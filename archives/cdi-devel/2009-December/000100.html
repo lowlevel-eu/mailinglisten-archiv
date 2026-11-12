@@ -1,0 +1,728 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH 2/3] Move complete initialisation to device_init
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%202/3%5D%20Move%20complete%20initialisation%20to%20device_init&In-Reply-To=%3C1262112703-11261-3-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000103.html">
+   <LINK REL="Next"  HREF="000101.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH 2/3] Move complete initialisation to device_init</H1>
+    <B>Kevin Wolf</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%202/3%5D%20Move%20complete%20initialisation%20to%20device_init&In-Reply-To=%3C1262112703-11261-3-git-send-email-kevin%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH 2/3] Move complete initialisation to device_init">kevin at tyndur.org
+       </A><BR>
+    <I>Tue Dec 29 19:51:42 CET 2009</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000103.html">[cdi-devel] [PATCH 1/3] cdi.h: Introduce cdi_bus_data
+</A></li>
+        <LI>Next message: <A HREF="000101.html">[cdi-devel] [PATCH 3/3] Initialise PCI devices in the CDI library
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#100">[ date ]</a>
+              <a href="thread.html#100">[ thread ]</a>
+              <a href="subject.html#100">[ subject ]</a>
+              <a href="author.html#100">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>* Up to now, the cdi-device struct was created during the init_driver
+  call of the driver and init_device only completed the initialisation.
+  The new model is that init_device gets bus information (e.g. PCI
+  address, device/vendor ID) and decides if it can handle the device. If
+  so, it creates a cdi_device object and returns it.
+
+  This way device creation is decoupled from driver initialisation and
+  hot-plugging becomes possible.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">kevin at tyndur.org</A>&gt;
+---
+ ata/atapi.c               |    2 +-
+ ata/device.c              |   11 ++++++++---
+ ata/device.h              |    6 +++---
+ ata/main.c                |    2 --
+ e1000/device.c            |   23 ++++++++++++++++++-----
+ e1000/device.h            |    2 +-
+ e1000/main.c              |   17 ++++++-----------
+ floppy/main.c             |    2 +-
+ include/cdi.h             |    4 +++-
+ ne2k/include/ne2k.h       |    2 +-
+ ne2k/main.c               |   16 +++++-----------
+ ne2k/ne2k.c               |   23 ++++++++++++++++++-----
+ pcnet/include/pcnet.h     |    2 +-
+ pcnet/main.c              |   13 +++++--------
+ pcnet/pcnet.c             |   21 ++++++++++++++++-----
+ rtl8139/include/rtl8139.h |    2 +-
+ rtl8139/main.c            |   16 +++++-----------
+ rtl8139/rtl8139.c         |   23 ++++++++++++++++++-----
+ sis900/device.c           |   23 ++++++++++++++++++-----
+ sis900/device.h           |    2 +-
+ sis900/main.c             |   16 +++++-----------
+ 21 files changed, 135 insertions(+), 93 deletions(-)
+
+diff --git a/ata/atapi.c b/ata/atapi.c
+index 77b1074..eaac06d 100644
+--- a/ata/atapi.c
++++ b/ata/atapi.c
+@@ -77,7 +77,7 @@ int atapi_drv_identify(struct ata_device* dev)
+     return 1;
+ }
+ 
+-void atapi_init_device(struct cdi_device* device)
++void atapi_init_device(struct ata_device* device)
+ {
+     struct cdi_scsi_device* scsi = (struct cdi_scsi_device*) device;
+ 
+diff --git a/ata/device.c b/ata/device.c
+index e564221..7339d65 100644
+--- a/ata/device.c
++++ b/ata/device.c
+@@ -199,6 +199,8 @@ void ata_parse_partitions(struct ata_device* dev)
+                 partition_list));
+ 
+             // Geraet registrieren
++            partition-&gt;dev.storage.dev.driver = &amp;dev-&gt;controller-&gt;storage-&gt;drv;
++            ata_init_device((struct ata_device*) partition);
+             cdi_list_push(dev-&gt;controller-&gt;storage-&gt;drv.devices, partition);
+ 
+             // An Partitionsliste fuer das aktuelle Geraet anhaengen
+@@ -298,6 +300,8 @@ void ata_init_controller(struct ata_controller* controller)
+                 ata_parse_partitions(dev);
+ 
+                 // Geraet registrieren
++                dev-&gt;dev.storage.dev.driver = &amp;controller-&gt;storage-&gt;drv;
++                ata_init_device(dev);
+                 cdi_list_push(controller-&gt;storage-&gt;drv.devices, dev);
+ #ifdef ATAPI_ENABLE
+             } else {
+@@ -305,7 +309,9 @@ void ata_init_controller(struct ata_controller* controller)
+                 asprintf((char**) &amp;(dev-&gt;dev.scsi.dev.name),&quot;atapi%01d%01d&quot;,
+                     (uint32_t) controller-&gt;id, i);
+             
+-            // Geraet registrieren
++                // Geraet registrieren
++                dev-&gt;dev.scsi.dev.driver = &amp;controller-&gt;scsi-&gt;drv;
++                atapi_init_device(dev);
+                 cdi_list_push(controller-&gt;scsi-&gt;drv.devices, dev);
+             }
+ #endif
+@@ -338,9 +344,8 @@ void ata_remove_controller(struct ata_controller* controller)
+ }
+ 
+ 
+-void ata_init_device(struct cdi_device* device)
++void ata_init_device(struct ata_device* dev)
+ {
+-    struct ata_device* dev = (struct ata_device*) device;
+     cdi_storage_device_init(&amp;dev-&gt;dev.storage);
+ }
+ 
+diff --git a/ata/device.h b/ata/device.h
+index 152f1ec..efb3f6f 100644
+--- a/ata/device.h
++++ b/ata/device.h
+@@ -128,7 +128,7 @@
+ 
+ // Debug
+ #ifdef DEBUG_ENABLE
+-    #define DEBUG(fmt, ...) printf(&quot;ata: &quot; fmt, __VA_ARGS__)
++    #define DEBUG(fmt, ...) printf(&quot;ata: &quot; fmt, ## __VA_ARGS__)
+ #else
+     #define DEBUG(...)
+ #endif
+@@ -445,7 +445,7 @@ struct ata_request {
+ 
+ void ata_init_controller(struct ata_controller* controller);
+ void ata_remove_controller(struct ata_controller* controller);
+-void ata_init_device(struct cdi_device* device);
++void ata_init_device(struct ata_device* dev);
+ void ata_remove_device(struct cdi_device* device);
+ int ata_read_blocks(struct cdi_storage_device* device, uint64_t block,
+     uint64_t count, void* buffer);
+@@ -468,7 +468,7 @@ int ata_drv_write_sectors(struct ata_device* dev, uint64_t start, size_t count,
+ 
+ // ATAPI-Funktionen
+ int atapi_drv_identify(struct ata_device* dev);
+-void atapi_init_device(struct cdi_device* device);
++void atapi_init_device(struct ata_device* device);
+ void atapi_remove_device(struct cdi_device* device);
+ int atapi_request(struct cdi_scsi_device* dev,struct cdi_scsi_packet* packet);
+ 
+diff --git a/ata/main.c b/ata/main.c
+index 3cc502d..814f830 100644
+--- a/ata/main.c
++++ b/ata/main.c
+@@ -181,7 +181,6 @@ static struct cdi_storage_driver driver_storage = {
+         .name           = DRIVER_STORAGE_NAME,
+         .init           = ata_driver_init,
+         .destroy        = ata_driver_destroy,
+-        .init_device    = ata_init_device,
+         .remove_device  = ata_remove_device,
+     },
+     .read_blocks        = ata_read_blocks,
+@@ -194,7 +193,6 @@ static struct cdi_scsi_driver driver_scsi = {
+         .name           = DRIVER_SCSI_NAME,
+         .init           = atapi_driver_init,
+         .destroy        = atapi_driver_destroy,
+-        .init_device    = atapi_init_device,
+         .remove_device  = atapi_remove_device,
+     },
+     .request            = atapi_request,
+diff --git a/e1000/device.c b/e1000/device.c
+index a92acf3..b4aa4eb 100644
+--- a/e1000/device.c
++++ b/e1000/device.c
+@@ -146,15 +146,26 @@ static uint64_t get_mac_address(struct e1000_device* device)
+     return mac;
+ }
+ 
+-void e1000_init_device(struct cdi_device* device)
++struct cdi_device* e1000_init_device(struct cdi_bus_data* bus_data)
+ {
+-    struct e1000_device* netcard = (struct e1000_device*) device;
+-    struct cdi_pci_device* pci = (struct cdi_pci_device*) device-&gt;bus_data;
++    struct cdi_pci_device* pci = (struct cdi_pci_device*) bus_data;
++    struct e1000_device* netcard;
++    void* phys_device;
++
++    if (!((pci-&gt;vendor_id == 0x8086) &amp;&amp; (pci-&gt;device_id == 0x100e))) {
++        return NULL;
++    }
++
++    cdi_alloc_phys_mem(sizeof(*netcard), (void**) &amp;netcard, &amp;phys_device);
++    memset(netcard, 0, sizeof(*netcard));
++
+     netcard-&gt;net.send_packet = e1000_send_packet;
++    netcard-&gt;phys = phys_device;
++    netcard-&gt;net.dev.bus_data = (struct cdi_bus_data*) pci;
+ 
+     // PCI-bezogenes Zeug initialisieren
+     netcard-&gt;revision = pci-&gt;rev_id;
+-    cdi_register_irq(pci-&gt;irq, e1000_handle_interrupt, device);
++    cdi_register_irq(pci-&gt;irq, e1000_handle_interrupt, &amp;netcard-&gt;net.dev);
+     cdi_pci_alloc_ioports(pci);
+ 
+     cdi_list_t reslist = pci-&gt;resources;
+@@ -177,7 +188,9 @@ void e1000_init_device(struct cdi_device* device)
+     netcard-&gt;net.mac = get_mac_address(netcard);
+     printf(&quot;e1000: MAC-Adresse: %012llx\n&quot;, (uint64_t) netcard-&gt;net.mac);
+ 
+-    cdi_net_device_init((struct cdi_net_device*) device);
++    cdi_net_device_init(&amp;netcard-&gt;net);
++
++    return &amp;netcard-&gt;net.dev;
+ }
+ 
+ void e1000_remove_device(struct cdi_device* device)
+diff --git a/e1000/device.h b/e1000/device.h
+index 40f03a7..9266e0f 100644
+--- a/e1000/device.h
++++ b/e1000/device.h
+@@ -157,7 +157,7 @@ struct e1000_device {
+     uint8_t                     revision;
+ };
+ 
+-void e1000_init_device(struct cdi_device* device);
++struct cdi_device* e1000_init_device(struct cdi_bus_data* bus_data);
+ void e1000_remove_device(struct cdi_device* device);
+ 
+ void e1000_send_packet
+diff --git a/e1000/main.c b/e1000/main.c
+index c98e191..229ec3f 100644
+--- a/e1000/main.c
++++ b/e1000/main.c
+@@ -53,19 +53,13 @@ static int e1000_driver_init(void)
+     cdi_list_t pci_devices = cdi_list_create();
+     cdi_pci_get_all_devices(pci_devices);
+ 
++    struct cdi_device* device;
+     struct cdi_pci_device* dev;
+     int i;
+     for (i = 0; (dev = cdi_list_get(pci_devices, i)); i++) {
+-        if ((dev-&gt;vendor_id == 0x8086) &amp;&amp; (dev-&gt;device_id == 0x100e)) {
+-            void* phys_device;
+-            struct e1000_device* device;
+-
+-            cdi_alloc_phys_mem(sizeof(*device),
+-                (void**) &amp;device, &amp;phys_device);
+-            memset(device, 0, sizeof(*device));
+-
+-            device-&gt;phys = phys_device;
+-            device-&gt;net.dev.bus_data = (struct cdi_bus_data*) dev;
++        device = e1000_init_device((struct cdi_bus_data*) dev);
++        if (device != NULL) {
++            // TODO
+             cdi_list_push(driver.drv.devices, device);
+         } else {
+             cdi_pci_device_destroy(dev);
+@@ -95,8 +89,9 @@ static int e1000_driver_destroy(void)
+ 
+ static struct cdi_net_driver driver = {
+     .drv = {
+-        .type           = CDI_NETWORK,
+         .name           = DRIVER_NAME,
++        .type           = CDI_NETWORK,
++        .bus            = CDI_PCI,
+         .init           = e1000_driver_init,
+         .destroy        = e1000_driver_destroy,
+         .init_device    = e1000_init_device,
+diff --git a/floppy/main.c b/floppy/main.c
+index e6208a6..c516a23 100644
+--- a/floppy/main.c
++++ b/floppy/main.c
+@@ -68,6 +68,7 @@ static int floppy_driver_init(void)
+ 
+         // Geraet nur eintragen wenn es existiert
+         if (floppy_device_probe(device) != 0) {
++            floppy_init_device((struct cdi_device*) device);
+             cdi_list_push(floppy_driver.drv.devices, device);
+         } else {
+             free(device);
+@@ -107,7 +108,6 @@ static struct cdi_storage_driver floppy_driver = {
+         .name           = DRIVER_NAME,
+         .init           = floppy_driver_init,
+         .destroy        = floppy_driver_destroy,
+-        .init_device    = floppy_init_device,
+         .remove_device  = floppy_remove_device,
+     },
+     .read_blocks        = floppy_read_blocks,
+diff --git a/include/cdi.h b/include/cdi.h
+index a0e1826..ab9f308 100644
+--- a/include/cdi.h
++++ b/include/cdi.h
+@@ -30,6 +30,7 @@ typedef enum {
+     CDI_USB_HCD         = 7,
+     CDI_USB             = 8,
+     CDI_FILESYSTEM      = 9,
++    CDI_PCI             = 10,
+ } cdi_device_type_t;
+ 
+ struct cdi_driver;
+@@ -50,10 +51,11 @@ struct cdi_device {
+ 
+ struct cdi_driver {
+     cdi_device_type_t   type;
++    cdi_device_type_t   bus;
+     const char*         name;
+     cdi_list_t          devices;
+ 
+-    void (*init_device)(struct cdi_device* device);
++    struct cdi_device* (*init_device)(struct cdi_bus_data* bus_data);
+     void (*remove_device)(struct cdi_device* device);
+ 
+     int (*init)(void);
+diff --git a/ne2k/include/ne2k.h b/ne2k/include/ne2k.h
+index 2a86897..585eab5 100644
+--- a/ne2k/include/ne2k.h
++++ b/ne2k/include/ne2k.h
+@@ -94,7 +94,7 @@ struct ne2k_device {
+     cdi_list_t                  pending_sends;
+ };
+ 
+-void ne2k_init_device(struct cdi_device* device);
++struct cdi_device* ne2k_init_device(struct cdi_bus_data* bus_data);
+ void ne2k_remove_device(struct cdi_device* device);
+ 
+ void ne2k_send_packet
+diff --git a/ne2k/main.c b/ne2k/main.c
+index 6f2448b..e46e866 100644
+--- a/ne2k/main.c
++++ b/ne2k/main.c
+@@ -49,18 +49,11 @@ static int ne2k_driver_init(void)
+     cdi_pci_get_all_devices(pci_devices);
+ 
+     struct cdi_pci_device* dev;
++    struct cdi_device* device;
+     int i;
+     for (i = 0; (dev = cdi_list_get(pci_devices, i)); i++) {
+-        if ((dev-&gt;vendor_id == 0x10ec) &amp;&amp; (dev-&gt;device_id == 0x8029)) {
+-            void* phys_device;
+-            struct ne2k_device* device;
+-
+-            cdi_alloc_phys_mem(sizeof(*device),
+-                (void**) &amp;device, &amp;phys_device);
+-            memset(device, 0, sizeof(*device));
+-
+-            device-&gt;phys = phys_device;
+-            device-&gt;net.dev.bus_data = (struct cdi_bus_data*) dev;
++        device = ne2k_init_device((struct cdi_bus_data*) dev);
++        if (device != NULL) {
+             cdi_list_push(ne2k_driver.drv.devices, device);
+         } else {
+             cdi_pci_device_destroy(dev);
+@@ -87,8 +80,9 @@ static int ne2k_driver_destroy(void)
+ 
+ static struct cdi_net_driver ne2k_driver = {
+     .drv = {
+-        .type           = CDI_NETWORK,
+         .name           = DRIVER_NAME,
++        .type           = CDI_NETWORK,
++        .bus            = CDI_PCI,
+         .init           = ne2k_driver_init,
+         .destroy        = ne2k_driver_destroy,
+         .init_device    = ne2k_init_device,
+diff --git a/ne2k/ne2k.c b/ne2k/ne2k.c
+index d7f1e06..b3faf46 100644
+--- a/ne2k/ne2k.c
++++ b/ne2k/ne2k.c
+@@ -77,15 +77,26 @@ static inline uint32_t read_register_dword(struct ne2k_device* netcard, uint8_t
+     return cdi_inl(netcard-&gt;port_base + reg);
+ }
+ 
+-void ne2k_init_device(struct cdi_device* device)
++struct cdi_device* ne2k_init_device(struct cdi_bus_data* bus_data)
+ {
+-    struct ne2k_device* netcard = (struct ne2k_device*) device;
+-    struct cdi_pci_device* pci = (struct cdi_pci_device*) device-&gt;bus_data;
++    struct cdi_pci_device* pci = (struct cdi_pci_device*) bus_data;
++    struct ne2k_device* netcard;
++    void* phys_device;
++
++    if (!((pci-&gt;vendor_id == 0x10ec) &amp;&amp; (pci-&gt;device_id == 0x8029))) {
++        return NULL;
++    }
++
++    cdi_alloc_phys_mem(sizeof(*netcard), (void**) &amp;netcard, &amp;phys_device);
++    memset(netcard, 0, sizeof(*netcard));
++
+     netcard-&gt;net.send_packet = ne2k_send_packet;
++    netcard-&gt;phys = phys_device;
++    netcard-&gt;net.dev.bus_data = (struct cdi_bus_data*) pci;
+ 
+     // PCI-bezogenes Zeug initialisieren
+     DEBUG_MSG(&quot;Interrupthandler und Ports registrieren&quot;);
+-    cdi_register_irq(pci-&gt;irq, ne2k_handle_interrupt, device);
++    cdi_register_irq(pci-&gt;irq, ne2k_handle_interrupt, &amp;netcard-&gt;net.dev);
+     cdi_pci_alloc_ioports(pci);
+ 
+     cdi_list_t reslist = pci-&gt;resources;
+@@ -154,8 +165,10 @@ void ne2k_init_device(struct cdi_device* device)
+ 
+     netcard-&gt;pending_sends = cdi_list_create();
+ 
+-    cdi_net_device_init((struct cdi_net_device*) device);
++    cdi_net_device_init(&amp;netcard-&gt;net);
+     DEBUG_MSG(&quot;Fertig initialisiert&quot;);
++
++    return &amp;netcard-&gt;net.dev;
+ }
+ 
+ void ne2k_remove_device(struct cdi_device* device)
+diff --git a/pcnet/include/pcnet.h b/pcnet/include/pcnet.h
+index 0b55122..000862c 100644
+--- a/pcnet/include/pcnet.h
++++ b/pcnet/include/pcnet.h
+@@ -127,7 +127,7 @@ struct pcnet_device {
+     volatile int                init_wait_for_irq;
+ };
+ 
+-void pcnet_init_device(struct cdi_device* device);
++struct cdi_device* pcnet_init_device(struct cdi_bus_data* bus_data);
+ void pcnet_remove_device(struct cdi_device* device);
+ void pcnet_send_packet
+     (struct cdi_net_device* device, void* data, size_t size);
+diff --git a/pcnet/main.c b/pcnet/main.c
+index 613c162..de05930 100644
+--- a/pcnet/main.c
++++ b/pcnet/main.c
+@@ -53,15 +53,11 @@ static int pcnet_driver_init(void)
+     cdi_pci_get_all_devices(pci_devices);
+ 
+     struct cdi_pci_device* dev;
++    struct cdi_device* device;
+     int i;
+     for (i = 0; (dev = cdi_list_get(pci_devices, i)); i++) {
+-        if ((dev-&gt;vendor_id == VENDOR_ID) &amp;&amp; (dev-&gt;device_id == DEVICE_ID)) {
+-            struct pcnet_device* device;
+-            device = malloc(sizeof(struct pcnet_device));
+-
+-            memset(device, 0, sizeof(struct pcnet_device));
+-
+-            device-&gt;net.dev.bus_data = (struct cdi_bus_data*) dev;
++        device = pcnet_init_device((struct cdi_bus_data*) dev);
++        if (device) {
+             cdi_list_push(pcnet_driver.drv.devices, device);
+         } else {
+             cdi_pci_device_destroy(dev);
+@@ -88,8 +84,9 @@ static int pcnet_driver_destroy(void)
+ 
+ static struct cdi_net_driver pcnet_driver = {
+     .drv = {
+-        .type           = CDI_NETWORK,
+         .name           = DRIVER_NAME,
++        .type           = CDI_NETWORK,
++        .bus            = CDI_PCI,
+         .init           = pcnet_driver_init,
+         .destroy        = pcnet_driver_destroy,
+         .init_device    = pcnet_init_device,
+diff --git a/pcnet/pcnet.c b/pcnet/pcnet.c
+index 2e29389..9983fd5 100644
+--- a/pcnet/pcnet.c
++++ b/pcnet/pcnet.c
+@@ -52,15 +52,24 @@ static void pcnet_write_bcr(struct pcnet_device *netcard, size_t bcr, uint16_t v
+     #define DEBUG_MSG(s) //
+ #endif
+ 
+-void pcnet_init_device(struct cdi_device* device)
++struct cdi_device* pcnet_init_device(struct cdi_bus_data* bus_data)
+ {
+-    struct pcnet_device* netcard = (struct pcnet_device*) device;
+-    struct cdi_pci_device* pci = (struct cdi_pci_device*) device-&gt;bus_data;
++    struct cdi_pci_device* pci = (struct cdi_pci_device*) bus_data;
++    struct pcnet_device* netcard;
++
++    if (!((pci-&gt;vendor_id == VENDOR_ID) &amp;&amp; (pci-&gt;device_id == DEVICE_ID))) {
++        return NULL;
++    }
++
++    netcard = malloc(sizeof(struct pcnet_device));
++    memset(netcard, 0, sizeof(struct pcnet_device));
++
++    netcard-&gt;net.dev.bus_data = (struct cdi_bus_data*) pci;
+     netcard-&gt;net.send_packet = pcnet_send_packet;
+ 
+     // PCI-bezogenes Zeug initialisieren
+     DEBUG_MSG(&quot;Interrupthandler und Ports registrieren&quot;);
+-    cdi_register_irq(pci-&gt;irq, pcnet_handle_interrupt, device);
++    cdi_register_irq(pci-&gt;irq, pcnet_handle_interrupt, &amp;netcard-&gt;net.dev);
+     cdi_pci_alloc_ioports(pci);
+ 
+     // I/O Port raussuchen
+@@ -99,9 +108,11 @@ void pcnet_init_device(struct cdi_device* device)
+     pcnet_start(netcard);
+ 
+     // Netzwerkkarte registrieren
+-    cdi_net_device_init((struct cdi_net_device*) device);
++    cdi_net_device_init(&amp;netcard-&gt;net);
+ 
+     DEBUG_MSG(&quot;Fertig initialisiert&quot;);
++
++    return &amp;netcard-&gt;net.dev;
+ }
+ 
+ void pcnet_remove_device(struct cdi_device* device)
+diff --git a/rtl8139/include/rtl8139.h b/rtl8139/include/rtl8139.h
+index 2c9e419..3ec81b0 100644
+--- a/rtl8139/include/rtl8139.h
++++ b/rtl8139/include/rtl8139.h
+@@ -98,7 +98,7 @@ struct rtl8139_device {
+     cdi_list_t                  pending_sends;
+ };
+ 
+-void rtl8139_init_device(struct cdi_device* device);
++struct cdi_device* rtl8139_init_device(struct cdi_bus_data* bus_data);
+ void rtl8139_remove_device(struct cdi_device* device);
+ 
+ void rtl8139_send_packet
+diff --git a/rtl8139/main.c b/rtl8139/main.c
+index 5411238..3459e1f 100644
+--- a/rtl8139/main.c
++++ b/rtl8139/main.c
+@@ -52,18 +52,11 @@ static int rtl8139_driver_init(void)
+     cdi_pci_get_all_devices(pci_devices);
+ 
+     struct cdi_pci_device* dev;
++    struct cdi_device* device;
+     int i;
+     for (i = 0; (dev = cdi_list_get(pci_devices, i)); i++) {
+-        if ((dev-&gt;vendor_id == 0x10ec) &amp;&amp; (dev-&gt;device_id == 0x8139)) {
+-            void* phys_device;
+-            struct rtl8139_device* device;
+-
+-            cdi_alloc_phys_mem(sizeof(*device),
+-                (void**) &amp;device, &amp;phys_device);
+-            memset(device, 0, sizeof(*device));
+-
+-            device-&gt;phys = phys_device;
+-            device-&gt;net.dev.bus_data = (struct cdi_bus_data*) dev;
++        device = rtl8139_init_device((struct cdi_bus_data*) dev);
++        if (device != NULL) {
+             cdi_list_push(rtl8139_driver.drv.devices, device);
+         } else {
+             cdi_pci_device_destroy(dev);
+@@ -90,8 +83,9 @@ static int rtl8139_driver_destroy(void)
+ 
+ static struct cdi_net_driver rtl8139_driver = {
+     .drv = {
+-        .type           = CDI_NETWORK,
+         .name           = DRIVER_NAME,
++        .type           = CDI_NETWORK,
++        .bus            = CDI_PCI,
+         .init           = rtl8139_driver_init,
+         .destroy        = rtl8139_driver_destroy,
+         .init_device    = rtl8139_init_device,
+diff --git a/rtl8139/rtl8139.c b/rtl8139/rtl8139.c
+index c89e08f..e922889 100644
+--- a/rtl8139/rtl8139.c
++++ b/rtl8139/rtl8139.c
+@@ -75,15 +75,26 @@ static inline uint32_t read_register_dword(struct rtl8139_device* netcard, uint8
+     return cdi_inl(netcard-&gt;port_base + reg);
+ }
+ 
+-void rtl8139_init_device(struct cdi_device* device)
++struct cdi_device* rtl8139_init_device(struct cdi_bus_data* bus_data)
+ {
+-    struct rtl8139_device* netcard = (struct rtl8139_device*) device;
+-    struct cdi_pci_device* pci = (struct cdi_pci_device*) device-&gt;bus_data;
++    struct cdi_pci_device* pci = (struct cdi_pci_device*) bus_data;
++    struct rtl8139_device* netcard;
++    void* phys_device;
++
++    if (!((pci-&gt;vendor_id == 0x10ec) &amp;&amp; (pci-&gt;device_id == 0x8139))) {
++        return NULL;
++    }
++
++    cdi_alloc_phys_mem(sizeof(*netcard), (void**) &amp;netcard, &amp;phys_device);
++    memset(netcard, 0, sizeof(*netcard));
++
++    netcard-&gt;phys = phys_device;
++    netcard-&gt;net.dev.bus_data = (struct cdi_bus_data*) pci;
+     netcard-&gt;net.send_packet = rtl8139_send_packet;
+ 
+     // PCI-bezogenes Zeug initialisieren
+     DEBUG_MSG(&quot;Interrupthandler und Ports registrieren&quot;);
+-    cdi_register_irq(pci-&gt;irq, rtl8139_handle_interrupt, device);
++    cdi_register_irq(pci-&gt;irq, rtl8139_handle_interrupt, &amp;netcard-&gt;net.dev);
+     cdi_pci_alloc_ioports(pci);
+ 
+     cdi_list_t reslist = pci-&gt;resources;
+@@ -139,8 +150,10 @@ void rtl8139_init_device(struct cdi_device* device)
+     netcard-&gt;rx_buffer_offset = 0;
+     netcard-&gt;pending_sends = cdi_list_create();
+ 
+-    cdi_net_device_init((struct cdi_net_device*) device);
++    cdi_net_device_init(&amp;netcard-&gt;net);
+     DEBUG_MSG(&quot;Fertig initialisiert&quot;);
++
++    return &amp;netcard-&gt;net.dev;
+ }
+ 
+ void rtl8139_remove_device(struct cdi_device* device)
+diff --git a/sis900/device.c b/sis900/device.c
+index d6e68d6..ade91c1 100644
+--- a/sis900/device.c
++++ b/sis900/device.c
+@@ -181,15 +181,26 @@ static uint64_t get_mac_address(struct sis900_device* device)
+     return mac;
+ }
+ 
+-void sis900_init_device(struct cdi_device* device)
++struct cdi_device* sis900_init_device(struct cdi_bus_data* bus_data)
+ {
+-    struct sis900_device* netcard = (struct sis900_device*) device;
+-    struct cdi_pci_device* pci = (struct cdi_pci_device*) device-&gt;bus_data;
++    struct cdi_pci_device* pci = (struct cdi_pci_device*) bus_data;
++    struct sis900_device* netcard;
++    void* phys_device;
++
++    if (!((pci-&gt;vendor_id == 0x1039) &amp;&amp; (pci-&gt;device_id == 0x0900))) {
++        return NULL;
++    }
++
++    cdi_alloc_phys_mem(sizeof(*netcard), (void**) &amp;netcard, &amp;phys_device);
++    memset(netcard, 0, sizeof(*netcard));
++
++    netcard-&gt;phys = phys_device;
++    netcard-&gt;net.dev.bus_data = (struct cdi_bus_data*) pci;
+     netcard-&gt;net.send_packet = sis900_send_packet;
+ 
+     // PCI-bezogenes Zeug initialisieren
+     netcard-&gt;revision = pci-&gt;rev_id;
+-    cdi_register_irq(pci-&gt;irq, sis900_handle_interrupt, device);
++    cdi_register_irq(pci-&gt;irq, sis900_handle_interrupt, &amp;netcard-&gt;net.dev);
+     cdi_pci_alloc_ioports(pci);
+     
+     cdi_list_t reslist = pci-&gt;resources;
+@@ -228,7 +239,9 @@ void sis900_init_device(struct cdi_device* device)
+ 
+     sis900_send_packet(device, sendbuf, 16);
+ */    
+-    cdi_net_device_init((struct cdi_net_device*) device);
++    cdi_net_device_init(&amp;netcard-&gt;net);
++
++    return &amp;netcard-&gt;net.dev;
+ }
+ 
+ void sis900_remove_device(struct cdi_device* device)
+diff --git a/sis900/device.h b/sis900/device.h
+index cbb44bf..cd110c0 100644
+--- a/sis900/device.h
++++ b/sis900/device.h
+@@ -143,7 +143,7 @@ struct sis900_device {
+     uint8_t                     revision;
+ };
+ 
+-void sis900_init_device(struct cdi_device* device);
++struct cdi_device* sis900_init_device(struct cdi_bus_data* bus_data);
+ void sis900_remove_device(struct cdi_device* device);
+ 
+ void sis900_send_packet
+diff --git a/sis900/main.c b/sis900/main.c
+index f813993..f4f6a2c 100644
+--- a/sis900/main.c
++++ b/sis900/main.c
+@@ -54,18 +54,11 @@ static int sis900_driver_init(void)
+     cdi_pci_get_all_devices(pci_devices);
+ 
+     struct cdi_pci_device* dev;
++    struct cdi_device* device;
+     int i;
+     for (i = 0; (dev = cdi_list_get(pci_devices, i)); i++) {
+-        if ((dev-&gt;vendor_id == 0x1039) &amp;&amp; (dev-&gt;device_id == 0x0900)) {
+-            void* phys_device;
+-            struct sis900_device* device;
+-            
+-            cdi_alloc_phys_mem(sizeof(*device), 
+-                (void**) &amp;device, &amp;phys_device);
+-            memset(device, 0, sizeof(*device));
+-
+-            device-&gt;phys = phys_device;
+-            device-&gt;net.dev.bus_data = (struct cdi_bus_data*) dev;
++        device = sis900_init_device((struct cdi_bus_data*) dev);
++        if (device != NULL) {
+             cdi_list_push(sis900_driver.drv.devices, device);
+         } else {
+             cdi_pci_device_destroy(dev);
+@@ -95,8 +88,9 @@ static int sis900_driver_destroy(void)
+ 
+ static struct cdi_net_driver sis900_driver = {
+     .drv = {
+-        .type           = CDI_NETWORK,
+         .name           = DRIVER_NAME,
++        .type           = CDI_NETWORK,
++        .bus            = CDI_PCI,
+         .init           = sis900_driver_init,
+         .destroy        = sis900_driver_destroy,
+         .init_device    = sis900_init_device,
+-- 
+1.6.0.2
+
+</PRE>
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000103.html">[cdi-devel] [PATCH 1/3] cdi.h: Introduce cdi_bus_data
+</A></li>
+	<LI>Next message: <A HREF="000101.html">[cdi-devel] [PATCH 3/3] Initialise PCI devices in the CDI library
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#100">[ date ]</a>
+              <a href="thread.html#100">[ thread ]</a>
+              <a href="subject.html#100">[ subject ]</a>
+              <a href="author.html#100">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

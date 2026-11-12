@@ -1,0 +1,714 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] FTP-Client: Befehlserweiterung und mehrere	kleine Bugs behoben
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20FTP-Client%3A%20Befehlserweiterung%20und%20mehrere%0A%09kleine%20Bugs%20behoben&In-Reply-To=%3C1255790886-15909-1-git-send-email-matheeguru%40gmx.de%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001455.html">
+   <LINK REL="Next"  HREF="001429.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] FTP-Client: Befehlserweiterung und mehrere	kleine Bugs behoben</H1>
+    <B>Paul Lange</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20FTP-Client%3A%20Befehlserweiterung%20und%20mehrere%0A%09kleine%20Bugs%20behoben&In-Reply-To=%3C1255790886-15909-1-git-send-email-matheeguru%40gmx.de%3E"
+           TITLE="[tyndur-devel] [PATCH] FTP-Client: Befehlserweiterung und mehrere	kleine Bugs behoben">matheeguru at gmx.de
+                  </A><BR>
+    <I>Sa Okt 17 16:48:06 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001455.html">[tyndur-devel] [PATCH v2] + cdi: video-Header
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001429.html">[tyndur-devel] [PATCH] FTP-Client: Befehlserweiterung und mehrere kleine Bugs behoben
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1427">[ Datum ]</a>
+              <a href="thread.html#1427">[ Thema ]</a>
+              <a href="subject.html#1427">[ Betreff (Subject) ]</a>
+              <a href="author.html#1427">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>!ftp: Wenn 'get' mit einer nicht vorhandenen Datei aufgerufen wird hängt das
++ftp: 'pwd' und 'system' wurden hinzugefügt
+*ftp: 'account' und 'quit' heisen jetzt 'user' und 'bye'
+-ftp: 'exit' wurde entfernt
+
+Signed-off-by: Paul Lange &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">matheeguru at gmx.de</A>&gt;
+---
+ src/modules/c/ftp/command.c |  146 +++++++++++++++++++++++++++++++++++++++----
+ src/modules/c/ftp/command.h |    8 ++-
+ src/modules/c/ftp/ftp.c     |   49 +++++++++++----
+ src/modules/c/ftp/ftp.h     |    5 +-
+ src/modules/c/ftp/help.c    |   11 ++--
+ src/modules/c/ftp/main.c    |  135 ++++++++++++++-------------------------
+ 6 files changed, 233 insertions(+), 121 deletions(-)
+
+diff --git a/src/modules/c/ftp/command.c b/src/modules/c/ftp/command.c
+index bf326c5..4525c01 100644
+--- a/src/modules/c/ftp/command.c
++++ b/src/modules/c/ftp/command.c
+@@ -37,6 +37,7 @@
+ #include &lt;stdlib.h&gt;
+ #include &lt;types.h&gt;
+ #include &lt;ctype.h&gt;
++#include &lt;string.h&gt;
+ #include &lt;libgen.h&gt;
+ #include &lt;sys/stat.h&gt;
+ #include &lt;readline/readline.h&gt;
+@@ -44,14 +45,21 @@
+ #include &quot;ftp.h&quot;
+ 
+ #define BLOCK_128K 131072
++#define LINE_LENGTH 80
+ 
+-void ftp_account(void)
++
++/**
++ * fragt den Benutzernamen und das Passwort ab und gibt es an den FTP-Server
++ * weiter
++ */
++void ftp_user(void)
+ {
+     char* input, *prompt, *c;
+ 
+     // falls keine Verbindung besteht, abbrechen
+     if (handle == NULL) {
+-        puts(&quot;\033[1;37mes besteht keine Serververbindung...\033[0m&quot;);
++        puts(&quot;\033[1;37mFehler: keine Serververbindung vorhanden...&quot;
++             &quot;\033[0m&quot;);
+         return;
+     }
+ 
+@@ -81,13 +89,18 @@ void ftp_account(void)
+     free(input);
+ }
+ 
++
++/**
++ * listet die Dateien in dem aktuellen Verzeichniss auf dem FTP-Server auf
++ */
+ void ftp_ls(void)
+ {
+     FILE* data_handle;
+     char buffer[BLOCK_128K];
+ 
+     if (handle == NULL) {
+-        puts(&quot;\033[1;37mes besteht keine Serververbindung...\033[0m&quot;);
++        puts(&quot;\033[1;37mFehler: keine Serververbindung vorhanden...&quot;
++             &quot;\033[0m&quot;);
+         return;
+     }
+ 
+@@ -104,15 +117,25 @@ void ftp_ls(void)
+     puts(&quot;\033[1;37mDatenverbindung beendet\033[0m&quot;);
+ }
+ 
++
++/**
++ * laedt Dateien vom FTP-Server in das aktuelle Verzeichniss
++ *
++ * @param pathname Pfadname zur ladenten Datei
++ */
+ void ftp_get(char* pathname)
+ {
+     FILE* data_handle;
+     FILE* file_handle;
++    bool line_end = TRUE;
++    int i = 0;
+     char* filename;
+-    char buffer[BLOCK_128K];
++    char buffer[BLOCK_128K], string[LINE_LENGTH], c;
++    size_t count;
+ 
+     if (handle == NULL) {
+-        puts(&quot;\033[1;37mes besteht keine Serververbindung...\033[0m&quot;);
++        puts(&quot;\033[1;37mFehler: keine Serververbindung vorhanden...&quot;
++             &quot;\033[0m&quot;);
+         return;
+     }
+ 
+@@ -124,10 +147,32 @@ void ftp_get(char* pathname)
+     fflush(handle);
+ 
+     // falls 550 zurückgegeben wird, ist die Datei nicht vorhanden
+-    response();
++    while (line_end) {
++        while (((c = fgetc(handle)) != '\n') &amp;&amp; i &lt; (LINE_LENGTH - 1)) {
++            if (c != EOF) {
++               string[i++] = c;
++            }
++        }
++        string[i] = '\0';
++        printf(&quot;%s\n&quot;, string);
++        // ueberpruefen auf 550
++        if (strncmp(&quot;550&quot;, string, 3) == 0) {
++            fclose(file_handle);
++            fclose(data_handle);
++            puts(&quot;\033[1;37mDatenverbindung beendet\033[0m&quot;);
++            return;
++        }
++        line_end = FALSE;
++
++        if ((i &gt; 3) &amp;&amp; (string[3] == '-')) {
++            line_end = TRUE;
++            i = 0;
++        }
++    }
+ 
+     while (!feof(data_handle)) {
+-      fwrite(buffer, 1, fread(buffer, 1, BLOCK_128K, data_handle),file_handle);
++      count = fread(buffer, 1, BLOCK_128K, data_handle);
++      fwrite(buffer, 1, count ,file_handle);
+     }
+ 
+     fclose(file_handle);
+@@ -136,6 +181,12 @@ void ftp_get(char* pathname)
+     puts(&quot;\033[1;37mDatenverbindung beendet\033[0m&quot;);
+ }
+ 
++
++/**
++ * speichert eine Datei in dem aktuellen Verzeichniss auf dem FTP-Server
++ *
++ * @param pathname Pfadname zur speichernden Datei
++ */
+ void ftp_put(char* pathname)
+ {
+     FILE* data_handle;
+@@ -145,7 +196,8 @@ void ftp_put(char* pathname)
+     size_t count;
+ 
+     if (handle == NULL) {
+-        puts(&quot;\033[1;37mes besteht keine Serververbindung...\033[0m&quot;);
++        puts(&quot;\033[1;37mFehler: keine Serververbindung vorhanden...&quot;
++             &quot;\033[0m&quot;);
+         return;
+     }
+ 
+@@ -155,6 +207,7 @@ void ftp_put(char* pathname)
+ 
+     fprintf(handle, &quot;STOR %s\r\n&quot;, filename);
+     fflush(handle);
++
+     response();
+ 
+     while (!feof(file_handle)) {
+@@ -168,10 +221,17 @@ void ftp_put(char* pathname)
+     puts(&quot;\033[1;37mDatenverbindung beendet\033[0m&quot;);
+ }
+ 
++
++/**
++ * erstellt ein neues Verzeichniss auf dem FTP-Server
++ *
++ * @param pathname Pfad des Ordners, der erstellt werden soll
++ */
+ void ftp_mkdir(const char* pathname)
+ {
+     if (handle == NULL) {
+-        puts(&quot;\033[1;37mes besteht keine Serververbindung...\033[0m&quot;);
++        puts(&quot;\033[1;37mFehler: keine Serververbindung vorhanden...&quot;
++             &quot;\033[0m&quot;);
+         return;
+     }
+ 
+@@ -180,10 +240,17 @@ void ftp_mkdir(const char* pathname)
+     response();
+ }
+ 
++
++/**
++ * loescht eine Datei auf dem FTP-Server
++ *
++ * @param pathname Pfad zur Datei
++ */
+ void ftp_rm(const char* pathname)
+ {
+     if (handle == NULL) {
+-        puts(&quot;\033[1;37mes besteht keine Serververbindung...\033[0m&quot;);
++        puts(&quot;\033[1;37mFehler: keine Serververbindung vorhanden...&quot;
++             &quot;\033[0m&quot;);
+         return;
+     }
+ 
+@@ -192,10 +259,17 @@ void ftp_rm(const char* pathname)
+     response();
+ }
+ 
++
++/**
++ * loescht ein Verzeichniss auf dem FTP-Server
++ *
++ * @param pathname Pfad des zu loeschenden Ordners
++ */
+ void ftp_rmdir(const char* pathname)
+ {
+     if (handle == NULL) {
+-        puts(&quot;\033[1;37mes besteht keine Serververbindung...\033[0m&quot;);
++        puts(&quot;\033[1;37mFehler: keine Serververbindung vorhanden...&quot;
++             &quot;\033[0m&quot;);
+         return;
+     }
+ 
+@@ -204,10 +278,17 @@ void ftp_rmdir(const char* pathname)
+     response();
+ }
+ 
++
++/**
++ * wechselt das Verzeichniss auf dem FTP-Server
++ *
++ * @param pathname Pfad zum neuen Verzeichniss
++ */
+ void ftp_cd(const char* pathname)
+ {
+     if (handle == NULL) {
+-        puts(&quot;\033[1;37mes besteht keine Serververbindung...\033[0m&quot;);
++        puts(&quot;\033[1;37mFehler: keine Serververbindung vorhanden...&quot;
++             &quot;\033[0m&quot;);
+         return;
+     }
+ 
+@@ -216,10 +297,15 @@ void ftp_cd(const char* pathname)
+     response();
+ }
+ 
++
++/**
++ * wechselt ins Stammverzeichniss auf dem FTP-Server
++ */
+ void ftp_cdup(void)
+ {
+     if (handle == NULL) {
+-        puts(&quot;\033[1;37mes besteht keine Serververbindung...\033[0m&quot;);
++        puts(&quot;\033[1;37mFehler: keine Serververbindung vorhanden...&quot;
++             &quot;\033[0m&quot;);
+         return;
+     }
+ 
+@@ -227,3 +313,37 @@ void ftp_cdup(void)
+     fflush(handle);
+     response();
+ }
++
++
++/**
++ * zeigt das akutell geoeffnete Verzeichniss auf dem FTP-Server an
++ */
++void ftp_pwd(void)
++{
++    if (handle == NULL) {
++        puts(&quot;\033[1;37mFehler: keine Serververbindung vorhanden...&quot;
++             &quot;\033[0m&quot;);
++        return;
++    }
++
++    fprintf(handle, &quot;%s\r\n&quot;, &quot;PWD&quot;);
++    fflush(handle);
++    response();
++}
++
++
++/**
++ * gibt den Namen des Betriebssystems vom FTP-Server aus
++ */
++void ftp_sys(void)
++{
++    if (handle == NULL) {
++        puts(&quot;\033[1;37mFehler: keine Serververbindung vorhanden...&quot;
++             &quot;\033[0m&quot;);
++        return;
++    }
++
++    fprintf(handle, &quot;%s\r\n&quot;, &quot;SYST&quot;);
++    fflush(handle);
++    response();
++}
+diff --git a/src/modules/c/ftp/command.h b/src/modules/c/ftp/command.h
+index 3d4366b..d3f4f51 100644
+--- a/src/modules/c/ftp/command.h
++++ b/src/modules/c/ftp/command.h
+@@ -40,7 +40,7 @@
+ void ftp_ls(void);
+ 
+ // auf dem FTP-Server einloggen
+-void ftp_account(void);
++void ftp_user(void);
+ 
+ // erzeugt ein Verzeichniss auf dem FTP-Server
+ // @param Pfadname+Dateiname
+@@ -61,6 +61,12 @@ void ftp_cd(const char*);
+ // zeigt das Hauptverzeichniss auf dem FTP-Server an
+ void ftp_cdup(void);
+ 
++// gibt den Namen des Betriebssystems vom FTP-Server aus
++void ftp_sys(void);
++
++// zeigt das akutell geoeffnete Verzeichniss auf dem FTP-Server an
++void ftp_pwd(void);
++
+ // uebertraegt eine Datei auf den FTP-Server
+ // @param Pfadname+Dateiname
+ void ftp_get(const char*);
+diff --git a/src/modules/c/ftp/ftp.c b/src/modules/c/ftp/ftp.c
+index fc600b4..5d6d023 100644
+--- a/src/modules/c/ftp/ftp.c
++++ b/src/modules/c/ftp/ftp.c
+@@ -45,10 +45,32 @@
+ #define COMMAND_PORT 21
+ #define LINE_LENGTH 80
+ 
++
++/**
++ * parst die Zweitangabe aus dem Eingabestring, da die Leerzeichen
++ * stoeren
++ *
++ * @param string zeigt auf den Eingabestring
++ * @return gibt Pointer auf die Zweitangabe zurueck
++ */
++char* parser(char* string)
++{
++    char* buffer;
++
++    for (; isspace(*string); string++);
++    if (*string != '\0') {
++        for (buffer = string; !isspace(*buffer) &amp;&amp; *buffer; buffer++);
++        *buffer = '\0';
++        return string;
++    }
++    return NULL;
++}
++
++
+ /**
+- * sendet einen Befehl an den Server und gibt den Request aus
++ * sendet einen Befehl an den FTP-Server und gibt den Request aus
+  *
+- * @param command enthaelt den Befehl für den Server
++ * @param command enthaelt den Befehl für den FTP-Server
+  */
+ void request(const char* command)
+ {
+@@ -79,7 +101,7 @@ void request(const char* command)
+ 
+ 
+ /**
+- * gibt den Request string auf dem Bildschirm aus
++ * gibt den Requeststring auf dem Bildschirm aus
+  */
+ void response(void)
+ {
+@@ -107,18 +129,22 @@ void response(void)
+ 
+ 
+ /**
+- * Stellt eine Verbindung zum Server her
++ * Stellt eine Verbindung zum FTP-Server her
++ *
++ * @param hostname Name des Hostes
+  */
+-void ftp_connect(void)
++void ftp_connect(char* hostname)
+ {
+     char* host_path;
+     char* prompt;
+     char* input;
+     char* c;
+ 
+-    if (handle) return;
++    if (handle != NULL) return;
+     puts(&quot;\033[1;37mVerbinde...\033[0m&quot;);
+-    asprintf(&amp;host_path, &quot;tcpip:/%s:%d&quot;, host, COMMAND_PORT);
++
++    // tcpip-Pfad erzeugen
++    asprintf(&amp;host_path, &quot;tcpip:/%s:%d&quot;, hostname, COMMAND_PORT);
+     handle = fopen(host_path, &quot;r+&quot;);
+     free(host_path);
+ 
+@@ -158,14 +184,11 @@ void ftp_connect(void)
+ 
+ 
+ /**
+- * Schliest die Verbindung zum Server
++ * Schliest die Verbindung zum FTP-Server
+  */
+ void ftp_disconnect(void)
+ {
+-    if (handle == NULL) {
+-        puts(&quot;\033[1;37mes besteht keine Serververbindung...\033[0m&quot;);
+-        return;
+-    }
++    if (handle == NULL) return;
+ 
+     request(&quot;QUIT&quot;);
+     fclose(handle);
+@@ -175,7 +198,7 @@ void ftp_disconnect(void)
+ 
+ 
+ /**
+- * Öffnet eine passive Datenverbindung zum Server
++ * Oeffnet eine passive Datenverbindung zum FTP-Server
+  *
+  * @return Handle zum Datenfluss
+  */
+diff --git a/src/modules/c/ftp/ftp.h b/src/modules/c/ftp/ftp.h
+index d755beb..3725768 100644
+--- a/src/modules/c/ftp/ftp.h
++++ b/src/modules/c/ftp/ftp.h
+@@ -36,14 +36,15 @@
+ #ifndef FTP_H
+ #define FTP_H
+ 
+-extern void ftp_connect(void);
+ extern FILE* ftp_data_connect(void);
++extern char* parser(char*);
++extern void ftp_connect(char*);
+ extern void ftp_disconnect(void);
+ extern void request(const char*);
+ extern void response(void);
+ 
+-extern char* host;
+ extern FILE* handle;
++extern char* host;
+ extern const char* help;
+ 
+ #endif
+diff --git a/src/modules/c/ftp/help.c b/src/modules/c/ftp/help.c
+index bd15e60..b7dbf59 100644
+--- a/src/modules/c/ftp/help.c
++++ b/src/modules/c/ftp/help.c
+@@ -35,19 +35,20 @@
+ 
+ const char* help =
+     &quot;FTP-Client Befehlsliste:\n\n&quot;
+-    &quot;account - einloggen mit Benutzername und Passwort\n&quot;
+     &quot;ascii   - ascii Mode einschalten\n&quot;
+     &quot;binary  - binary Mode einschalten\n&quot;
++    &quot;bye     - schließt die Verbindung zum Server und beendet den FTP-Client\n&quot;
+     &quot;cd      - [Pfad] wechseln des Verzeichnisses auf dem Server\n&quot;
+-    &quot;cdup    - zeigt das Stammverzeichniss auf dem Server an\n&quot;
++    &quot;cdup    - wechselt zum Stammverzeichniss auf dem Server\n&quot;
+     &quot;clear   - löscht den Inhalt des Terminals\n&quot;
+     &quot;close   - schließt die Verbindung zum Server\n&quot;
+-    &quot;exit    - beendet den FTP-Client\n&quot;
+     &quot;get     - [Pfad+Dateiname] holt eine Datei vom Server\n&quot;
+     &quot;help    - zeigt diese Hilfe an\n&quot;
+     &quot;mkdir   - [Pfad+Ordnername] erstellt einen Ordner auf dem Server\n&quot;
+     &quot;open    - [ftp.name.net] öffnet eine Verbindung zu einem Server\n&quot;
+     &quot;put     - [Pfad+Dateiname] speichert eine Datei auf dem Server\n&quot;
+-    &quot;quit    - schließt die Verbindung zum Server und beendet den FTP-Client\n&quot;
++    &quot;pwd     - zeigt das akutell geoeffnete Verzeichniss auf dem Server an\n&quot;
+     &quot;rm      - [Pfad+Dateiname] löscht die Datei auf dem Server\n&quot;
+-    &quot;rmdir   - [Pfad+Verzeichnisname] löscht ein Verzeichnis auf dem Server\n&quot;;
++    &quot;rmdir   - [Pfad+Verzeichnisname] löscht ein Verzeichnis auf dem Server\n&quot;
++    &quot;system  - zeigt den Namen des Betriebssystems vom Server an\n&quot;
++    &quot;user    - einloggen mit Benutzername und Passwort\n&quot;;
+diff --git a/src/modules/c/ftp/main.c b/src/modules/c/ftp/main.c
+index 34acd62..f158723 100644
+--- a/src/modules/c/ftp/main.c
++++ b/src/modules/c/ftp/main.c
+@@ -49,125 +49,86 @@ FILE* handle;
+ int main(int argc, char* argv[])
+ {
+     bool prgm_end = FALSE;
+-    char* input, *buffer;
++    char* input;
+ 
++    // nur ein Parameter ist gueltig
+     if (argc == 2) {
+         host = argv[1];
+-        ftp_connect();
++        ftp_connect(argv[1]);
+     }
+ 
+-    // Bildet den Ablauf des kompletten Programmes
++    // bildet den Ablauf des kompletten Programmes
+     do {
+         input = readline(&quot;\033[1;37mFTP&gt; \033[0m&quot;);
+         // durchlaeuft den String bis zum ersten Zeichen
+         for (; isspace(*input); input++);
+ 
+-            if (!strncmp(input, &quot;exit&quot;, 4)) {
+-                prgm_end = TRUE;
+-            } else if (!strncmp(input, &quot;close&quot;, 5)) {
+-                ftp_disconnect();
+-            } else if (!strncmp(input, &quot;quit&quot;, 4)) {
+-                ftp_disconnect();
+-                prgm_end = TRUE;
+-            } else if (!strncmp(input, &quot;help&quot;, 4)) {
+-                printf(help);
++            if (!strncmp(input, &quot;rm&quot;, 2)) {
++                input += 2;
++                input = parser(input);
++                if (input != NULL) ftp_rm(input);
++            } else if (!strncmp(input, &quot;cd&quot;, 2)) {
++                input += 2;
++                input = parser(input);
++                if (input != NULL) ftp_cd(input);
++            } else if (!strncmp(input, &quot;put&quot;, 3)) {
++                input += 3;
++                input = parser(input);
++                if (input != NULL) ftp_put(input);
++            } else if (!strncmp(input, &quot;get&quot;, 3)) {
++                input += 3;
++                input = parser(input);
++                if (input != NULL) ftp_get(input);
+             } else if (!strncmp(input, &quot;open&quot;, 4)) {
+-                // parst den host aus dem string
+                 input += 4;
+-                for (; isspace(*input); input++);
+-                if (*input != '\0') {
+-                    for (buffer = input; !isspace(*buffer) &amp;&amp; *buffer;
+-                         buffer++);
+-                    *buffer = '\0';
+-
+-                    host = input;
+-                    ftp_connect();
+-                }
+-            } else if (!strncmp(input, &quot;account&quot;, 7)) {
+-                ftp_account();
++                input = parser(input);
++                host = input;
++                if (input != NULL) ftp_connect(input);
+             } else if (!strncmp(input, &quot;mkdir&quot;, 5)) {
+                 input += 5;
+-                for (; isspace(*input); input++);
+-                if (*input != '\0') {
+-                    for (buffer = input; !isspace(*buffer) &amp;&amp; *buffer;
+-                         buffer++);
+-                    *buffer = '\0';
+-
+-                    ftp_mkdir(input);
+-                }
+-            } else if (!strncmp(input, &quot;rm&quot;, 2)) {
+-                input += 2;
+-                for (; isspace(*input); input++);
+-                if (*input != '\0') {
+-                    for (buffer = input; !isspace(*buffer) &amp;&amp; *buffer;
+-                         buffer++);
+-                         *buffer = '\0';
+-
+-                         ftp_rm(input);
+-                }
++                input = parser(input);
++                if (input != NULL) ftp_mkdir(input);
+             } else if (!strncmp(input, &quot;rmdir&quot;, 5)) {
+                 input += 5;
+-                for (; isspace(*input); input++);
+-                if (*input != '\0') {
+-                    for (buffer = input; !isspace(*buffer) &amp;&amp; *buffer;
+-                         buffer++);
+-                         *buffer = '\0';
+-
+-                         ftp_rmdir(input);
+-                }
++                input = parser(input);
++                if (input != NULL) ftp_rmdir(input);
++            } else if (!strncmp(input, &quot;bye&quot;, 3)) {
++                ftp_disconnect();
++                prgm_end = TRUE;
++            } else if (!strncmp(input, &quot;help&quot;, 4)) {
++                printf(help);
++            } else if (!strncmp(input, &quot;close&quot;, 5)) {
++                ftp_disconnect();
++            } else if (!strncmp(input, &quot;user&quot;, 4)) {
++                ftp_user();
++            } else if (!strncmp(input, &quot;system&quot;, 6)) {
++                ftp_sys();
+             } else if (!strncmp(input, &quot;cdup&quot;, 4)) {
+                 ftp_cdup();
++            } else if (!strncmp(input, &quot;pwd&quot;, 3)) {
++                ftp_pwd();
++            } else if (!strncmp(input, &quot;ls&quot;, 2)) {
++                ftp_ls();
++            } else if (!strncmp(input, &quot;clear&quot;, 5)) {
++                puts(&quot;\33[2J\33[H&quot;);
+             } else if (!strncmp(input, &quot;ascii&quot;, 5)) {
+                 // falls keine Verbindung besteht, abbrechen
+                 if (handle == NULL) {
+-                    puts(&quot;\033[1;37mEs besteht keine Serververbindung...&quot;
++                    puts(&quot;\033[1;37mFehler: keine Serververbindung vorhanden...&quot;
+                         &quot;\033[0m&quot;);
+                     continue;
+                 }
+                 request(&quot;TYPE A&quot;);
+             } else if (!strncmp(input, &quot;binary&quot;, 6)) {
+                 if (handle == NULL) {
+-                    puts(&quot;\033[1;37mEs besteht keine Serververbindung...&quot;
++                    puts(&quot;\033[1;37mFehler: keine Serververbindung vorhanden...&quot;
+                         &quot;\033[0m&quot;);
+                     continue;
+                 }
+                 request(&quot;TYPE I&quot;);
+-            } else if (!strncmp(input, &quot;clear&quot;, 5)) {
+-                puts(&quot;\33[2J\33[H&quot;);
+-            } else if (!strncmp(input, &quot;get&quot;, 3)) {
+-                input += 3;
+-                for (; isspace(*input); input++);
+-                if (*input != '\0') {
+-                    for (buffer = input; !isspace(*buffer) &amp;&amp; *buffer;
+-                         buffer++);
+-                         *buffer = '\0';
+-
+-                         ftp_get(input);
+-                }
+-            } else if (!strncmp(input, &quot;put&quot;, 3)) {
+-                input += 3;
+-                for (; isspace(*input); input++);
+-                if (*input != '\0') {
+-                    for (buffer = input; !isspace(*buffer) &amp;&amp; *buffer;
+-                         buffer++);
+-                         *buffer = '\0';
+-
+-                         ftp_put(input);
+-                }
+-            } else if (!strncmp(input, &quot;cd&quot;, 2)) {
+-                input += 2;
+-                for (; isspace(*input); input++);
+-                if (*input != '\0') {
+-                    for (buffer = input; !isspace(*buffer) &amp;&amp; *buffer;
+-                         buffer++);
+-                    *buffer = '\0';
+-
+-                    ftp_cd(input);
+-                }
+-            } else if (!strncmp(input, &quot;ls&quot;, 2)) {
+-                ftp_ls();
+             } else {
+-                printf(help);
++                puts(&quot;\033[1;37mGeben sie help ein um eine Liste aller Befehle &quot;
++                        &quot;zu erhalten!\033[0m&quot;);
+             }
+ 
+             free(input);
+-- 
+1.6.0.4
+
+</PRE>
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001455.html">[tyndur-devel] [PATCH v2] + cdi: video-Header
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001429.html">[tyndur-devel] [PATCH] FTP-Client: Befehlserweiterung und mehrere kleine Bugs behoben
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1427">[ Datum ]</a>
+              <a href="thread.html#1427">[ Thema ]</a>
+              <a href="subject.html#1427">[ Betreff (Subject)]</a>
+              <a href="author.html#1427">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

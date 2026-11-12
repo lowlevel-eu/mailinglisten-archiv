@@ -1,0 +1,475 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 2/4] kernel/libc: Multithreading-Syscalls
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%202/4%5D%20kernel/libc%3A%20Multithreading-Syscalls&In-Reply-To=%3C1363820305-17864-3-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002410.html">
+   <LINK REL="Next"  HREF="002412.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 2/4] kernel/libc: Multithreading-Syscalls</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%202/4%5D%20kernel/libc%3A%20Multithreading-Syscalls&In-Reply-To=%3C1363820305-17864-3-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 2/4] kernel/libc: Multithreading-Syscalls">kevin at tyndur.org
+                  </A><BR>
+    <I>Mi Mär 20 23:58:23 CET 2013</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002410.html">[tyndur-devel] [PATCH 1/4] kernel2: Erst Threads, dann Prozess zerstören
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002412.html">[tyndur-devel] [PATCH 3/4] tests: Ein einfacher Threadtest
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2411">[ Datum ]</a>
+              <a href="thread.html#2411">[ Thema ]</a>
+              <a href="subject.html#2411">[ Betreff (Subject) ]</a>
+              <a href="author.html#2411">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>From: Patrick Pokatilo &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">shyxormz at asxsoft.de</A>&gt;
+
++ kernel/libc: Native tyndur-Thread-API hinzugefügt
+
+Signed-off-by: Patrick Pokatilo &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">shyxormz at asxsoft.de</A>&gt;
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/include/syscallno.h                  |    6 ++-
+ src/include/types.h                      |    1 +
+ src/kernel2/include/syscall.h            |   10 +++
+ src/kernel2/include/tasks.h              |    6 ++
+ src/kernel2/src/syscall.c                |    4 +
+ src/kernel2/src/syscalls/pm.c            |   74 ++++++++++++++++++++
+ src/kernel2/src/tasks/thread.c           |   25 ++++++-
+ src/modules/include/syscall.h            |    3 +
+ src/modules/include/unistd.h             |    3 +
+ src/modules/lib/posix/getpid.c           |   10 +++-
+ src/modules/lib/syscalls/create_thread.c |  110 ++++++++++++++++++++++++++++++
+ 11 files changed, 246 insertions(+), 6 deletions(-)
+ create mode 100644 src/modules/lib/syscalls/create_thread.c
+
+diff --git a/src/include/syscallno.h b/src/include/syscallno.h
+index ec43668..12779e0 100644
+--- a/src/include/syscallno.h
++++ b/src/include/syscallno.h
+@@ -68,6 +68,10 @@
+ 
+ #define SYSCALL_PM_WAIT_FOR_RPC 17
+ 
++#define SYSCALL_PM_GET_TID 119
++#define SYSCALL_PM_CREATE_THREAD 120
++#define SYSCALL_PM_EXIT_THREAD 121
++
+ #define SYSCALL_GET_TICK_COUNT 40
+ 
+ #define SYSCALL_FORTY_TWO 42
+@@ -112,6 +116,6 @@
+ #define SYSCALL_LIO_SRV_NODE_REMOVE                 118
+ 
+ //ACHTUNG: Muss eine Zahl groesser als die Groesste Syscall-Nummer sein
+-#define SYSCALL_MAX 119
++#define SYSCALL_MAX 122
+ 
+ #endif
+diff --git a/src/include/types.h b/src/include/types.h
+index 22bf560..0352b09 100644
+--- a/src/include/types.h
++++ b/src/include/types.h
+@@ -39,6 +39,7 @@ typedef void * vaddr_t;
+ typedef int pid_t;
+ typedef unsigned int uid_t;
+ typedef unsigned int gid_t;
++typedef unsigned int tid_t;
+ 
+ #endif
+ 
+diff --git a/src/kernel2/include/syscall.h b/src/kernel2/include/syscall.h
+index 2eb93b0..c49051a 100644
+--- a/src/kernel2/include/syscall.h
++++ b/src/kernel2/include/syscall.h
+@@ -125,6 +125,16 @@ void syscall_pm_exit_process(void);
+ void* syscall_pm_enumerate_tasks(void);
+ 
+ 
++/// Thread erstellen
++tid_t syscall_pm_create_thread(vaddr_t start, void *arg);
++
++/// ID des aktuellen Threads abfragen
++tid_t syscall_pm_get_tid(void);
++
++/// Thread beenden
++void syscall_pm_exit_thread(void);
++
++
+ /// Speicher an einen anderen Prozess uebergeben
+ void syscall_init_child_page(pid_t pid, vaddr_t src, vaddr_t dest,
+     size_t size);
+diff --git a/src/kernel2/include/tasks.h b/src/kernel2/include/tasks.h
+index 1b719d7..f31b4b6 100644
+--- a/src/kernel2/include/tasks.h
++++ b/src/kernel2/include/tasks.h
+@@ -140,6 +140,12 @@ typedef struct {
+ 
+     /// Gesetzt, wenn der Thread ein VM86-Thread mit allem Drum und Dran ist
+     bool vm86;
++
++    /// Eindeutige Threadnummer
++    tid_t tid;
++
++    /// Gesetzt, wenn der Thread beim Beenden den gesamten Prozess beendet
++    bool is_main_thread;
+ } pm_thread_t;
+ 
+ typedef void (*pm_process_destroy_handler)(pm_process_t* process, void* prv);
+diff --git a/src/kernel2/src/syscall.c b/src/kernel2/src/syscall.c
+index 1871739..bd41275 100644
+--- a/src/kernel2/src/syscall.c
++++ b/src/kernel2/src/syscall.c
+@@ -76,6 +76,10 @@ void syscall_init()
+     syscall_register(SYSCALL_PM_ENUMERATE_TASKS,
+         &amp;syscall_pm_enumerate_tasks, 0);
+ 
++    syscall_register(SYSCALL_PM_CREATE_THREAD, &amp;syscall_pm_create_thread, 2);
++    syscall_register(SYSCALL_PM_GET_TID, &amp;syscall_pm_get_tid, 0);
++    syscall_register(SYSCALL_PM_EXIT_THREAD, &amp;syscall_pm_exit_thread, 0);
++
+     syscall_register(SYSCALL_SET_RPC_HANDLER, &amp;syscall_set_rpc_handler, 1);
+ #if CONFIG_ARCH == ARCH_I386
+     syscall_register(SYSCALL_FASTRPC, &amp;syscall_fastrpc, 5);
+diff --git a/src/kernel2/src/syscalls/pm.c b/src/kernel2/src/syscalls/pm.c
+index 948b577..6ab13d2 100644
+--- a/src/kernel2/src/syscalls/pm.c
++++ b/src/kernel2/src/syscalls/pm.c
+@@ -351,3 +351,77 @@ void* syscall_pm_enumerate_tasks(void)
+ 
+     return task_info;
+ }
++
++/**
++ * TID des aktuellen Threads ausfindig machen
++ *
++ * @return TID des aktuellen Threads
++ */
++tid_t syscall_pm_get_tid()
++{
++    int i = 0;
++
++    pm_thread_t *thread;
++
++    while ((thread = list_get_element_at(current_process-&gt;threads, i))) {
++        if (thread-&gt;status == PM_STATUS_RUNNING) {
++            return thread-&gt;tid;
++        }
++    }
++
++    return -1;
++}
++
++/**
++ * Neuen Thread in einem Prozess erstellen. Der neue Task wird blockiert, bis
++ * er vom Ersteller entblockt wird.
++ *
++ * @param start Start-Adresse
++ * @param arg Argument für den Thread
++ *
++ * @return TID des neuen Tasks
++ */
++tid_t syscall_pm_create_thread(vaddr_t start, void *arg)
++{
++    pm_thread_t *thread;
++
++    thread = pm_thread_create(current_process, start);
++    if (thread == NULL) {
++        return -1;
++    }
++
++    while (pm_thread_block(thread) == false);
++
++    interrupt_stack_frame_t *isf = (interrupt_stack_frame_t *)thread-&gt;user_isf;
++
++    *((void **)(isf-&gt;esp)) = arg;
++
++    isf-&gt;esp -= sizeof(void *);
++
++    while (pm_thread_unblock(thread) == true);
++
++    return thread-&gt;tid;
++}
++
++void syscall_pm_exit_thread(void)
++{
++    pm_thread_t *thread;
++    tid_t tid;
++    int i = 0;
++
++    tid = syscall_pm_get_tid();
++
++    if (tid == -1) {
++        // TODO Kann das wirklich passieren?
++        return;
++    }
++
++    while ((thread = list_get_element_at(current_process-&gt;threads, i))) {
++        if (thread-&gt;tid == tid) {
++            pm_scheduler_push(thread);
++            pm_thread_block(thread);
++            pm_thread_destroy(thread);
++            break;
++        }
++    }
++}
+diff --git a/src/kernel2/src/tasks/thread.c b/src/kernel2/src/tasks/thread.c
+index 639d2c9..961fe31 100644
+--- a/src/kernel2/src/tasks/thread.c
++++ b/src/kernel2/src/tasks/thread.c
+@@ -44,6 +44,18 @@
+ #include &quot;lock.h&quot;
+ #include &quot;cpu.h&quot;
+ 
++static tid_t next_tid = 1;
++
++static tid_t generate_tid(void)
++{
++    static lock_t tid_lock = LOCK_UNLOCKED;
++    lock(&amp;tid_lock);
++    tid_t tid = next_tid++;
++    unlock(&amp;tid_lock);
++
++    return tid;
++}
++
+ /**
+  * Neuen Thread erstellen
+  *
+@@ -60,6 +72,11 @@ pm_thread_t* pm_thread_create(pm_process_t* process, vaddr_t entry)
+     if (thread == NULL) {
+         return NULL;
+     }
++
++    thread-&gt;is_main_thread = (process != current_process);
++
++    // Dem Thread eine ID zuordnen
++    thread-&gt;tid = generate_tid();
+     
+     // Ein Pointer auf den Prozess im Thread hinterlegen
+     thread-&gt;process = process;
+@@ -139,6 +156,8 @@ pm_thread_t* pm_thread_create(pm_process_t* process, vaddr_t entry)
+  */
+ void pm_thread_destroy(pm_thread_t* thread)
+ {
++    // TODO Andere Threads beenden, falls thread-&gt;is_main_thread
++
+     // Zuerst muss der Thread angehalten werden
+     while (pm_thread_block(thread) == false);
+     
+@@ -232,12 +251,10 @@ bool pm_thread_unblock(pm_thread_t* thread)
+ 
+     // Der Thread wird nur entsperrt, wenn er auch wirklich blockiert ist
+     if (thread-&gt;status == PM_STATUS_BLOCKED) {
+-        lock(&amp;thread-&gt;lock);
+-        unlock(&amp;thread-&gt;lock);
+-        return true;
++        thread-&gt;status = PM_STATUS_READY;
++        result = true;
+     }
+ 
+     unlock(&amp;thread-&gt;lock);
+     return result;
+ }
+-
+diff --git a/src/modules/include/syscall.h b/src/modules/include/syscall.h
+index d89449d..0679631 100644
+--- a/src/modules/include/syscall.h
++++ b/src/modules/include/syscall.h
+@@ -104,6 +104,9 @@ void syscall_timer(uint32_t timer_id, uint32_t usec);
+ 
+ void syscall_debug_stacktrace(pid_t pid);
+ 
++tid_t create_thread(uint32_t start, void *arg);
++void exit_thread(void);
++tid_t get_tid(void);
+ 
+ // LIO2
+ 
+diff --git a/src/modules/include/unistd.h b/src/modules/include/unistd.h
+index d101135..95e9f18 100644
+--- a/src/modules/include/unistd.h
++++ b/src/modules/include/unistd.h
+@@ -62,6 +62,9 @@ pid_t getpid(void);
+ /// PID des Elternprozesses auslesen
+ pid_t getppid(void);
+ 
++/// TID des aktuellen Threads auslesen
++tid_t gettid(void);
++
+ /// Hardlink erstellen
+ int link(const char* oldpath, const char* newpath);
+ 
+diff --git a/src/modules/lib/posix/getpid.c b/src/modules/lib/posix/getpid.c
+index 1ab55de..40faded 100644
+--- a/src/modules/lib/posix/getpid.c
++++ b/src/modules/lib/posix/getpid.c
+@@ -50,4 +50,12 @@ pid_t getppid()
+     return get_parent_pid(0);
+ }
+ 
+-
++/**
++ * ID des aktuellen Threads auslesen
++ *
++ * @return Thread-ID
++ */
++tid_t gettid()
++{
++    return get_tid();
++}
+diff --git a/src/modules/lib/syscalls/create_thread.c b/src/modules/lib/syscalls/create_thread.c
+new file mode 100644
+index 0000000..5789df5
+--- /dev/null
++++ b/src/modules/lib/syscalls/create_thread.c
+@@ -0,0 +1,110 @@
++/*
++ * Copyright (c) 2012 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Patrick Pokatilo.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include &lt;stdint.h&gt;
++#include &lt;stdlib.h&gt;
++#include &quot;syscall.h&quot;
++
++/**
++ * ID des aktuellen Threads abfragen.
++ *
++ * @return ID
++ */
++tid_t get_tid(void)
++{
++    tid_t pid;
++
++    asm(
++        &quot;mov %1, %%eax;&quot;
++        &quot;int $0x30;&quot;
++        : &quot;=a&quot; (pid) : &quot;i&quot; (SYSCALL_PM_GET_TID));
++
++    return pid;
++}
++
++/**
++ * Neuen Prozess erstellen. Dieser ist solange blockiert, bis er mit
++ * unblock_task erloest wird. Waerend dieser Zeit kann der Elternprozess Mit
++ * Hilfe von init_child_page Einzelne Seiten in den Adressraum des neuen
++ * Prozesses mappen.
++ *
++ * @param initial_eip Der Einsprungspunkt an dem der Prozess seine Arbeit
++ *                      beginnen soll.
++ * @param uid Die Benutzernummer unter der der Neue Prozess laufen soll (FIXME:
++ *              Sollte vom Elternprozess geerbt werden)
++ * @param args Pointer auf die Kommandozeilen-Parameter
++ * @param parent Prozessnummer des Elternprozesses, dem der neue Task
++ *          untergeordenet werden soll, oder 0 fuer den aktuellen Prozess.
++ *
++ * @return Prozessnummer
++ */
++typedef struct
++{
++    void *(*func)(void *);
++    void *arg;
++} ct_parameter_t;
++
++void *ct_start(ct_parameter_t *p)
++{
++    void *result = p-&gt;func(p-&gt;arg);
++
++    free(p);
++
++    exit_thread();
++
++    return result;
++}
++
++tid_t create_thread(uint32_t start, void *arg)
++{
++    tid_t tid;
++
++    ct_parameter_t *ct_arg = malloc(sizeof(ct_parameter_t));
++
++    ct_arg-&gt;func = (void *(*)(void *))start;
++    ct_arg-&gt;arg = arg;
++
++    asm(
++        &quot;pushl %3;&quot;
++        &quot;pushl %2;&quot;
++        &quot;mov %1, %%eax;&quot;
++        &quot;int $0x30;&quot;
++        &quot;add $0x08, %%esp;&quot;
++        : &quot;=a&quot; (tid)
++        : &quot;i&quot; (SYSCALL_PM_CREATE_THREAD), &quot;r&quot; (ct_start), &quot;r&quot; (ct_arg));
++
++    return tid;
++}
++
++void exit_thread(void)
++{
++    asm(
++        &quot;mov %0, %%eax;&quot;
++        &quot;int $0x30;&quot;
++        : : &quot;i&quot; (SYSCALL_PM_EXIT_THREAD));
++}
+-- 
+1.7.7
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002410.html">[tyndur-devel] [PATCH 1/4] kernel2: Erst Threads, dann Prozess zerstören
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002412.html">[tyndur-devel] [PATCH 3/4] tests: Ein einfacher Threadtest
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2411">[ Datum ]</a>
+              <a href="thread.html#2411">[ Thema ]</a>
+              <a href="subject.html#2411">[ Betreff (Subject)]</a>
+              <a href="author.html#2411">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

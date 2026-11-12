@@ -1,0 +1,1204 @@
+From kevin at tyndur.org  Sat Nov  1 18:00:43 2008
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat,  1 Nov 2008 18:00:43 +0100
+Subject: [Lost] [PATCH] lpt: Ein bisschen mehr Fehlerbehandlung
+Message-ID: <1225558843-12435-1-git-send-email-kevin@tyndur.org>
+
++ lpt: Verstaendliche Fehlermeldung statt Unhandled Exception, wenn
+  Abhaengigkeiten nicht aufgeloest werden koennen oder die Paketliste
+  nicht eingelesen werden kann.
+! lpt: Endlosschleife beseitigt, wenn eine pkglist.* zu einer Quelle
+  existiert, die in pkgsrc nicht aufgefuehrt wird.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/pas/lpt/lpt.pas |   75 +++++++++++++++++++++++++------------------
+ 1 files changed, 44 insertions(+), 31 deletions(-)
+
+diff --git a/src/modules/pas/lpt/lpt.pas b/src/modules/pas/lpt/lpt.pas
+index 56fe1d3..dec7a15 100644
+--- a/src/modules/pas/lpt/lpt.pas
++++ b/src/modules/pas/lpt/lpt.pas
+@@ -157,6 +157,37 @@ begin
+     Close(f);
+ end;
+ 
++procedure ReadPkglists(pkgset: TPackageSet);
++var
++    srec: SearchRec;
++    name: String;
++    repo: TRepository;
++begin
++    dos.FindFirst(configRoot + 'pkglist.*', 0, srec);
++    while DosError = 0 do begin
++        WriteLn('Lese Paketliste ein: ' + srec.name);
++
++        name := Copy(srec.name, length('pkglist.*'), length(srec.name));
++        repo := GetRepository(name);
++        if repo = nil then begin
++            TextColor(6);
++            WriteLn('Warnung: "', name, '" nicht in pkgsrc gefunden. Ueberspringe Quelle.');
++            TextColor(7);
++        end else begin
++            try
++                pkgset.ScanFile(configRoot + srec.name, repo.url);
++            except
++                on e: Exception do begin
++                    TextColor(12);
++                    WriteLn('Fehler beim Einlesen der Paketliste: ', e.message);
++                    TextColor(7);
++                end;
++            end;
++        end;
++        dos.FindNext(srec);
++    end;
++end;
++
+ procedure Get(pkgname: String);
+ 
+ 
+@@ -208,10 +239,8 @@ procedure Get(pkgname: String);
+     end;
+ 
+ var
+-    srec: SearchRec;
+     pkgset: TPackageSet;
+     section: String;
+-    repo: TRepository;
+ 
+     instset: TPackageSet;
+     pkg: TPackage;
+@@ -222,20 +251,7 @@ begin
+     ReadPkgsrc(configRoot + 'pkgsrc');
+     pkgset := TPackageSet.create;
+ 
+-    dos.FindFirst(configRoot + 'pkglist.*', 0, srec);
+-    while DosError = 0 do begin
+-        WriteLn('Lese Paketliste ein: ' + srec.name);
+-        
+-        repo := GetRepository(Copy(srec.name, length('pkglist.*'), length(srec.name)));
+-        if repo = nil then begin
+-            WriteLn('Fehler: Nicht in pkgsrc gefunden. Ueberspringe Quelle.');
+-            continue;
+-        end;
+-
+-        pkgset.ScanFile(configRoot + srec.name, repo.url);
+-        dos.FindNext(srec);
+-    end;
+-
++    ReadPkglists(pkgset);
+ 
+     section := 'bin';
+     version := pkgset.GetCurrentVersion(pkgname, section);
+@@ -249,7 +265,17 @@ begin
+     
+     instset := TPackageSet.create();
+     instset.AddVersion(version);
+-    instset.AddDependencies(pkgset);
++    try
++        instset.AddDependencies(pkgset);
++    except
++        on e: EDependency do begin
++            TextColor(12);
++            WriteLn('Konnte die Abhaengigkeiten des Pakets nicht aufloesen:');
++            WriteLn(e.message);
++            TextColor(7);
++            exit;
++        end;
++    end;
+ 
+     for i := 0 to instset.packages.count - 1 do begin
+         pkg := TPackage(instset.packages.items[i]);
+@@ -282,20 +308,7 @@ var
+ begin
+     ReadPkgsrc(configRoot + 'pkgsrc');
+     pkgset := TPackageSet.create;
+-
+-    dos.FindFirst(configRoot + 'pkglist.*', 0, srec);
+-    while DosError = 0 do begin
+-        WriteLn('Lese Paketliste ein: ' + srec.name);
+-
+-        repo := GetRepository(Copy(srec.name, length('pkglist.*'), length(srec.name)));
+-        if repo = nil then begin
+-            WriteLn('Fehler: Nicht in pkgsrc gefunden. Ueberspringe Quelle.');
+-            continue;
+-        end;
+-
+-        pkgset.ScanFile(configRoot + srec.name, repo.url);
+-        dos.FindNext(srec);
+-    end;
++    ReadPkglists(pkgset);
+ 
+     for i := 0 to pkgset.packages.count - 1 do begin
+         pkg := TPackage(pkgset.packages.items[i]);
+-- 
+1.5.4.5
+
+
+
+From toni at famkaufmann.info  Sat Nov  1 18:16:38 2008
+From: toni at famkaufmann.info (Antoine Kaufmann)
+Date: Sat, 1 Nov 2008 18:16:38 +0100
+Subject: [Lost] [PATCH] lpt: Ein bisschen mehr Fehlerbehandlung
+In-Reply-To: <1225558843-12435-1-git-send-email-kevin@tyndur.org>
+References: <1225558843-12435-1-git-send-email-kevin@tyndur.org>
+Message-ID: <20081101171638.GA23976@thales.produktiv.lan>
+
+On Sat, Nov 01 18:00, Kevin Wolf wrote:
+> + lpt: Verstaendliche Fehlermeldung statt Unhandled Exception, wenn
+>   Abhaengigkeiten nicht aufgeloest werden koennen oder die Paketliste
+>   nicht eingelesen werden kann.
+> ! lpt: Endlosschleife beseitigt, wenn eine pkglist.* zu einer Quelle
+>   existiert, die in pkgsrc nicht aufgefuehrt wird.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Ack.
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 197 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20081101/c5ec2b9b/attachment.pgp>
+
+From toni at famkaufmann.info  Sat Nov  1 20:39:16 2008
+From: toni at famkaufmann.info (Antoine Kaufmann)
+Date: Sat, 1 Nov 2008 20:39:16 +0100
+Subject: [Lost] [PATCH 1/2] AVL-Baeume (v2)
+In-Reply-To: <1224968757-11874-2-git-send-email-kevin@tyndur.org>
+References: <1224968757-11874-1-git-send-email-kevin@tyndur.org>
+	<1224968757-11874-2-git-send-email-kevin@tyndur.org>
+Message-ID: <20081101193916.GB23976@thales.produktiv.lan>
+
+On Sat, Oct 25 23:05, Kevin Wolf wrote:
+> + libc: AVL-Baeume
+> 
+> Dieser Patch enthaelt gegenueber der ersten geposteten Version folgende
+> Aenderungen:
+> 
+> ! libc: AVL-Baeume: rebalance akzeptiert auch Nullpointer als Parameter,
+>   weil manchmal item->parent uebergeben wird, ohne zu pruefen, ob es
+>   nicht die Wurzel ist (bei item == NULL passiert dann einfach nichts)
+> ! libc: Beim Loeschen muss ein linker Teilbaum nur beruecksichtigt
+>   werden, wenn es ihn auch gibt.
+> ---
+>  src/include/collections.h  |   65 +++++++
+>  src/lib/collections/tree.c |  441 ++++++++++++++++++++++++++++++++++++++++++++
+>  2 files changed, 506 insertions(+), 0 deletions(-)
+>  create mode 100644 src/lib/collections/tree.c
+> 
+> diff --git a/src/include/collections.h b/src/include/collections.h
+> index 3702837..a215582 100644
+> --- a/src/include/collections.h
+> +++ b/src/include/collections.h
+> ...
+> +void* tree_next(tree_t* tree, void* node)
+> +{
+> +    struct tree_item* current = to_tree_item(tree, node);
+> +    struct tree_item* old = current;
+> +
+> +    if (node == NULL) {
+> +        current = tree->root;
+> +    } else {
+> +        // Das ist im Prinzip ein tree_next mit links und rechts vertauscht
+
+BUG im Kommentar ;-)
+
+> +
+> +        if (current->right == NULL) {
+> +            do {
+> +                old = current;
+> +                current = current->parent;
+> +            } while (current && (current->right == old));
+> +
+> +            return current ? to_node(tree, current) : NULL;
+> +        }
+> +
+> +        current = current->right;
+> +    }
+> +
+> +    while (current->left) {
+> +        current = current->left;
+> +    }
+> +
+> +    return to_node(tree, current);
+> +}
+> +
+
+Ich würde zwar grundsätzlich gerne noch ein bisschen Dokumentation
+sehen, aber schieb das halt mal rein so. Im Moment sehe ich nichts mehr,
+das kaputt sein könnte.
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 197 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20081101/46f51e19/attachment.pgp>
+
+From toni at famkaufmann.info  Sat Nov  1 22:56:03 2008
+From: toni at famkaufmann.info (Antoine Kaufmann)
+Date: Sat, 1 Nov 2008 22:56:03 +0100
+Subject: [Lost] [PATCH 2/2] kernel2: Shared Memory
+In-Reply-To: <1224968757-11874-3-git-send-email-kevin@tyndur.org>
+References: <1224968757-11874-1-git-send-email-kevin@tyndur.org>
+	<1224968757-11874-3-git-send-email-kevin@tyndur.org>
+Message-ID: <20081101215603.GC23976@thales.produktiv.lan>
+
+On Sat, Oct 25 23:05, Kevin Wolf wrote:
+> + kernel2: Shared Memory
+> diff --git a/src/kernel2/src/mm/shm.c b/src/kernel2/src/mm/shm.c
+> new file mode 100644
+> index 0000000..b48defc
+> --- /dev/null
+> +++ b/src/kernel2/src/mm/shm.c
+> @@ -0,0 +1,171 @@
+> ...
+> +struct shm_desc {
+> +    uint64_t            id;
+
+Aber unten werden immer nur 32-Bit Ids verwendet, oder sehe ich das
+falsch?
+
+> +    struct tree_item    tree_item;
+> +
+> +    paddr_t             paddr;
+> +    size_t              num_pages;
+> +    list_t*             processes;
+> +};
+> ...
+> +uint32_t shm_create(size_t size)
+> +{
+> +    // FIXME Die Pages muessen nicht physisch zusammenhaengend sein
+> +    paddr_t shm_phys = pmm_alloc(NUM_PAGES(size));
+> +    uint32_t id = ++shm_last_id;
+> +    struct shm_desc* shm;
+> +
+> +    while (tree_search(shms, id)) {
+> +        id++;
+> +    }
+
+Warum ist das denn notwendig? Müsste ++shm_last_id nicht sowieso noch
+frei sein?
+
+> +    shm = calloc(1, sizeof(*shm));
+> +    shm->id = id;
+> +    shm->num_pages = NUM_PAGES(size);
+> +    shm->paddr = shm_phys;
+> +    shm->processes = list_create();
+> +
+> +    tree_insert(shms, shm);
+> +
+> +    return id;
+> +}
+>...
+> diff --git a/src/kernel2/src/tasks/pm.c b/src/kernel2/src/tasks/pm.c
+> index e47a11c..64a814c 100644
+> --- a/src/kernel2/src/tasks/pm.c
+> +++ b/src/kernel2/src/tasks/pm.c
+> @@ -166,6 +166,8 @@ void pm_destroy(pm_process_t* process)
+>      // TODO Die einzelnen Listenglieder freigeben
+>      list_destroy(process->rpcs);
+>  
+> +    // TODO Alle SHMs freigeben
+> +
+>      // Den Prozess aus der Liste entfernen
+>      pm_process_t* _proc;
+>      int i = 0;
+
+Das TODO ist aber nicht gerade schön... ;-) Aber jo wenn es tut, dann
+kann es zumindest mal rein. ;-)
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 197 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20081101/3872bb90/attachment.pgp>
+
+From mail at kevin-wolf.de  Sat Nov  1 23:18:44 2008
+From: mail at kevin-wolf.de (Kevin Wolf)
+Date: Sat, 1 Nov 2008 23:18:44 +0100
+Subject: [Lost] [PATCH 2/2] kernel2: Shared Memory
+In-Reply-To: <20081101215603.GC23976@thales.produktiv.lan>
+References: <1224968757-11874-1-git-send-email-kevin@tyndur.org>
+	<1224968757-11874-3-git-send-email-kevin@tyndur.org>
+	<20081101215603.GC23976@thales.produktiv.lan>
+Message-ID: <200811012318.44201@kevin-wolf.de>
+
+Am Samstag, 1. November 2008 22:56:03 schrieb Antoine Kaufmann:
+> On Sat, Oct 25 23:05, Kevin Wolf wrote:
+> > + kernel2: Shared Memory
+> > diff --git a/src/kernel2/src/mm/shm.c b/src/kernel2/src/mm/shm.c
+> > new file mode 100644
+> > index 0000000..b48defc
+> > --- /dev/null
+> > +++ b/src/kernel2/src/mm/shm.c
+> > @@ -0,0 +1,171 @@
+> > ...
+> > +struct shm_desc {
+> > +    uint64_t            id;
+>
+> Aber unten werden immer nur 32-Bit Ids verwendet, oder sehe ich das
+> falsch?
+
+Der Schlüssel ist bei AVL-Bäumen per definitionem 64 Bit lang. Es gab sogar 
+irgendeinen Grund, warum ich hier trotzdem nur 32 Bit davon verwende, aber er 
+fällt mir gerade nicht mehr ein...
+
+>
+> > +    struct tree_item    tree_item;
+> > +
+> > +    paddr_t             paddr;
+> > +    size_t              num_pages;
+> > +    list_t*             processes;
+> > +};
+> > ...
+> > +uint32_t shm_create(size_t size)
+> > +{
+> > +    // FIXME Die Pages muessen nicht physisch zusammenhaengend sein
+> > +    paddr_t shm_phys = pmm_alloc(NUM_PAGES(size));
+> > +    uint32_t id = ++shm_last_id;
+> > +    struct shm_desc* shm;
+> > +
+> > +    while (tree_search(shms, id)) {
+> > +        id++;
+> > +    }
+>
+> Warum ist das denn notwendig? Müsste ++shm_last_id nicht sowieso noch
+> frei sein?
+
+Außer nach einem Overflow ja.
+
+> > +    shm = calloc(1, sizeof(*shm));
+> > +    shm->id = id;
+> > +    shm->num_pages = NUM_PAGES(size);
+> > +    shm->paddr = shm_phys;
+> > +    shm->processes = list_create();
+> > +
+> > +    tree_insert(shms, shm);
+> > +
+> > +    return id;
+> > +}
+> >...
+> > diff --git a/src/kernel2/src/tasks/pm.c b/src/kernel2/src/tasks/pm.c
+> > index e47a11c..64a814c 100644
+> > --- a/src/kernel2/src/tasks/pm.c
+> > +++ b/src/kernel2/src/tasks/pm.c
+> > @@ -166,6 +166,8 @@ void pm_destroy(pm_process_t* process)
+> >      // TODO Die einzelnen Listenglieder freigeben
+> >      list_destroy(process->rpcs);
+> >
+> > +    // TODO Alle SHMs freigeben
+> > +
+> >      // Den Prozess aus der Liste entfernen
+> >      pm_process_t* _proc;
+> >      int i = 0;
+>
+> Das TODO ist aber nicht gerade schön... ;-) Aber jo wenn es tut, dann
+> kann es zumindest mal rein. ;-)
+
+Tasks beenden ist in kernel2 sowieso noch total kaputt, glaube ich.
+
+
+From toni at famkaufmann.info  Sat Nov  1 23:23:41 2008
+From: toni at famkaufmann.info (Antoine Kaufmann)
+Date: Sat, 1 Nov 2008 23:23:41 +0100
+Subject: [Lost] [PATCH 2/2] kernel2: Shared Memory
+In-Reply-To: <200811012318.44201@kevin-wolf.de>
+References: <1224968757-11874-1-git-send-email-kevin@tyndur.org>
+	<1224968757-11874-3-git-send-email-kevin@tyndur.org>
+	<20081101215603.GC23976@thales.produktiv.lan>
+	<200811012318.44201@kevin-wolf.de>
+Message-ID: <20081101222341.GD23976@thales.produktiv.lan>
+
+On Sat, Nov 01 23:18, Kevin Wolf wrote:
+> Am Samstag, 1. November 2008 22:56:03 schrieb Antoine Kaufmann:
+> > On Sat, Oct 25 23:05, Kevin Wolf wrote:
+> > > + kernel2: Shared Memory
+> > > diff --git a/src/kernel2/src/mm/shm.c b/src/kernel2/src/mm/shm.c
+> > > new file mode 100644
+> > > index 0000000..b48defc
+> > > --- /dev/null
+> > > +++ b/src/kernel2/src/mm/shm.c
+> > > @@ -0,0 +1,171 @@
+> > > ...
+> > > +struct shm_desc {
+> > > +    uint64_t            id;
+> >
+> > Aber unten werden immer nur 32-Bit Ids verwendet, oder sehe ich das
+> > falsch?
+> 
+> Der Schlüssel ist bei AVL-Bäumen per definitionem 64 Bit lang. Es gab sogar 
+> irgendeinen Grund, warum ich hier trotzdem nur 32 Bit davon verwende, aber er 
+> fällt mir gerade nicht mehr ein...
+> 
+> >
+> > > +    struct tree_item    tree_item;
+> > > +
+> > > +    paddr_t             paddr;
+> > > +    size_t              num_pages;
+> > > +    list_t*             processes;
+> > > +};
+> > > ...
+> > > +uint32_t shm_create(size_t size)
+> > > +{
+> > > +    // FIXME Die Pages muessen nicht physisch zusammenhaengend sein
+> > > +    paddr_t shm_phys = pmm_alloc(NUM_PAGES(size));
+> > > +    uint32_t id = ++shm_last_id;
+> > > +    struct shm_desc* shm;
+> > > +
+> > > +    while (tree_search(shms, id)) {
+> > > +        id++;
+> > > +    }
+> >
+> > Warum ist das denn notwendig? Müsste ++shm_last_id nicht sowieso noch
+> > frei sein?
+
+Und wie fängst du die mögliche Endlosschleife ab? *g*
+
+> Außer nach einem Overflow ja.
+> 
+> > > +    shm = calloc(1, sizeof(*shm));
+> > > +    shm->id = id;
+> > > +    shm->num_pages = NUM_PAGES(size);
+> > > +    shm->paddr = shm_phys;
+> > > +    shm->processes = list_create();
+> > > +
+> > > +    tree_insert(shms, shm);
+> > > +
+> > > +    return id;
+> > > +}
+> > >...
+> > > diff --git a/src/kernel2/src/tasks/pm.c b/src/kernel2/src/tasks/pm.c
+> > > index e47a11c..64a814c 100644
+> > > --- a/src/kernel2/src/tasks/pm.c
+> > > +++ b/src/kernel2/src/tasks/pm.c
+> > > @@ -166,6 +166,8 @@ void pm_destroy(pm_process_t* process)
+> > >      // TODO Die einzelnen Listenglieder freigeben
+> > >      list_destroy(process->rpcs);
+> > >
+> > > +    // TODO Alle SHMs freigeben
+> > > +
+> > >      // Den Prozess aus der Liste entfernen
+> > >      pm_process_t* _proc;
+> > >      int i = 0;
+> >
+> > Das TODO ist aber nicht gerade schön... ;-) Aber jo wenn es tut, dann
+> > kann es zumindest mal rein. ;-)
+> 
+> Tasks beenden ist in kernel2 sowieso noch total kaputt, glaube ich.
+
+Na dann. Ack.
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 197 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20081101/e04101b8/attachment.pgp>
+
+From janosch.graef at gmx.net  Sun Nov  9 18:48:47 2008
+From: janosch.graef at gmx.net (=?ISO-8859-15?Q?Janosch_Gr=E4f?=)
+Date: Sun, 09 Nov 2008 18:48:47 +0100
+Subject: [Lost] Ramdisk
+In-Reply-To: <48F3AAAD.5080102@gmx.net>
+References: <48F3AAAD.5080102@gmx.net>
+Message-ID: <4917227F.1060407@gmx.net>
+
+Hi,
+
+Dieser Patch fixt zwei memleaks die beim Löschen einer Datei auftreten.
+ * Löschen einer Klasse und zerstören der Klasse (beide Funktionen geben
+res->buffer frei)
+ * Löschen einer Link-Klasse (Link-Pfad steht nicht mehr in res->buffer
+sondern in res->res.link_path)
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : ramdisk.patch
+Dateityp    : text/x-patch
+Dateigröße  : 1139 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20081109/cf8e4383/attachment.bin>
+
+From janosch.graef at gmx.net  Sun Nov  9 19:36:56 2008
+From: janosch.graef at gmx.net (=?ISO-8859-15?Q?Janosch_Gr=E4f?=)
+Date: Sun, 09 Nov 2008 19:36:56 +0100
+Subject: [Lost] Ramdisk
+In-Reply-To: <4917227F.1060407@gmx.net>
+References: <48F3AAAD.5080102@gmx.net> <4917227F.1060407@gmx.net>
+Message-ID: <49172DC8.6000200@gmx.net>
+
+Hier ist mein zweiter Anlauf:
+
+Das Freigeben des Speichers wird jetzt nur noch in
+ramdisk_fs_res_destroy() erledigt. Außerdem ist es nicht mehr möglich
+Resources mit Kindern mit ramdisk_fs_res_destroy() zu zerstören.
+ramdisk_fs_destroy() zerstört trotzdem auch Kind-Resourcen mithilfe von
+destroy_res().
+
+Außerdem habe ich noch ein time() entfernt.
+
+Janosch Gräf schrieb:
+> Hi,
+>
+> Dieser Patch fixt zwei memleaks die beim Löschen einer Datei auftreten.
+>  * Löschen einer Klasse und zerstören der Klasse (beide Funktionen geben
+> res->buffer frei)
+>  * Löschen einer Link-Klasse (Link-Pfad steht nicht mehr in res->buffer
+> sondern in res->res.link_path)
+>
+> ------------------------------------------------------------------------
+>
+> _______________________________________________
+> Lost mailing list
+> Lost at tyndur.org
+> http://list.tyndur.org/mailman/listinfo/lost
+
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : ramdisk.patch
+Dateityp    : text/x-patch
+Dateigröße  : 2384 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20081109/de1dbce6/attachment.bin>
+
+From janosch.graef at gmx.net  Thu Nov 13 17:46:33 2008
+From: janosch.graef at gmx.net (=?ISO-8859-15?Q?Janosch_Gr=E4f?=)
+Date: Thu, 13 Nov 2008 17:46:33 +0100
+Subject: [Lost] Ramdisk
+In-Reply-To: <49172DC8.6000200@gmx.net>
+References: <48F3AAAD.5080102@gmx.net> <4917227F.1060407@gmx.net>
+	<49172DC8.6000200@gmx.net>
+Message-ID: <491C59E9.8030000@gmx.net>
+
+Hi,
+
+Jetzt kompiliert es auch mit -Wall -Werror. Wenn man halt so hohe
+Ansprüche hat ;)
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : ramdisk.patch
+Dateityp    : text/x-patch
+Dateigröße  : 2393 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20081113/0a81fee2/attachment.bin>
+
+From kevin at tyndur.org  Sat Nov 22 21:38:33 2008
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 22 Nov 2008 21:38:33 +0100
+Subject: [Lost] [PATCH] cdi: Cache: Auch unbenutzte Blocks am Ende wieder
+	freigeben
+In-Reply-To: <1227386313-15199-1-git-send-email-kevin@tyndur.org>
+References: <1227386313-15199-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1227386313-15199-5-git-send-email-kevin@tyndur.org>
+
+---
+ src/modules/cdi/lib/cache.c |   27 +++++++++++++--------------
+ 1 files changed, 13 insertions(+), 14 deletions(-)
+
+diff --git a/src/modules/cdi/lib/cache.c b/src/modules/cdi/lib/cache.c
+index df325c1..b51655f 100644
+--- a/src/modules/cdi/lib/cache.c
++++ b/src/modules/cdi/lib/cache.c
+@@ -190,20 +190,19 @@ void cdi_cache_destroy(struct cdi_cache* cache)
+         b = c->blocks + i;
+ 
+         // Ungueltige Blocks ueberspringen
+-        if (b->cdi.number == INVBLKNUM) {
+-            continue;
+-        }
++        if (b->cdi.number != INVBLKNUM) {
+ 
+-        if (b->ref_count) {
+-            printf("cdi_cache: Beim Zerstoeren des Caches wurde ein Block "
+-                "gefunden, der einen Referenzzaehler != 0 hat (%lld)\n",
+-                (unsigned long long) b->cdi.number);
+-        }
++            if (b->ref_count) {
++                printf("cdi_cache: Beim Zerstoeren des Caches wurde ein Block "
++                    "gefunden, der einen Referenzzaehler != 0 hat (%lld)\n",
++                    (unsigned long long) b->cdi.number);
++            }
+ 
+-        if (b->dirty) {
+-            printf("cdi_cache: Beim Zerstoeren des Caches wurde ein Block "
+-                "gefunden, der als veraendert markiert ist (%lld)\n",
+-                (unsigned long long) b->cdi.number);
++            if (b->dirty) {
++                printf("cdi_cache: Beim Zerstoeren des Caches wurde ein Block "
++                    "gefunden, der als veraendert markiert ist (%lld)\n",
++                    (unsigned long long) b->cdi.number);
++            }
+         }
+ 
+         free(b->cdi.data);
+-- 
+1.5.4.5
+
+
+
+From kevin at tyndur.org  Sat Nov 22 21:38:31 2008
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 22 Nov 2008 21:38:31 +0100
+Subject: [Lost] [PATCH] cdi: Entry-Interface fuer Cache entfernen
+In-Reply-To: <1227386313-15199-1-git-send-email-kevin@tyndur.org>
+References: <1227386313-15199-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1227386313-15199-3-git-send-email-kevin@tyndur.org>
+
+---
+ src/modules/cdi/include/cdi/cache.h |   90 -----------
+ src/modules/cdi/lib/cache.c         |  282 -----------------------------------
+ 2 files changed, 0 insertions(+), 372 deletions(-)
+
+diff --git a/src/modules/cdi/include/cdi/cache.h b/src/modules/cdi/include/cdi/cache.h
+index fd43bca..3c13230 100644
+--- a/src/modules/cdi/include/cdi/cache.h
++++ b/src/modules/cdi/include/cdi/cache.h
+@@ -32,13 +32,6 @@ struct cdi_cache_block {
+     void*       private;
+ };
+ 
+-/** Cache-Bereiche fuer komfortablen, dafuer etwas langsameren, Zugriff */
+-struct cdi_cache_entry {
+-    struct cdi_cache* cache;
+-
+-    /* OS-Spezifische Daten folgen... */
+-};
+-
+ /** Typ fuer Cache-Callback zum einlesen eines Blocks. */
+ typedef int (cdi_cache_read_block_t)(struct cdi_cache* cache, uint64_t block,
+     size_t count, void* dest, void* prv);
+@@ -112,87 +105,4 @@ void cdi_cache_block_release(struct cdi_cache* cache,
+ void cdi_cache_block_dirty(struct cdi_cache* cache,
+     struct cdi_cache_block* block);
+ 
+-/**
+- * Cache-Eintrag erstellen
+- *
+- * @param offset    Position auf dem Datentraeger
+- * @param size      Groesse des Bereichs
+- *
+- * @return Handle
+- */
+-struct cdi_cache_entry* cdi_cache_entry_new(struct cdi_cache* cache,
+-    uint64_t offset, size_t size);
+-
+-/**
+- * Cache-Eintrag freigeben
+- *
+- * @param entry Handle
+- */
+-void    cdi_cache_entry_release(struct cdi_cache_entry* entry);
+-
+-/**
+- * Cache-Eintrag sperren
+- *
+- * @param entry Handle
+- */
+-void    cdi_cache_entry_lock(struct cdi_cache_entry* entry);
+-
+-/**
+- * Cache-Eintrag entsperren
+- *
+- * @param entry Handle
+- */
+-void    cdi_cache_entry_unlock(struct cdi_cache_entry* entry);
+-
+-/**
+- * Cache-Eintrag als veraendert markieren
+- *
+- * @param entry Handle
+- */
+-void    cdi_cache_entry_dirty(struct cdi_cache_entry* entry);
+-
+-/**
+- * Einzelnen Block im Cache-Eintrag als veraendert markieren
+- *
+- * @param entry Handle
+- * @param block Blocknummer (von 0 an)
+- */
+-void    cdi_cache_entry_blkdirty(struct cdi_cache_entry* entry, uint64_t block);
+-
+-
+-
+-/**
+- * Pointer auf einen Block im Cache-Eintrag holen
+- *
+- * @param entry Handle
+- * @param block Blocknummer relativ zum Eintrag (der Offset innerhalb des
+- *              Eintrags wird nicht beruecksichtigt)
+- *
+- * @return Pointer auf den Block
+- */
+-void*   cdi_cache_entry_block(struct cdi_cache_entry* entry, size_t block);
+-
+-/**
+- * Daten aus dem Cache-Eintrag lesen
+- *
+- * @param entry     Handle
+- * @param offset    Offset relativ zum Cache-Eintrag
+- * @param size      Groesse des zu lesenden Bereichs
+- * @param buffer    Puffer in dem die Daten abgelegt werden sollen
+- */
+-int     cdi_cache_entry_read(struct cdi_cache_entry* entry, size_t offset,
+-            size_t size, void* buffer);
+-
+-/**
+- * Daten in den Cache-Eintrag schreiben
+- *
+- * @param entry     Handle
+- * @param offset    Offset relativ zum Cache-Eintrag
+- * @param size      Groesse des zu schreibenden Bereichs
+- * @param buffer    Puffer aus dem die Daten gelesen werden
+- */
+-int     cdi_cache_entry_write(struct cdi_cache_entry* entry, size_t offset,
+-            size_t size, const void* buffer);
+-
+-
+ #endif
+diff --git a/src/modules/cdi/lib/cache.c b/src/modules/cdi/lib/cache.c
+index 30ecdc3..486382a 100644
+--- a/src/modules/cdi/lib/cache.c
++++ b/src/modules/cdi/lib/cache.c
+@@ -103,29 +103,6 @@ struct cache {
+     uint16_t            prev_hint;
+ };
+ 
+-/**
+- * Cache-eintrag
+- */
+-struct entry {
+-    /** Eigentlicher CDI-Cache-Eintrag */
+-    struct cdi_cache_entry  entry;
+-
+-    /** Offset */
+-    uint64_t                offset;
+-
+-    /** Groesse des Bereichs */
+-    size_t                  size;
+-
+-    /** Anzahl der Blocks */
+-    size_t                  block_count;
+-
+-    /** Pointer auf ein Array mit Blockpointern */
+-    struct block**          blocks;
+-
+-    /** Gesperrt */
+-    int                     locked;
+-};
+-
+ 
+ 
+ /**
+@@ -711,262 +688,3 @@ void cdi_cache_block_dirty(struct cdi_cache* cache,
+     struct block* b = (struct block*) block;
+     b->dirty = 1;
+ }
+-
+-
+-
+-
+-/**
+- * Cache-Eintrag erstellen
+- *
+- * @param offset    Position auf dem Datentraeger
+- * @param size      Groesse des Bereichs
+- *
+- * @return Handle
+- */
+-struct cdi_cache_entry* cdi_cache_entry_new(struct cdi_cache* cache,
+-    uint64_t offset, size_t size)
+-{
+-    struct entry* entry = malloc(sizeof(struct entry));
+-    size_t block_size = cache->block_size;
+-    uint64_t start_block = offset / block_size;
+-    uint64_t end_block = (offset + size - 1) / block_size;
+-
+-    entry->entry.cache = cache;
+-    entry->locked = 0;
+-    entry->offset = offset;
+-    entry->size = size;
+-    entry->block_count = end_block - start_block + 1;
+-    entry->blocks = calloc(sizeof(struct block*) * entry->block_count, 1);
+-
+-    return (struct cdi_cache_entry*) entry;
+-}
+-
+-/**
+- * Cache-Eintrag freigeben
+- *
+- * @param entry Handle
+- */
+-void    cdi_cache_entry_release(struct cdi_cache_entry* entry)
+-{
+-    struct entry* e = (struct entry*) entry;
+-    size_t i;
+-
+-    if (e->locked) {
+-        cdi_cache_entry_unlock(entry);
+-    }
+-
+-    for (i = 0; i < e->block_count; i++) {
+-        struct block* block = e->blocks[i];
+-        if (block) {
+-            block->ref_count--;
+-        }
+-    }
+-
+-    free(e);
+-}
+-
+-/**
+- * Cache-Eintrag sperren
+- *
+- * @param entry Handle
+- */
+-void    cdi_cache_entry_lock(struct cdi_cache_entry* entry)
+-{
+-    struct entry* e = (struct entry*) entry;
+-    e->locked = 1;
+-}
+-
+-/**
+- * Cache-Eintrag entsperren
+- *
+- * @param entry Handle
+- */
+-void    cdi_cache_entry_unlock(struct cdi_cache_entry* entry)
+-{
+-    struct entry* e = (struct entry*) entry;
+-    e->locked = 0;
+-}
+-
+-/**
+- * Cache-Eintrag als veraendert markieren
+- *
+- * @param entry Handle
+- */
+-void    cdi_cache_entry_dirty(struct cdi_cache_entry* entry)
+-{
+-    struct entry* e = (struct entry*) entry;
+-    size_t i;
+-
+-    for (i = 0; i < e->block_count; i++) {
+-        struct block* block = e->blocks[i];
+-        block->dirty = 1;
+-    }
+-}
+-
+-
+-
+-/**
+- * Pointer auf einen Block im Cache-Eintrag holen
+- *
+- * @param entry Handle
+- * @param block Blocknummer relativ zum Eintrag (der Offset innerhalb des
+- *              Eintrags wird nicht beruecksichtigt)
+- *
+- * @return Pointer auf den Block
+- */
+-void*   cdi_cache_entry_block(struct cdi_cache_entry* entry, size_t block)
+-{
+-    struct entry* e = (struct entry*) entry;
+-    size_t block_size = entry->cache->block_size;
+-    uint64_t dev_start_block = (e->offset) / block_size;
+-
+-    if (block >= e->block_count) {
+-        return NULL;
+-    }
+-
+-    if (e->blocks[block] == NULL) {
+-        e->blocks[block] = get_block((struct cache*) entry->cache,
+-            dev_start_block + block, 1);
+-        e->blocks[block]->ref_count++;
+-    }
+-
+-
+-    return e->blocks[block]->cdi.data;
+-}
+-
+-/**
+- * Daten aus dem Cache-Eintrag lesen
+- *
+- * @param entry     Handle
+- * @param offset    Offset relativ zum Cache-Eintrag
+- * @param size      Groesse des zu lesenden Bereichs
+- * @param buffer    Puffer in dem die Daten abgelegt werden sollen
+- */
+-int     cdi_cache_entry_read(struct cdi_cache_entry* entry, size_t offset,
+-            size_t size, void* buffer)
+-{
+-    struct entry* e = (struct entry*) entry;
+-    size_t block_size = entry->cache->block_size;
+-    uint64_t dev_start_block = (e->offset + offset) / block_size;
+-    size_t start_block = (e->offset + offset) / block_size - e->offset /
+-        block_size;
+-    size_t end_block = (e->offset + offset + size -1) / block_size - e->offset /
+-        block_size;
+-    size_t block_count = end_block - start_block + 1;
+-    size_t i;
+-    size_t bytes_done = 0;
+-
+-    // Nicht ueber den Eintragsrand hinauslesen
+-    if ((offset + size) > e->size) {
+-        return 0;
+-    }
+-
+-    // Offset vom Block-Anfang im Cacheeintrag beruecksichtigen, falls vorhanden
+-    offset += e->offset % block_size;
+-
+-    for (i = 0; i < block_count; i++) {
+-        void* block;
+-        size_t bytes = block_size;
+-        size_t off = 0;
+-
+-        if (e->blocks[start_block + i] == NULL) {
+-            e->blocks[start_block + i] = get_block((struct cache*) entry->cache,
+-                dev_start_block + i, 1);
+-            e->blocks[start_block + i]->ref_count++;
+-        }
+-
+-        block = e->blocks[start_block + i]->cdi.data;
+-        e->blocks[start_block + i]->access_time = ++cache_time;
+-
+-        // Beim ersten Durchlauf muss der Anfangsoffset beruecksichtigt werden
+-        if (i == 0) {
+-            off = offset % block_size;
+-            bytes = block_size - off;
+-        }
+-
+-        // Beim letzten Durchlauf muss unter umstaenden nicht mehr ein ganzer
+-        // Block gelesen werden.
+-        if (i == block_count - 1) {
+-            bytes = size - bytes_done;
+-        }
+-
+-        memcpy((void*) ((uintptr_t) buffer + bytes_done), (void*)
+-            ((uintptr_t) block + off), bytes);
+-        bytes_done += bytes;
+-    }
+-
+-    return 1;
+-}
+-
+-/**
+- * Daten in den Cache-Eintrag schreiben
+- *
+- * @param entry     Handle
+- * @param offset    Offset relativ zum Cache-Eintrag
+- * @param size      Groesse des zu schreibenden Bereichs
+- * @param buffer    Puffer aus dem die Daten gelesen werden
+- */
+-int     cdi_cache_entry_write(struct cdi_cache_entry* entry, size_t offset,
+-            size_t size, const void* buffer)
+-{
+-    struct entry* e = (struct entry*) entry;
+-    size_t block_size = entry->cache->block_size;
+-    uint64_t dev_start_block = (e->offset + offset) / block_size;
+-    size_t start_block = (e->offset + offset) / block_size - e->offset /
+-        block_size;
+-    size_t end_block = (e->offset + offset + size - 1) / block_size - e->offset /
+-        block_size;
+-    size_t block_count = end_block - start_block + 1;
+-    size_t i;
+-    size_t bytes_done = 0;
+-
+-    // Nicht ueber den Eintragsrand hinausschreiben
+-    if ((offset + size) > e->size) {
+-        return 0;
+-    }
+-
+-    // Offset vom Block-Anfang im Cacheeintrag beruecksichtigen, falls vorhanden
+-    offset += e->offset % block_size;
+-
+-    for (i = 0; i < block_count; i++) {
+-        void* block;
+-        size_t bytes = block_size;
+-        size_t off = 0;
+-
+-        // Beim ersten Durchlauf muss der Anfangsoffset beruecksichtigt werden
+-        if (i == 0) {
+-            off = offset % block_size;
+-            bytes = block_size - off;
+-        }
+-
+-        if (i == block_count - 1) {
+-            bytes = size - bytes_done;
+-        }
+-
+-
+-        if (e->blocks[start_block + i] == NULL) {
+-            int read = 1;
+-
+-            if ((off == 0) && (bytes == block_size)) {
+-                read = 0;
+-            }
+-
+-            e->blocks[start_block + i] = get_block((struct cache*) entry->cache,
+-                dev_start_block + i, read);
+-            e->blocks[start_block + i]->ref_count++;
+-        }
+-
+-        block = e->blocks[start_block + i]->cdi.data;
+-        e->blocks[start_block + i]->access_time = ++cache_time;
+-        e->blocks[start_block + i]->dirty = 1;
+-
+-
+-        memcpy((void*) ((uintptr_t) block + off), (void*) ((uintptr_t) buffer +
+-            bytes_done), bytes);
+-        bytes_done += bytes;
+-    }
+-
+-    return 1;
+-}
+-
+-
+-- 
+1.5.4.5
+
+
+
+From kevin at tyndur.org  Sat Nov 22 21:38:29 2008
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 22 Nov 2008 21:38:29 +0100
+Subject: [PATCH 0/4] cdi: Patches fÃ¼r den Cache
+Message-ID: <1227386313-15199-1-git-send-email-kevin@tyndur.org>
+
+
+Die folgenden Patches rÃ¤umen im Cache ein paar Kleinigkeiten auf. Im einzelnen sind das:
+
+- Falsche Includedatei fÃ¼r Nicht-LOST-Systeme gefixt
+- Das Entry-Interface ist angeblich Broken by Design und fliegt deswegen raus
+- Das Hints-Array initialisieren
+- BlÃ¶cke am Ende in allen FÃ¤llen wieder freigeben
+
+
+From kevin at tyndur.org  Sat Nov 22 21:38:32 2008
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 22 Nov 2008 21:38:32 +0100
+Subject: [Lost] [PATCH] cdi: Cache-Hints initialisieren
+In-Reply-To: <1227386313-15199-1-git-send-email-kevin@tyndur.org>
+References: <1227386313-15199-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1227386313-15199-4-git-send-email-kevin@tyndur.org>
+
+---
+ src/modules/cdi/lib/cache.c |   13 +++++++++++--
+ 1 files changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/src/modules/cdi/lib/cache.c b/src/modules/cdi/lib/cache.c
+index 486382a..df325c1 100644
+--- a/src/modules/cdi/lib/cache.c
++++ b/src/modules/cdi/lib/cache.c
+@@ -25,6 +25,7 @@
+ 
+ #define INVBLKNUM (~0L)
+ #define READBUF_SZ 16
++#define NUM_HINTS 4
+ 
+ static uint64_t cache_time = 0;
+ #ifdef __LOST__
+@@ -97,13 +98,14 @@ struct cache {
+ 
+ 
+     /** Hints fuer Positionen */
+-    struct hint         hints[4];
++    struct hint         hints[NUM_HINTS];
+ 
+     /** Zuletzt geschriebener hint-index */
+     uint16_t            prev_hint;
+ };
+ 
+ 
++static inline void put_hint(struct cache* cache, uint64_t block, size_t index);
+ 
+ /**
+  * Cache erstellen
+@@ -142,6 +144,9 @@ struct cdi_cache* cdi_cache_create(size_t block_size, size_t blkpriv_len,
+     cache->read_buffer_cnt = 0;
+ 
+     cache->prev_hint = 0;
++    for (i = 0; i < NUM_HINTS; i++) {
++        put_hint(cache, (uint64_t) -1, 0);
++    }
+ 
+ 
+     cache->blocks = malloc(sizeof(struct block) * cache->block_count);
+@@ -365,6 +370,10 @@ static inline size_t get_hint(struct cache* cache, uint64_t block)
+ {
+     int i;
+ 
++    if (block == (uint64_t) -1) {
++        return -1;
++    }
++
+     for (i = 0; i < sizeof(cache->hints) / sizeof(struct hint); i++) {
+         if (cache->hints[i].block == block) {
+             return cache->hints[i].index;
+@@ -383,7 +392,7 @@ static inline size_t get_hint(struct cache* cache, uint64_t block)
+ static inline void put_hint(struct cache* cache, uint64_t block, size_t index)
+ {
+     cache->prev_hint++;
+-    cache->prev_hint %= sizeof(cache->hints) / sizeof(struct hint);
++    cache->prev_hint %= NUM_HINTS;
+     cache->hints[cache->prev_hint].block = block;
+     cache->hints[cache->prev_hint].index = index;
+ }
+-- 
+1.5.4.5
+
+
+
+From kevin at tyndur.org  Sat Nov 22 21:38:30 2008
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 22 Nov 2008 21:38:30 +0100
+Subject: [Lost] [PATCH] cdi: cache fuer Nicht-LOST fixen
+In-Reply-To: <1227386313-15199-1-git-send-email-kevin@tyndur.org>
+References: <1227386313-15199-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1227386313-15199-2-git-send-email-kevin@tyndur.org>
+
+! cdi: cache soll cdi/cache.h statt cdi_cache.h includen
+---
+ src/modules/cdi/lib/cache.c |    5 ++---
+ 1 files changed, 2 insertions(+), 3 deletions(-)
+
+diff --git a/src/modules/cdi/lib/cache.c b/src/modules/cdi/lib/cache.c
+index a8ab33e..30ecdc3 100644
+--- a/src/modules/cdi/lib/cache.c
++++ b/src/modules/cdi/lib/cache.c
+@@ -18,11 +18,10 @@
+ #ifdef __LOST__
+     #include "cdi.h"
+     #include "cdi/misc.h"
+-    #include "cdi/cache.h"
+-#else
+-    #include "cdi_cache.h"
+ #endif
+ 
++#include "cdi/cache.h"
++
+ 
+ #define INVBLKNUM (~0L)
+ #define READBUF_SZ 16
+-- 
+1.5.4.5
+
+
+

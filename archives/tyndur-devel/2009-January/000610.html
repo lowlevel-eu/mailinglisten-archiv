@@ -1,0 +1,1015 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH v2] cdi: CD-ROM-Unterstuetzung
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%5D%20cdi%3A%20CD-ROM-Unterstuetzung&In-Reply-To=%3C1231019259-18776-1-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="000609.html">
+   <LINK REL="Next"  HREF="000612.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH v2] cdi: CD-ROM-Unterstuetzung</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%5D%20cdi%3A%20CD-ROM-Unterstuetzung&In-Reply-To=%3C1231019259-18776-1-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH v2] cdi: CD-ROM-Unterstuetzung">kevin at tyndur.org
+                  </A><BR>
+    <I>Sa Jan  3 22:47:39 CET 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="000609.html">[tyndur-devel] [PATCH] cdi: CD-ROM-Unterstuetzung
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="000612.html">[tyndur-devel] [PATCH v3 0/5] cdi: Unterstuetzung fuer CD-ROM
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#610">[ Datum ]</a>
+              <a href="thread.html#610">[ Thema ]</a>
+              <a href="subject.html#610">[ Betreff (Subject) ]</a>
+              <a href="author.html#610">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ cdi: Storage: Zusaetzliche Funktionen get_size() und get_block_size(), da SCSI-Geraete die Variablen nicht haben
++ cdi: SCSI: Grundfunktionalitaet
++ cdi: SCSI: Storage-Backend scsi/disk (momentan nur fuer CD-ROM geeignet)
+* cdi: Storage nimmt jetzt auch SCSI-Geraete
+* cdi: Storage-Treiber und -Geraete werden einzeln initialisiert
+* ata/floppy: An geaenderte Interfaces geanpasst
+---
+ doc/COPYRIGHT                         |   23 +++
+ src/modules/cdi/ata/atapi.c           |    3 +
+ src/modules/cdi/ata/device.c          |   19 ++-
+ src/modules/cdi/ata/device.h          |    6 +-
+ src/modules/cdi/ata/main.c            |    2 +
+ src/modules/cdi/floppy/device.c       |   29 +++-
+ src/modules/cdi/floppy/device.h       |    6 +-
+ src/modules/cdi/floppy/main.c         |    4 +-
+ src/modules/cdi/include/cdi.h         |    3 +-
+ src/modules/cdi/include/cdi/scsi.h    |  111 ++++++++++++++
+ src/modules/cdi/include/cdi/storage.h |   19 ++-
+ src/modules/cdi/lib/cdi.c             |    1 +
+ src/modules/cdi/lib/scsi/disk.c       |  264 +++++++++++++++++++++++++++++++++
+ src/modules/cdi/lib/scsi/driver.c     |   56 +++++++
+ src/modules/cdi/lib/storage.c         |   89 ++++++++----
+ 15 files changed, 591 insertions(+), 44 deletions(-)
+ create mode 100644 src/modules/cdi/include/cdi/scsi.h
+ create mode 100644 src/modules/cdi/lib/scsi/disk.c
+ create mode 100644 src/modules/cdi/lib/scsi/driver.c
+
+diff --git a/doc/COPYRIGHT b/doc/COPYRIGHT
+index 66abeb4..a69002f 100644
+--- a/doc/COPYRIGHT
++++ b/doc/COPYRIGHT
+@@ -129,3 +129,26 @@ Parts of tyndur are derived from ZLib and are distributed under the Zlib terms:
+ 
+ Portions of this software are copyright (c) 2007 The FreeType
+ Project (www.freetype.org).  All rights reserved.
++
++Parts of tyndur are derived from software under the following license:
++
++    Copyright (C) 2008 Mathias Gottschlag
++    Copyright (C) 2009 Kevin Wolf
++
++    Permission is hereby granted, free of charge, to any person obtaining a copy
++    of this software and associated documentation files (the &quot;Software&quot;), to
++    deal in the Software without restriction, including without limitation the
++    rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
++    sell copies of the Software, and to permit persons to whom the Software is
++    furnished to do so, subject to the following conditions:
++
++    The above copyright notice and this permission notice shall be included in
++    all copies or substantial portions of the Software.
++
++    THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++    IN THE SOFTWARE.
+diff --git a/src/modules/cdi/ata/atapi.c b/src/modules/cdi/ata/atapi.c
+index 67dc140..ecff315 100644
+--- a/src/modules/cdi/ata/atapi.c
++++ b/src/modules/cdi/ata/atapi.c
+@@ -86,7 +86,10 @@ int atapi_drv_identify(struct ata_device* dev)
+ 
+ void atapi_init_device(struct cdi_device* device)
+ {
++    struct cdi_scsi_device* scsi = (struct cdi_scsi_device*) device;
+ 
++    scsi-&gt;type = CDI_STORAGE;
++    cdi_scsi_device_init(scsi);
+ }
+ 
+ void atapi_remove_device(struct cdi_device* device)
+diff --git a/src/modules/cdi/ata/device.c b/src/modules/cdi/ata/device.c
+index f9ccf21..b9763d4 100644
+--- a/src/modules/cdi/ata/device.c
++++ b/src/modules/cdi/ata/device.c
+@@ -333,6 +333,8 @@ void ata_remove_controller(struct ata_controller* controller)
+ 
+ void ata_init_device(struct cdi_device* device)
+ {
++    struct ata_device* dev = (struct ata_device*) device;
++    cdi_storage_device_init(&amp;dev-&gt;dev.storage);
+ }
+ 
+ void ata_remove_device(struct cdi_device* device)
+@@ -344,7 +346,7 @@ void ata_remove_device(struct cdi_device* device)
+ /**
+  * Blocks von einem ATA(PI) Geraet lesen
+  */
+-int ata_read_blocks(struct cdi_storage_device* device, uint64_t block,
++int ata_read_blocks(struct cdi_device* device, uint64_t block,
+     uint64_t count, void* buffer)
+ {
+     struct ata_device* dev = (struct ata_device*) device;
+@@ -374,7 +376,7 @@ int ata_read_blocks(struct cdi_storage_device* device, uint64_t block,
+ /**
+  * Blocks auf ein ATA(PI) Geraet schreiben
+  */
+-int ata_write_blocks(struct cdi_storage_device* device, uint64_t block,
++int ata_write_blocks(struct cdi_device* device, uint64_t block,
+     uint64_t count, void* buffer)
+ {
+     struct ata_device* dev = (struct ata_device*) device;
+@@ -401,3 +403,16 @@ int ata_write_blocks(struct cdi_storage_device* device, uint64_t block,
+     }
+ }
+ 
++uint64_t ata_get_size(struct cdi_device* device)
++{
++    struct cdi_storage_device* storage = (struct cdi_storage_device*) device;
++
++    return storage-&gt;block_size * storage-&gt;block_count;
++}
++
++uint64_t ata_get_block_size(struct cdi_device* device)
++{
++    struct cdi_storage_device* storage = (struct cdi_storage_device*) device;
++
++    return storage-&gt;block_size;
++}
+diff --git a/src/modules/cdi/ata/device.h b/src/modules/cdi/ata/device.h
+index 140f037..eaa890a 100644
+--- a/src/modules/cdi/ata/device.h
++++ b/src/modules/cdi/ata/device.h
+@@ -411,11 +411,13 @@ void ata_init_controller(struct ata_controller* controller);
+ void ata_remove_controller(struct ata_controller* controller);
+ void ata_init_device(struct cdi_device* device);
+ void ata_remove_device(struct cdi_device* device);
+-int ata_read_blocks(struct cdi_storage_device* device, uint64_t block,
++int ata_read_blocks(struct cdi_device* device, uint64_t block,
+     uint64_t count, void* buffer);
+-int ata_write_blocks(struct cdi_storage_device* device, uint64_t block,
++int ata_write_blocks(struct cdi_device* device, uint64_t block,
+     uint64_t count, void* buffer);
+ 
++uint64_t ata_get_size(struct cdi_device* device);
++uint64_t ata_get_block_size(struct cdi_device* device);
+ 
+ // Einen ATA-Request absenden und ausfuehren
+ int ata_request(struct ata_request* request);
+diff --git a/src/modules/cdi/ata/main.c b/src/modules/cdi/ata/main.c
+index 750f7b2..81fb165 100644
+--- a/src/modules/cdi/ata/main.c
++++ b/src/modules/cdi/ata/main.c
+@@ -91,6 +91,8 @@ static void ata_driver_init()
+     driver_storage.drv.remove_device    = ata_remove_device;
+     driver_storage.read_blocks          = ata_read_blocks;
+     driver_storage.write_blocks         = ata_write_blocks;
++    driver_storage.get_size             = ata_get_size;
++    driver_storage.get_block_size       = ata_get_block_size;
+ 
+     driver_scsi.drv.destroy             = atapi_driver_destroy;
+     driver_scsi.drv.init_device         = atapi_init_device;
+diff --git a/src/modules/cdi/floppy/device.c b/src/modules/cdi/floppy/device.c
+index 6614e1e..4435630 100644
+--- a/src/modules/cdi/floppy/device.c
++++ b/src/modules/cdi/floppy/device.c
+@@ -796,6 +796,8 @@ void floppy_init_device(struct cdi_device* device)
+ 
+     dev-&gt;dev.block_size = FLOPPY_SECTOR_SIZE(dev);
+     dev-&gt;dev.block_count = FLOPPY_SECTOR_COUNT(dev);
++
++    cdi_storage_device_init(&amp;dev-&gt;dev);
+ }
+ 
+ /**
+@@ -808,7 +810,7 @@ void floppy_remove_device(struct cdi_device* device)
+ /**
+  * Sektoren einlesen
+  */
+-int floppy_read_blocks(struct cdi_storage_device* dev, uint64_t block,
++int floppy_read_blocks(struct cdi_device* dev, uint64_t block,
+     uint64_t count, void* buffer)
+ {
+     struct floppy_device* device = (struct floppy_device*) dev;
+@@ -823,7 +825,7 @@ int floppy_read_blocks(struct cdi_storage_device* dev, uint64_t block,
+         // Wenn das schief geht, wird mehrmals probiert
+         for (j = 0; (j &lt; 5) &amp;&amp; (result != 0); j++) {
+             result = floppy_drive_sector_read(device, (uint32_t) block + i,
+-                buffer + i * dev-&gt;block_size);
++                buffer + i * device-&gt;dev.block_size);
+         }
+     }
+ 
+@@ -833,7 +835,7 @@ int floppy_read_blocks(struct cdi_storage_device* dev, uint64_t block,
+ /**
+  * Sektoren schreiben
+  */
+-int floppy_write_blocks(struct cdi_storage_device* dev, uint64_t block,
++int floppy_write_blocks(struct cdi_device* dev, uint64_t block,
+     uint64_t count, void* buffer)
+ {
+     struct floppy_device* device = (struct floppy_device*) dev;
+@@ -848,13 +850,32 @@ int floppy_write_blocks(struct cdi_storage_device* dev, uint64_t block,
+         // Wenn das schief geht, wird mehrmals probiert
+         for (j = 0; (j &lt; 5) &amp;&amp; (result != 0); j++) {
+             result = floppy_drive_sector_write(device, (uint32_t) block + i,
+-                buffer + i * dev-&gt;block_size);
++                buffer + i * device-&gt;dev.block_size);
+         }
+     }
+ 
+     return result;
+ }
+ 
++/**
++ * Gibt die Groesse des Mediums zurueck
++ */
++uint64_t floppy_get_size(struct cdi_device* device)
++{
++    struct cdi_storage_device* storage = (struct cdi_storage_device*) device;
++
++    return storage-&gt;block_size * storage-&gt;block_count;
++}
++
++/**
++ * Gibt die Sektorgroesse des Mediums zurueck
++ */
++uint64_t floppy_get_block_size(struct cdi_device* device)
++{
++    struct cdi_storage_device* storage = (struct cdi_storage_device*) device;
++
++    return storage-&gt;block_size;
++}
+ 
+ /**
+  * IRQ-Handler fuer den Kontroller; Erhoeht nur den IRQ-Zaehler in der
+diff --git a/src/modules/cdi/floppy/device.h b/src/modules/cdi/floppy/device.h
+index 24d16f9..6c3bfcf 100644
+--- a/src/modules/cdi/floppy/device.h
++++ b/src/modules/cdi/floppy/device.h
+@@ -137,10 +137,12 @@ int floppy_init_controller(struct floppy_controller* controller);
+ 
+ void floppy_init_device(struct cdi_device* device);
+ void floppy_remove_device(struct cdi_device* device);
+-int floppy_read_blocks(struct cdi_storage_device* device, uint64_t block,
++int floppy_read_blocks(struct cdi_device* device, uint64_t block,
+     uint64_t count, void* buffer);
+-int floppy_write_blocks(struct cdi_storage_device* device, uint64_t block,
++int floppy_write_blocks(struct cdi_device* device, uint64_t block,
+     uint64_t count, void* buffer);
++uint64_t floppy_get_size(struct cdi_device* device);
++uint64_t floppy_get_block_size(struct cdi_device* device);
+ 
+ void floppy_handle_interrupt(struct cdi_device* device);
+ 
+diff --git a/src/modules/cdi/floppy/main.c b/src/modules/cdi/floppy/main.c
+index 435ff1f..f701262 100644
+--- a/src/modules/cdi/floppy/main.c
++++ b/src/modules/cdi/floppy/main.c
+@@ -97,7 +97,9 @@ static int floppy_driver_init(struct floppy_driver* driver)
+     driver-&gt;storage.drv.remove_device   = floppy_remove_device;
+     driver-&gt;storage.read_blocks         = floppy_read_blocks; 
+     driver-&gt;storage.write_blocks        = floppy_write_blocks;
+-    
++    driver-&gt;storage.get_size            = floppy_get_size;
++    driver-&gt;storage.get_block_size      = floppy_get_block_size;
++
+     // Geraete erstellen (TODO: Was wenn eines oder beide nicht vorhanden
+     // sind?)
+     for (i = 0; i &lt; 2; i++) {
+diff --git a/src/modules/cdi/include/cdi.h b/src/modules/cdi/include/cdi.h
+index 42e4643..5fb7025 100644
+--- a/src/modules/cdi/include/cdi.h
++++ b/src/modules/cdi/include/cdi.h
+@@ -23,7 +23,8 @@
+ typedef enum {
+     CDI_UNKNOWN         = 0,
+     CDI_NETWORK         = 1,
+-    CDI_STORAGE         = 2
++    CDI_STORAGE         = 2,
++    CDI_SCSI            = 3,
+ } cdi_device_type_t;
+ 
+ struct cdi_driver;
+diff --git a/src/modules/cdi/include/cdi/scsi.h b/src/modules/cdi/include/cdi/scsi.h
+new file mode 100644
+index 0000000..cd8cfd4
+--- /dev/null
++++ b/src/modules/cdi/include/cdi/scsi.h
+@@ -0,0 +1,111 @@
++/*
++ * Copyright (c) 2008 Janosch Graef
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it
++ * and/or modify it under the terms of the Do What The Fuck You Want
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * <A HREF="http://sam.zoy.org/projects/COPYING.WTFPL">http://sam.zoy.org/projects/COPYING.WTFPL</A> for more details.
++ */
++
++/**
++ * Treiber fuer SCSI-Geraete
++ * \defgroup net
++ */
++/*\@{*/
++
++#ifndef _CDI_SCSI_H_
++#define _CDI_SCSI_H_
++
++#include &lt;stdint.h&gt;
++#include &lt;stddef.h&gt;
++
++#include &quot;cdi.h&quot;
++
++/// SCSI-Paket
++struct cdi_scsi_packet {
++    /// Buffer zum Senden oder Empfangen von Daten
++    void *buffer;
++
++    /// Groesse des Buffers
++    size_t bufsize;
++
++    /// Ob gelesen oder geschrieben werden soll
++    enum {
++        CDI_SCSI_NODATA,
++        CDI_SCSI_READ,
++        CDI_SCSI_WRITE,
++    } direction;
++
++    /// SCSI-Befehl
++    uint8_t command[16];
++
++    /// Groesse des SCSI-Befehls
++    size_t cmdsize;
++};
++
++/// SCSI-Geraet
++struct cdi_scsi_device {
++
++    struct cdi_device dev;
++
++    /// Geraetetyp, der ueber SCSI angesteuert wird
++    cdi_device_type_t type;
++
++};
++
++/// SCSI-Treiber
++struct cdi_scsi_driver {
++
++    struct cdi_driver drv;
++
++    /**
++     * Sendet ein SCSI-Paket an das Geraet.
++     *
++     * @return SCSI-Fehlerstatus nach der Ausfuehrung des Befehls
++     */
++    int (*request)(struct cdi_scsi_device *device,
++        struct cdi_scsi_packet *packet);
++};
++
++/**
++ * Ein SCSI-Paket allozieren
++ *
++ * @param size Benoetigte Groesse
++ *
++ * @return Pointer auf das Paket oder NULL im Fehlerfall
++ */
++struct cdi_scsi_packet* cdi_scsi_packet_alloc(size_t size);
++
++/**
++ * Ein SCSI-Paket freigeben
++ *
++ * @param packet Pointer auf das Paket
++ */
++void cdi_scsi_packet_free(struct cdi_scsi_packet* packet);
++
++/**
++ * Initialisiert die Datenstrukturen fuer einen SCSI-Treiber
++ */
++void cdi_scsi_driver_init(struct cdi_scsi_driver* driver);
++
++/**
++ * Deinitialisiert die Datenstrukturen fuer einen SCSI-Treiber
++ */
++void cdi_scsi_driver_destroy(struct cdi_scsi_driver* driver);
++
++/**
++ * Registiert einen SCSI-Treiber
++ */
++void cdi_scsi_driver_register(struct cdi_scsi_driver* driver);
++
++/**
++ * Initialisiert ein neues SCSI-Geraet
++ *
++ * Der Typ der Geraetes muss bereits gesetzt sein
++ */
++void cdi_scsi_device_init(struct cdi_scsi_device* device);
++
++#endif
++
++/*\@}*/
+diff --git a/src/modules/cdi/include/cdi/storage.h b/src/modules/cdi/include/cdi/storage.h
+index 73ae245..781a158 100644
+--- a/src/modules/cdi/include/cdi/storage.h
++++ b/src/modules/cdi/include/cdi/storage.h
+@@ -40,7 +40,7 @@ struct cdi_storage_driver {
+      *
+      * @return 0 bei Erfolg, -1 im Fehlerfall.
+      */
+-    int (*read_blocks)(struct cdi_storage_device* device, uint64_t start,
++    int (*read_blocks)(struct cdi_device* device, uint64_t start,
+         uint64_t count, void* buffer);
+     
+     /**
+@@ -53,8 +53,18 @@ struct cdi_storage_driver {
+      *
+      * @return 0 bei Erfolg, -1 im Fehlerfall
+      */
+-    int (*write_blocks)(struct cdi_storage_device* device, uint64_t start,
++    int (*write_blocks)(struct cdi_device* device, uint64_t start,
+         uint64_t count, void* buffer);
++
++    /**
++     * Gibt die Groesse des Mediums in Bytes zurueck
++     */
++    uint64_t (*get_size)(struct cdi_device* device);
++
++    /**
++     * Gibt die Blockgroesse des Geraets in Bytes zurueck
++     */
++    uint64_t (*get_block_size)(struct cdi_device* device);
+ };
+ 
+ 
+@@ -75,6 +85,11 @@ void cdi_storage_driver_destroy(struct cdi_storage_driver* driver);
+  */
+ void cdi_storage_driver_register(struct cdi_storage_driver* driver);
+ 
++/**
++ * Initialisiert einen Massenspeicher
++ */
++void cdi_storage_device_init(struct cdi_storage_device* device);
++
+ #endif
+ 
+ /*\@}*/
+diff --git a/src/modules/cdi/lib/cdi.c b/src/modules/cdi/lib/cdi.c
+index d8c7819..487887e 100644
+--- a/src/modules/cdi/lib/cdi.c
++++ b/src/modules/cdi/lib/cdi.c
+@@ -86,6 +86,7 @@ void cdi_run_drivers(void)
+ 
+         for (j = 0; (device = cdi_list_get(driver-&gt;devices, j)); j++) {
+             device-&gt;driver = driver;
++            device-&gt;type = driver-&gt;type;
+ 
+             if (driver-&gt;init_device) {
+                 driver-&gt;init_device(device);
+diff --git a/src/modules/cdi/lib/scsi/disk.c b/src/modules/cdi/lib/scsi/disk.c
+new file mode 100644
+index 0000000..c54bdf2
+--- /dev/null
++++ b/src/modules/cdi/lib/scsi/disk.c
+@@ -0,0 +1,264 @@
++/*
++ * Copyright (C) 2008 Mathias Gottschlag
++ * Copyright (C) 2009 Kevin Wolf
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the &quot;Software&quot;), to
++ * deal in the Software without restriction, including without limitation the
++ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
++ * sell copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++#include &lt;stdio.h&gt;
++#include &lt;string.h&gt;
++#include &lt;stdlib.h&gt;
++
++#include &lt;cdi/lists.h&gt;
++#include &lt;cdi/scsi.h&gt;
++#include &lt;cdi/storage.h&gt;
++
++#define big_endian_word(x) ((((x) &amp; 0xFF) &lt;&lt; 8) | (((x) &amp; 0xFF00) &gt;&gt; 8))
++#define big_endian_dword(x) \
++    ((big_endian_word((x) &amp; 0xFFFF) &lt;&lt; 16) | \
++    (big_endian_word((x) &gt;&gt; 16)))
++
++static int cdi_scsi_disk_read(struct cdi_device* device,
++    uint64_t start, uint64_t count, void* buffer);
++
++static int cdi_scsi_disk_write(struct cdi_device* device,
++    uint64_t start, uint64_t count, void* buffer);
++
++static uint64_t cdi_scsi_disk_get_size(struct cdi_device* device);
++static uint64_t cdi_scsi_disk_get_block_size(struct cdi_device* device);
++
++struct cdi_storage_driver cdi_scsi_disk_driver = {
++    .read_blocks    = cdi_scsi_disk_read,
++    .write_blocks   = cdi_scsi_disk_write,
++    .get_size       = cdi_scsi_disk_get_size,
++    .get_block_size = cdi_scsi_disk_get_block_size,
++};
++
++// TODO: This is kind of incomplete... -.-
++// FIXME Das ist alles sehr CD-ROM-spezifisch hartkodiert...
++
++union cdrom_command
++{
++    struct
++    {
++        uint8_t opcode;
++        uint8_t reserved0;
++        uint32_t address;
++        uint8_t reserved1;
++        uint16_t length;
++        uint8_t reserved2;
++    } __attribute__ ((packed)) dfl;
++    struct
++    {
++        uint8_t opcode;
++        uint8_t reserved0;
++        uint32_t address;
++        uint32_t length;
++        uint16_t reserved1;
++    } __attribute__ ((packed)) ext;
++};
++
++static int cdrom_read_sector(
++    struct cdi_scsi_device *device, uint32_t sector, char *buffer)
++{
++    struct cdi_scsi_packet packet;
++    struct cdi_scsi_driver* drv = (struct cdi_scsi_driver*) device-&gt;dev.driver;
++    union cdrom_command* cmd = (union cdrom_command*) &amp;packet.command;
++
++    memset(&amp;packet, 0, sizeof(packet));
++    packet.direction = CDI_SCSI_READ;
++    packet.buffer = buffer;
++    packet.bufsize = 2048;
++    packet.cmdsize = 12;
++
++    cmd-&gt;ext.opcode = 0xA8;
++    cmd-&gt;ext.address = big_endian_dword(sector);
++    cmd-&gt;ext.length = 0x01000000;
++
++    if (drv-&gt;request(device, &amp;packet)) {
++        return -1;
++    }
++
++    return 0;
++}
++
++static int cdrom_capacity(struct cdi_scsi_device *device,
++    uint32_t* num_sectors, uint32_t* sector_size)
++{
++    uint32_t buffer[32];
++    struct cdi_scsi_packet packet;
++    struct cdi_scsi_driver* drv = (struct cdi_scsi_driver*) device-&gt;dev.driver;
++    union cdrom_command* cmd = (union cdrom_command*) &amp;packet.command;
++
++    memset(&amp;packet, 0, sizeof(packet));
++    packet.direction = CDI_SCSI_READ;
++    packet.buffer = buffer;
++    packet.bufsize = sizeof(buffer);
++    packet.cmdsize = 12;
++
++    cmd-&gt;ext.opcode = 0x25;
++
++    if (drv-&gt;request(device, &amp;packet)) {
++        return -1;
++    }
++
++    *num_sectors = big_endian_dword(buffer[0]);
++    *sector_size = big_endian_dword(buffer[1]);
++
++    return 0;
++}
++
++#if 0
++static int cdrom_lock_device(FsSCSIDevice *device, int index, int lock)
++{
++    // Lock drive
++    FsSCSIPacket packet;
++    memset(&amp;packet, 0, sizeof(FsSCSIPacket));
++    packet.direction = CDI_SCSI_NO_DATA;
++    ((union cdrom_command*)packet.command)-&gt;dfl.opcode = 0x1E;
++    packet.command[4] = 1;
++    packet.buffer = 0;
++    packet.length = 0;
++    packet.commandsize = 12;
++    uint32_t status = device-&gt;request(device, &amp;packet);
++    if (status)
++    {
++        kePrint(&quot;cdrom %d: Lock failed, %x\n&quot;, index, status);
++        fsCloseSCSIDevice(device);
++        return KE_ERROR_UNKNOWN;
++    }
++    return 0;
++}
++
++static void cdrom_sense(FsSCSIDevice *device, uint32_t index)
++{
++    char sense_data[18];
++    FsSCSIPacket packet;
++    packet.direction = CDI_SCSI_READ;
++    packet.buffer = sense_data;
++    packet.length = 18;
++    packet.commandsize = 12;
++    ((union cdrom_command*)packet.command)-&gt;dfl.opcode = 0x12;
++}
++#endif
++
++int cdrom_init(struct cdi_scsi_device* device)
++{
++    // Send inquiry command
++    struct cdi_scsi_driver* drv = (struct cdi_scsi_driver*) device-&gt;dev.driver;
++    struct cdi_scsi_packet packet;
++    uint32_t status;
++    unsigned char inqdata[96];
++
++    memset(&amp;packet, 0, sizeof(packet));
++    memset(inqdata, 0xF0, sizeof(inqdata));
++
++    packet.direction = CDI_SCSI_READ;
++    packet.buffer = inqdata;
++    packet.bufsize = 96;
++    packet.cmdsize = 12;
++
++    ((union cdrom_command*)packet.command)-&gt;dfl.opcode = 0x12;
++    packet.command[4] = 96;
++    status = drv-&gt;request(device, &amp;packet);
++    if (status)
++    {
++        return -1;
++    }
++
++#if 0
++    if (cdrom_lock_device(device, index, 1))
++        return KE_ERROR_UNKNOWN;
++#endif
++
++    // Start drive
++    packet.direction = CDI_SCSI_NODATA;
++    ((union cdrom_command*)packet.command)-&gt;dfl.opcode = 0x1B;
++    packet.buffer = 0;
++    packet.bufsize = 0;
++    packet.command[4] = 0;
++    packet.command[4] = 3;
++    packet.cmdsize = 12;
++
++    status = drv-&gt;request(device, &amp;packet);
++    if (status)
++    {
++        printf(&quot;cdrom %d: Start failed, %x\n&quot;, index, status);
++        return -1;
++    }
++
++    return 0;
++}
++
++static int cdi_scsi_disk_read(struct cdi_device* device,
++    uint64_t start, uint64_t count, void* buffer)
++{
++    struct cdi_scsi_device* dev = (struct cdi_scsi_device*) device;
++
++    while (count--) {
++        if (cdrom_read_sector(dev, start, buffer)) {
++            return -1;
++        }
++        start ++;
++        buffer += 2048;
++    }
++
++    return 0;
++}
++
++static int cdi_scsi_disk_write(struct cdi_device* device,
++    uint64_t start, uint64_t count, void* buffer)
++{
++    return -1;
++}
++
++static uint64_t cdi_scsi_disk_get_size(struct cdi_device* device)
++{
++    struct cdi_scsi_device* dev = (struct cdi_scsi_device*) device;
++    uint32_t num_sectors, sector_size;
++
++
++    // TODO Einmal beim Initialisieren eines Mediums einlesen und dann bei
++    // jedem Aufruf wiederverwenden
++    cdrom_capacity(dev, &amp;num_sectors, &amp;sector_size);
++
++    return num_sectors * sector_size;
++}
++
++static uint64_t cdi_scsi_disk_get_block_size(struct cdi_device* device)
++{
++    struct cdi_scsi_device* dev = (struct cdi_scsi_device*) device;
++    uint32_t num_sectors, sector_size;
++
++
++    // TODO s.o.
++    cdrom_capacity(dev, &amp;num_sectors, &amp;sector_size);
++
++    return sector_size;
++}
++
++int lostio_mst_if_newdev(struct cdi_device* device);
++
++void cdi_scsi_disk_init(struct cdi_scsi_device* device)
++{
++    if (cdrom_init(device) == 0) {
++        // LostIO-Verzeichnisknoten anlegen
++        lostio_mst_if_newdev(&amp;device-&gt;dev);
++    }
++}
+diff --git a/src/modules/cdi/lib/scsi/driver.c b/src/modules/cdi/lib/scsi/driver.c
+new file mode 100644
+index 0000000..745bd25
+--- /dev/null
++++ b/src/modules/cdi/lib/scsi/driver.c
+@@ -0,0 +1,56 @@
++/*
++ * Copyright (c) 2009 Kevin Wolf
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it
++ * and/or modify it under the terms of the Do What The Fuck You Want
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * <A HREF="http://sam.zoy.org/projects/COPYING.WTFPL">http://sam.zoy.org/projects/COPYING.WTFPL</A> for more details.
++ */
++
++#include &lt;stdio.h&gt;
++#include &lt;stdint.h&gt;
++#include &lt;stdlib.h&gt;
++#include &lt;string.h&gt;
++#include &lt;lostio.h&gt;
++
++#include &quot;cdi/scsi.h&quot;
++
++extern void cdi_scsi_disk_init(struct cdi_scsi_device* device);
++
++/**
++ * Initialisiert die Datenstrukturen fuer einen SCSI-Treiber
++ */
++void cdi_scsi_driver_init(struct cdi_scsi_driver* driver)
++{
++    driver-&gt;drv.type = CDI_SCSI;
++    cdi_driver_init((struct cdi_driver*) driver);
++}
++
++/**
++ * Deinitialisiert die Datenstrukturen fuer einen SCSI-Treiber
++ */
++void cdi_scsi_driver_destroy(struct cdi_scsi_driver* driver)
++{
++    cdi_driver_destroy((struct cdi_driver*) driver);
++}
++
++/**
++ * Initialisiert ein neues SCSI-Geraet
++ *
++ * Der Typ der Geraetes muss bereits gesetzt sein
++ */
++void cdi_scsi_device_init(struct cdi_scsi_device* device)
++{
++    if (device-&gt;type == CDI_STORAGE) {
++        cdi_scsi_disk_init(device);
++    }
++}
++
++/**
++ * Registiert den Treiber fuer SCSI-Geraete
++ */
++void cdi_scsi_driver_register(struct cdi_scsi_driver* driver)
++{
++    cdi_driver_register((struct cdi_driver*) driver);
++}
+diff --git a/src/modules/cdi/lib/storage.c b/src/modules/cdi/lib/storage.c
+index 9dd9746..16e4a7e 100644
+--- a/src/modules/cdi/lib/storage.c
++++ b/src/modules/cdi/lib/storage.c
+@@ -17,7 +17,7 @@
+ #include &quot;cdi/storage.h&quot;
+ 
+ static void lostio_mst_if_init(void);
+-static int lostio_mst_if_newdev(struct cdi_storage_device* device);
++int lostio_mst_if_newdev(struct cdi_device* device);
+ 
+ static size_t lostio_mst_read_handler(lostio_filehandle_t* fh,
+     void* buf, size_t blocksize, size_t blockcount);
+@@ -63,8 +63,6 @@ void cdi_storage_driver_destroy(struct cdi_storage_driver* driver)
+ void cdi_storage_driver_register(struct cdi_storage_driver* driver)
+ {
+     static int initialized = 0;
+-    int i;
+-    struct cdi_storage_device* device;
+ 
+     cdi_driver_register((struct cdi_driver*) driver);
+ 
+@@ -72,11 +70,32 @@ void cdi_storage_driver_register(struct cdi_storage_driver* driver)
+         lostio_mst_if_init();
+         initialized = 1;
+     }
++}
++
++/**
++ * Initialisiert einen Massenspeicher
++ */
++void cdi_storage_device_init(struct cdi_storage_device* device)
++{
++    device-&gt;dev.type = CDI_STORAGE;
+ 
+     // Geraeteknoten fuer LostIO erstellen
+-    for (i = 0; (device = cdi_list_get(driver-&gt;drv.devices, i)); i++) {
+-        lostio_mst_if_newdev(device);
++    lostio_mst_if_newdev(&amp;device-&gt;dev);
++}
++
++extern struct cdi_storage_driver cdi_scsi_disk_driver;
++
++static struct cdi_storage_driver* get_storage_drv(struct cdi_device* dev)
++{
++    struct cdi_storage_driver* driver = NULL;
++
++    if (dev-&gt;type == CDI_STORAGE) {
++        driver = (struct cdi_storage_driver*) dev-&gt;driver;
++    } else if (dev-&gt;type == CDI_SCSI) {
++        driver = &amp;cdi_scsi_disk_driver;
+     }
++
++    return driver;
+ }
+ 
+ /**
+@@ -86,12 +105,12 @@ void cdi_storage_driver_register(struct cdi_storage_driver* driver)
+  * @param size Anzahl der zu lesenden Bytes
+  * @param dest Buffer
+  */
+-int cdi_storage_read(struct cdi_storage_device* device, uint64_t pos,
++int cdi_storage_read(struct cdi_device* device, uint64_t pos,
+     size_t size, void* dest)
+ {
+-    struct cdi_storage_driver* driver = (struct cdi_storage_driver*) device-&gt;
+-        dev.driver;
+-    size_t block_size = device-&gt;block_size;
++    struct cdi_storage_driver* driver = get_storage_drv(device);
++    size_t block_size = driver-&gt;get_block_size(device);
++
+     // Start- und Endblock
+     uint64_t block_read_start = pos / block_size;
+     uint64_t block_read_end = (pos + size) / block_size;
+@@ -128,13 +147,12 @@ int cdi_storage_read(struct cdi_storage_device* device, uint64_t pos,
+  * @param size Anzahl der zu schreibendes Bytes
+  * @param src Buffer
+  */
+-int cdi_storage_write(struct cdi_storage_device* device, uint64_t pos,
++int cdi_storage_write(struct cdi_device* device, uint64_t pos,
+     size_t size, void* src)
+ {
+-    struct cdi_storage_driver* driver = (struct cdi_storage_driver*) device-&gt;
+-        dev.driver;
+-    
+-    size_t block_size = device-&gt;block_size;
++    struct cdi_storage_driver* driver = get_storage_drv(device);
++    size_t block_size = driver-&gt;get_block_size(device);
++
+     uint64_t block_write_start = pos / block_size;
+     uint8_t buffer[block_size];
+     size_t offset;
+@@ -206,15 +224,17 @@ static void lostio_mst_if_init()
+ /**
+  * Erstellt den Dateisystemknoten fuer ein Geraet.
+  */
+-static int lostio_mst_if_newdev(struct cdi_storage_device* device)
++int lostio_mst_if_newdev(struct cdi_device* device)
+ {
++    struct cdi_storage_driver* driver = get_storage_drv(device);
++
+     // Slash vor Pfad angaengen
+-    char path[strlen(device-&gt;dev.name) + 2];
+-    strcpy(path + 1, device-&gt;dev.name);
++    char path[strlen(device-&gt;name) + 2];
++    strcpy(path + 1, device-&gt;name);
+     *path = '/';
+ 
+-    if (vfstree_create_node(path, CDI_LOSTIO_TYPE_MST, device-&gt;block_size *
+-        device-&gt;block_count, (void*) device, 0) == FALSE)
++    if (vfstree_create_node(path, CDI_LOSTIO_TYPE_MST,
++        driver-&gt;get_size(device), (void*) device, 0) == FALSE)
+     {
+         return -1;
+     }
+@@ -227,13 +247,19 @@ static int lostio_mst_if_newdev(struct cdi_storage_device* device)
+ static size_t lostio_mst_read_handler(lostio_filehandle_t* fh,
+     void* buf, size_t blocksize, size_t blockcount)
+ {
+-    struct cdi_storage_device* device = (struct cdi_storage_device*) fh-&gt;node-&gt;
+-        data;
++    struct cdi_device* device = (struct cdi_device*) fh-&gt;node-&gt;data;
++    struct cdi_storage_driver* drv = get_storage_drv(device);
++
+     size_t size = blocksize * blockcount;
++    size_t devsize = drv-&gt;get_size(device);
+ 
+     // Groesse anpassen, wenn ueber das Medium hinaus gelesen werden soll
+-    if (size &gt; (device-&gt;block_count * device-&gt;block_size - fh-&gt;pos)) {
+-        size = device-&gt;block_count * device-&gt;block_size - fh-&gt;pos;
++    if (size &gt; (devsize - fh-&gt;pos)) {
++        size = devsize - fh-&gt;pos;
++        if (size == 0) {
++            fh-&gt;flags |= LOSTIO_FLAG_EOF;
++            return 0;
++        }
+     }
+ 
+     // In den uebergebenen Buffer einlesen
+@@ -253,14 +279,16 @@ static size_t lostio_mst_read_handler(lostio_filehandle_t* fh,
+ static size_t lostio_mst_write_handler(lostio_filehandle_t* fh,
+     size_t blocksize, size_t blockcount, void* data)
+ {
+-    struct cdi_storage_device* device = (struct cdi_storage_device*) fh-&gt;node-&gt;
+-        data;
++    struct cdi_device* device = (struct cdi_device*) fh-&gt;node-&gt;data;
++    struct cdi_storage_driver* drv = get_storage_drv(device);
++
+     size_t size = blocksize * blockcount;
++    size_t devsize = drv-&gt;get_size(device);
+     size_t result = size;
+ 
+     // Groesse anpassen, wenn ueber das Medium hinaus geschrieben werden soll
+-    if (size &gt; (device-&gt;block_count * device-&gt;block_size - fh-&gt;pos)) {
+-        size = device-&gt;block_count * device-&gt;block_size - fh-&gt;pos;
++    if (size &gt; (devsize - fh-&gt;pos)) {
++        size = devsize - fh-&gt;pos;
+     }
+ 
+     // Daten schreiben
+@@ -279,10 +307,11 @@ static size_t lostio_mst_write_handler(lostio_filehandle_t* fh,
+ static int lostio_mst_seek_handler(lostio_filehandle_t* fh, uint64_t offset,
+     int origin)
+ {
+-    struct cdi_storage_device* device = (struct cdi_storage_device*) fh-&gt;node-&gt;
+-        data;
++    struct cdi_device* device = (struct cdi_device*) fh-&gt;node-&gt;data;
++    struct cdi_storage_driver* drv = get_storage_drv(device);
++
+     uint64_t new_pos = fh-&gt;pos;
+-    uint64_t size = device-&gt;block_size * device-&gt;block_count;
++    uint64_t size = drv-&gt;get_size(device);
+ 
+     switch (origin)  {
+         case SEEK_SET:
+-- 
+1.5.4.5
+
+
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="000609.html">[tyndur-devel] [PATCH] cdi: CD-ROM-Unterstuetzung
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="000612.html">[tyndur-devel] [PATCH v3 0/5] cdi: Unterstuetzung fuer CD-ROM
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#610">[ Datum ]</a>
+              <a href="thread.html#610">[ Thema ]</a>
+              <a href="subject.html#610">[ Betreff (Subject)]</a>
+              <a href="author.html#610">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

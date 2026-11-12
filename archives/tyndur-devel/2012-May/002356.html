@@ -1,0 +1,146 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 4/6] cdi/fs: Readahead implementiert
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%204/6%5D%20cdi/fs%3A%20Readahead%20implementiert&In-Reply-To=%3C1336857589-6603-5-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002355.html">
+   <LINK REL="Next"  HREF="002357.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 4/6] cdi/fs: Readahead implementiert</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%204/6%5D%20cdi/fs%3A%20Readahead%20implementiert&In-Reply-To=%3C1336857589-6603-5-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 4/6] cdi/fs: Readahead implementiert">kevin at tyndur.org
+                  </A><BR>
+    <I>Sa Mai 12 23:19:47 CEST 2012</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002355.html">[tyndur-devel] [PATCH 3/6] libc: Lesepuffer in fread
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002357.html">[tyndur-devel] [PATCH 5/6] tcpip: Readahead-Unterstützung für TCP
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2356">[ Datum ]</a>
+              <a href="thread.html#2356">[ Thema ]</a>
+              <a href="subject.html#2356">[ Betreff (Subject) ]</a>
+              <a href="author.html#2356">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ cdi/fs: Für Dateien (nicht für Verzeichnisse) wird das Readahead-Flag
+  gesetzt. read ist jetzt ein Wrapper um readahead.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/cdi/lib/fs/fs.c        |    3 +++
+ src/modules/cdi/lib/fs/lostio_if.c |   22 +++++++++++++++++-----
+ 2 files changed, 20 insertions(+), 5 deletions(-)
+
+diff --git a/src/modules/cdi/lib/fs/fs.c b/src/modules/cdi/lib/fs/fs.c
+index 11777eb..dddf9ee 100644
+--- a/src/modules/cdi/lib/fs/fs.c
++++ b/src/modules/cdi/lib/fs/fs.c
+@@ -49,6 +49,8 @@ bool lostio_not_found_handler(char** path, uint8_t args, pid_t pid,
+     FILE* source);
+ bool lostio_pre_open_handler(char** path, uint8_t args, pid_t pid,
+     FILE* source);
++size_t lostio_readahead_handler(lostio_filehandle_t* fh, void* buf,
++    size_t bs, size_t bc);
+ size_t lostio_read_handler(lostio_filehandle_t* fh, void* buf,
+     size_t bs, size_t bc);
+ size_t lostio_write_handler(lostio_filehandle_t* fh, size_t bs, size_t bc,
+@@ -66,6 +68,7 @@ typehandle_t cdi_typehandle = {
+     .pre_open = &amp;lostio_pre_open_handler,
+     .post_open = NULL,
+     .read = &amp;lostio_read_handler,
++    .readahead = &amp;lostio_readahead_handler,
+     .write = &amp;lostio_write_handler,
+     .seek = &amp;lostio_seek_handler,
+     .unlink = &amp;lostio_unlink_handler,
+diff --git a/src/modules/cdi/lib/fs/lostio_if.c b/src/modules/cdi/lib/fs/lostio_if.c
+index 4f3271e..e3375dd 100644
+--- a/src/modules/cdi/lib/fs/lostio_if.c
++++ b/src/modules/cdi/lib/fs/lostio_if.c
+@@ -131,6 +131,7 @@ static int handle_dirent(struct cdi_fs_res* res, vfstree_node_t* node)
+ 
+         if (res-&gt;file) {
+             size = res-&gt;res-&gt;meta_read(s, CDI_FS_META_SIZE);
++            flags |= LOSTIO_FLAG_READAHEAD;
+         }
+     }
+ 
+@@ -378,7 +379,7 @@ bool lostio_pre_open_handler(char** path, uint8_t args, pid_t pid,
+     return true;
+ }
+ 
+-size_t lostio_read_handler(lostio_filehandle_t* fh, void* buf,
++size_t lostio_readahead_handler(lostio_filehandle_t* fh, void* buf,
+     size_t bs, size_t bc)
+ {
+     size_t size = 0;
+@@ -404,16 +405,27 @@ size_t lostio_read_handler(lostio_filehandle_t* fh, void* buf,
+ 
+     size = dh-&gt;res-&gt;file-&gt;read(dh, fh-&gt;pos, size, buf);
+ 
+-    fh-&gt;pos += size;
++out:
++    v();
++    return size;
++}
++
++size_t lostio_read_handler(lostio_filehandle_t* fh, void* buf,
++    size_t bs, size_t bc)
++{
++    size_t ret;
++
++    p();
++    ret = lostio_readahead_handler(fh, buf, bs, bc);
++    fh-&gt;pos += ret;
+     if(fh-&gt;pos &gt;= fh-&gt;node-&gt;size) {
+         fh-&gt;flags |= LOSTIO_FLAG_EOF;
+     } else {
+         fh-&gt;flags &amp;= ~LOSTIO_FLAG_EOF;
+     }
+-
+-out:
+     v();
+-    return size;
++
++    return ret;
+ }
+ 
+ size_t lostio_write_handler(lostio_filehandle_t* fh, size_t bs, size_t bc,
+-- 
+1.7.7
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002355.html">[tyndur-devel] [PATCH 3/6] libc: Lesepuffer in fread
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002357.html">[tyndur-devel] [PATCH 5/6] tcpip: Readahead-Unterstützung für TCP
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2356">[ Datum ]</a>
+              <a href="thread.html#2356">[ Thema ]</a>
+              <a href="subject.html#2356">[ Betreff (Subject)]</a>
+              <a href="author.html#2356">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

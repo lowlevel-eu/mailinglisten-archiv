@@ -1,0 +1,169 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] tcpip: Verbindung schliessen beim close()
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20tcpip%3A%20Verbindung%20schliessen%20beim%20close%28%29&In-Reply-To=%3C1252101569-15423-1-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001327.html">
+   <LINK REL="Next"  HREF="001329.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] tcpip: Verbindung schliessen beim close()</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20tcpip%3A%20Verbindung%20schliessen%20beim%20close%28%29&In-Reply-To=%3C1252101569-15423-1-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH] tcpip: Verbindung schliessen beim close()">kevin at tyndur.org
+                  </A><BR>
+    <I>Fr Sep  4 23:59:29 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001327.html">[tyndur-devel] [PATCH] kedit: Syntax-Highlighting für Pascal
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001329.html">[tyndur-devel] [PATCH] tcpip: Verbindung schliessen beim close()
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1328">[ Datum ]</a>
+              <a href="thread.html#1328">[ Thema ]</a>
+              <a href="subject.html#1328">[ Betreff (Subject) ]</a>
+              <a href="author.html#1328">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ tcpip: Wenn der Benutzer die Datei zumacht, sollten wir auch die
+  TCP-Verbindung schliessen.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/tcpip/include/tcp.h |    2 ++
+ src/modules/tcpip/lostio_if.c   |    4 ++--
+ src/modules/tcpip/tcp.c         |   34 ++++++++++++++++++++++++++++++++++
+ 3 files changed, 38 insertions(+), 2 deletions(-)
+
+diff --git a/src/modules/tcpip/include/tcp.h b/src/modules/tcpip/include/tcp.h
+index b0b5917..c741ea8 100644
+--- a/src/modules/tcpip/include/tcp.h
++++ b/src/modules/tcpip/include/tcp.h
+@@ -44,6 +44,7 @@
+ #define TCPS_CONNECTED_FIN 4
+ #define TCPS_CLOSED 5
+ #define TCPS_WAIT_FOR_ACCEPT 6
++#define TCPS_WAIT_FOR_FIN_ACK 7
+ 
+ #define TCPF_FIN    (1 &lt;&lt; 0)
+ #define TCPF_SYN    (1 &lt;&lt; 1)
+@@ -116,6 +117,7 @@ struct tcp_server {
+ 
+ void init_tcp(void);
+ struct tcp_connection* tcp_open_connection(dword ip, word port);
++void tcp_close_connection(struct tcp_connection* conn);
+ void tcp_free_connection(struct tcp_connection* conn);
+ void tcp_accept_connection(struct tcp_connection* conn);
+ 
+diff --git a/src/modules/tcpip/lostio_if.c b/src/modules/tcpip/lostio_if.c
+index b79ebf8..1f3b428 100644
+--- a/src/modules/tcpip/lostio_if.c
++++ b/src/modules/tcpip/lostio_if.c
+@@ -337,15 +337,15 @@ int lostio_tcp_close(lostio_filehandle_t* filehandle)
+         free(buffer-&gt;data);
+         free(buffer);
+     }
++    v();
+ 
+-    // TODO tcp_connection_close
++    tcp_close_connection(conn);
+     /*
+      * TODO Reaktivieren, sobald die Verbindungen nicht mehr hartkodiert sind
+     if (--(filehandle-&gt;node-&gt;size) == 0) {
+         vfstree_delete_node(filehandle-&gt;node-&gt;name);
+     }
+     */
+-    v();
+ 
+     return 0;
+ }
+diff --git a/src/modules/tcpip/tcp.c b/src/modules/tcpip/tcp.c
+index b8a7f0f..60fb896 100644
+--- a/src/modules/tcpip/tcp.c
++++ b/src/modules/tcpip/tcp.c
+@@ -179,6 +179,7 @@ static void tcp_send_reset(struct tcp_connection* conn)
+ static void tcp_send_fin(struct tcp_connection* conn, bool ack)
+ {
+     tcp_send_packet(conn, NULL, 0, TCPF_FIN | (ack ? TCPF_ACK : 0));
++    conn-&gt;seq++;
+ }
+ 
+ static void do_nothing(void) {}
+@@ -265,6 +266,30 @@ void tcp_free_connection(struct tcp_connection* conn)
+     free(conn);
+ }
+ 
++void tcp_close_connection(struct tcp_connection* conn)
++{
++    uint64_t timeout;
++
++    DEBUG_MSG(&quot;tcp_send_fin_ack&quot;);
++    conn-&gt;status = TCPS_WAIT_FOR_FIN_ACK;
++    tcp_send_fin(conn, FALSE);
++
++    timeout = get_tick_count() + 9 * 1000000;
++    timer_register(do_nothing, 10 * 1000000);
++    while ((conn-&gt;status == TCPS_WAIT_FOR_FIN_ACK)
++        &amp;&amp; (get_tick_count() &lt; timeout))
++    {
++        wait_for_rpc();
++    }
++
++    if (conn-&gt;status == TCPS_WAIT_FOR_FIN_ACK) {
++        tcp_send_reset(conn);
++        DEBUG_MSG(&quot;Timeout beim Schliessen der Verbindung&quot;);
++    }
++
++    tcp_free_connection(conn);
++}
++
+ void tcp_accept_connection(struct tcp_connection* conn)
+ {
+     DEBUG_MSG(&quot;tcp_send_syn_ack&quot;);
+@@ -512,6 +537,15 @@ void tcp_receive(dword source_ip, void* data, dword data_size)
+             }*/
+             break;
+ 
++        case TCPS_WAIT_FOR_FIN_ACK:
++            if ((header-&gt;flags &amp; TCPF_FIN) &amp;&amp; (header-&gt;flags &amp; TCPF_ACK)) {
++                DEBUG_MSG(&quot;FIN ACK erhalten&quot;);
++                conn-&gt;ack = big_endian_dword(header-&gt;seq) + 1;
++                tcp_send_ack(conn);
++                conn-&gt;status = TCPS_CLOSED;
++            }
++            break;
++
+         case TCPS_WAIT_FOR_LAST_ACK:
+             // TODO: Prï¿½fen, ob fï¿½r das richtige Segment
+             DEBUG_MSG(&quot;ACK&quot;);
+-- 
+1.6.0.2
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001327.html">[tyndur-devel] [PATCH] kedit: Syntax-Highlighting für Pascal
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001329.html">[tyndur-devel] [PATCH] tcpip: Verbindung schliessen beim close()
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1328">[ Datum ]</a>
+              <a href="thread.html#1328">[ Thema ]</a>
+              <a href="subject.html#1328">[ Betreff (Subject)]</a>
+              <a href="author.html#1328">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

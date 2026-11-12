@@ -1,0 +1,147 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 3/4] kernel2: get_node_in_dir() raussplitten
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%203/4%5D%20kernel2%3A%20get_node_in_dir%28%29%20raussplitten&In-Reply-To=%3C1478389238-7842-4-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002603.html">
+   <LINK REL="Next"  HREF="002605.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 3/4] kernel2: get_node_in_dir() raussplitten</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%203/4%5D%20kernel2%3A%20get_node_in_dir%28%29%20raussplitten&In-Reply-To=%3C1478389238-7842-4-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 3/4] kernel2: get_node_in_dir() raussplitten">kevin at tyndur.org
+                  </A><BR>
+    <I>So Nov  6 00:40:37 CET 2016</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002603.html">[tyndur-devel] [PATCH 2/4] libc: errno für mkdir() setzen
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002605.html">[tyndur-devel] [PATCH 4/4] kernel2: Fehlercodes zurückgeben in lio_mkfile/dir/symlink
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2604">[ Datum ]</a>
+              <a href="thread.html#2604">[ Thema ]</a>
+              <a href="subject.html#2604">[ Betreff (Subject) ]</a>
+              <a href="author.html#2604">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* kernel2: get_node_in_dir() ist der Teil von lio_get_resource(), der in
+  einer gegebenen Verzeichnis-Ressource nach einem Eintrag sucht. Das
+  ist auch in anderen Zusammenhängen nützlich.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/kernel2/src/lostio/client.c | 47 +++++++++++++++++++++++++++--------------
+ 1 file changed, 31 insertions(+), 16 deletions(-)
+
+diff --git a/src/kernel2/src/lostio/client.c b/src/kernel2/src/lostio/client.c
+index 8f3bcd1..770b675 100644
+--- a/src/kernel2/src/lostio/client.c
++++ b/src/kernel2/src/lostio/client.c
+@@ -114,6 +114,32 @@ static struct lio_resource* resolve_symlink(struct lio_resource* link,
+     return lio_do_get_resource(buf, 1, depth + 1);
+ }
+ 
++static int get_node_in_dir(struct lio_resource* dir, const char* name,
++                           struct lio_node** node)
++{
++    struct lio_node* n;
++    int ret;
++    int i;
++
++    // Falls die Liste der Kinder nicht geladen ist, nachholen
++    if (dir-&gt;children == NULL) {
++        ret = dir-&gt;tree-&gt;service-&gt;lio_ops.load_children(dir);
++        if (ret &lt; 0) {
++            return ret;
++        }
++    }
++
++    // Passendes Kind raussuchen
++    for (i = 0; (n = list_get_element_at(dir-&gt;children, i)); i++) {
++        if (strcmp(n-&gt;name, name) == 0) {
++            *node = n;
++            return 0;
++        }
++    }
++
++    return -ENOENT;
++}
++
+ struct lio_resource* lio_do_get_resource(const char* path, int follow_symlinks,
+                                          int depth)
+ {
+@@ -124,7 +150,7 @@ struct lio_resource* lio_do_get_resource(const char* path, int follow_symlinks,
+     char* tokenize_path;
+     char* name;
+     char* old_name = NULL;
+-    int i;
++    int ret;
+ 
+     // Passenden Baum raussuchen
+     tree = lio_get_tree(path, &amp;rel_path, depth);
+@@ -160,24 +186,13 @@ struct lio_resource* lio_do_get_resource(const char* path, int follow_symlinks,
+             goto out;
+         }
+ 
+-        // Falls die Liste der Kinder nicht geladen ist, nachholen
+-        if (res-&gt;children == NULL) {
+-            if (tree-&gt;service-&gt;lio_ops.load_children(res)) {
+-                res = NULL;
+-                goto out;
+-            }
+-        }
+-
+         // Passendes Kind raussuchen
+-        for (i = 0; (node = list_get_element_at(res-&gt;children, i)); i++) {
+-            if (strcmp(node-&gt;name, name) == 0) {
+-                goto found;
+-            }
++        ret = get_node_in_dir(res, name, &amp;node);
++        if (ret &lt; 0) {
++            res = NULL;
++            goto out;
+         }
+-        res = NULL;
+-        goto out;
+ 
+-found:
+         // Passender Kindknoten wurde gefunden, weiter im Pfad
+         old_name = name;
+         name = strtok_r(NULL, &quot;/&quot;, &amp;saveptr);
+-- 
+2.1.4
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002603.html">[tyndur-devel] [PATCH 2/4] libc: errno für mkdir() setzen
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002605.html">[tyndur-devel] [PATCH 4/4] kernel2: Fehlercodes zurückgeben in lio_mkfile/dir/symlink
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2604">[ Datum ]</a>
+              <a href="thread.html#2604">[ Thema ]</a>
+              <a href="subject.html#2604">[ Betreff (Subject)]</a>
+              <a href="author.html#2604">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

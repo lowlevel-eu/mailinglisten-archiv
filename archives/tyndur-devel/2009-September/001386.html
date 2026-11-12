@@ -1,0 +1,609 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 2/3] lpt: Mehrsprachige Meldungen vorbereiten
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%202/3%5D%20lpt%3A%20Mehrsprachige%20Meldungen%20vorbereiten&In-Reply-To=%3C1253975713-19083-3-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001401.html">
+   <LINK REL="Next"  HREF="001396.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 2/3] lpt: Mehrsprachige Meldungen vorbereiten</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%202/3%5D%20lpt%3A%20Mehrsprachige%20Meldungen%20vorbereiten&In-Reply-To=%3C1253975713-19083-3-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 2/3] lpt: Mehrsprachige Meldungen vorbereiten">kevin at tyndur.org
+                  </A><BR>
+    <I>Sa Sep 26 16:35:12 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001401.html">[tyndur-devel] [PATCH 1/3] Pascal-RTL: Unterstuetzung fuer mehrsprachige Programme
+</A></li>
+        <LI>N�chste Nachricht: <A HREF="001396.html">[tyndur-devel] [PATCH 2/3] lpt: Mehrsprachige Meldungen vorbereiten
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1386">[ Datum ]</a>
+              <a href="thread.html#1386">[ Thema ]</a>
+              <a href="subject.html#1386">[ Betreff (Subject) ]</a>
+              <a href="author.html#1386">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* lpt: Ressourcestrings fuer Meldungen verwenden, damit sie uebersetzt
+  werden koennen
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/pas/lpt/Makefile.all          |    2 +-
+ src/modules/pas/lpt/helpers.pas           |   22 +++++--
+ src/modules/pas/lpt/lang/Makefile.conf    |    1 +
+ src/modules/pas/lpt/lang/lang_en.c        |   48 +++++++++++++++
+ src/modules/pas/lpt/lpt.pas               |   93 ++++++++++++++++++++--------
+ src/modules/pas/lpt/packages.pas          |    9 ++-
+ src/modules/pas/lpt/repositories.pas      |   10 ++-
+ src/modules/pas/lpt/repository_base.pas   |    3 +
+ src/modules/pas/lpt/repository_file.pas   |    2 +-
+ src/modules/pas/lpt/repository_http.pas   |    7 ++-
+ src/modules/pas/lpt/repository_single.pas |    5 +-
+ 11 files changed, 158 insertions(+), 44 deletions(-)
+ create mode 100644 src/modules/pas/lpt/lang/Makefile.conf
+ create mode 100644 src/modules/pas/lpt/lang/lang_en.c
+
+diff --git a/src/modules/pas/lpt/Makefile.all b/src/modules/pas/lpt/Makefile.all
+index dd0ebaa..c4078d2 100644
+--- a/src/modules/pas/lpt/Makefile.all
++++ b/src/modules/pas/lpt/Makefile.all
+@@ -2,5 +2,5 @@ shopt -s extglob
+ source $LOST_BUILDMK_ROOT/config.sh
+ 
+ echo &quot;LD   $1/apps/lpt&quot;
+-$LOST_TOOLS_LD -olpt.mod -Ttext=0x40000000 *.o --start-group ../lib/units/*.a $2 --end-group
++$LOST_TOOLS_LD -olpt.mod -Ttext=0x40000000 *.o lang/*.o --start-group ../lib/units/*.a $2 --end-group
+ $LOST_TOOLS_STRIP -s lpt.mod -o $1/apps/lpt
+diff --git a/src/modules/pas/lpt/helpers.pas b/src/modules/pas/lpt/helpers.pas
+index ba96dbf..b26ff4b 100644
+--- a/src/modules/pas/lpt/helpers.pas
++++ b/src/modules/pas/lpt/helpers.pas
+@@ -2,7 +2,7 @@ unit helpers;
+ {$MODE ObjFPC}
+ 
+ interface
+-uses crt, sysutils, dos, classes, tar, packages, tcpip, http;
++uses crt, sysutils, dos, classes, tar, packages, tcpip, http, multilang;
+ 
+ procedure ScanFile(pkgset: TPackageSet; filename, repository: String);
+ procedure DrawProgress(http: HTTPRequest);
+@@ -17,6 +17,14 @@ procedure mkpath(path: string);
+ 
+ implementation
+ 
++resourcestring
++    rsBytesReceived = '%d Bytes empfangen';
++    rsBytesReceivedPartial = '%d/%d Bytes empfangen';
++
++    rsDownloading = 'Herunterladen von %s';
++    rsConnecting = 'Verbinde...';
++    rsHTTPError = 'Fehler: HTTP-Statuscode';
++
+ procedure mkpath(path: string);
+ var
+     i: integer;
+@@ -54,9 +62,11 @@ begin
+     end;
+ 
+     if http.responseRemaining &gt;= 0 then begin
+-        Write(#13, (http.responseLength - http.responseRemaining), '/', http.responseLength, ' Bytes empfangen');
++        Write(#13, FormatNum(rsBytesReceivedPartial,
++            [http.responseLength - http.responseRemaining,
++            http.responseLength]));
+     end else begin
+-        Write(#13, http.responseLength, ' Bytes empfangen');
++        Write(#13, FormatNum(rsBytesReceived, [http.responseLength]));
+     end;
+ end;
+ 
+@@ -67,8 +77,8 @@ begin
+     httpc := HTTPRequest.create(url);
+     httpc.setRequestHeader('Pragma', 'no-cache');
+     httpc.setRequestHeader('Cache-Control', 'no-cache');
+-    WriteLn('Herunterladen von ', url);
+-    Write('Verbinde...');
++    WriteLn(Format(rsDownloading, [url]));
++    Write(rsConnecting);
+     httpc.onReadTick := @DrawProgress;
+     httpc.get;
+     WriteLn;
+@@ -76,7 +86,7 @@ begin
+     if httpc.statusCode = 200 then begin
+         exit(httpc);
+     end else begin
+-        WriteLn('Fehler: HTTP-Statuscode ', httpc.statusCode);
++        WriteLn(rsHTTPError, ' ', httpc.statusCode);
+         exit(nil)
+     end;
+ end;
+diff --git a/src/modules/pas/lpt/lang/Makefile.conf b/src/modules/pas/lpt/lang/Makefile.conf
+new file mode 100644
+index 0000000..594ef2a
+--- /dev/null
++++ b/src/modules/pas/lpt/lang/Makefile.conf
+@@ -0,0 +1 @@
++CC_FLAGS_APPEND=&quot;-Wno-missing-braces&quot;
+diff --git a/src/modules/pas/lpt/lang/lang_en.c b/src/modules/pas/lpt/lang/lang_en.c
+new file mode 100644
+index 0000000..c90d990
+--- /dev/null
++++ b/src/modules/pas/lpt/lang/lang_en.c
+@@ -0,0 +1,48 @@
++/*
++ * Copyright (c) 2009 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include &quot;tms.h&quot;
++
++static int get_number(int n)
++{
++    return (n == 1 ? 0 : 1);
++}
++
++static const struct tms_strings dict[] = {
++    0,
++    0,
++};
++
++static const struct tms_lang lang = {
++    .lang = &quot;en&quot;,
++    .numbers = 2,
++    .get_number = get_number,
++    .strings = dict,
++};
++
++LANGUAGE(&amp;lang)
+diff --git a/src/modules/pas/lpt/lpt.pas b/src/modules/pas/lpt/lpt.pas
+index 9b3f98e..1cdf230 100644
+--- a/src/modules/pas/lpt/lpt.pas
++++ b/src/modules/pas/lpt/lpt.pas
+@@ -1,16 +1,37 @@
+ program lpt;
+ {$MODE ObjFPC}
+ 
+-uses crt, dos, sysutils, classes, tar, helpers, packages, repositories, repository_base;
++uses
++    crt, dos, sysutils, classes, tar, multilang,
++    helpers, packages, repositories, repository_base;
++
++resourcestring
++    rsUsage =
++        'Aufruf: lpt [scan|list|get &lt;Paket&gt;]'#10 +
++        '  scan: Lädt die Paketlisten von den Servern'#10 +
++        '  list: Zeigt alle verfügbaren Pakete an'#10 +
++        '  get:  Installiert das angegebene Paket'#10 +
++        '  install: Installiert das angegebene Paket aus lokaler Datei'#10 +
++        '           Achtung, Datei als letzten Parameter angeben!';
++
++    rsDownloadAndExtract = 'Herunterladen und Entpacken von %s';
++    rsSearching = 'Suche %s';
++    rsConfiguring = 'Richte %s ein';
++
++    rsError = 'Fehler:';
++    rsCantLoadRepoList = 'Kann Repository-Liste nicht laden:';
++    rsFailDownloadRepoList = 'Download der Paketliste für %s fehlgeschlagen:';
++    rsAlreadyInstalled = 'Paket ist bereits installiert:';
++    rsCannotReadPkglists = 'Kann die Paketlisten nicht einlesen:';
++    rsCannotFindPackage = 'Konnte keine Version von %s finden';
++    rsCannotResolveDep = 'Konnte die Abhängigkeiten des Pakets nicht auflösen:';
++    rsWrongParamCount = 'Falsche Parameterzahl';
++    rsInvalidAction = 'Ungütige Aktion:';
++
+ 
+ procedure PrintUsage;
+ begin
+-    WriteLn('Aufruf: lpt [scan|list|get &lt;Paket&gt;]');
+-    WriteLn('  scan: Lädt die Paketlisten von den Servern');
+-    WriteLn('  list: Zeigt alle verfügbaren Pakete an');
+-    WriteLn('  get:  Installiert das angegebene Paket');
+-    WriteLn('  install: Installiert das angegebene Paket aus lokaler Datei');
+-    WriteLn('           Achtung, Datei als letzten Parameter angeben!');
++    WriteLn(rsUsage);
+ end;
+ 
+ procedure Scan;
+@@ -26,7 +47,7 @@ begin
+     except
+         on e: Exception do begin
+             TextColor(12);
+-            WriteLn('Kann Repository-Liste nicht laden:');
++            WriteLn(rsCantLoadRepoList);
+             WriteLn(e.message);
+             TextColor(7);
+         end;
+@@ -40,7 +61,7 @@ begin
+         except
+             on e: EDownload do begin
+                 TextColor(12);
+-                WriteLn('Download der Paketliste für ' + repo.name + ' fehlgeschlagen:');
++                WriteLn(Format(rsFailDownloadRepoList, [repo.name]));
+                 WriteLn(e.message);
+                 TextColor(7);
+             end;
+@@ -62,7 +83,7 @@ begin
+         except
+             on e: Exception do begin
+                 TextColor(12);
+-                WriteLn('Fehler: ' + e.message);
++                WriteLn(rsError, ' ', e.message);
+                 TextColor(7);
+             end;
+         end;
+@@ -86,7 +107,7 @@ procedure Get(pkgname: String; reinstall: boolean);
+             version.version + '/' + version.section.section + '/';
+         if FileExists(filename) and not reinstall then begin
+             TextColor(15);
+-            WriteLn('Bereits installiert: ' + version.pkg.name + '/' +
++            WriteLn(rsAlreadyInstalled, ' ', version.pkg.name, '/',
+                 version.section.section);
+             TextColor(7);
+             Install := true;
+@@ -97,7 +118,8 @@ procedure Get(pkgname: String; reinstall: boolean);
+ 
+         // Ansonsten herunterladen und installieren
+         TextColor(15);
+-        WriteLn('Herunterladen und Entpacken von ' + version.pkg.name + '/' + version.section.section);
++        WriteLn(Format(rsDownloadAndExtract, [version.pkg.name + '/' +
++            version.section.section]));
+         TextColor(7);
+         installarchive := repos.Download(version);
+         if installarchive &lt;&gt; nil then begin
+@@ -107,9 +129,10 @@ procedure Get(pkgname: String; reinstall: boolean);
+         filename := 'file:/packages/' + version.pkg.name + '/' +
+             version.version + '/postinstall-' + version.section.section;
+ 
+-        WriteLn('Suche ' + filename);
++        WriteLn(Format(rsSearching, [filename]));
+         if FileExists(filename) then begin
+-            WriteLn('Richte ' + version.pkg.name + '/' + version.section.section + ' ein');
++            WriteLn(Format(rsConfiguring, [version.pkg.name + '/' +
++                version.section.section]));
+             exec(filename, '');
+         end;
+ 
+@@ -134,7 +157,7 @@ begin
+     except
+         on e: EPackageList do begin
+             TextColor(12);
+-            WriteLn('Kann die Paketlisten nicht einlesen: ');
++            WriteLn(rsCannotReadPkglists);
+             WriteLn(e.message);
+             TextColor(7);
+         end;
+@@ -154,7 +177,7 @@ begin
+     
+     if version = nil then begin
+         TextColor(12);
+-        WriteLn('Konnte keine Version von ' + pkgname + ' finden');
++        WriteLn(format(rsCannotFindPackage, [pkgname]));
+         TextColor(7);
+         exit;
+     end;
+@@ -166,7 +189,7 @@ begin
+     except
+         on e: EDependency do begin
+             TextColor(12);
+-            WriteLn('Konnte die Abhaengigkeiten des Pakets nicht aufloesen:');
++            WriteLn(rsCannotResolveDep);
+             WriteLn(e.message);
+             TextColor(7);
+             exit;
+@@ -184,7 +207,7 @@ begin
+                 except
+                     on e: Exception do begin
+                         TextColor(12);
+-                        WriteLn('Fehler: ' + e.message);
++                        WriteLn(rsError, ' ', e.message);
+                         TextColor(7);
+                     end;
+                 end;
+@@ -282,7 +305,23 @@ begin
+     c_lostio_create_link(@path[1], @pubname[1], False);
+ end;
+ 
++procedure SetLang;
++var
++    name: String;
++    lang: TLanguage;
++begin
++    name := GetEnv('LANG');
++    if name &lt;&gt; '' then begin
++        lang := GetLanguage(name);
++        if lang &lt;&gt; nil then begin
++            SetLanguage(lang);
++        end;
++    end;
++end;
++
+ begin
++    SetLang;
++
+     if system.ParamCount &lt; 1 then begin
+         PrintUsage;
+         halt(1);
+@@ -296,60 +335,60 @@ begin
+         if system.ParamCount = 2 then begin
+             Get(system.ParamStr(2), false);
+         end else begin
+-            WriteLn('Falsche Parameterzahl');
++            WriteLn(rsWrongParamCount);
+             PrintUsage;
+         end;
+     end else if system.ParamStr(1) = 'reget' then begin
+         if system.ParamCount = 2 then begin
+             Get(system.ParamStr(2), true);
+         end else begin
+-            WriteLn('Falsche Parameterzahl');
++            WriteLn(rsWrongParamCount);
+             PrintUsage;
+         end;
+     end else if system.ParamStr(1) = 'install' then begin
+         if system.ParamCount = 3 then begin
+             Install(system.ParamStr(3), system.ParamStr(2), false);
+         end else begin
+-            WriteLn('Falsche Parameterzahl');
++            WriteLn(rsWrongParamCount);
+             PrintUsage;
+         end;
+     end else if system.ParamStr(1) = 'reinstall' then begin
+         if system.ParamCount = 3 then begin
+             Install(system.ParamStr(3), system.ParamStr(2), true);
+         end else begin
+-            WriteLn('Falsche Parameterzahl');
++            WriteLn(rsWrongParamCount);
+             PrintUsage;
+         end;
+     end else if system.ParamStr(1) = 'cfg-addbin' then begin
+         if system.ParamCount = 3 then begin
+             CfgAddbin(system.ParamStr(2), system.ParamStr(3));
+         end else begin
+-            WriteLn('Falsche Parameterzahl');
++            WriteLn(rsWrongParamCount);
+             PrintUsage;
+         end;
+     end else if system.ParamStr(1) = 'cfg-addlib' then begin
+         if system.ParamCount = 3 then begin
+             CfgAddlib(system.ParamStr(2), system.ParamStr(3));
+         end else begin
+-            WriteLn('Falsche Parameterzahl');
++            WriteLn(rsWrongParamCount);
+             PrintUsage;
+         end;
+     end else if system.ParamStr(1) = 'cfg-addinc' then begin
+         if system.ParamCount = 3 then begin
+             CfgAddinc(system.ParamStr(2), system.ParamStr(3));
+         end else begin
+-            WriteLn('Falsche Parameterzahl');
++            WriteLn(rsWrongParamCount);
+             PrintUsage;
+         end;
+     end else if system.ParamStr(1) = 'cfg-adddoc' then begin
+         if system.ParamCount = 3 then begin
+             CfgAdddoc(system.ParamStr(2), system.ParamStr(3));
+         end else begin
+-            WriteLn('Falsche Parameterzahl');
++            WriteLn(rsWrongParamCount);
+             PrintUsage;
+         end;
+     end else begin
+-        WriteLn('Ungueltige Aktion: ', system.ParamStr(1));
++        WriteLn(rsInvalidAction, ' ', system.ParamStr(1));
+         PrintUsage;
+         halt(1);
+     end;
+diff --git a/src/modules/pas/lpt/packages.pas b/src/modules/pas/lpt/packages.pas
+index 9e2b44c..d5a0218 100644
+--- a/src/modules/pas/lpt/packages.pas
++++ b/src/modules/pas/lpt/packages.pas
+@@ -88,7 +88,10 @@ type
+     end;
+ 
+ implementation
+-    
++
++resourcestring
++    rsPackageMissing = 'Paket %s fehlt';
++
+ constructor TPackageSet.create;
+ begin
+     packages := TCollection.create(TPackage);
+@@ -220,8 +223,8 @@ begin
+                             AddVersion(depPkg);
+                             changed := true;
+                         end else begin
+-                            raise EDependency.create('Paket ' + dep.pkgname + 
+-                                '/' + dep.section + ' fehlt');
++                            raise EDependency.create(Format(rsPackageMissing,
++                                [dep.pkgname]));
+                         end;
+                     end;
+                 end;
+diff --git a/src/modules/pas/lpt/repositories.pas b/src/modules/pas/lpt/repositories.pas
+index 13633ca..a31cad1 100644
+--- a/src/modules/pas/lpt/repositories.pas
++++ b/src/modules/pas/lpt/repositories.pas
+@@ -11,6 +11,10 @@ function GetAllRepositories(): TCollection;
+ 
+ implementation
+ 
++resourcestring
++    rsUnknownRepoType = 'Repository unbekannten Typs!';
++    rsInvalidPkgsrc = 'Ungültige Paketquelle:';
++
+ var
+     repos: TCollection;
+ 
+@@ -25,7 +29,7 @@ begin
+     end else if repostype = files then begin
+         repo := TFileRepository.create(repos);
+     end else begin
+-        raise EInvalidRepository.create('Repository unbekannten Types!');
++        raise EInvalidRepository.create(rsUnknownRepoType);
+     end;
+     repo.name := name;
+     repo.url := url;
+@@ -66,13 +70,13 @@ begin
+                 repostype := files;
+             end else begin
+                 TextColor(12);
+-                WriteLn('Ungueltige Paketquelle: ' + url);
++                WriteLn(rsInvalidPkgsrc, ' ', url);
+                 TextColor(7);
+                 continue;
+             end
+         end else begin
+             TextColor(12);
+-            WriteLn('Ungueltige Paketquelle: ' + url);
++            WriteLn(rsInvalidPkgsrc, ' ', url);
+             TextColor(7);
+             continue;
+         end;
+diff --git a/src/modules/pas/lpt/repository_base.pas b/src/modules/pas/lpt/repository_base.pas
+index f2a4712..8b34360 100644
+--- a/src/modules/pas/lpt/repository_base.pas
++++ b/src/modules/pas/lpt/repository_base.pas
+@@ -4,6 +4,9 @@ unit repository_base;
+ interface
+ uses sysutils, classes, tar, packages, helpers;
+ 
++resourcestring
++    rsNoPackageList = 'Keine Paketliste für %s vorhanden!';
++
+ type
+     EDownload = class(Exception) end;
+     EPackageList = class(Exception) end;
+diff --git a/src/modules/pas/lpt/repository_file.pas b/src/modules/pas/lpt/repository_file.pas
+index 6cc353c..cfc1d0e 100644
+--- a/src/modules/pas/lpt/repository_file.pas
++++ b/src/modules/pas/lpt/repository_file.pas
+@@ -47,7 +47,7 @@ begin
+     if FileExists(self.url + 'packages.' + getArch) then begin
+         ScanFile(pkgset, self.url + 'packages.' + getArch, self.name);
+     end else begin
+-        raise EPackageList.create('Keine Paketliste für ' + self.name + ' vorhanden!');
++        raise EPackageList.create(Format(rsNoPackageList, [self.name]));
+     end;
+ end;
+ 
+diff --git a/src/modules/pas/lpt/repository_http.pas b/src/modules/pas/lpt/repository_http.pas
+index 759cbc6..33a957d 100644
+--- a/src/modules/pas/lpt/repository_http.pas
++++ b/src/modules/pas/lpt/repository_http.pas
+@@ -16,6 +16,9 @@ type
+ 
+ implementation
+ 
++resourcestring
++    rsDownloadingPkglist = 'Lade Paketliste %s von %s';
++
+ constructor THTTPRepository.create(parent : TCollection);
+ begin
+     inherited;
+@@ -46,7 +49,7 @@ begin
+         pkglisturl := self.url + 'packages.' + getArch;
+     end;
+ 
+-    WriteLn('Lade Paketliste ' + self.name + ' von ' + pkglisturl);
++    WriteLn(Format(rsDownloadingPkglist, [self.name, pkglisturl]));
+     try
+         DownloadToFile(pkglisturl, getConfigRoot + 'pkglist.' + self.name);
+     except
+@@ -61,7 +64,7 @@ begin
+     if FileExists(getConfigRoot + 'pkglist.' + self.name) then begin
+         ScanFile(pkgset, getConfigRoot + 'pkglist.' + self.name, self.name);
+     end else begin
+-        raise EPackageList.create('Keine Paketliste für ' + self.name + ' vorhanden!');
++        raise EPackageList.create(Format(rsNoPackageList, [self.name]));
+     end;
+ end;
+ 
+diff --git a/src/modules/pas/lpt/repository_single.pas b/src/modules/pas/lpt/repository_single.pas
+index 1a62681..8ab1e2b 100644
+--- a/src/modules/pas/lpt/repository_single.pas
++++ b/src/modules/pas/lpt/repository_single.pas
+@@ -16,6 +16,9 @@ type
+ 
+ implementation
+ 
++resourcestring
++    rsLocalPkgDesc = 'Keine (lokale Datei)';
++
+ constructor TSFRepository.create(parent : TCollection);
+ begin
+     inherited;
+@@ -89,7 +92,7 @@ begin
+             (* Prüfen ob Metadaten zu Paket passen *)
+             if (line = 'packages/'+pkg_name+'/'+pkg_version+'/packageinfo-'+pkg_section) then begin
+                 pkg := pkgset.add(pkg_name);
+-                pkg.desc := 'Keine (lokale Datei)';
++                pkg.desc := rsLocalPkgDesc;
+                 section := pkg.add(pkg_section);
+                 version := section.add(pkg_version);
+                 version.pkg := pkg;
+-- 
+1.6.0.2
+
+</PRE>
+
+
+
+
+
+
+
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001401.html">[tyndur-devel] [PATCH 1/3] Pascal-RTL: Unterstuetzung fuer mehrsprachige Programme
+</A></li>
+	<LI>N�chste Nachricht: <A HREF="001396.html">[tyndur-devel] [PATCH 2/3] lpt: Mehrsprachige Meldungen vorbereiten
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1386">[ Datum ]</a>
+              <a href="thread.html#1386">[ Thema ]</a>
+              <a href="subject.html#1386">[ Betreff (Subject)]</a>
+              <a href="author.html#1386">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

@@ -1,0 +1,181 @@
+Index: src/include/collections.h
+===================================================================
+--- src/include/collections.h	(Revision 923)
++++ src/include/collections.h	(Arbeitskopie)
+@@ -12,6 +12,7 @@
+ void list_destroy(list_t* list);
+ list_t* list_push(list_t* list, void* value);
+ void* list_pop(list_t* list);
++void list_merge_into(list_t* target, list_t* to_merge);
+ bool list_is_empty(list_t* list);
+ void* list_get_element_at(list_t* list, int index);
+ list_t* list_insert(list_t* list, int index, void* value);
+Index: src/lib/collections/list.c
+===================================================================
+--- src/lib/collections/list.c	(Revision 923)
++++ src/lib/collections/list.c	(Arbeitskopie)
+@@ -163,7 +163,7 @@
+     }
+ 
+     return value;
+-}
++}    
+     
+ /**
+  * Gibt einen Knoten aus der Liste zurück. Wird von allen Funktionen benutzt,
+@@ -212,6 +212,21 @@
+ }
+ 
+ /**
++ * Vereinigt zwei Listen, indem eine Liste in die Ziel-Liste
++ * eingefuegt wird und das Quell-Listenhandle zerstoert wird.
++ * @param target Ziel-Liste
++ * @param to_merge Quell-Liste
++ */
++void list_merge_into(list_t* target, list_t* to_merge)
++{
++    if ((!target) || (!to_merge)) return;
++    (list_get_node_at(to_merge, ((to_merge->size)-1)))->next = target->anchor;
++    target->anchor = to_merge->anchor;
++    target->size += to_merge->size;
++    free(to_merge);
++}
++
++/**
+  * Fragt den Wert eines Listenelements ab.
+  *
+  * @param list Liste, deren Element abgefragt werden soll
+Index: src/modules/c/shell/completion.c
+===================================================================
+--- src/modules/c/shell/completion.c	(Revision 923)
++++ src/modules/c/shell/completion.c	(Arbeitskopie)
+@@ -44,6 +44,8 @@
+ 
+ #include "shell.h"
+ 
++static list_t* executables_in_path;
++
+ /**
+  * Completion-Handler fuer Readline
+  *
+@@ -56,13 +58,23 @@
+ /**
+  * Matches in Befehlen suchen
+  *
++ * @param word  Wort, das vervollstaendigt werden soll
+  * @return Pointer auf Array oder NULL wenn keine Gefunden wurden
+  */
+ static char** shell_command_matches(const char* word);
+ 
+ /**
++ * Matches in Befehlen suchen, die nicht in shell_commands[]
++ * vorhanden sind.
++ *
++ * @param word  Wort, das vervollstaendigt werden soll
++ * @return Pointer auf list_t oder NULL bei null Uebereinstimmungen
++ */
++static list_t* shell_executable_matches(const char* word);
++/**
+  * Matches in Umgebungsvariabeln suchen
+  *
++ * @param word  Wort, das vervollstaendigt werden soll
+  * @return Pointer auf Array oder NULL wenn keine Gefunden wurden
+  */
+ static char** shell_envvar_matches(const char* word);
+@@ -70,6 +82,7 @@
+ /**
+  * Matches in Dateien
+  *
++ * @param word  Wort, das vervollstaendigt werden soll
+  * @return Pointer auf Array oder NULL wenn keine Gefunden wurden
+  */
+ static char** shell_file_matches(const char* word);
+@@ -84,6 +97,7 @@
+  */
+ void completion_init()
+ {
++    update_path_env();
+     rl_attempted_completion_function = rl_completion;
+ }
+ 
+@@ -110,6 +124,26 @@
+     return matches;
+ }
+ 
++void update_path_env(void)
++{
++    io_resource_t* dir;
++    io_direntry_t* dentry;
++    list_t* executables;
++    
++    const char* path = getenv("PATH");
++    if ((dir = directory_open(path)) == NULL) return;
++    executables = list_create();
++    while ((dentry = directory_read(dir))) {
++        if (dentry->type == IO_DIRENTRY_DIR) continue;
++        list_push(executables, strdup (dentry->name));
++    }
++    
++    list_destroy(executables_in_path);
++    executables_in_path = executables;
++}
++    
++    
++
+ static char** build_matches_array(list_t* list)
+ {
+     char** matches;
+@@ -152,6 +186,7 @@
+         return NULL;
+     }
+ 
++    list_merge_into(matches_list, shell_executable_matches(word));
+     matches = build_matches_array(matches_list);
+ 
+     list_destroy(matches_list);
+@@ -159,6 +194,33 @@
+     return matches;
+ }
+ 
++static list_t* shell_executable_matches(const char* word)
++{
++    char* filename;
++    list_t* matches_list = list_create();
++    
++    int i;
++    for (i = 0; i < list_size(executables_in_path); i++) {
++        filename = list_get_element_at(executables_in_path, i);
++        if (strncmp(filename, word, strlen(word)) == 0) {
++            size_t fnamelen = strlen(filename);
++            char fname[fnamelen + 2];
++            strcpy(fname, filename);
++            
++            fname[fnamelen] = ' ', 0;
++            
++            list_push(matches_list, strdup(fname));
++        }
++    }
++
++    if (list_size(matches_list) == 0) {
++        list_destroy(matches_list);
++        return NULL;
++    }
++
++    return matches_list;
++}
++
+ static char** shell_envvar_matches(const char* word)
+ {
+     int word_len = strlen(word);
+Index: src/modules/c/shell/shell.h
+===================================================================
+--- src/modules/c/shell/shell.h	(Revision 923)
++++ src/modules/c/shell/shell.h	(Arbeitskopie)
+@@ -48,6 +48,7 @@
+ bool shell_script(const char* path);
+ bool shell_match_command(const char* cmd, const char* cmdline);
+ void completion_init(void);
++void update_path_env(void);
+ 
+ int shell_command_default(int argc, char* argv[], const char* args);
+ int shell_command_help(int argc, char* argv[], const char* args);

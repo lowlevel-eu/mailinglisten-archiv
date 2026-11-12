@@ -1,0 +1,610 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] tcpip: Unterstuetzung fuer TCP-Server
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20tcpip%3A%20Unterstuetzung%20fuer%20TCP-Server&In-Reply-To=%3C1246182508-6569-1-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001097.html">
+   
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] tcpip: Unterstuetzung fuer TCP-Server</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20tcpip%3A%20Unterstuetzung%20fuer%20TCP-Server&In-Reply-To=%3C1246182508-6569-1-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH] tcpip: Unterstuetzung fuer TCP-Server">kevin at tyndur.org
+                  </A><BR>
+    <I>So Jun 28 11:48:28 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001097.html">[tyndur-devel] [PATCH] mtest: \r anstelle von Escapesequenzen
+</A></li>
+        
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1098">[ Datum ]</a>
+              <a href="thread.html#1098">[ Thema ]</a>
+              <a href="subject.html#1098">[ Betreff (Subject) ]</a>
+              <a href="author.html#1098">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ tcpip: Unterstuetzung fuer TCP-Server. Um Verbindungen
+  entgegenzunehmen, muss sich ein Server zunaechst fuer einen Port
+  registrieren, indem er tcpip:/tcp-listen/:&lt;port&gt; oeffnet. Sobald ein
+  Client eine Verbindung oeffnen will, wird in dieser Datei der Name
+  einer zweiten Datei in tcpip:/tcp-conn ausgegeben, die geoeffnet
+  werden muss, um die Verbindung anzunehmen (pro Client eine Zeile).
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/tcpip/include/lostio_if.h |   18 ++
+ src/modules/tcpip/include/tcp.h       |   21 ++
+ src/modules/tcpip/lostio_if.c         |   13 +-
+ src/modules/tcpip/tcp.c               |   25 +++
+ src/modules/tcpip/tcp_server.c        |  343 +++++++++++++++++++++++++++++++++
+ 5 files changed, 414 insertions(+), 6 deletions(-)
+ create mode 100644 src/modules/tcpip/tcp_server.c
+
+diff --git a/src/modules/tcpip/include/lostio_if.h b/src/modules/tcpip/include/lostio_if.h
+index 894ea80..1d34799 100644
+--- a/src/modules/tcpip/include/lostio_if.h
++++ b/src/modules/tcpip/include/lostio_if.h
+@@ -38,8 +38,26 @@
+ 
+ #include &quot;main.h&quot;
+ 
++
++#define LOSTIO_TYPES_TCPPORT 255
++#define LOSTIO_TYPES_NETCONFIG 254
++#define LOSTIO_TYPES_DNS 253
++#define LOSTIO_TYPES_ROUTE 252
++#define LOSTIO_TYPES_SERVER  251
++#define LOSTIO_TYPES_SERVER_DIR  250
++#define LOSTIO_TYPES_SERVER_CONN 249
++
++
+ void init_lostio_interface(void);
+ void lostio_add_driver(struct driver *driver);
+ void lostio_add_device(struct device *device);
+ 
++size_t lostio_tcp_read(lostio_filehandle_t* fh, void* buf,
++    size_t blocksize, size_t count);
++size_t lostio_tcp_write
++    (lostio_filehandle_t* fh, size_t blocksize, size_t count, void* data);
++int lostio_tcp_close(lostio_filehandle_t* filehandle);
++
++
++
+ #endif
+diff --git a/src/modules/tcpip/include/tcp.h b/src/modules/tcpip/include/tcp.h
+index 42b5699..d192226 100644
+--- a/src/modules/tcpip/include/tcp.h
++++ b/src/modules/tcpip/include/tcp.h
+@@ -43,6 +43,7 @@
+ #define TCPS_WAIT_FOR_LAST_ACK 3
+ #define TCPS_CONNECTED_FIN 4
+ #define TCPS_CLOSED 5
++#define TCPS_WAIT_FOR_ACCEPT 6
+ 
+ #define TCPF_FIN    (1 &lt;&lt; 0)
+ #define TCPF_SYN    (1 &lt;&lt; 1)
+@@ -107,9 +108,15 @@ struct tcp_out_buffer {
+     void*   data;
+ };
+ 
++struct tcp_server {
++    uint16_t    port;
++    list_t*     requests;
++};
++
+ 
+ void init_tcp(void);
+ struct tcp_connection* tcp_open_connection(dword ip, word port);
++void tcp_accept_connection(struct tcp_connection* conn);
+ 
+ word tcp_checksum
+     (struct tcp_header* header, struct tcp_pseudo_header* pseudo_header,
+@@ -128,4 +135,18 @@ void tcp_send_ack(struct tcp_connection* conn); // TODO Ersetzen
+  */
+ size_t tcp_get_mss(struct tcp_connection* conn);
+ 
++/**
++ * Registriert die LostIO-Typehandles, die fuer TCP-Server benoetigt werden
++ */
++void tcp_server_register_lostio(void);
++
++/**
++ * Wird aufgerufen, um ein SYN-Paket zu behandeln. Erstellt eine Verbindung,
++ * ohne jedoch SYN ACK zu senden. Stattdessen wird der Server benachrichtigt
++ * und eine LostIO-Ressource angelegt, ueber die die Verbindung tatsaechlich
++ * auf TCP-Ebene geoeffnet wird.
++ */
++struct tcp_connection* tcp_incoming_connection(uint32_t ip,
++    struct tcp_header* header);
++
+ #endif
+diff --git a/src/modules/tcpip/lostio_if.c b/src/modules/tcpip/lostio_if.c
+index 3bb7f10..a3b0f1c 100644
+--- a/src/modules/tcpip/lostio_if.c
++++ b/src/modules/tcpip/lostio_if.c
+@@ -45,6 +45,7 @@
+ #include &quot;network.h&quot;
+ #include &quot;ip.h&quot;
+ #include &quot;tcp.h&quot;
++#include &quot;lostio_if.h&quot;
+ #include &quot;dns.h&quot;
+ 
+ //Hier koennen die Debug-Nachrichten aktiviert werden
+@@ -67,11 +68,6 @@
+ #endif
+ 
+ 
+-#define LOSTIO_TYPES_TCPPORT 255
+-#define LOSTIO_TYPES_NETCONFIG 254
+-#define LOSTIO_TYPES_DNS 253
+-#define LOSTIO_TYPES_ROUTE 252
+-
+ typehandle_t typehandle;
+ typehandle_t typehandle2;
+ typehandle_t typehandle3;
+@@ -124,10 +120,15 @@ void init_lostio_interface(void)
+ 
+     lostio_register_typehandle(&amp;typehandle3);
+ 
++    // Typ fuer das DNS-Verzeichnis
+     lostio_type_directory_use_as(LOSTIO_TYPES_DNS);
+     get_typehandle(LOSTIO_TYPES_DNS)-&gt;not_found = lostio_tcp_not_found;
+     vfstree_get_node_by_path(&quot;/&quot;)-&gt;type = LOSTIO_TYPES_DNS;
+-   
++
++    // Weitere Typen
++    tcp_server_register_lostio();
++
++    // Dateien/Verzeichnisse anlegen
+     vfstree_create_node(&quot;/dns&quot;, LOSTIO_TYPES_DNS, 0, NULL, 
+         LOSTIO_FLAG_BROWSABLE);
+     vfstree_create_node(&quot;/route&quot;, LOSTIO_TYPES_ROUTE, 1, NULL, 0);
+diff --git a/src/modules/tcpip/tcp.c b/src/modules/tcpip/tcp.c
+index 7eac8b2..721a690 100644
+--- a/src/modules/tcpip/tcp.c
++++ b/src/modules/tcpip/tcp.c
+@@ -66,12 +66,14 @@
+ extern bool debug_checksum;
+ 
+ list_t* tcp_connections;
++list_t* tcp_servers;
+ 
+ void tcp_send_ack(struct tcp_connection* conn);
+ 
+ void init_tcp()
+ {
+     tcp_connections = list_create();
++    tcp_servers = list_create();
+ }
+ 
+ static word tcp_get_free_port(void)
+@@ -129,6 +131,8 @@ static void tcp_send_packet(struct tcp_connection* conn, void* data,
+ 
+     tcp_update_checksum(buffer, &amp;pseudo_header, buffer + sizeof(header), data_size + options_size);
+ 
++    DEBUG_MSG2(&quot;Sending packet to %x, ack = %d&quot;, conn-&gt;dest_ip,
++        conn-&gt;ack);
+     ip_send(conn-&gt;dest_ip, IP_PROTO_TCP, buffer, buffer_size);
+ }
+ 
+@@ -153,6 +157,15 @@ void tcp_send_ack(struct tcp_connection* conn)
+     }
+ }
+ 
++static void tcp_send_syn_ack(struct tcp_connection* conn)
++{
++    conn-&gt;status = TCPS_CONNECTED;
++    conn-&gt;seq = 0; //TODO (dword) get_tick_count();
++
++    tcp_send_packet(conn, NULL, 0, TCPF_SYN | TCPF_ACK);
++    conn-&gt;seq++;
++}
++
+ static void tcp_send_reset(struct tcp_connection* conn)
+ {
+     tcp_send_packet(conn, NULL, 0, TCPF_RST);
+@@ -214,6 +227,12 @@ struct tcp_connection* tcp_open_connection(dword ip, word port)
+     return conn;
+ }
+ 
++void tcp_accept_connection(struct tcp_connection* conn)
++{
++    DEBUG_MSG(&quot;tcp_send_syn_ack&quot;);
++    tcp_send_syn_ack(conn);
++}
++
+ 
+ struct tcp_connection* tcp_get_connection
+     (dword remote_ip, word remote_port, word local_port)
+@@ -312,6 +331,12 @@ void tcp_receive(dword source_ip, void* data, dword data_size)
+         big_endian_word(header-&gt;dest_port));
+ 
+     DEBUG_MSG(&quot;--&quot;);
++
++    // Neue Verbindung fuer einen TCP-Server?
++    if ((conn == NULL) &amp;&amp; (header-&gt;flags == TCPF_SYN)) {
++        conn = tcp_incoming_connection(source_ip, header);
++    }
++
+     if (conn == NULL) {
+         DEBUG_MSG1(&quot;Verbindung nicht gefunden. IP = %08x&quot;, source_ip);
+         return;
+diff --git a/src/modules/tcpip/tcp_server.c b/src/modules/tcpip/tcp_server.c
+new file mode 100644
+index 0000000..da48ad6
+--- /dev/null
++++ b/src/modules/tcpip/tcp_server.c
+@@ -0,0 +1,343 @@
++/*
++ * Copyright (c) 2009 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the tyndur Project
++ *     and its contributors.
++ * 4. Neither the name of the tyndur Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include &lt;lostio.h&gt;
++#include &lt;string.h&gt;
++#include &lt;stdlib.h&gt;
++#include &lt;stdio.h&gt;
++#include &lt;syscall.h&gt;
++#include &lt;rpc.h&gt;
++#include &lt;network.h&gt;
++
++#include &quot;ip.h&quot;
++#include &quot;tcp.h&quot;
++#include &quot;lostio_if.h&quot;
++
++extern list_t* tcp_connections;
++extern list_t* tcp_servers;
++
++static void do_nothing(void) {}
++
++/**
++ * Legt Knoten im Verzeichnisbaum an, die noch nicht existieren, wenn auf sie
++ * zugegriffen werden soll
++ */
++static bool lio_server_dir_not_found(char** path, byte flags, pid_t pid,
++    io_resource_t* ps)
++{
++    return vfstree_create_node(*path, LOSTIO_TYPES_SERVER, 0, NULL, 0);
++}
++
++/**
++ * Das Oeffnen einer Datei in tcpip:/tcp-listen registriert einen TCP-Server.
++ * Wenn ein Client verbindet, wird in der geoeffneten Datei der Dateiname zum
++ * Oeffnen der Verbindung ausgegeben
++ */
++static bool lio_server_pre_open(char** path, byte flags, pid_t pid,
++    io_resource_t* ps)
++{
++    char* s;
++    char* port;
++    int portnr;
++    int i;
++    struct tcp_server* server;
++    vfstree_node_t* node;
++
++    // Knoten raussuchen
++    node = vfstree_get_node_by_path(*path);
++    if (node == NULL) {
++        return FALSE;
++    }
++
++    // Pfad auseinandernehmen
++    if (strncmp(*path, &quot;/tcp-listen/&quot;, strlen(&quot;/tcp-listen/&quot;))) {
++        return FALSE;
++    }
++
++    s = *path + strlen(&quot;/tcp-listen/&quot;);
++    port = strchr(s, ':');
++    if (port == NULL) {
++        return FALSE;
++    }
++
++    port++;
++    portnr = atoi(port);
++    if (port == 0) {
++        return FALSE;
++    }
++
++    // Pruefen, ob der Port nicht schon belegt ist
++    p();
++    for (i = 0; (server = list_get_element_at(tcp_servers, i)); i++) {
++        if (server-&gt;port == portnr) {
++            return FALSE;
++        }
++    }
++    v();
++
++    // Neuen Server anlegen und der Ressource zuordnen
++    server = calloc(1, sizeof(*server));
++    server-&gt;port = portnr;
++    server-&gt;requests = list_create();
++    node-&gt;data = server;
++
++    p();
++    list_push(tcp_servers, server);
++    v();
++
++    return TRUE;
++}
++
++/**
++ * Liest eine Verbindung, die geoeffnet werden kann, aus
++ */
++size_t lio_server_read(lostio_filehandle_t* fh, void* buf,
++    size_t blocksize, size_t count)
++{
++    struct tcp_server* server = fh-&gt;node-&gt;data;
++    char* s;
++    size_t len;
++
++    s = list_pop(server-&gt;requests);
++    if (s == NULL) {
++        return 0;
++    }
++
++    len = strlen(s);
++    if (blocksize * count &lt; len) {
++        len = blocksize * count;
++    }
++
++
++    strncpy(buf, s, len);
++    free(s);
++
++    return len;
++}
++
++/**
++ * Beendet einen Server
++ */
++int lio_server_close(lostio_filehandle_t* fh)
++{
++    struct tcp_server* server = fh-&gt;node-&gt;data;
++    struct tcp_server* cur;
++    char* s;
++    int i;
++
++    // Aus der Liste der Server entfernen
++    p();
++    for (i = 0; (cur = list_get_element_at(tcp_servers, i)); i++) {
++        if (server == cur) {
++            list_remove(tcp_servers, i);
++            break;
++        }
++    }
++    v();
++
++    // VFS-Knoten entfernen
++    fh-&gt;node-&gt;data = NULL;
++    while ((s = list_pop(server-&gt;requests))) {
++        free(s);
++    }
++    list_destroy(server-&gt;requests);
++    free(server);
++    vfstree_delete_child(fh-&gt;node-&gt;parent, fh-&gt;node-&gt;name);
++
++    return 0;
++}
++
++/**
++ * Wird aufgerufen, um ein SYN-Paket zu behandeln. Erstellt eine Verbindung,
++ * ohne jedoch SYN ACK zu senden. Stattdessen wird der Server benachrichtigt
++ * und eine LostIO-Ressource angelegt, ueber die die Verbindung tatsaechlich
++ * auf TCP-Ebene geoeffnet wird.
++ */
++struct tcp_connection* tcp_incoming_connection(uint32_t remote_ip,
++    struct tcp_header* header)
++{
++    struct tcp_server* server;
++    struct tcp_connection* conn;
++    struct routing_entry* route;
++    uint64_t timeout;
++    int i;
++
++    uint16_t remote_port = big_endian_word(header-&gt;source_port);
++    uint16_t local_port = header-&gt;dest_port;
++
++    // Server an header-&gt;dest_port suchen
++    server = NULL;
++    for (i = 0; (server = list_get_element_at(tcp_servers, i)); i++) {
++        if (server-&gt;port == header-&gt;dest_port) {
++            break;
++        }
++    }
++
++    if (server == NULL) {
++        return NULL;
++    }
++
++    // Duplikate suchen
++    // Wenn wir sowieso schon darauf warten, dass jemand die Verbindung
++    // annimmt, hilft uns ein zweites SYN-Paket auch nicht weiter.
++    conn = NULL;
++    for (i = 0; (conn = list_get_element_at(tcp_connections, i)); i++) {
++        if ((conn-&gt;source_port  == local_port) &amp;&amp;
++            (conn-&gt;dest_port    == remote_port) &amp;&amp;
++            (conn-&gt;dest_ip      == remote_ip))
++        {
++            return NULL;
++        }
++    }
++
++    // Verbindung erstellen
++    conn = calloc(1, sizeof(struct tcp_connection));
++    route = get_routing_entry(remote_ip);
++
++    if (route == NULL) {
++        return NULL;
++    }
++
++    conn-&gt;dest_ip = remote_ip;
++    conn-&gt;dest_port = remote_port;
++    conn-&gt;source_ip = route-&gt;device-&gt;dev.ip;
++    conn-&gt;source_port = local_port;
++    conn-&gt;window = 0x1000;
++    conn-&gt;ack = big_endian_dword(header-&gt;seq) + 1;
++    conn-&gt;out_buffer = list_create();
++    conn-&gt;in_buffer = list_create();
++    conn-&gt;to_lostio = list_create();
++    conn-&gt;status = TCPS_WAIT_FOR_ACCEPT;
++
++    p();
++    list_push(tcp_connections, conn);
++    v();
++
++    // Neuen VFS-Knoten anlegen
++    char* ip_str = ip_to_string(remote_ip);
++    char* buf;
++    asprintf(&amp;buf, &quot;/tcp-conn/local:%d_%s:%d&quot;,
++        header-&gt;dest_port, ip_str, header-&gt;source_port);
++    vfstree_create_node(buf, LOSTIO_TYPES_SERVER_CONN, 0, conn,
++        LOSTIO_FLAG_NOAUTOEOF);
++    free(buf);
++
++    // Den Server informieren
++    asprintf(&amp;buf, &quot;tcpip:/tcp-conn/local:%d_%s:%d\n&quot;,
++        header-&gt;dest_port, ip_str, header-&gt;source_port);
++    free(ip_str);
++    p();
++    list_push(server-&gt;requests, buf);
++    v();
++
++    // Warten, bis der Server die Verbindung annimmt
++    timeout = get_tick_count() + 9 * 1000000;
++    timer_register(do_nothing, 10 * 1000000);
++    while ((conn-&gt;status == TCPS_WAIT_FOR_ACCEPT)
++        &amp;&amp; (get_tick_count() &lt; timeout))
++    {
++        wait_for_rpc();
++    }
++
++    if (conn-&gt;status == TCPS_WAIT_FOR_ACCEPT) {
++        // TODO Verbindung abbrechen und wieder freigeben
++        return NULL;
++    }
++
++    return conn;
++}
++
++/**
++ * Oeffnet eine eingehende Verbindung
++ */
++void lio_server_conn_post_open(lostio_filehandle_t* fh)
++{
++    struct tcp_connection* conn = fh-&gt;node-&gt;data;
++
++    tcp_accept_connection(conn);
++    fh-&gt;node-&gt;size++;
++}
++
++/**
++ * Schliesst eine eingehende Verbindung und entfernt sie aus dem
++ * Verzeichnisbaum.
++ */
++int lio_server_conn_close(lostio_filehandle_t* fh)
++{
++    int ret = lostio_tcp_close(fh);
++
++    // VFS-Knoten entfernen
++    vfstree_delete_child(fh-&gt;node-&gt;parent, fh-&gt;node-&gt;name);
++
++    return ret;
++}
++
++/// Typ fuer einen TCP-Server
++static typehandle_t lio_type_server = {
++    .id          = LOSTIO_TYPES_SERVER,
++    .pre_open    = &amp;lio_server_pre_open,
++    .read        = &amp;lio_server_read,
++    .close       = &amp;lio_server_close,
++};
++
++/// Typ fuer eine Verbindung fuer TCP-Server
++static typehandle_t lio_type_server_conn = {
++    .id          = LOSTIO_TYPES_SERVER_CONN,
++    .post_open   = &amp;lio_server_conn_post_open,
++    .read        = &amp;lostio_tcp_read,
++    .write       = &amp;lostio_tcp_write,
++    .close       = &amp;lio_server_conn_close,
++};
++
++/**
++ * Registriert die LostIO-Typehandles, die fuer TCP-Server benoetigt werden
++ */
++void tcp_server_register_lostio(void)
++{
++    // Typ fuer das Verzeichnis tcp-listen
++    lostio_type_directory_use_as(LOSTIO_TYPES_SERVER_DIR);
++    get_typehandle(LOSTIO_TYPES_SERVER_DIR)-&gt;not_found =
++        &amp;lio_server_dir_not_found;
++
++    // Typen fuer einen TCP-Server und seine Verbindungen
++    lostio_register_typehandle(&amp;lio_type_server);
++    lostio_register_typehandle(&amp;lio_type_server_conn);
++
++    // Knoten erstellen
++    vfstree_create_node(&quot;/tcp-listen&quot;, LOSTIO_TYPES_SERVER_DIR, 0, NULL,
++        LOSTIO_FLAG_BROWSABLE);
++    vfstree_create_node(&quot;/tcp-conn&quot;, LOSTIO_TYPES_DIRECTORY, 0, NULL,
++        LOSTIO_FLAG_BROWSABLE);
++}
+-- 
+1.6.0.2
+
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001097.html">[tyndur-devel] [PATCH] mtest: \r anstelle von Escapesequenzen
+</A></li>
+	
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1098">[ Datum ]</a>
+              <a href="thread.html#1098">[ Thema ]</a>
+              <a href="subject.html#1098">[ Betreff (Subject)]</a>
+              <a href="author.html#1098">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

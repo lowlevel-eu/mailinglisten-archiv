@@ -1,0 +1,370 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH 06/10] usb: Create provide_virtual_devices()
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%2006/10%5D%20usb%3A%20Create%20provide_virtual_devices%28%29&In-Reply-To=%3C1451346799-23335-7-git-send-email-max%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000351.html">
+   <LINK REL="Next"  HREF="000353.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH 06/10] usb: Create provide_virtual_devices()</H1>
+    <B>Max Reitz</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%2006/10%5D%20usb%3A%20Create%20provide_virtual_devices%28%29&In-Reply-To=%3C1451346799-23335-7-git-send-email-max%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH 06/10] usb: Create provide_virtual_devices()">max at tyndur.org
+       </A><BR>
+    <I>Tue Dec 29 00:53:15 CET 2015</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000351.html">[cdi-devel] [PATCH 05/10] usb: Store hub and hub_port for each	usb_device
+</A></li>
+        <LI>Next message: <A HREF="000353.html">[cdi-devel] [PATCH 07/10] usb: Fix and simplify debugging code
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#352">[ date ]</a>
+              <a href="thread.html#352">[ thread ]</a>
+              <a href="subject.html#352">[ subject ]</a>
+              <a href="author.html#352">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>* new_hub() has been getting rather long. This pulls out the code which
+  enumerates and provides the virtual devices to CDI (either the full
+  physical device, or single interfaces, depending on the device and
+  configuration), making it shorter.
+! Also, that stuff was broken. It expected a certain order of
+  descriptors without gaps in between; fix it.
+! Of course, that is not the only way in which it was broken:
+  cdi_usb_device.interface should *not* be set to the interface
+  descriptor index, but to the value of that descriptor's
+  b_interface_number field.
+
+Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+---
+ usb/usb.c | 255 ++++++++++++++++++++++++++++++++++++++------------------------
+ 1 file changed, 155 insertions(+), 100 deletions(-)
+
+diff --git a/usb/usb.c b/usb/usb.c
+index c7a56d3..a8366e0 100644
+--- a/usb/usb.c
++++ b/usb/usb.c
+@@ -405,8 +405,162 @@ static void debug_configuration(usb_device_t *dev)
+ #endif
+ 
+ 
++static struct cdi_usb_descriptor *next_desc(struct cdi_usb_descriptor *desc)
++{
++    return (struct cdi_usb_descriptor *)((uintptr_t)desc + desc-&gt;b_length);
++}
++
+ static void new_hub_device(usb_logical_device_t *ldev);
+ 
++static void provide_virtual_devices(usb_device_t *dev)
++{
++    usb_logical_device_t *ldev = NULL;
++    int ldev_ep_idx = 0;
++    bool interface_level;
++
++    struct cdi_usb_descriptor *opaque_desc;
++    struct cdi_usb_device_descriptor *devd = &amp;dev-&gt;dev_desc;
++    struct cdi_usb_configuration_descriptor *config = dev-&gt;config;
++    struct cdi_usb_interface_descriptor *ifc;
++    struct cdi_usb_endpoint_descriptor *ep;
++
++    uintptr_t desc_end = (uintptr_t)config + config-&gt;w_total_length;
++
++    interface_level = devd-&gt;b_device_class == CDI_USB_DEVCLS_NONE;
++    if (!interface_level) {
++        ldev = calloc(1, sizeof(*ldev));
++        ldev-&gt;cdi.bus_data.bus_type = CDI_USB;
++        ldev-&gt;cdi.interface         = -1;
++        ldev-&gt;cdi.endpoint_count    = 1; // EP0
++        ldev-&gt;cdi.vendor_id         = devd-&gt;id_vendor;
++        ldev-&gt;cdi.product_id        = devd-&gt;id_product;
++        ldev-&gt;cdi.class_id          = devd-&gt;b_device_class;
++        ldev-&gt;cdi.subclass_id       = devd-&gt;b_device_sub_class;
++        ldev-&gt;cdi.protocol_id       = devd-&gt;b_device_protocol;
++
++        ldev-&gt;dev = dev;
++
++        ldev-&gt;endpoints = malloc(1 * sizeof(ldev-&gt;endpoints[0]));
++        ldev-&gt;endpoints[0] = 0; // EP0
++        ldev_ep_idx = 1;
++    }
++
++
++    opaque_desc = next_desc(&amp;config-&gt;base);
++
++    int i = 0;
++    while ((uintptr_t)next_desc(opaque_desc) &lt;= desc_end &amp;&amp;
++           i &lt; (int)config-&gt;b_num_interfaces)
++    {
++        if (opaque_desc-&gt;b_descriptor_type == CDI_USB_DESC_INTERFACE) {
++            i++;
++            ifc = CDI_UPCAST(opaque_desc,
++                             struct cdi_usb_interface_descriptor, base);
++        } else {
++            ifc = NULL;
++        }
++
++        opaque_desc = next_desc(opaque_desc);
++        if (!ifc) {
++            continue;
++        }
++
++        if (interface_level) {
++            ldev = calloc(1, sizeof(*ldev));
++            ldev-&gt;cdi.bus_data.bus_type = CDI_USB;
++            ldev-&gt;cdi.interface         = ifc-&gt;b_interface_number;
++            // Include EP0
++            ldev-&gt;cdi.endpoint_count    = ifc-&gt;b_num_endpoints + 1;
++            ldev-&gt;cdi.vendor_id         = devd-&gt;id_vendor;
++            ldev-&gt;cdi.product_id        = devd-&gt;id_product;
++            ldev-&gt;cdi.class_id          = ifc-&gt;b_interface_class;
++            ldev-&gt;cdi.subclass_id       = ifc-&gt;b_interface_sub_class;
++            ldev-&gt;cdi.protocol_id       = ifc-&gt;b_interface_protocol;
++
++            ldev-&gt;dev = dev;
++
++            ldev-&gt;endpoints = malloc(ldev-&gt;cdi.endpoint_count
++                                     * sizeof(ldev-&gt;endpoints[0]));
++            ldev-&gt;endpoints[0] = 0; // EP0
++            ldev_ep_idx = 1;
++        } else {
++            ldev-&gt;cdi.endpoint_count += ifc-&gt;b_num_endpoints;
++            ldev-&gt;endpoints = realloc(ldev-&gt;endpoints,
++                                      ldev-&gt;cdi.endpoint_count
++                                      * sizeof(ldev-&gt;endpoints[0]));
++        }
++
++        int j = 0;
++        while ((uintptr_t)next_desc(opaque_desc) &lt;= desc_end &amp;&amp;
++               j &lt; (int)ifc-&gt;b_num_endpoints)
++        {
++            if (opaque_desc-&gt;b_descriptor_type == CDI_USB_DESC_ENDPOINT) {
++                j++;
++                ep = CDI_UPCAST(opaque_desc,
++                                struct cdi_usb_endpoint_descriptor, base);
++            } else {
++                ep = NULL;
++            }
++
++            opaque_desc = next_desc(opaque_desc);
++            if (!ep) {
++                continue;
++            }
++
++            bool in = ep-&gt;b_endpoint_address &amp; CDI_USB_EPDSC_EPADR_DIR;
++            int id  = CDI_USB_EPDSC_EPADR_ID(ep-&gt;b_endpoint_address);
++
++            dev-&gt;eps[in][id].ep     = id;
++            dev-&gt;eps[in][id].mps
++                = CDI_USB_EPDSC_MPS_MPS(ep-&gt;w_max_packet_size);
++            dev-&gt;eps[in][id].desc   = ep;
++
++            switch (ep-&gt;bm_attributes &amp; CDI_USB_EPDSC_ATTR_XFER_TYPE_MASK) {
++                case CDI_USB_EPDSC_ATTR_CONTROL:
++                    dev-&gt;eps[in][id].type = CDI_USB_CONTROL;
++                    break;
++                case CDI_USB_EPDSC_ATTR_ISOCHRONOUS:
++                    dev-&gt;eps[in][id].type = CDI_USB_ISOCHRONOUS;
++                    break;
++                case CDI_USB_EPDSC_ATTR_BULK:
++                    dev-&gt;eps[in][id].type = CDI_USB_BULK;
++                    break;
++                case CDI_USB_EPDSC_ATTR_INTERRUPT:
++                    dev-&gt;eps[in][id].type = CDI_USB_INTERRUPT;
++                    break;
++            }
++
++            ldev-&gt;endpoints[ldev_ep_idx++] = ((int)in &lt;&lt; 4) | id;
++        }
++
++        // FIXME (should be a graceful failure)
++        assert(j == ifc-&gt;b_num_endpoints);
++
++        if (interface_level) {
++            if (ldev-&gt;cdi.class_id == CDI_USB_DEVCLS_HUB) {
++                new_hub_device(ldev);
++            } else {
++                cdi_provide_device(&amp;ldev-&gt;cdi.bus_data);
++            }
++        }
++
++        ifc = (void *)opaque_desc;
++    }
++
++    if (i &lt; config-&gt;b_num_interfaces) {
++        printf(&quot;[usb] warning: failed to inquire all device interfaces\n&quot;);
++    }
++
++    if (!interface_level) {
++        if (ldev-&gt;cdi.class_id == CDI_USB_DEVCLS_HUB) {
++            new_hub_device(ldev);
++        } else {
++            cdi_provide_device(&amp;ldev-&gt;cdi.bus_data);
++        }
++    }
++}
++
++
+ static void new_hub(usb_hub_t *hub)
+ {
+     for (int i = 0; i &lt; hub-&gt;cdi-&gt;ports; i++) {
+@@ -458,41 +612,14 @@ static void new_hub(usb_hub_t *hub)
+         debug_device(dev);
+ #endif
+ 
+-        usb_logical_device_t *ldev = NULL;
+-        int ldev_ep_idx = 0;
+-        bool interface_level;
+-
+-        interface_level = dev-&gt;dev_desc.b_device_class == CDI_USB_DEVCLS_NONE;
+-        if (!interface_level) {
+-            ldev = calloc(1, sizeof(*ldev));
+-            ldev-&gt;cdi.bus_data.bus_type = CDI_USB;
+-            ldev-&gt;cdi.interface         = -1;
+-            ldev-&gt;cdi.endpoint_count    = 1; // EP0
+-            ldev-&gt;cdi.vendor_id         = dev-&gt;dev_desc.id_vendor;
+-            ldev-&gt;cdi.product_id        = dev-&gt;dev_desc.id_product;
+-            ldev-&gt;cdi.class_id          = dev-&gt;dev_desc.b_device_class;
+-            ldev-&gt;cdi.subclass_id       = dev-&gt;dev_desc.b_device_sub_class;
+-            ldev-&gt;cdi.protocol_id       = dev-&gt;dev_desc.b_device_protocol;
+-
+-            ldev-&gt;dev = dev;
+-
+-            ldev-&gt;endpoints = malloc(1 * sizeof(ldev-&gt;endpoints[0]));
+-            ldev-&gt;endpoints[0] = 0; // EP0
+-            ldev_ep_idx = 1;
+-        }
+-
+         if (get_configurations(dev) &lt; 0) {
+             printf(&quot;[usb] failed to get device configurations\n&quot;);
+-            free(ldev-&gt;endpoints);
+-            free(ldev);
+             free(dev);
+             hub-&gt;drv-&gt;port_disable(hub-&gt;cdi, i);
+             continue;
+         }
+         if (choose_configuration(dev) &lt; 0) {
+             printf(&quot;[usb] failed to select device configuration\n&quot;);
+-            free(ldev-&gt;endpoints);
+-            free(ldev);
+             for (int j = 0; j &lt; (int)dev-&gt;dev_desc.b_num_configurations; j++) {
+                 free(dev-&gt;configs[j]);
+             }
+@@ -506,79 +633,7 @@ static void new_hub(usb_hub_t *hub)
+         debug_configuration(dev);
+ #endif
+ 
+-        struct cdi_usb_interface_descriptor *ifc = (void *)(dev-&gt;config + 1);
+-        for (int j = 0; j &lt; (int)dev-&gt;config-&gt;b_num_interfaces; j++) {
+-            if (interface_level) {
+-                ldev = calloc(1, sizeof(*ldev));
+-                ldev-&gt;cdi.bus_data.bus_type = CDI_USB;
+-                ldev-&gt;cdi.interface         = j;
+-                // Include EP0
+-                ldev-&gt;cdi.endpoint_count    = ifc-&gt;b_num_endpoints + 1;
+-                ldev-&gt;cdi.vendor_id         = dev-&gt;dev_desc.id_vendor;
+-                ldev-&gt;cdi.product_id        = dev-&gt;dev_desc.id_product;
+-                ldev-&gt;cdi.class_id          = ifc-&gt;b_interface_class;
+-                ldev-&gt;cdi.subclass_id       = ifc-&gt;b_interface_sub_class;
+-                ldev-&gt;cdi.protocol_id       = ifc-&gt;b_interface_protocol;
+-
+-                ldev-&gt;dev = dev;
+-
+-                ldev-&gt;endpoints = malloc(ldev-&gt;cdi.endpoint_count
+-                                         * sizeof(ldev-&gt;endpoints[0]));
+-                ldev-&gt;endpoints[0] = 0; // EP0
+-                ldev_ep_idx = 1;
+-            } else {
+-                ldev-&gt;cdi.endpoint_count += ifc-&gt;b_num_endpoints;
+-                ldev-&gt;endpoints = realloc(ldev-&gt;endpoints,
+-                                          ldev-&gt;cdi.endpoint_count
+-                                          * sizeof(ldev-&gt;endpoints[0]));
+-            }
+-
+-            struct cdi_usb_endpoint_descriptor *ep = (void *)(ifc + 1);
+-            for (int k = 0; k &lt; (int)ifc-&gt;b_num_endpoints; k++, ep++) {
+-                bool in = ep-&gt;b_endpoint_address &amp; CDI_USB_EPDSC_EPADR_DIR;
+-                int id  = CDI_USB_EPDSC_EPADR_ID(ep-&gt;b_endpoint_address);
+-
+-                dev-&gt;eps[in][id].ep     = id;
+-                dev-&gt;eps[in][id].mps
+-                    = CDI_USB_EPDSC_MPS_MPS(ep-&gt;w_max_packet_size);
+-                dev-&gt;eps[in][id].desc   = ep;
+-
+-                switch (ep-&gt;bm_attributes &amp; CDI_USB_EPDSC_ATTR_XFER_TYPE_MASK) {
+-                    case CDI_USB_EPDSC_ATTR_CONTROL:
+-                        dev-&gt;eps[in][id].type = CDI_USB_CONTROL;
+-                        break;
+-                    case CDI_USB_EPDSC_ATTR_ISOCHRONOUS:
+-                        dev-&gt;eps[in][id].type = CDI_USB_ISOCHRONOUS;
+-                        break;
+-                    case CDI_USB_EPDSC_ATTR_BULK:
+-                        dev-&gt;eps[in][id].type = CDI_USB_BULK;
+-                        break;
+-                    case CDI_USB_EPDSC_ATTR_INTERRUPT:
+-                        dev-&gt;eps[in][id].type = CDI_USB_INTERRUPT;
+-                        break;
+-                }
+-
+-                ldev-&gt;endpoints[ldev_ep_idx++] = ((int)in &lt;&lt; 4) | id;
+-            }
+-
+-            if (interface_level) {
+-                if (ldev-&gt;cdi.class_id == CDI_USB_DEVCLS_HUB) {
+-                    new_hub_device(ldev);
+-                } else {
+-                    cdi_provide_device(&amp;ldev-&gt;cdi.bus_data);
+-                }
+-            }
+-
+-            ifc = (void *)ep;
+-        }
+-
+-        if (!interface_level) {
+-            if (ldev-&gt;cdi.class_id == CDI_USB_DEVCLS_HUB) {
+-                new_hub_device(ldev);
+-            } else {
+-                cdi_provide_device(&amp;ldev-&gt;cdi.bus_data);
+-            }
+-        }
++        provide_virtual_devices(dev);
+     }
+ }
+ 
+-- 
+2.6.4
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000351.html">[cdi-devel] [PATCH 05/10] usb: Store hub and hub_port for each	usb_device
+</A></li>
+	<LI>Next message: <A HREF="000353.html">[cdi-devel] [PATCH 07/10] usb: Fix and simplify debugging code
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#352">[ date ]</a>
+              <a href="thread.html#352">[ thread ]</a>
+              <a href="subject.html#352">[ subject ]</a>
+              <a href="author.html#352">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

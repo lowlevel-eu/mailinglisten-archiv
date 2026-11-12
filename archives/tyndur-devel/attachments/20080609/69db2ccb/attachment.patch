@@ -1,0 +1,194 @@
+Index: trunk/src/kernel2/src/syscalls/pv.c
+===================================================================
+--- /dev/null
++++ trunk/src/kernel2/src/syscalls/pv.c
+@@ -0,0 +1,72 @@
++/*
++ * Copyright (c) 2008 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <types.h>
++#include <stdint.h>
++#include <string.h>
++
++#include "syscall.h"
++#include "tasks.h"
++#include "cpu.h"
++
++/**
++ * Kritischen Abschnitt einleiten (Keine RPCs ausser Antworten sind mehr
++ * zulaessig)
++ */
++int syscall_pm_p(void)
++{
++    pm_block_rpc(cpu_get_current()->thread->process,
++        cpu_get_current()->thread->process->pid);
++
++    return 0;
++}
++
++/**
++ * Kritischen Abschnitt verlassen
++ *
++ * @param pid PID, fuer die wieder RPCs zugelassen werden sollen. 0 fuer
++ * den aufrufenden Prozess selbst
++ */
++int syscall_pm_v(pid_t pid)
++{
++    if (pid == 0) {
++        pm_unblock_rpc(cpu_get_current()->thread->process,
++            cpu_get_current()->thread->process->pid);
++    } else {
++        pm_unblock_rpc(pm_get(pid), cpu_get_current()->thread->process->pid);
++    }
++
++    return 0;
++}
+Index: trunk/src/kernel2/src/syscall.c
+===================================================================
+--- trunk.orig/src/kernel2/src/syscall.c
++++ trunk/src/kernel2/src/syscall.c
+@@ -57,6 +57,9 @@ void syscall_init()
+     syscall_register(SYSCALL_PM_GET_CMDLINE, (void*) syscall_pm_get_cmdline,
+         0);
+ 
++    syscall_register(SYSCALL_PM_P, (void*) &syscall_pm_p, 0);
++    syscall_register(SYSCALL_PM_V, (void*) &syscall_pm_v, 1);
++
+     syscall_register(SYSCALL_SET_RPC_HANDLER, (void*) &syscall_set_rpc_handler,
+         1);
+ 
+Index: trunk/src/kernel2/include/syscall.h
+===================================================================
+--- trunk.orig/src/kernel2/include/syscall.h
++++ trunk/src/kernel2/include/syscall.h
+@@ -90,6 +90,11 @@ pid_t syscall_pm_get_parent_pid(pid_t pi
+ /// Befehlszeile des aktuellen Prozesses abfragen
+ const char* syscall_pm_get_cmdline();
+ 
++/// Kritischen Abschnitt betreten
++int syscall_pm_p(void);
++
++/// Kritischen Abschnitt verlassen
++int syscall_pm_v(pid_t pid);
+ 
+ // RPC
+ /// RPC-Handler registrieren
+Index: trunk/src/kernel2/include/tasks.h
+===================================================================
+--- trunk.orig/src/kernel2/include/tasks.h
++++ trunk/src/kernel2/include/tasks.h
+@@ -70,6 +70,12 @@ typedef struct {
+ 
+     /// Der RPC-Handler fuer diesen Prozess
+     vaddr_t rpc_handler;
++
++    /// Die PID des Prozesses, der RPC fuer diesen Prozess abgestellt hat
++    dword blocked_by_pid;
++
++    /// Die Anzahl von p()s (RPC wird erst bei 0 wieder freigegeben)
++    dword blocked_count;
+ } pm_process_t;
+ 
+ 
+@@ -115,6 +121,13 @@ bool pm_unblock(pm_process_t* process);
+ /// Prozess anhand seiner PID suchen
+ pm_process_t* pm_get(pid_t pid);
+ 
++/// RPC-Empfang fuer einen Prozess blockieren
++bool pm_block_rpc(pm_process_t* task, pid_t blocked_by);
++
++/// RPC-Empfang fuer einen Prozess wieder freigeben
++bool pm_unblock_rpc(pm_process_t* task, pid_t blocked_by);
++
++
+ /**
+  * Threadverwaltung
+  */
+Index: trunk/src/kernel2/src/tasks/pm.c
+===================================================================
+--- trunk.orig/src/kernel2/src/tasks/pm.c
++++ trunk/src/kernel2/src/tasks/pm.c
+@@ -239,3 +239,51 @@ pm_process_t* pm_get(pid_t pid) {
+     }
+     return process;
+ }
++
++/**
++ * Blockiert einen Task. Zu einem blockierten Task können keine RPC-Aufrufe
++ * durchgeführt werden. Wenn der Task durch einen anderen Task blockiert ist,
++ * wird er außerdem vom Scheduler nicht mehr aufgerufen, bis der Task
++ * entblockt wird.
++ *
++ * @param task Zu blockierender Task
++ * @param blocked_by PID des blockierenden Tasks
++ */
++bool pm_block_rpc(pm_process_t* task, pid_t blocked_by)
++{
++    if(task->blocked_by_pid == blocked_by) {
++        task->blocked_count++;
++        return TRUE;
++    }
++
++    if (task->blocked_by_pid) {
++        return FALSE;
++    }
++
++    task->blocked_by_pid = blocked_by;
++    task->blocked_count = 1;
++
++    return TRUE;
++}
++
++/**
++ * Entblockt einen blockierten Task. Dies ist nur möglich, wenn der
++ * aufrufende Task dem blockierenden Task entspricht
++ *
++ * @param task Zu entblockender Task
++ * @param blocked_by Aufrufender Task
++ *
++ * @return true, wenn der Task erfolgreich entblockt wurde, false
++ * im Fehlerfall.
++ */
++bool pm_unblock_rpc(pm_process_t* task, pid_t blocked_by)
++{
++    if (task->blocked_by_pid == blocked_by) {
++        if(--(task->blocked_count) == 0) {
++            task->blocked_by_pid = 0;
++        }
++        return TRUE;
++    } else {
++        return FALSE;
++    }
++}

@@ -1,0 +1,136 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] kernel2: Kennzeichnung von vm86-Threads
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20kernel2%3A%20Kennzeichnung%20von%20vm86-Threads&In-Reply-To=%3C1302457560-25460-1-git-send-email-max%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002162.html">
+   <LINK REL="Next"  HREF="002164.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] kernel2: Kennzeichnung von vm86-Threads</H1>
+    <B>Max Reitz</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20kernel2%3A%20Kennzeichnung%20von%20vm86-Threads&In-Reply-To=%3C1302457560-25460-1-git-send-email-max%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH] kernel2: Kennzeichnung von vm86-Threads">max at tyndur.org
+                  </A><BR>
+    <I>So Apr 10 19:46:00 CEST 2011</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002162.html">[tyndur-devel] [PATCH] libc: ctype.h: extern &quot;C&quot; für C++-Programme
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002164.html">[tyndur-devel] (kein Betreff)
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2163">[ Datum ]</a>
+              <a href="thread.html#2163">[ Thema ]</a>
+              <a href="subject.html#2163">[ Betreff (Subject) ]</a>
+              <a href="author.html#2163">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>! Ein Bool in der Threadstruktur ist wesentlich schöner als ein nicht
+  gesetztes reserviertes Flag in EFLAGS und erspart obendrein
+  Peinlichkeiten, wenn das Flag irgendwann doch nicht mehr reserviert
+  sein sollte.
+
+Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">max at tyndur.org</A>&gt;
+---
+ src/kernel2/include/tasks.h      |    3 +++
+ src/kernel2/src/arch/i386/vm86.c |    6 ++++--
+ src/kernel2/src/interrupts/im.c  |    2 +-
+ src/kernel2/src/tasks/thread.c   |    3 +++
+ 4 files changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/src/kernel2/include/tasks.h b/src/kernel2/include/tasks.h
+index d4b4334..04d6b41 100644
+--- a/src/kernel2/include/tasks.h
++++ b/src/kernel2/include/tasks.h
+@@ -133,6 +133,9 @@ typedef struct {
+ 
+     /// Wird gesperrt, wenn aenderungen am Thread vorgenommen werden
+     lock_t lock;
++
++    /// Gesetzt, wenn der Thread ein VM86-Thread mit allem Drum und Dran ist
++    bool vm86;
+ } pm_thread_t;
+ 
+ typedef void (*pm_process_destroy_handler)(pm_process_t* process, void* prv);
+diff --git a/src/kernel2/src/arch/i386/vm86.c b/src/kernel2/src/arch/i386/vm86.c
+index 4edb42c..4bb33d5 100644
+--- a/src/kernel2/src/arch/i386/vm86.c
++++ b/src/kernel2/src/arch/i386/vm86.c
+@@ -180,8 +180,7 @@ static void vm86_gpf_entry(uint32_t above_error_code)
+         .error_code = (error_code &amp; (1 &lt;&lt; 1)) ? 0 : error_code,
+         .eip = (uintptr_t) &amp;vm86_task_entry,
+         .cs = 0x08,
+-        // Das gelöschte Bit 1 zeigt, dass es sich um einen vm86-Task handelt
+-        .eflags = 0x200
++        .eflags = 0x202
+     };
+ 
+     if ((isf.interrupt_number &lt; 0x20) &amp;&amp; (isf.interrupt_number != 13)) {
+@@ -225,6 +224,9 @@ static int create_vm86_task(int intr, vm86_regs_t* regs, uintptr_t stack)
+     pm_thread_t* task = pm_thread_create(current_process,
+         &amp;vm86_task_entry);
+ 
++    // Na ja... Fast normal.
++    task-&gt;vm86 = true;
++
+     cpu_tss_t* vm86_tss = mmc_valloc_limits(&amp;mmc_current_context(),
+         NUM_PAGES(2 * sizeof(cpu_tss_t)), 0, 0,
+         0x100000, KERNEL_MEM_END, MM_FLAGS_KERNEL_DATA);
+diff --git a/src/kernel2/src/interrupts/im.c b/src/kernel2/src/interrupts/im.c
+index a342669..97862ac 100644
+--- a/src/kernel2/src/interrupts/im.c
++++ b/src/kernel2/src/interrupts/im.c
+@@ -88,7 +88,7 @@ static void handle_exception(interrupt_stack_frame_t* isf, uint8_t int_num)
+ #if CONFIG_ARCH == ARCH_I386
+     // Pruefen, ob ein VM86-Task die Exception ausgeloest hat
+     // Falls ja lassen wir sie vom VM86-Code behandeln, wenn er kann
+-    if (!(isf-&gt;eflags &amp; (1 &lt;&lt; 1))) {
++    if (current_thread-&gt;vm86) {
+         if (vm86_exception(isf)) {
+             return;
+         }
+diff --git a/src/kernel2/src/tasks/thread.c b/src/kernel2/src/tasks/thread.c
+index 618d369..3450626 100644
+--- a/src/kernel2/src/tasks/thread.c
++++ b/src/kernel2/src/tasks/thread.c
+@@ -67,6 +67,9 @@ pm_thread_t* pm_thread_create(pm_process_t* process, vaddr_t entry)
+     // Der Lock wird gesperrt initialisiert
+     thread-&gt;lock = 1;
+ 
++    // Normalerweise sind Threads keine VM86-Threads
++    thread-&gt;vm86 = false;
++
+     // Eine Page fuer den Kernelstacks des Threads allozieren
+     thread-&gt;kernel_stack_size = 0x1000;
+     paddr_t kernel_stack_phys = pmm_alloc(NUM_PAGES(thread-&gt;
+-- 
+1.7.3.4
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002162.html">[tyndur-devel] [PATCH] libc: ctype.h: extern &quot;C&quot; für C++-Programme
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002164.html">[tyndur-devel] (kein Betreff)
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2163">[ Datum ]</a>
+              <a href="thread.html#2163">[ Thema ]</a>
+              <a href="subject.html#2163">[ Betreff (Subject)]</a>
+              <a href="author.html#2163">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

@@ -1,0 +1,1368 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH v2] CDI.usb
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%20v2%5D%20CDI.usb&In-Reply-To=%3C1272192060-18512-1-git-send-email-max%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000200.html">
+   
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH v2] CDI.usb</H1>
+    <B>max at tyndur.org</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%20v2%5D%20CDI.usb&In-Reply-To=%3C1272192060-18512-1-git-send-email-max%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH v2] CDI.usb">max at tyndur.org
+       </A><BR>
+    <I>Sun Apr 25 12:41:00 CEST 2010</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000200.html">[cdi-devel] [PATCH] CDI.usb
+</A></li>
+        
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#201">[ date ]</a>
+              <a href="thread.html#201">[ thread ]</a>
+              <a href="subject.html#201">[ subject ]</a>
+              <a href="author.html#201">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>From: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+
+This version is slightly changed to fulfill the suggestions Kevin
+made.
+
+Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+---
+ include/cdi-osdep.h       |    9 +
+ include/cdi.h             |    2 +-
+ include/cdi/usb-bus.h     |   98 ++++++
+ include/cdi/usb-hc.h      |  268 +++++++++++++++++
+ include/cdi/usb-structs.h |  159 ++++++++++
+ include/cdi/usb.h         |  713 +++++++++++++++++++++++++++++++++++++++++++++
+ 6 files changed, 1248 insertions(+), 1 deletions(-)
+ create mode 100644 include/cdi/usb-bus.h
+ create mode 100644 include/cdi/usb-hc.h
+ create mode 100644 include/cdi/usb-structs.h
+ create mode 100644 include/cdi/usb.h
+
+diff --git a/include/cdi-osdep.h b/include/cdi-osdep.h
+index 279001a..c1778fd 100644
+--- a/include/cdi-osdep.h
++++ b/include/cdi-osdep.h
+@@ -67,4 +67,13 @@ typedef struct
+ typedef struct {
+ } cdi_mem_osdep;
+ 
++/**
++ * \if german
++ * Dient zur eindeutigen Identifizierung eines USB-Hostcontrollers.
++ * \elseif english
++ * Used for uniquely identifying a USB host controller.
++ * \endif
++ */
++typedef void* cdi_usb_hc_t;
++
+ #endif
+diff --git a/include/cdi.h b/include/cdi.h
+index 851bb6a..9e15b8c 100644
+--- a/include/cdi.h
++++ b/include/cdi.h
+@@ -292,7 +292,7 @@ void cdi_driver_register(struct cdi_driver* driver);
+ 
+ /**
+  * \german
+- * Informiert dass Betriebssystem, dass ein neues Geraet angeschlossen wurde.
++ * Informiert das Betriebssystem, dass ein neues Geraet angeschlossen wurde.
+  *
+  * Der Zweck dieser Funktion ist es, Bustreibern zu erm&#195;&#182;glichen, die Ger&#195;&#164;te
+  * auf ihrem Bus anderen Treibern zur Verf&#195;&#188;gung zu stellen, die &#195;&#188;ber den
+diff --git a/include/cdi/usb-bus.h b/include/cdi/usb-bus.h
+new file mode 100644
+index 0000000..b01cd35
+--- /dev/null
++++ b/include/cdi/usb-bus.h
+@@ -0,0 +1,98 @@
++/*
++ * Copyright (c) 2010 Max Reitz
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it
++ * and/or modify it under the terms of the Do What The Fuck You Want
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * <A HREF="http://sam.zoy.org/projects/COPYING.WTFPL">http://sam.zoy.org/projects/COPYING.WTFPL</A> for more details.
++ */
++
++/**
++ * \if german
++ * Definitionen f&#195;&#188;r USB-Bustreiber.
++ * \elseif english
++ * Definitions for USB bus drivers.
++ * \endif
++ */
++/*\@{*/
++
++#ifndef _CDI_USB_BUS_H_
++#define _CDI_USB_BUS_H_
++
++#include &lt;cdi.h&gt;
++#include &lt;cdi/usb.h&gt;
++#include &lt;cdi/usb-hc.h&gt;
++
++struct cdi_usb_bus_driver {
++    struct cdi_driver drv;
++    /**
++     * \if german
++     *
++     * Wird aufgerufen, wenn ein neuer Hostcontroller gefunden wurde.
++     *
++     * @param hc Gefundener Hostcontroller
++     *
++     * \elseif english
++     *
++     * Is called when a new host controller has been found.
++     *
++     * @param hc Found host controller
++     *
++     * \endif
++     */
++    void (*found_hc)(cdi_usb_hc_t hc);
++    /**
++     * \if german
++     * s. cdi_usb_connect()
++     * \elseif english
++     * see cdi_usb_connect()
++     * \endif
++     */
++    cdi_usb_pipe_t (*create_pipe)(cdi_usb_endpoint_t endpoint);
++    /**
++     * \if german
++     * s. cdi_usb_disconnect()
++     * \elseif english
++     * see cdi_usb_disconnect()
++     * \endif
++     */
++    void (*destroy_pipe)(cdi_usb_pipe_t pipe);
++    /**
++     * \if german
++     * s. cdi_usb_initiate_transaction()
++     * \elseif english
++     * see cdi_usb_initiate_transaction()
++     * \endif
++     */
++    int (*initiate_transaction)(struct cdi_usb_transaction* transaction);
++    /**
++     * \if german
++     * s. cdi_get_usb_endpoint()
++     * \elseif english
++     * see cdi_get_usb_endpoint()
++     * \endif
++     */
++    int (*get_endpoint)(struct cdi_usb_endpoint* endpoint, cdi_usb_endpoint_t id);
++    /**
++     * \if german
++     * s. cdi_get_usb_interface()
++     * \elseif english
++     * see cdi_get_usb_interface()
++     * \endif
++     */
++    int (*get_interface)(struct cdi_usb_interface* interface);
++    /**
++     * \if german
++     * s. cdi_usb_get_pipe_information()
++     * \elseif english
++     * see cdi_usb_get_pipe_information()
++     * \endif
++     */
++    int (*get_pipe_info)(cdi_usb_pipe_t pipe, int* device_addr,
++        struct cdi_usb_endpoint* endpoint);
++};
++
++#endif
++/*\@}*/
++
+diff --git a/include/cdi/usb-hc.h b/include/cdi/usb-hc.h
+new file mode 100644
+index 0000000..fcb0658
+--- /dev/null
++++ b/include/cdi/usb-hc.h
+@@ -0,0 +1,268 @@
++/*
++ * Copyright (c) 2010 Max Reitz
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it
++ * and/or modify it under the terms of the Do What The Fuck You Want
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * <A HREF="http://sam.zoy.org/projects/COPYING.WTFPL">http://sam.zoy.org/projects/COPYING.WTFPL</A> for more details.
++ */
++
++/**
++ * \if german
++ * USB-Hostcontroller-Definitionen
++ * \elseif english
++ * USB host controller definitions
++ * \endif
++ */
++/*\@{*/
++
++#ifndef _CDI_USB_HC_H_
++#define _CDI_USB_HC_H_
++
++#include &lt;cdi.h&gt;
++#include &lt;cdi-osdep.h&gt;
++#include &lt;cdi/usb.h&gt;
++
++struct cdi_usb_hc {
++    struct cdi_device dev;
++    /**
++     * \if german
++     * Anzahl der Rootports.
++     * \elseif english
++     * Root port count.
++     * \endif
++     */
++    int ports;
++};
++
++struct cdi_usb_hcd {
++    struct cdi_driver drv;
++    /**
++     * \if german
++     * Geschwindigkeit(en), die dieser Hostcontrollertreiber unterst&#195;&#188;tzt.
++     * \elseif english
++     * Speed(s) supported by this host controller driver.
++     * \endif
++     */
++    cdi_usb_speed_t speed;
++    /**
++     * \if german
++     * Ist dieses Flag gesetzt, so muss die entsprechende Funktion f&#195;&#188;r jeden
++     * registrierten Hostcontroller mit diesem Treiber st&#195;&#164;ndig aufgerufen
++     * werden, damit z. B. der Status von angeschlossenen und nicht
++     * angeschlossenen Ger&#195;&#164;te aktualisiert werden kann.
++     * \elseif english
++     * If this flag is set, the according function has to be called for every
++     * registered host controller with this driver periodically, thus the driver
++     * can refresh the status of connected and disconnected devices, for
++     * example.
++     * \endif
++     */
++    int needs_periodic_call;
++    /**
++     * \if german
++     *
++     * Callback, das vom OS st&#195;&#164;ndig aufgerufen werden muss, wenn das gerade
++     * beschriebene Flag gesetzt ist.
++     *
++     * @param hc Hostcontroller (Funktion muss mit allen Hostcontrollern
++     *           nacheinander aufgerufen werden)
++     *
++     * \elseif english
++     *
++     * Callback which is periodically called by the OS if the flag just
++     * described is set.
++     *
++     * @param hc Host controller (function has to be called with all host
++     *           controllers consecutively)
++     *
++     * \endif
++     */
++    void (*periodic_callback)(struct cdi_usb_hc* hc);
++    /**
++     * \if german
++     *
++     * Untersucht einen Rootport auf ein angeschlossenes Ger&#195;&#164;t.
++     *
++     * @param hc Hostcontroller
++     * @param dev Die Funktion muss diese Struktur mit Informationen f&#195;&#188;llen,
++     *            wenn ein Ger&#195;&#164;t angeschlossen ist (nur speed-Feld).
++     * @param port Index des Ports (von 0 beginnend)
++     *
++     * @return 0, wenn ein Ger&#195;&#164;t angeschlossen ist, sonst -1.
++     *
++     * \elseif english
++     *
++     * Determines if a device is plugged into a root port.
++     *
++     * @param Host controller
++     * @param dev The function has to store information about the device (if
++     *            available) here (speed field has to be set).
++     * @param port Port's index (starting from 0)
++     *
++     * @return 0 if there's a device, -1 else.
++     *
++     * \endif
++     */
++    int (*scan_port)(struct cdi_usb_hc* hc, struct cdi_usb_device* dev,
++        int port);
++    /**
++     * \if german
++     *
++     * Aktiviert einen Rootport (treibt also ggf. Resume) und treibt
++     * anschlie&#195;&#159;end 50 ms lang ein Resetsignal.
++     *
++     * @param hc Hostcontroller
++     * @param port Der zu aktivierende Port.
++     *
++     * \elseif english
++     *
++     * Activates a root port (drives resume if necessary) and drives a 50 ms
++     * reset signal afterwards.
++     *
++     * @param hc Host controller
++     * @param port Port to be activated.
++     *
++     * \endif
++     */
++    void (*reset_and_enable)(struct cdi_usb_hc* hc, int port);
++    /**
++     * \if german
++     *
++     * Deaktiviert einen Rootport.
++     *
++     * @param hc Hostcontroller
++     * @param port Zu deaktivierender Port
++     *
++     * \elseif english
++     *
++     * Disables a root port.
++     *
++     * @param hc Host controller
++     * @param port Port to be disabled
++     *
++     * \endif
++     */
++    void (*disable)(struct cdi_usb_hc* hc, int port);
++    /**
++     * \if german
++     *
++     * Erstellt eine Pipe zum angegebenen Endpunkt.
++     *
++     * @param hc Hostcontroller
++     * @param device_addr USB-Adresse des Zielger&#195;&#164;ts
++     * @param endpoint Informationen zum Endpunkt
++     *
++     * \elseif english
++     *
++     * Creates a pipe to the given endpoint.
++     *
++     * @param hc Host controller
++     * @param device_addr Target device's USB address
++     * @param endpoint Information about the endpoint
++     *
++     * \endif
++     */
++    void (*create_pipe)(struct cdi_usb_hc* hc, int device_addr,
++        struct cdi_usb_endpoint* endpoint);
++    /**
++     * \if german
++     *
++     * Entfernt alle Pipes zum angegebenen Endpunkt (und mit ihnen alle
++     * entsprechenden &#195;&#156;bertragungen).
++     *
++     * @param hc Hostcontroller
++     * @param device_addr USB-Adresse des Zielger&#195;&#164;ts
++     * @param endpoint Informationen zum Endpunkt
++     *
++     * \elseif english
++     *
++     * Removes all pipes to the given endpoint (and all according transactions,
++     * too).
++     *
++     * @param hc Host controller
++     * @param device_addr Target device's USB address
++     * @param endpoint Information about the endpoint
++     *
++     * \endif
++     */
++    void (*destroy_pipe)(struct cdi_usb_hc* hc, int device_addr,
++        struct cdi_usb_endpoint* endpoint);
++    /**
++     * \if german
++     *
++     * Leitet eine USB-Transaktion ein.
++     *
++     * @param hc Hostcontroller
++     * @param transaction Beschreibung der &#195;&#156;bertragung
++     *
++     * \elseif english
++     *
++     * Initiates a USB transaction.
++     *
++     * @param hc Host controller
++     * @param transaction Transaction's description
++     *
++     * \endif
++     */
++    void (*initiate_transaction)(struct cdi_usb_hc* hc,
++        struct cdi_usb_transaction* transaction);
++};
++
++#ifdef __cplusplus
++extern &quot;C&quot; {
++#endif
++
++/**
++ * \if german
++ *
++ * Am angegebenen Rootport trat ein CSC (connect status change) auf, es wurde
++ * also ein Ger&#195;&#164;t angesteckt oder entfernt. Diese Funktion wird vom HCD
++ * aufgerufen, um dem OS diese Ver&#195;&#164;nderung mitzuteilen, damit es alle
++ * Informationen zu diesem Port aktualisieren kann.
++ *
++ * @param hc Hostcontroller
++ * @param port Rootport, an dem der CSC aufgetreten ist
++ *
++ * \elseif english
++ *
++ * A CSC (connect status change) occured at the given root port, i.e., a device
++ * has been removed or plugged in. This function is called by the HCD to tell
++ * the OS about that change, thus it can refresh all information about this
++ * port.
++ *
++ * @param hc Host controller
++ * @param port Root port where the CSC occured
++ *
++ * \endif
++ */
++void cdi_usb_csc(struct cdi_usb_hc* hc, int port);
++
++/**
++ * \if german
++ * Die folgendenen Funktionen verhalten sich genau so wie die dazugeh&#195;&#182;rigen
++ * Funktion in struct cdi_usb_hcd.
++ * \elseif english
++ * The following functions behave exactly like the according functions in
++ * struct cdi_usb_hcd.
++ * \endif
++ */
++
++int cdi_usb_hc_scan_port(cdi_usb_hc_t hc, struct cdi_usb_device* dev, int port);
++void cdi_usb_hc_reset_and_enable(cdi_usb_hc_t hc, int port);
++void cdi_usb_hc_disable(cdi_usb_hc_t hc, int port);
++void cdi_usb_hc_create_pipe(cdi_usb_hc_t hc, int device_addr,
++    struct cdi_usb_endpoint* endpoint);
++void cdi_usb_hc_destroy_pipe(cdi_usb_hc_t hc, int device_addr,
++    struct cdi_usb_endpoint* endpoint);
++void cdi_usb_hc_initiate_transaction(cdi_usb_hc_t hc,
++    struct cdi_usb_transaction* transaction);
++
++#ifdef __cplusplus
++}; // extern &quot;C&quot;
++#endif
++
++#endif
++/*\@}*/
++
+diff --git a/include/cdi/usb-structs.h b/include/cdi/usb-structs.h
+new file mode 100644
+index 0000000..316165e
+--- /dev/null
++++ b/include/cdi/usb-structs.h
+@@ -0,0 +1,159 @@
++/*
++ * Copyright (c) 2010 Max Reitz
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it
++ * and/or modify it under the terms of the Do What The Fuck You Want
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * <A HREF="http://sam.zoy.org/projects/COPYING.WTFPL">http://sam.zoy.org/projects/COPYING.WTFPL</A> for more details.
++ */
++
++/**
++ * \if german
++ * Allgemeine USB-Strukturen
++ * \elseif english
++ * General USB structures
++ * \endif
++ */
++/*\@{*/
++
++#ifndef _CDI_USB_STRUCTS_H_
++#define _CDI_USB_STRUCTS_H_
++
++#include &lt;stdint.h&gt;
++
++#define CDI_USB_SETUP_OUT     (0 &lt;&lt; 7)
++#define CDI_USB_SETUP_IN      (1 &lt;&lt; 7)
++#define CDI_USB_SETUP_REQ_STD (0 &lt;&lt; 5)
++#define CDI_USB_SETUP_REQ_CLS (1 &lt;&lt; 5)
++#define CDI_USB_SETUP_REQ_VDR (2 &lt;&lt; 5)
++#define CDI_USB_SETUP_REC_DEV 0
++#define CDI_USB_SETUP_REC_IF  1
++#define CDI_USB_SETUP_REC_EP  2
++#define CDI_USB_SETUP_REC_OTH 3
++
++enum cdi_usb_setup_requst {
++    CDI_USB_GET_STATUS = 0,
++    CDI_USB_CLEAR_FEATURE = 1,
++    CDI_USB_SET_FEATURE = 3,
++    CDI_USB_SET_ADDRESS = 5,
++    CDI_USB_GET_DESCRIPTOR = 6,
++    CDI_USB_SET_DESCRIPTOR = 7,
++    CDI_USB_GET_CONFIGURATION = 8,
++    CDI_USB_SET_CONFIGURATION = 9,
++    CDI_USB_GET_INTERFACE = 10,
++    CDI_USB_SET_INTERFACE = 11,
++    CDI_USB_SYNC_FRAME = 12
++};
++
++enum cdi_usb_setup_descriptor {
++    CDI_USB_DESC_DEVICE = 1 &lt;&lt; 8,
++    CDI_USB_DESC_CONFIGURATION = 2 &lt;&lt; 8,
++    CDI_USB_DESC_STRING = 3 &lt;&lt; 8,
++    CDI_USB_DESC_INTERFACE = 4 &lt;&lt; 8,
++    CDI_USB_DESC_ENDPOINT = 5 &lt;&lt; 8,
++    CDI_USB_DESC_DEVICE_QUALIFIER = 6 &lt;&lt; 8,
++    CDI_USB_DESC_OTHER_SPEED_CONFIGURATION = 7 &lt;&lt; 8,
++    CDI_USB_DESC_INTERFACE_POWER = 8 &lt;&lt; 8,
++
++    CDI_USB_DESC_HUB = 41 &lt;&lt; 8
++};
++
++struct cdi_usb_setup_packet {
++    uint8_t type;
++    uint8_t request;
++    uint16_t value;
++    uint16_t index;
++    uint16_t length;
++} __attribute__((packed));
++
++struct cdi_usb_descriptor {
++    uint8_t length;
++    uint8_t desc_type;
++} __attribute__((packed));
++
++struct cdi_usb_device_descriptor {
++    struct cdi_usb_descriptor desc;
++    uint16_t bcd_usb;
++    uint8_t class, subclass, protocol;
++    uint8_t mps0;
++    uint16_t vendor_id, device_id;
++    uint16_t bcd_device;
++    uint8_t i_manufacturer, i_product, i_serial;
++    uint8_t num_configurations;
++} __attribute__((packed));
++
++struct cdi_usb_config_descriptor {
++    struct cdi_usb_descriptor desc;
++    uint16_t total_length;
++    uint8_t num_interfaces;
++    uint8_t configuration_value;
++    uint8_t i_configuration;
++    unsigned rsvd0         : 5;
++    unsigned remote_wakeup : 1;
++    unsigned self_powered  : 1;
++    unsigned rsvd1         : 1;
++    uint8_t max_power;
++} __attribute__((packed));
++
++struct cdi_usb_interface_descriptor {
++    struct cdi_usb_descriptor desc;
++    uint8_t interface_number;
++    uint8_t alternate_setting;
++    uint8_t num_endpoints;
++    uint8_t class, subclass, protocol;
++    uint8_t i_interface;
++} __attribute__((packed));
++
++#define CDI_USB_EP_CONTROL     0
++#define CDI_USB_EP_ISOCHRONOUS 1
++#define CDI_USB_EP_BULK        2
++#define CDI_USB_EP_INTERRUPT   3
++
++struct cdi_usb_endpoint_descriptor {
++    struct cdi_usb_descriptor desc;
++    unsigned number    : 4;
++    unsigned rsvd1     : 3;
++    unsigned direction : 1;
++    unsigned type  : 2;
++    unsigned sync  : 2;
++    unsigned usage : 2;
++    unsigned rsvd2 : 2;
++    unsigned mps       : 11;
++    unsigned trans_opp : 2;
++    unsigned rsvd3     : 3;
++    uint8_t interval;
++} __attribute__((packed));
++
++struct cdi_usb_device_qualifier {
++    struct cdi_usb_descriptor desc;
++    uint16_t bcd_usb;
++    uint8_t class, subclass, protocol;
++    uint8_t mps0;
++    uint8_t num_configurations;
++    uint8_t rsvd;
++} __attribute__((packed));
++
++struct cdi_usb_hub_descriptor {
++    struct cdi_usb_descriptor desc;
++    uint8_t nbr_ports;
++    unsigned power_mode : 2;
++    unsigned compound   : 1;
++    unsigned oc_protect : 2;
++    unsigned tt         : 2;
++    unsigned pindicator : 1;
++    uint8_t rsvd;
++    uint8_t pwr_on_2_pwr_good;
++    uint8_t hub_contr_current;
++    /**
++     * \if german
++     * Die folgenden Felder haben eine variable Gr&#195;&#182;&#195;&#159;e.
++     * \elseif english
++     * The following fields are not constant in size.
++     * \endif
++     */
++} __attribute__((packed));
++
++#endif
++/*\@}*/
++
+diff --git a/include/cdi/usb.h b/include/cdi/usb.h
+new file mode 100644
+index 0000000..b784327
+--- /dev/null
++++ b/include/cdi/usb.h
+@@ -0,0 +1,713 @@
++/*
++ * Copyright (c) 2010 Max Reitz
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it
++ * and/or modify it under the terms of the Do What The Fuck You Want
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * <A HREF="http://sam.zoy.org/projects/COPYING.WTFPL">http://sam.zoy.org/projects/COPYING.WTFPL</A> for more details.
++ */
++
++/**
++ * \if german
++ * USB beinhaltet mehrere Interfaces: Es gibt ein Interface, mit dem sich
++ * Hostcontrollertreiber beim System anmelden k&#195;&#182;nnen, eines, mit dem USB-
++ * Bustreiber arbeiten (es sollte eigentlich nur einen Bustreiber geben) und
++ * eines, mit dem sich USB-Ger&#195;&#164;tetreiber beim System registrieren k&#195;&#182;nnen,
++ * sodass sie aufgerufen werden, wenn ein entsprechendes Ger&#195;&#164;t gefunden wird.
++ *
++ * \section usb_dev Ein USB-Ger&#195;&#164;t
++ * Bei CDI.usb gibt es zwei verschiedene Typen von USB-Ger&#195;&#164;ten:
++ *
++ * - Echte (physische) USB-Ger&#195;&#164;te: Dies ist z. B. ein USB-Stick oder eine
++ *   Tastatur, also das, was auch der Normalb&#195;&#188;rger als Ger&#195;&#164;t bezeichnen w&#195;&#188;rde.
++ * - Logische Ger&#195;&#164;te: Ein echtes USB-Ger&#195;&#164;t kann mehrere logische enthalten,
++ *   so ist eine Webcam gleichzeitig Video- und Audioger&#195;&#164;t. Diese Teilung wird
++ *   &#195;&#188;ber Interfaces erreicht. Ein logisches Ger&#195;&#164;t kann also entweder ein
++ *   Interface (meistens so, auch wenn nur ein logisches Ger&#195;&#164;t im echten
++ *   enthalten ist) oder ein echtes Ger&#195;&#164;t sein (z. B. bei Diagnoseger&#195;&#164;ten).
++ *   Logische Ger&#195;&#164;te werden (hier) auch USB-Einheiten genannt.
++ *
++ * Jedem logischen Ger&#195;&#164;t wird ein Treiber zugewiesen (bzw. es wird zumindest
++ * versucht). So kann ein echtes Ger&#195;&#164;t von mehreren Treibern gleichzeitig
++ * gesteuert werden.
++ *
++ * \section usb_hc Hostcontroller
++ * Der Hostcontrollertreiber &#195;&#188;bernimmt zwei Aufgaben:
++ *
++ * - Er leitet USB-Transaktionen ein und muss dabei z. B. selbst darauf achten,
++ *   dass die MPS des verwendeten Endpunkts nicht &#195;&#188;berschritten wird (also die
++ *   &#195;&#156;bertragungen selbst aufteilen).
++ * - Er steuert den Roothub, muss also erkennen, wenn neue Ger&#195;&#164;te angeschlossen
++ *   werden und dem OS die M&#195;&#182;glichkeit bieten, Informationen dar&#195;&#188;ber zu
++ *   erhalten, sie zur&#195;&#188;ckzusetzen, und so weiter.
++ *
++ * \section usb_bus_drv USB-Bustreiber
++ * Der Bustreiber ist f&#195;&#188;r die Steuerung der USB-Topologie zust&#195;&#164;ndig.
++ *
++ * - Er muss Ger&#195;&#164;te enumerieren und so dem OS &#195;&#188;ber neu angeschlossene Bericht
++ *   erstatten.
++ * - Er muss die Steuerung aller Hubs (au&#195;&#159;er Roothubs) &#195;&#188;bernehmen, ist also
++ *   gleichzeitig auch Hubtreiber.
++ * - Der Bustreiber muss Konfiguration und alternative Einstellungen f&#195;&#188;r
++ *   Interfaces selbstst&#195;&#164;ndig ausw&#195;&#164;hlen. In jedem Fall m&#195;&#188;ssen betroffene
++ *   Interfaces zun&#195;&#164;chst deinitialisiert und anschlie&#195;&#159;end wieder neu
++ *   registriert werden.
++ * - Au&#195;&#159;erdem muss er &#195;&#156;bertragungsanforderungen von den Ger&#195;&#164;tetreibern an den
++ *   Hostcontroller durchreichen und den Status aller Pipes festhalten (z. B.
++ *   Toggle-Bit). Bei &#195;&#156;bertragungsfehlern muss entsprechend reagiert werden
++ *   (z. B. ein ClearFeature(ENDPOINT_STALL) bei einem STALL).
++ *
++ * \section usb_dev_drv USB-Ger&#195;&#164;tetreiber
++ * Ein USB-Ger&#195;&#164;tetreiber steuert ein logisches USB-Ger&#195;&#164;t. Zun&#195;&#164;chst muss er sich
++ * beim System anmelden und mitteilen, welche Ger&#195;&#164;te er unterst&#195;&#188;tzt. Wird solch
++ * eines gefunden, so wird der Treiber aufgerufen, welcher daraufhin die
++ * Initialisierung (nicht die Enumeration) ausf&#195;&#188;hrt.
++ * \elseif english
++ * USB contains multiple interfaces: There is an interface for host controller
++ * drivers to register themselves at the OS, one for USB bus drivers (but there
++ * should be only one bus driver) and one for USB device drivers to register
++ * themselves at the OS, so they are called when an appropriate device has been
++ * found.
++ *
++ * \section usb_dev A USB device
++ * There are two different types of USB devices when using CDI.usb:
++ *
++ * - Physical USB devices: This is for example a USB pen drive or a keyboard,
++ *   i.e., those devices a normal user would call device.
++ * - Logical devices: A physical device may contain several logical ones, e.g.
++ *   a webcam is both video and audio device. This seperation is done via
++ *   interfaces. Hence, a logical device may be either an interface (in most
++ *   cases) or a physical device (e.g., diagnosis devices). Logical devices
++ *   are (as for here) also referred to as USB units.
++ *
++ * Every logical device is handled by one driver (i.e., one tries to do so).
++ * Thus, a physical device may be handled by several drivers simultanously.
++ *
++ * \section usb_hc Host controller
++ * The host controller has two tasks:
++ *
++ * - It initiates USB transactions and has to take care (for example) that the
++ *   MPS of the used endpoint will not be exceeded (so it has to split
++ *   transactions on its own, if necessary).
++ * - It controls the root hub, thus is responsible for discovering new devices
++ *   and the OS must be able to obtain information about them, reset them, and
++ *   so on.
++ *
++ * \section usb_bus_drv USB bus driver
++ * The bus driver is responsible for controling the USB topology.
++ *
++ * - It has to enumerate newly connected devices and tell the OS about them.
++ * - It is responsible for handling all hubs (except the root hub), i.e., is
++ *   also a hub driver.
++ * - The bus driver has to select configurations and alternate interfaces on
++ *   its own. Everytime an interface is changed, it has to be de-initialised
++ *   and registered again.
++ * - Furthermore, it has to send transaction requests from the device drivers
++ *   to the host controller and it needs know every pipe's status (e.g., the
++ *   toggle bit). When detecting errors, it has to react properly (e.g.,
++ *   sending a ClearFeature(ENDPOINT_STALL) after a STALL).
++ *
++ * \section usb_dev_drv USB device driver
++ * A USB device driver controls a USB unit. First, it has to register itself at
++ * the OS and tell it about the devices it supports. If such a device is being
++ * found, the OS calls the driver which will afterwards initialise (not
++ * enumerate) the device.
++ * \endif
++ *
++ * \defgroup usb
++ */
++/*\@{*/
++
++#ifndef _CDI_USB_H_
++#define _CDI_USB_H_
++
++#include &lt;stddef.h&gt;
++#include &lt;stdint.h&gt;
++
++#include &lt;cdi.h&gt;
++#include &lt;cdi/mem.h&gt;
++#include &lt;cdi/lists.h&gt;
++
++/**
++ * \if german
++ * Unterscheidet bei USB-Einheiten zwischen Ger&#195;&#164;ten und Interfaces.
++ * \elseif english
++ * Differentiates between devices and interfaces on USB units.
++ * \endif
++ */
++typedef enum {
++    CDI_USB_DEVICE,
++    CDI_USB_INTERFACE
++} cdi_usb_unit_type_t;
++
++/**
++ * \if german
++ * Typ eines Endpunkts oder einer Pipe
++ * \elseif english
++ * Endpoint's or pipe's type
++ * \endif
++ */
++typedef enum {
++    CDI_USB_EP_CONTROL,
++    CDI_USB_EP_BULK,
++    CDI_USB_EP_INTERRUPT,
++    CDI_USB_EP_ISOCHRONOUS
++} cdi_usb_endpoint_type_t;
++
++/**
++ * \if german
++ * Richtung eines Endpunkts oder Transfertyp
++ * \elseif english
++ * Endpoint's direction or transfer type
++ * \endif
++ */
++typedef enum {
++    CDI_USB_DIR_IN,
++    CDI_USB_DIR_OUT,
++    /**
++     * \if german
++     * Setuptransfers oder unbestimmte Richtung
++     * \elseif english
++     * Setup transfers or undefined direction
++     * \endif
++     */
++    CDI_USB_DIR_SETUP
++} cdi_usb_direction_t;
++
++/**
++ * \if german
++ * Geschwindigkeit eines Ger&#195;&#164;ts, eines Hostcontrollers, usw..
++ * \elseif english
++ * Speed of a device, a host controller, etc..
++ * \endif
++ */
++typedef enum {
++    CDI_USB_LOW_SPEED = (1 &lt;&lt; 0),
++    CDI_USB_FULL_SPEED = (1 &lt;&lt; 1),
++    CDI_USB_HIGH_SPEED = (1 &lt;&lt; 2),
++    CDI_USB_SUPERSPEED = (1 &lt;&lt; 3)
++} cdi_usb_speed_t;
++
++/**
++ * \if german
++ * Kann eine USB-Ger&#195;&#164;teadresse aufnehmen (0 &#226;&#128;&#147; 127)
++ * \elseif english
++ * Capable of holding a USB device address (0&#226;&#128;&#147;127)
++ * \endif
++ */
++typedef int8_t cdi_usb_dev_id_t;
++
++/**
++ * \if german
++ * Dient zur eindeutigen Identifizierung eines Interfaces innerhalb eines
++ * Ger&#195;&#164;ts
++ * \elseif english
++ * Used to uniquely identify an interface on one device
++ * \endif
++ */
++typedef int cdi_usb_interface_t;
++
++/**
++ * \if german
++ * Dient zur global eindeutigen Identifizierung eines Endpunkts
++ * \elseif english
++ * Used to uniquely identify an endpoint (globally)
++ * \endif
++ */
++typedef int cdi_usb_endpoint_t;
++
++/**
++ * \if german
++ * Repr&#195;&#164;sentiert eine USB-Pipe.
++ * \elseif english
++ * Represents a USB pipe.
++ * \endif
++ */
++typedef void* cdi_usb_pipe_t;
++
++struct cdi_usb_transaction;
++/**
++ * \if german
++ *
++ * Callback f&#195;&#188;r periodische Transfers.
++ *
++ * @param transaction Transaktion, die den Aufruf ausgel&#195;&#182;st hat
++ *
++ * \elseif english
++ *
++ * Callback for periodic transfers.
++ *
++ * @param transaction Transaction which caused the call
++ *
++ * \endif
++ */
++typedef void (*cdi_usb_callback_periodic_t)(struct cdi_usb_transaction* transaction);
++
++/**
++ * \if german
++ * Eine USB-Einheit ist ein logisches USB-Ger&#195;&#164;t. Jede Einheit wird von einem
++ * (oder keinem) USB-Ger&#195;&#164;tetreiber behandelt.
++ * Solch eine Einheit kann entweder ein echtes USB-Ger&#195;&#164;t oder (h&#195;&#164;ufiger) ein
++ * Interface sein.
++ * \elseif english
++ * A USB unit is a logical USB device. Each unit is handled by one (or none)
++ * USB device driver.
++ * Such a unit may be either a physical USB device or (more often) an interface.
++ * \endif
++ */
++struct cdi_usb_unit {
++    /**
++     * \if german
++     * Typ der Einheit (echtes Ger&#195;&#164;t oder Interface)
++     * \elseif english
++     * Unit type (physical device or interface)
++     * \endif
++     */
++    cdi_usb_unit_type_t type;
++    /**
++     * \if german
++     * USB-Ger&#195;&#164;teadresse des echten USB-Ger&#195;&#164;ts, zu dem dieses logische
++     * geh&#195;&#182;rt.
++     * \elseif english
++     * USB device address of the physical USB device this logical one belongs
++     * to.
++     * \endif
++     */
++    cdi_usb_dev_id_t device_id;
++    /**
++     * \if german
++     * Interface-ID, wenn es sich um ein Interface handelt; bei echten USB-
++     * Ger&#195;&#164;ten muss dies entweder die ID des ersten Interfaces sein, oder eine
++     * ung&#195;&#188;ltige ID, sodass beim Aufruf von cdi_get_usb_interface die Daten
++     * des ersten Interfaces zur&#195;&#188;ckgegeben werden.
++     * \elseif english
++     * Interface ID if this is an interface; if this unit is a physical USB
++     * device, this ID is either the first interface's ID or an invalid one,
++     * thus calling cdi_get_usb_interface returns the first interface's data.
++     * \endif
++     */
++    cdi_usb_interface_t interface_id;
++    /**
++     * \if german
++     * Klasse, Unterklasse und Protokoll dieser USB-Einheit.
++     * \elseif english
++     * Class, subclass and protocol of this USB unit.
++     * \endif
++     */
++    int class, subclass, protocol;
++    /**
++     * \if german
++     * Hersteller- und Produkt-ID des echten USB-Ger&#195;&#164;ts.
++     * \elseif english
++     * Vendor and product ID of the physical USB device.
++     * \endif
++     */
++    int vendor_id, product_id;
++};
++
++/**
++ * \if german
++ * Echtes USB-Ger&#195;&#164;t.
++ * \elseif english
++ * Physical USB device.
++ * \endif
++ */
++struct cdi_usb_device {
++    struct cdi_usb_unit usb_unit;
++
++    /**
++     * \if german
++     * Geschwindigkeit des Ger&#195;&#164;ts.
++     * \elseif english
++     * Device's speed.
++     * \endif
++     */
++    cdi_usb_speed_t speed;
++};
++
++/**
++ * \if german
++ * USB-Ger&#195;&#164;teinterface.
++ * \elseif english
++ * USB device interface.
++ * \endif
++ */
++struct cdi_usb_interface {
++    struct cdi_usb_unit usb_unit;
++
++    /**
++     * \if german
++     * Enth&#195;&#164;lt Elemente vom Typ cdi_usb_endpoint_t.
++     * \elseif english
++     * Contains elements of type cdi_usb_endpoint_t.
++     * \endif
++     */
++    cdi_list_t endpoints;
++};
++
++/**
++ * \if german
++ * Beschreibt eine gefundene USB-Einheit.
++ * \elseif english
++ * Describtes a found USB unit.
++ * \endif
++ */
++struct cdi_usb_bus_data {
++    struct cdi_bus_data generic;
++    struct cdi_usb_unit* unit;
++};
++
++/**
++ * \if german
++ * Informationen zu einem USB-Endpunkt.
++ * \elseif english
++ * Information about a USB endpoint.
++ * \endif
++ */
++struct cdi_usb_endpoint {
++    /**
++     * \if german
++     * Typ des Endpunkts (Control, Bulk, Interrupt, Isochronous)
++     * \elseif english
++     * Endpoint's type (control, bulk, interrupt, isochronous)
++     * \endif
++     */
++    cdi_usb_endpoint_type_t type;
++    /**
++     * \if german
++     * Richtung des Endpunkts (IN, OUT, undefiniert)
++     * \elseif english
++     * Endpoint's direction (IN, OUT, undefined)
++     * \endif
++     */
++    cdi_usb_direction_t direction;
++    /**
++     * \if german
++     * Nummer des Endpunkts in der aktuellen Konfiguration.
++     * \elseif english
++     * Endpoint's number in the current configuration.
++     * \endif
++     */
++    int number;
++    /**
++     * \if german
++     * Maximale Paketgr&#195;&#182;&#195;&#159;e des Endpunkts.
++     * \elseif english
++     * Maximum packet size of this endpoint.
++     * \endif
++     */
++    int mps;
++    /**
++     * \if german
++     * Aktuelles Datatoggle. Ist hier, damit Hostcontroller- und Bustreiber
++     * synchronisiert bleiben (jeder kann seine eigene Pipestruktur haben, aber
++     * die Endpunktstruktur ist identisch).
++     * \elseif english
++     * Current data toggle. Is here to allow host controller and bus driver to
++     * stay synchronised (both may use their own pipe structure, but the
++     * endpoint structure is identical).
++     * \endif
++     */
++    int toggle;
++};
++
++/**
++ * \if german
++ * Beschreibt eine USB-Transaktion.
++ * \elseif english
++ * Describes a USB transaction.
++ * \endif
++ */
++struct cdi_usb_transaction {
++    /**
++     * \if german
++     * Typ der Transaktion
++     * \elseif english
++     * Transaction type
++     * \endif
++     */
++    cdi_usb_endpoint_type_t type;
++    /**
++     * \if german
++     * Pipe, &#195;&#188;ber die die &#195;&#156;bertragung ablaufen soll.
++     * \elseif english
++     * Pipe to be used by the transaction.
++     * \endif
++     */
++    cdi_usb_pipe_t pipe;
++    /**
++     * \if german
++     * Zu verwendender Datenpuffer (je nach &#195;&#156;bertragungstyp).
++     * \elseif english
++     * Buffer to be used (depends on the transaction type).
++     * \endif
++     */
++    struct cdi_mem_area* buffer;
++};
++
++/**
++ * \if german
++ * Beschreibt einen Controltransfer.
++ * \elseif english
++ * Describes a control transfer.
++ * \endif
++ */
++struct cdi_usb_control_transaction {
++    struct cdi_usb_transaction transaction;
++    /**
++     * \if german
++     * Daten, die w&#195;&#164;hrend der Setupstage gesendet werden sollen (der Puffer
++     * muss acht Byte lang sein).
++     * \elseif english
++     * Data to be sent during setup stage (buffer has to contain eight bytes).
++     * \endif
++     */
++    void* setup_packet;
++};
++
++/**
++ * \if german
++ * Beschreibt einen Bulktransfer.
++ * \elseif english
++ * Describes a bulk transfer.
++ * \endif
++ */
++struct cdi_usb_bulk_transaction {
++    struct cdi_usb_transaction transaction;
++    /**
++     * \if german
++     * Nachdem die &#195;&#156;bertragung abgeschlossen ist, wird dieses Feld entweder auf
++     * 0 (erfolgreich) oder -1 (Fehler) gesetzt.
++     * \elseif english
++     * After the transaction has been done this value is either set to 0
++     * (success) or -1 (error).
++     * \endif
++     */
++    volatile int status;
++};
++
++/**
++ * \if german
++ * Beschreibt einen Interrupttransfer.
++ * \elseif english
++ * Descripes an interrupt transfer.
++ * \endif
++ */
++struct cdi_usb_interrupt_transaction {
++    struct cdi_usb_transaction transaction;
++    /**
++     * \if german
++     * Callback, der bei jedem Empfangen von Daten aufgerufen wird.
++     * \elseif english
++     * Callback being called upon receiving data.
++     * \endif
++     */
++    cdi_usb_callback_periodic_t callback;
++};
++
++#ifdef __cplusplus
++extern &quot;C&quot; {
++#endif
++
++/**
++ * \if german
++ *
++ * Speichert Informationen zum angegebenen Interface in der Struktur, auf die
++ * der Pointer zeigt.
++ *
++ * @param interface Hier wird die Information gespeichert, die Felder
++ *                  usb_unit.device_id und usb_unit.interface_id geben das zu
++ *                  untersuchende Interface an. Ist der Wert f&#195;&#188;r interface_id
++ *                  ung&#195;&#188;ltig (also z. B. negativ; wenn ein Interface einfach
++ *                  nicht existiert, der Wert an sich aber g&#195;&#188;ltig ist, dann
++ *                  gilt dies nicht), so muss das erste Interface des Ger&#195;&#164;ts
++ *                  genutzt werden.
++ *
++ * @return 0 im Erfolgsfall, -1, wenn ein Fehler aufgetreten ist.
++ *
++ * \elseif english
++ *
++ * Stores information about the given interface in the structure the pointer is
++ * pointing to.
++ *
++ * @param interface Information is stored here, usb_unit.device_id and
++ *                  usb_unit.interface_id select the interface to be examined.
++ *                  If the value of interface_id is invalid (e.g., negative; if
++ *                  an interface simply not exist but the value itself is valid,
++ *                  then the following is not applicable), then the device's
++ *                  first interface has to be used.
++ *
++ * @return 0 in case of success, -1 in case of error.
++ *
++ * \endif
++ */
++int cdi_get_usb_interface(struct cdi_usb_interface* interface);
++
++/**
++ * \if german
++ *
++ * Speichert Informationen zum angegebenen Endpunkt in der Struktur, auf die der
++ * Pointer zeigt.
++ *
++ * @param endpoint Die Daten werden hier gespeichert
++ * @param id ID des Endpunkts
++ *
++ * @return 0 bei Erfolg, sonst -1.
++ *
++ * \elseif english
++ *
++ * Stores information about the given endpoint in the structure the pointer is
++ * pointing to.
++ *
++ * @param endpoint Data is stored here
++ * @param id Endpoint's ID
++ *
++ * @return 0 on success, -1 else.
++ *
++ * \endif
++ */
++int cdi_get_usb_endpoint(struct cdi_usb_endpoint* endpoint,
++    cdi_usb_endpoint_t id);
++
++/**
++ * \if german
++ *
++ * Erstellt eine USB-Pipe zum angegebenen Endpunkt (oder gibt die ID einer
++ * bestehenden zur&#195;&#188;ck, wenn sie bereits existiert).
++ *
++ * @param endpoint ID des Endpunkts
++ *
++ * @return ID der Pipe bei Erfolg, sonst (cdi_usb_pipe_t)-1.
++ *
++ * \elseif english
++ *
++ * Creates a USB pipe to the given endpoint (or returns an existing one's if
++ * there is one).
++ *
++ * @param endpoint Endpoint's ID
++ *
++ * @return Pipe's ID on success, else (cdi_usb_pipe_t)-1.
++ *
++ * \endif
++ */
++cdi_usb_pipe_t cdi_usb_connect(cdi_usb_endpoint_t endpoint);
++
++/**
++ * \if german
++ *
++ * Entfernt eine existierende Pipe.
++ *
++ * @param pipe Zu entfernende Pipe
++ *
++ * \elseif english
++ *
++ * Removes an existing pipe.
++ *
++ * @param pipe Pipe to be removed
++ *
++ * \endif
++ */
++void cdi_usb_disconnect(cdi_usb_pipe_t pipe);
++
++/**
++ * \if german
++ *
++ * Leitet eine USB-&#195;&#156;bertragung ein.
++ *
++ * @param transaction Informationen zur Transaktion
++ *
++ * @return 0, wenn die &#195;&#156;bertragung erfolgreich gestartet werden konnte, -1 im
++ *         Fehlerfall (bei synchronen &#195;&#156;bertragungen wird so auch der Status
++ *         der gesamten &#195;&#156;bertragung angezeigt)
++ *
++ * \elseif english
++ *
++ * Initiates a USB transaction.
++ *
++ * @param transaction Information about the transaction
++ *
++ * @return 0 if the transaction has been enqueued successfully, -1 in case of
++ *         an error (indicates also the status of the whole transaction for
++ *         synchronous ones)
++ *
++ * \endif
++ */
++int cdi_usb_initiate_transaction(struct cdi_usb_transaction* transaction);
++
++/**
++ * \if german
++ *
++ * Gibt Informationen zu einer Pipe zur&#195;&#188;ck.
++ *
++ * @param pipe Zu untersuchende Pipe
++ * @param device_addr Hier wird die USB-Adresse des Zielger&#195;&#164;ts gespeichert
++ * @param endpoint Hier werden Informationen zum Zielendpunkt gespeichert
++ *
++ * @return 0 bei Erfolg, sonst -1 (z. B. Pipe existiert nicht)
++ *
++ * \elseif english
++ *
++ * Returns information about a pipe.
++ *
++ * @param pipe Pipe to be examined
++ * @param device_addr USB address of the target device is stored here
++ * @param endpoint Information about the target endpoint is stored here
++ *
++ * @return 0 on success, -1 else (e.g., pipe doesn't exist)
++ *
++ * \endif
++ */
++int cdi_usb_get_pipe_information(cdi_usb_pipe_t pipe, int* device_addr,
++    struct cdi_usb_endpoint* endpoint);
++
++/**
++ * \if german
++ *
++ * Registriert einen USB-Ger&#195;&#164;tetreiber f&#195;&#188;r einen bestimmten Typ von USB-
++ * Ger&#195;&#164;ten. Ist einem Treiber ein Feld egal, so muss er dort -1 &#195;&#188;bergeben
++ * (m&#195;&#182;chte er z. B. alle Ger&#195;&#164;te eines bestimmten Klassen- und
++ * Unterklassencodes behandeln, so m&#195;&#188;ssen protocol, vendor_id und product_id
++ * -1 sein).
++ * Das Betriebssystem muss daf&#195;&#188;r Sorge tragen, dass beim Auffinden eines
++ * USB-Ger&#195;&#164;ts nur der am besten passende Callback aufgerufen wird (z. B. sind
++ * Hersteller- und Produkt-ID eindeutiger als die Klassencodes).
++ *
++ * @param drv Treiberstruktur (Pointer init_device und remove_device werden
++ *            jeweils verwendet, wenn ein Ger&#195;&#164;t gefunden oder entfernt wurde)
++ * @param class Klassencode
++ * @param subclass Unterklassencode
++ * @param protocol Protokolltyp
++ * @param vendor_id Hersteller-ID
++ * @param product_id Produkt-ID
++ *
++ * \elseif english
++ *
++ * Registers a USB device driver for a specific type of USB device. If the
++ * driver does not care about a field, it must be set to -1 (e.g., if it wants
++ * to handle all devices with a specific class and subclass code, then protocol,
++ * vendor_id and product_id must be set to -1).
++ * The OS has to make sure that upon finding a USB device just the best fitting
++ * callback is called (e.g., vendor and product ID are less ambiguous than the
++ * class codes).
++ *
++ * @param drv Driver structure (pointers init_device and remove_device will be
++ *            used when a device has been found or removed, respectively)
++ * @param class Class code
++ * @param subclass Subclass code
++ * @param protocol Protocol type
++ * @param vendor_id Vendor ID
++ * @param product_id Product ID
++ *
++ * \endif
++ */
++void cdi_usb_register_device_driver(struct cdi_driver* drv, int class,
++    int subclass, int protocol, int vendor_id, int product_id);
++
++#ifdef __cplusplus
++}; // extern &quot;C&quot;
++#endif
++
++#endif
++/*\@}*/
++
+-- 
+1.6.4.2
+
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000200.html">[cdi-devel] [PATCH] CDI.usb
+</A></li>
+	
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#201">[ date ]</a>
+              <a href="thread.html#201">[ thread ]</a>
+              <a href="subject.html#201">[ subject ]</a>
+              <a href="author.html#201">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

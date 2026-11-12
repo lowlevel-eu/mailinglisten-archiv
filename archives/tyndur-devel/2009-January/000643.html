@@ -1,0 +1,119 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [Lost] [PATCH v2 09/10] kernel2:	IRQ-Verarbeitung fixen
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BLost%5D%20%5BPATCH%20v2%2009/10%5D%20kernel2%3A%0A%09IRQ-Verarbeitung%20fixen&In-Reply-To=%3C20090118162352.GH10425%40einstein.produktiv.lan%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="000654.html">
+   <LINK REL="Next"  HREF="000644.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [Lost] [PATCH v2 09/10] kernel2:	IRQ-Verarbeitung fixen</H1>
+    <B>Antoine Kaufmann</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BLost%5D%20%5BPATCH%20v2%2009/10%5D%20kernel2%3A%0A%09IRQ-Verarbeitung%20fixen&In-Reply-To=%3C20090118162352.GH10425%40einstein.produktiv.lan%3E"
+           TITLE="[tyndur-devel] [Lost] [PATCH v2 09/10] kernel2:	IRQ-Verarbeitung fixen">toni at tyndur.org
+                  </A><BR>
+    <I>So Jan 18 17:23:52 CET 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="000654.html">[tyndur-devel] [Lost] [PATCH v2 08/10] kernel2:	Syscall	mem_allocate_physical
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="000644.html">[tyndur-devel] [Lost] [PATCH v2 10/10] kernel2: Makros fuer	aktuellen	Thread/Prozess
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#643">[ Datum ]</a>
+              <a href="thread.html#643">[ Thema ]</a>
+              <a href="subject.html#643">[ Betreff (Subject) ]</a>
+              <a href="author.html#643">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>On Sat, Dec 20 23:49, Kevin Wolf wrote:
+&gt;<i> ! kernel2: Der RPC zur Benachrichtigung ueber einen IRQ muss immer von dem Task selbst kommen, der benachrichtigt wird.
+</I>&gt;<i> * kernel2: Die RPC-Liste, in die eingetragen wird, dass es ein IRQ war, gehoert strenggenommen zum Callee, nicht zum Caller. Das ist mit dem oberen Fix zwar egal, weil es immer dieselben sind, aber schoener ist es schon so.
+</I>&gt;<i> ---
+</I>&gt;<i>  src/kernel2/src/interrupts/im.c |    6 ++++++
+</I>&gt;<i>  src/kernel2/src/syscalls/rpc.c  |    3 +--
+</I>&gt;<i>  2 files changed, 7 insertions(+), 2 deletions(-)
+</I>&gt;<i> 
+</I>&gt;<i> diff --git a/src/kernel2/src/interrupts/im.c b/src/kernel2/src/interrupts/im.c
+</I>&gt;<i> index 1838b4d..d8e12fc 100644
+</I>&gt;<i> --- a/src/kernel2/src/interrupts/im.c
+</I>&gt;<i> +++ b/src/kernel2/src/interrupts/im.c
+</I>&gt;<i> @@ -226,6 +226,7 @@ bool im_add_handler(uint32_t intr, pm_process_t* handler)
+</I>&gt;<i>  void im_send_interrupts(void)
+</I>&gt;<i>  {
+</I>&gt;<i>      uint32_t intr;
+</I>&gt;<i> +    pm_thread_t* old_thread = cpu_get_current()-&gt;thread;
+</I>&gt;<i>  
+</I>&gt;<i>      for (intr = 0; intr &lt; IM_NUM_INTERRUPTS; intr++)
+</I>&gt;<i>      {
+</I>&gt;<i> @@ -235,7 +236,10 @@ void im_send_interrupts(void)
+</I>&gt;<i>                  break;
+</I>&gt;<i>              }
+</I>&gt;<i>  
+</I>&gt;<i> +            // Dieses Wechseln des Tasks ist wichtig: IRQs werden nur
+</I>&gt;<i> +            // angenommen, wenn der Task sie sich selbst schickt
+</I>&gt;<i>              // TODO schedule_to_task(intr_handling_task[intr], esp);
+</I>&gt;<i> +            cpu_get_current()-&gt;thread = list_get_element_at(intr_handling_task[intr]-&gt;threads, 0);
+</I>&gt;<i>  
+</I>&gt;<i>              if (!fastrpc_irq(intr_handling_task[intr], 0, 0,
+</I>&gt;<i>                  sizeof(intr), (char*) &amp;intr, intr - IM_IRQ_BASE))
+</I>&gt;<i> @@ -245,4 +249,6 @@ void im_send_interrupts(void)
+</I>&gt;<i>              intr_to_send[intr]--;
+</I>&gt;<i>          }
+</I>&gt;<i>      }
+</I>&gt;<i> +
+</I>&gt;<i> +    cpu_get_current()-&gt;thread = old_thread;
+</I>&gt;<i>  }
+</I>&gt;<i> diff --git a/src/kernel2/src/syscalls/rpc.c b/src/kernel2/src/syscalls/rpc.c
+</I>&gt;<i> index 14fbe11..aa978de 100644
+</I>&gt;<i> --- a/src/kernel2/src/syscalls/rpc.c
+</I>&gt;<i> +++ b/src/kernel2/src/syscalls/rpc.c
+</I>&gt;<i> @@ -323,8 +323,7 @@ bool fastrpc_irq(pm_process_t* callee, size_t metadata_size, void* metadata,
+</I>&gt;<i>          return FALSE;
+</I>&gt;<i>      }
+</I>&gt;<i>  
+</I>&gt;<i> -    rpc_t* rpc = list_get_element_at(
+</I>&gt;<i> -        cpu_get_current()-&gt;thread-&gt;process-&gt;rpcs, 0);
+</I>&gt;<i> +    rpc_t* rpc = list_get_element_at(callee-&gt;rpcs, 0);
+</I>&gt;<i>      rpc-&gt;reenable_irq = irq;
+</I>&gt;<i>  
+</I>&gt;<i>      return TRUE;
+</I>
+Rein damit.
+
+-- 
+Antoine Kaufmann
+&lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">toni at famkaufmann.info</A>&gt;
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 197 bytes
+Beschreibung: nicht verfügbar
+URL         : &lt;<A HREF="http://list.tyndur.org/pipermail/tyndur-devel/attachments/20090118/31886c78/attachment.pgp">http://list.tyndur.org/pipermail/tyndur-devel/attachments/20090118/31886c78/attachment.pgp</A>&gt;
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="000654.html">[tyndur-devel] [Lost] [PATCH v2 08/10] kernel2:	Syscall	mem_allocate_physical
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="000644.html">[tyndur-devel] [Lost] [PATCH v2 10/10] kernel2: Makros fuer	aktuellen	Thread/Prozess
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#643">[ Datum ]</a>
+              <a href="thread.html#643">[ Thema ]</a>
+              <a href="subject.html#643">[ Betreff (Subject)]</a>
+              <a href="author.html#643">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

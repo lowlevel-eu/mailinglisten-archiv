@@ -1,0 +1,241 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH 2/5] ehci: Implement interrupt transfers
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%202/5%5D%20ehci%3A%20Implement%20interrupt%20transfers&In-Reply-To=%3C20160103221515.GA3010%40silvanus%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000388.html">
+   <LINK REL="Next"  HREF="000383.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH 2/5] ehci: Implement interrupt transfers</H1>
+    <B>Kevin Wolf</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%202/5%5D%20ehci%3A%20Implement%20interrupt%20transfers&In-Reply-To=%3C20160103221515.GA3010%40silvanus%3E"
+       TITLE="[cdi-devel] [PATCH 2/5] ehci: Implement interrupt transfers">kevin at tyndur.org
+       </A><BR>
+    <I>Sun Jan  3 23:15:17 CET 2016</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000388.html">[cdi-devel] [PATCH 0/9] hdaudio: Patches for real hardware
+</A></li>
+        <LI>Next message: <A HREF="000383.html">[cdi-devel] [PATCH 4/5] hid: Specify interface
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#382">[ date ]</a>
+              <a href="thread.html#382">[ thread ]</a>
+              <a href="subject.html#382">[ subject ]</a>
+              <a href="author.html#382">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>On Tue, Dec 29, 2015 at 01:00:51AM +0100, Max Reitz wrote:
+&gt;<i> Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+</I>&gt;<i> ---
+</I>&gt;<i>  ehci/ehci.c | 265 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++---
+</I>&gt;<i>  ehci/ehci.h |  20 +++++
+</I>&gt;<i>  ehci/main.c |  11 +--
+</I>&gt;<i>  3 files changed, 278 insertions(+), 18 deletions(-)
+</I>&gt;<i> 
+</I>&gt;<i> diff --git a/ehci/ehci.c b/ehci/ehci.c
+</I>&gt;<i> index addec00..4b548ae 100644
+</I>&gt;<i> --- a/ehci/ehci.c
+</I>&gt;<i> +++ b/ehci/ehci.c
+</I>&gt;<i> @@ -40,6 +40,13 @@
+</I>&gt;<i>  
+</I>&gt;<i>  static void bios_handoff(struct cdi_pci_device *pci_dev, struct ehci *hc);
+</I>&gt;<i>  static void irq_handler(struct cdi_device *dev);
+</I>&gt;<i> +static void init_periodic_pseudo_qhs(struct ehci *hc);
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +static inline bool is_power_of_two(unsigned value)
+</I>&gt;<i> +{
+</I>&gt;<i> +    return !(value &amp; (value - 1));
+</I>&gt;<i> +}
+</I>&gt;<i>  
+</I>&gt;<i>  
+</I>&gt;<i>  struct cdi_device *ehci_init_device(struct cdi_bus_data *bus_data)
+</I>&gt;<i> @@ -111,6 +118,18 @@ struct cdi_device *ehci_init_device(struct cdi_bus_data *bus_data)
+</I>&gt;<i>      }
+</I>&gt;<i>      hc-&gt;regs-&gt;periodiclistbase = hc-&gt;periodic_list_mem-&gt;paddr.items[0].start;
+</I>&gt;<i>  
+</I>&gt;<i> +    hc-&gt;periodic_qhs = calloc(1024, sizeof(*hc-&gt;periodic_qhs));
+</I>&gt;<i> +    // 10 = |0..10| = |ld(1)..ld(1024)|
+</I>
+I gues you mean &quot;// 11 = ...&quot;?
+
+&gt;<i> +    hc-&gt;periodic_pseudo_qhs_mem =
+</I>&gt;<i> +        cdi_mem_alloc(11 * sizeof(hc-&gt;periodic_pseudo_qhs[0]),
+</I>&gt;<i> +                      6
+</I>&gt;<i> +                      | CDI_MEM_PHYS_CONTIGUOUS
+</I>&gt;<i> +                      | CDI_MEM_DMA_4G
+</I>&gt;<i> +                      | CDI_MEM_NOINIT);
+</I>&gt;<i> +    hc-&gt;periodic_pseudo_qhs = hc-&gt;periodic_pseudo_qhs_mem-&gt;vaddr;
+</I>&gt;<i> +
+</I>&gt;<i> +    init_periodic_pseudo_qhs(hc);
+</I>&gt;<i> +
+</I>&gt;<i>      // Create anchor
+</I>&gt;<i>      struct cdi_mem_area *anchor_qh;
+</I>&gt;<i>      anchor_qh = cdi_mem_alloc(sizeof(ehci_fat_qh_t), 6
+</I>
+&gt;<i> @@ -323,7 +442,28 @@ static void enter_async_qh(struct ehci *hc, ehci_fat_qh_t *qh)
+</I>&gt;<i>  }
+</I>&gt;<i>  
+</I>&gt;<i>  
+</I>&gt;<i> -static void retire_qh(struct ehci *hc, ehci_fat_qh_t *qh)
+</I>&gt;<i> +static void enter_interrupt_qh(struct ehci *hc, ehci_fat_qh_t *qh,
+</I>&gt;<i> +                               int frame_interval_shift)
+</I>&gt;<i> +{
+</I>&gt;<i> +    qh-&gt;next = hc-&gt;periodic_functional_qhs;
+</I>
+This value...
+
+&gt;<i> +    hc-&gt;periodic_functional_qhs = qh;
+</I>&gt;<i> +
+</I>&gt;<i> +    ehci_fat_qh_t *pseudo_qh = &amp;hc-&gt;periodic_pseudo_qhs[frame_interval_shift];
+</I>&gt;<i> +
+</I>&gt;<i> +    qh-&gt;next = pseudo_qh-&gt;next;
+</I>
+...is immediately overwritten here.
+
+As I don't understand yet what functional and pseudo QHs are and the
+header doesn't tell anything about it, I can't say how bad this is, but
+we seem to throw away all of the QHs in hc-&gt;periodic_functional_qhs and
+replace them by qh.
+
+My guess is that the first assignment should be qh-&gt;next_periodic.
+
+&gt;<i> +    qh-&gt;previous = pseudo_qh;
+</I>&gt;<i> +
+</I>&gt;<i> +    pseudo_qh-&gt;next = qh;
+</I>&gt;<i> +    if (qh-&gt;next) {
+</I>&gt;<i> +        qh-&gt;next-&gt;previous = qh;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    qh-&gt;qh.next_qh = pseudo_qh-&gt;qh.next_qh;
+</I>&gt;<i> +    pseudo_qh-&gt;qh.next_qh = qh-&gt;paddr | EHCI_QH;
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +static void retire_async_qh(struct ehci *hc, ehci_fat_qh_t *qh)
+</I>&gt;<i>  {
+</I>&gt;<i>      qh-&gt;previous-&gt;qh.next_qh = qh-&gt;qh.next_qh;
+</I>&gt;<i>  
+</I>&gt;<i> @@ -336,11 +476,29 @@ static void retire_qh(struct ehci *hc, ehci_fat_qh_t *qh)
+</I>&gt;<i>  }
+</I>&gt;<i>  
+</I>&gt;<i>  
+</I>&gt;<i> -static void retire_first_qtd(ehci_fat_qh_t *qh)
+</I>&gt;<i> +static void retire_periodic_qh(struct ehci *hc, ehci_fat_qh_t *qh)
+</I>&gt;<i>  {
+</I>&gt;<i> -    ehci_fat_qtd_t *qtd = qh-&gt;first_qtd;
+</I>&gt;<i> +    qh-&gt;previous-&gt;qh.next_qh = qh-&gt;qh.next_qh;
+</I>&gt;<i>  
+</I>&gt;<i> -    assert(qtd);
+</I>&gt;<i> +    qh-&gt;previous-&gt;next = qh-&gt;next;
+</I>&gt;<i> +    if (qh-&gt;next) {
+</I>&gt;<i> +        qh-&gt;next-&gt;previous = qh-&gt;previous;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    ehci_fat_qh_t **func_periodic_ptr = &amp;hc-&gt;periodic_functional_qhs;
+</I>&gt;<i> +    while (*func_periodic_ptr &amp;&amp; *func_periodic_ptr != qh) {
+</I>&gt;<i> +        func_periodic_ptr = &amp;(*func_periodic_ptr)-&gt;next_periodic;
+</I>&gt;<i> +    }
+</I>&gt;<i> +    assert(*func_periodic_ptr == qh);
+</I>&gt;<i> +    *func_periodic_ptr = qh-&gt;next_periodic;
+</I>&gt;<i> +
+</I>&gt;<i> +    cdi_list_push(hc-&gt;retired_qhs, qh);
+</I>
+I think this will only be processed when the next async QH is retired.
+Is this good enough?
+
+&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +static void qtd_write_back(ehci_fat_qtd_t *qtd)
+</I>&gt;<i> +{
+</I>&gt;<i> +    ehci_fat_qh_t *qh = qtd-&gt;qh;
+</I>&gt;<i>  
+</I>&gt;<i>      uint32_t err_mask = (qh-&gt;qh.ep_state[0] &amp; EHCI_QHES0_EPS_MASK)
+</I>&gt;<i>                           == EHCI_QHES0_EPS_HS
+</I>
+&gt;<i> diff --git a/ehci/ehci.h b/ehci/ehci.h
+</I>&gt;<i> index fb8dd9e..4b55391 100644
+</I>&gt;<i> --- a/ehci/ehci.h
+</I>&gt;<i> +++ b/ehci/ehci.h
+</I>&gt;<i> @@ -87,8 +87,14 @@ struct ehci_fat_qh {
+</I>&gt;<i>      struct cdi_mem_area *cdi_mem_area;
+</I>&gt;<i>      uintptr_t paddr;
+</I>&gt;<i>  
+</I>&gt;<i> +    cdi_usb_hc_interrupt_cb_t cb;
+</I>&gt;<i> +    void *cb_opaque;
+</I>
+Maybe comment that cb != NULL if, and only if, this is a periodic QH?
+
+&gt;<i> +
+</I>&gt;<i>      ehci_fat_qh_t *next, *previous;
+</I>&gt;<i> +    ehci_fat_qh_t *next_periodic;
+</I>&gt;<i>      ehci_fat_qtd_t *first_qtd, *last_qtd;
+</I>&gt;<i> +
+</I>&gt;<i> +    bool is_pseudo_qh;
+</I>&gt;<i>  } __attribute__((aligned(64)));
+</I>&gt;<i>  
+</I>&gt;<i>  static_assert(!(sizeof(struct ehci_fat_qh) % 64),
+</I>&gt;<i> @@ -122,9 +128,17 @@ struct ehci {
+</I>&gt;<i>  
+</I>&gt;<i>      struct cdi_mem_area *periodic_list_mem;
+</I>&gt;<i>      volatile uint32_t *periodic_list;
+</I>&gt;<i> +    ehci_fat_qh_t **periodic_qhs;
+</I>&gt;<i> +
+</I>&gt;<i> +    struct cdi_mem_area *periodic_pseudo_qhs_mem;
+</I>&gt;<i> +    ehci_fat_qh_t *periodic_pseudo_qhs;
+</I>&gt;<i> +    ehci_fat_qh_t *periodic_functional_qhs;
+</I>
+As I mentioned above, a comment explaining these wouldn't hurt either.
+
+After reading the rest of the patch I have the impression that the job
+of the pseudo QHs is just to sit there permanently so that the
+(transient) functional QHs have a place to attach to. I'm not sure,
+though.
+
+&gt;<i>      ehci_fat_qh_t *async_start;
+</I>&gt;<i>      cdi_list_t retired_qhs;
+</I>&gt;<i> +
+</I>&gt;<i> +    // For a bit of load balancing
+</I>&gt;<i> +    int periodic_start_microframe;
+</I>&gt;<i>  };
+</I>&gt;<i>  
+</I>&gt;<i>  #define PCI_CLASS_SERIAL_BUS_CONTROLLER     0x0c
+</I>
+Kevin
+</PRE>
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000388.html">[cdi-devel] [PATCH 0/9] hdaudio: Patches for real hardware
+</A></li>
+	<LI>Next message: <A HREF="000383.html">[cdi-devel] [PATCH 4/5] hid: Specify interface
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#382">[ date ]</a>
+              <a href="thread.html#382">[ thread ]</a>
+              <a href="subject.html#382">[ subject ]</a>
+              <a href="author.html#382">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

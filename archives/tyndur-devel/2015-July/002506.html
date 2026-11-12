@@ -1,0 +1,115 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] libc/kernel2: Kein Busywait in waitpid()
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20libc/kernel2%3A%20Kein%20Busywait%20in%20waitpid%28%29&In-Reply-To=%3C1437943845-8684-1-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002504.html">
+   
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] libc/kernel2: Kein Busywait in waitpid()</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20libc/kernel2%3A%20Kein%20Busywait%20in%20waitpid%28%29&In-Reply-To=%3C1437943845-8684-1-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH] libc/kernel2: Kein Busywait in waitpid()">kevin at tyndur.org
+                  </A><BR>
+    <I>So Jul 26 22:50:45 CEST 2015</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002504.html">[tyndur-devel] [PATCH v2 8/8] kernel2: Blockierendes Lesen
+</A></li>
+        
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2506">[ Datum ]</a>
+              <a href="thread.html#2506">[ Thema ]</a>
+              <a href="subject.html#2506">[ Betreff (Subject) ]</a>
+              <a href="author.html#2506">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ kernel2: Wenn ein Kindprozess beendet wird, den Elternprozess wieder
+  aufwecken
+
+* libc: Nicht mehr busywaiten bis ein Kindprozess verschwindet, sondern
+  mit wait_for_rpc() auf den passenden Exit-RPC warten. Das wurde bisher
+  nicht gemacht weil der Kindprozess sich nicht zwingend sauber beendet.
+  Mit der Kerneländerung bleiben wir aber auf keinen Fall mehr hängen;
+  nur ein Exitcode, der uns mitteilt, was passiert ist, fehlt nach wie
+  vor. Auf jeden Fall sind wir damit und mit blockierenden Reads die
+  dauerhaft 100% CPU-Auslastung los.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/kernel2/src/tasks/pm.c   | 7 +++++++
+ src/modules/lib/posix/wait.c | 2 +-
+ 2 files changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/src/kernel2/src/tasks/pm.c b/src/kernel2/src/tasks/pm.c
+index bb95923..61b4626 100644
+--- a/src/kernel2/src/tasks/pm.c
++++ b/src/kernel2/src/tasks/pm.c
+@@ -210,6 +210,7 @@ void pm_prepare_destroy(pm_process_t* process)
+  */
+ void pm_destroy(pm_process_t* process)
+ {
++    pm_process_t* parent = process-&gt;parent;
+     struct on_destroy_info* info;
+     int i;
+ 
+@@ -270,6 +271,12 @@ void pm_destroy(pm_process_t* process)
+     
+     // Zu guter letzt wird auch die Prozessstruktur freigegeben
+     free(process);
++
++    // Und schließlich noch den Elternprozess wieder aufwecken, falls er in
++    // einem waitpid() stecken könnte.
++    if (parent &amp;&amp; parent-&gt;status == PM_STATUS_WAIT_FOR_RPC) {
++        parent-&gt;status = PM_STATUS_READY;
++    }
+ }
+ 
+ /**
+diff --git a/src/modules/lib/posix/wait.c b/src/modules/lib/posix/wait.c
+index 2f32ccb..d234c72 100644
+--- a/src/modules/lib/posix/wait.c
++++ b/src/modules/lib/posix/wait.c
+@@ -166,7 +166,7 @@ pid_t waitpid(pid_t pid, int* status, int options)
+         // Warten bis der Prozess terminiert
+         if ((options &amp; WNOHANG) == 0) {
+             while (wait_child-&gt;running &amp;&amp; (get_parent_pid(pid) != 0)) {
+-                yield();
++                wait_for_rpc();
+             }
+         } else if (wait_child-&gt;running) {
+             return 0;
+-- 
+2.1.4
+
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002504.html">[tyndur-devel] [PATCH v2 8/8] kernel2: Blockierendes Lesen
+</A></li>
+	
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2506">[ Datum ]</a>
+              <a href="thread.html#2506">[ Thema ]</a>
+              <a href="subject.html#2506">[ Betreff (Subject)]</a>
+              <a href="author.html#2506">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

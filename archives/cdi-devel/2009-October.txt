@@ -1,0 +1,1364 @@
+From max at tyndur.org  Thu Oct  1 22:52:12 2009
+From: max at tyndur.org (max at tyndur.org)
+Date: Thu,  1 Oct 2009 22:52:12 +0200
+Subject: [cdi-devel] [PATCH] ac97: CDI.storage driver
+Message-ID: <1254430332-14696-1-git-send-email-max@tyndur.org>
+
+From: Max Reitz <max at tyndur.org>
+
++ ac97 driver appears as CDI.storage driver (path on t?ndur:
+  ac97:/crd0)
+
+Signed-off-by: Max Reitz <max at tyndur.org>
+---
+ ac97/device.h |   65 +++++++++++++
+ ac97/main.c   |  281 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 346 insertions(+), 0 deletions(-)
+ create mode 100644 ac97/device.h
+ create mode 100644 ac97/main.c
+
+diff --git a/ac97/device.h b/ac97/device.h
+new file mode 100644
+index 0000000..382a1b2
+--- /dev/null
++++ b/ac97/device.h
+@@ -0,0 +1,65 @@
++/******************************************************************************
++ * Copyright (c) 2009 Max Reitz                                               *
++ *                                                                            *
++ * Permission is hereby granted,  free of charge,  to any  person obtaining a *
++ * copy of this software and associated documentation files (the "Software"), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use,  copy, modify, merge, publish,  distribute, sublicense, *
++ * and/or sell copies  of the  Software,  and to permit  persons to whom  the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF MERCHANTABILITY, *
++ * FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#ifndef _AC97_DEVICE_H_
++#define _AC97_DEVICE_H_
++
++#define USE_BUFS 16
++#define FRAMES_PER_BUF 0x4000
++
++#define NAM_RESET          0x0000
++#define NAM_MASTER_VOLUME  0x0002
++#define NAM_MONO_VOLUME    0x0006
++#define NAM_PC_BEEP        0x000A
++#define NAM_PCM_VOLUME     0x0018
++#define NAM_EXT_AUDIO_ID   0x0028
++#define NAM_EXT_AUDIO_STC  0x002A
++#define NAM_FRONT_SPLRATE  0x002C
++#define NAM_LR_SPLRATE     0x0032
++#define NABM_POBDBAR       0x0010
++#define NABM_POLVI         0x0015
++#define NABM_POSTATUS      0x0016
++#define NABM_POPICB        0x0018
++#define NABM_POCONTROL     0x001B
++#define NABM_GLB_CTRL_STAT 0x0060
++
++
++struct ac97_bufdesc {
++    uint32_t pbuf;
++    uint16_t samples;
++    uint16_t flags;
++} __attribute__ ((packed));
++
++struct ac97_card {
++    struct cdi_storage_device cdi_strg_dev;
++    struct cdi_pci_device *cdi_pci_dev;
++    int nambar;
++    int nabmbar;
++    int volume;
++    int sample_rate;
++    struct ac97_bufdesc *bufdesc;
++    struct ac97_bufdesc *pbufdesc;
++    void *buffer[USE_BUFS];
++    uintptr_t pbuffer[USE_BUFS];
++} __attribute__ ((packed));
++
++#endif
+diff --git a/ac97/main.c b/ac97/main.c
+new file mode 100644
+index 0000000..18cf764
+--- /dev/null
++++ b/ac97/main.c
+@@ -0,0 +1,281 @@
++/******************************************************************************
++ * Copyright (c) 2009 Max Reitz                                               *
++ *                                                                            *
++ * Permission is hereby granted,  free of charge,  to any  person obtaining a *
++ * copy of this software and associated documentation files (the "Software"), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use,  copy, modify, merge, publish,  distribute, sublicense, *
++ * and/or sell copies  of the  Software,  and to permit  persons to whom  the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF MERCHANTABILITY, *
++ * FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "cdi.h"
++#include "cdi/io.h"
++#include "cdi/lists.h"
++#include "cdi/misc.h"
++#include "cdi/pci.h"
++#include "cdi/storage.h"
++
++#include "device.h"
++
++
++static void driver_init(void);
++static void init_dev(struct cdi_device *device);
++static void deinit_dev(struct cdi_device *device);
++static void suicide(struct cdi_driver *drv);
++static int play(struct cdi_storage_device *dev, uint64_t start, uint64_t count,
++    void *buffer);
++static int read_dummy(struct cdi_storage_device *dev, uint64_t start,
++    uint64_t count, void *buffer);
++static void isr(struct cdi_device *device);
++
++static const char *driver_name = "ac97";
++static struct cdi_storage_driver driver_storage;
++
++
++static int card_counter = 0;
++static volatile int buffer_queue = 0, have_qc_waiting = 0, doing_buffer = 0;
++
++
++#ifdef CDI_STANDALONE
++int main(void)
++#else
++int init_ac97(void)
++#endif
++{
++    cdi_init();
++
++    driver_init();
++    cdi_storage_driver_register((struct cdi_storage_driver *)&driver_storage);
++
++    cdi_run_drivers();
++
++    return 0;
++}
++
++static void driver_init(void)
++{
++    struct cdi_pci_device *dev;
++    int i;
++    struct ac97_card *card;
++    cdi_list_t pci_devices;
++
++    cdi_storage_driver_init(&driver_storage);
++
++    driver_storage.drv.name = driver_name;
++    driver_storage.drv.type = CDI_STORAGE;
++
++    driver_storage.drv.init_device = &init_dev;
++    driver_storage.drv.remove_device = &deinit_dev;
++    driver_storage.drv.destroy = &suicide;
++
++    driver_storage.read_blocks = &read_dummy;
++    driver_storage.write_blocks = &play;
++
++    pci_devices = cdi_list_create();
++    cdi_pci_get_all_devices(pci_devices);
++
++    for (i = 0; (dev = cdi_list_get(pci_devices, i)); i++) {
++        if ((dev->vendor_id == 0x8086) && ((dev->device_id == 0x2415) ||
++            (dev->device_id == 0x2425) || (dev->device_id == 0x2445)))
++        {
++            card = malloc(sizeof(*card));
++            card->cdi_pci_dev = dev;
++            cdi_list_push(driver_storage.drv.devices, card);
++        } else {
++            cdi_pci_device_destroy(dev);
++        }
++    }
++
++    cdi_list_destroy(pci_devices);
++}
++
++static void init_dev(struct cdi_device *device)
++{
++    struct ac97_card *card = (struct ac97_card *)device;
++    cdi_list_t pci_res_list;
++    struct cdi_pci_resource *rsrc;
++    int i;
++
++    card->cdi_strg_dev.block_size = 4;
++    card->cdi_strg_dev.block_count = FRAMES_PER_BUF * USE_BUFS;
++    card->cdi_strg_dev.dev.name = malloc(10);
++    sprintf((char *)card->cdi_strg_dev.dev.name, "crd%i", card_counter++);
++
++    cdi_register_irq(card->cdi_pci_dev->irq, &isr, device);
++    cdi_pci_alloc_ioports(card->cdi_pci_dev);
++
++    card->nambar = 0;
++    card->nabmbar = 0;
++
++    pci_res_list = card->cdi_pci_dev->resources;
++    for (i = 0; (rsrc = cdi_list_get(pci_res_list, i)); i++) {
++        if (rsrc->type == CDI_PCI_IOPORTS) {
++            //Die Resourcen liegen r?ckw?rts in der Liste!
++            //Wir nehmen nur die ersten zwei.
++            card->nabmbar = card->nambar;
++            card->nambar = rsrc->start;
++        }
++    }
++
++    cdi_alloc_phys_mem(sizeof(struct ac97_bufdesc) * 32,
++        (void **)&card->bufdesc, (void **)&card->pbufdesc);
++    for (i = 0; i < USE_BUFS; i++) {
++        cdi_alloc_phys_mem(FRAMES_PER_BUF * 4, &card->buffer[i],
++            (void **)&card->pbuffer[i]);
++    }
++    for (i = 0; i < 32; i++) {
++        card->bufdesc[i].pbuf = 0;
++        card->bufdesc[i].samples = 0;
++        card->bufdesc[i].flags = 0x4000;
++    }
++
++    cdi_outw(card->nambar + NAM_RESET, 42);
++    cdi_outb(card->nabmbar + NABM_GLB_CTRL_STAT, 0x02);
++    cdi_sleep_ms(100);
++    card->volume = 0; //Volle Dr?hnung
++    cdi_outw(card->nambar + NAM_MASTER_VOLUME,
++        (card->volume << 8) | card->volume);
++    cdi_outw(card->nambar + NAM_MONO_VOLUME, card->volume);
++    cdi_outw(card->nambar + NAM_PC_BEEP, card->volume);
++    cdi_outw(card->nambar + NAM_PCM_VOLUME
++        (card->volume << 8) | card->volume);
++    cdi_sleep_ms(10);
++    if (!(cdi_inw(card->nambar + NAM_EXT_AUDIO_ID) & 1)) {
++        card->sample_rate = 48000;
++    } else {
++        cdi_outw(card->nambar + NAM_EXT_AUDIO_STC,
++            cdi_inw(card->nambar + NAM_EXT_AUDIO_STC) | 1);
++        cdi_sleep_ms(10);
++        cdi_outw(card->nambar + NAM_FRONT_SPLRATE, 44100);
++        cdi_outw(card->nambar + NAM_LR_SPLRATE, 44100);
++        cdi_sleep_ms(10);
++        card->sample_rate = cdi_inw(card->nambar + NAM_LR_SPLRATE);
++    }
++
++    cdi_storage_device_init((struct cdi_storage_device *)device);
++}
++
++static void deinit_dev(struct cdi_device *device)
++{
++}
++
++static void suicide(struct cdi_driver *drv)
++{
++}
++
++static int read_dummy(struct cdi_storage_device *dev, uint64_t start,
++    uint64_t count, void *buffer)
++{
++    return 0;
++}
++
++static int play(struct cdi_storage_device *dev, uint64_t start, uint64_t count,
++    void *buffer)
++{
++    struct ac97_card *card = (struct ac97_card *)dev;
++    int size = count * 4, i, final = 0;
++    ptrdiff_t off = 0;
++
++    if (!size) {
++        return 0;
++    }
++
++    if (have_qc_waiting < 0) { //Haha
++        have_qc_waiting = 0;
++    }
++    while (have_qc_waiting++ > 1) {
++        have_qc_waiting--;
++        cdi_wait_irq(card->cdi_pci_dev->irq, 100);
++    }
++
++    while (buffer_queue > 1) {
++        cdi_reset_wait_irq(card->cdi_pci_dev->irq);
++        cdi_wait_irq(card->cdi_pci_dev->irq, 100);
++    }
++
++    //Der letzte Buffer... Wir k?nnen den Rest also kopieren
++
++    for (i = 0; (i < USE_BUFS) && size; i++) {
++        card->bufdesc[i].pbuf = card->pbuffer[i];
++        if ((i == USE_BUFS - 1) || (size <= FRAMES_PER_BUF * 4)) {
++            while ((buffer_queue > 1) ||
++                (cdi_inw(card->nabmbar + NABM_POPICB) > 1764))
++            {
++                //Bis 20 ms vor Ablauf k?nnen wir noch CPU sparen
++                cdi_sleep_ms(1);
++            }
++            while (buffer_queue);
++            if (i) {
++                //Der erste Buffer ist gef?llt, wir k?nnen das Abspielen also
++                //beginnen, bevor wir den letzten f?llen
++                cdi_outl(card->nabmbar + NABM_POBDBAR,
++                    (uint32_t)card->pbufdesc);
++                cdi_outb(card->nabmbar + NABM_POLVI, 15);
++                cdi_outb(card->nabmbar + NABM_POCONTROL, 0x15);
++                buffer_queue = i + 1;
++                doing_buffer = 0;
++            }
++        }
++        if (size >= FRAMES_PER_BUF * 4) {
++            card->bufdesc[i].samples = FRAMES_PER_BUF * 2;
++            size -= FRAMES_PER_BUF * 4;
++            memcpy(card->buffer[i], buffer + off, FRAMES_PER_BUF * 4);
++            off += FRAMES_PER_BUF * 4;
++        } else {
++            card->bufdesc[i].samples = size >> 1;
++            memcpy(card->buffer[i], buffer + off, size);
++            size = 0;
++        }
++        card->bufdesc[i].flags = 0x8000; //IOC
++        if (!size || (i == USE_BUFS - 1)) {
++            card->bufdesc[i].flags |= 0x4000; //BUP
++            final = i;
++        }
++    }
++
++    if (!final) {
++        cdi_outl(card->nabmbar + NABM_POBDBAR, (uint32_t)card->pbufdesc);
++        cdi_outb(card->nabmbar + NABM_POLVI, 15);
++        cdi_outb(card->nabmbar + NABM_POCONTROL, 0x15);
++        buffer_queue = 1;
++        doing_buffer = 0;
++    }
++
++    for (; i < 32; i++) {
++        card->bufdesc[i].samples = 0;
++        card->bufdesc[i].flags = 0xC000;
++    }
++
++    have_qc_waiting = 0;
++
++    return count;
++}
++
++static void isr(struct cdi_device *device)
++{
++    struct ac97_card *card = (struct ac97_card *)device;
++
++    cdi_outb(card->nabmbar + NABM_POSTATUS,
++        cdi_inb(card->nabmbar + NABM_POSTATUS));
++    if (buffer_queue > 0) {
++        card->bufdesc[doing_buffer++].samples = 0;
++        buffer_queue--;
++    }
++}
+-- 
+1.6.3.3
+
+
+From max at tyndur.org  Fri Oct  2 18:47:12 2009
+From: max at tyndur.org (max at tyndur.org)
+Date: Fri,  2 Oct 2009 18:47:12 +0200
+Subject: [cdi-devel] [PATCH] ac97: CDI.storage driver
+Message-ID: <1254502032-25314-1-git-send-email-max@tyndur.org>
+
+From: Max Reitz <max at tyndur.org>
+
++ ac97 driver appears as CDI.storage driver (path on t?ndur:
+  ac97:/crd0) - now working
+
+Signed-off-by: Max Reitz <max at tyndur.org>
+---
+ ac97/device.h |   65 +++++++++++++
+ ac97/main.c   |  281 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 346 insertions(+), 0 deletions(-)
+ create mode 100644 ac97/device.h
+ create mode 100644 ac97/main.c
+
+diff --git a/ac97/device.h b/ac97/device.h
+new file mode 100644
+index 0000000..382a1b2
+--- /dev/null
++++ b/ac97/device.h
+@@ -0,0 +1,65 @@
++/******************************************************************************
++ * Copyright (c) 2009 Max Reitz                                               *
++ *                                                                            *
++ * Permission is hereby granted,  free of charge,  to any  person obtaining a *
++ * copy of this software and associated documentation files (the "Software"), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use,  copy, modify, merge, publish,  distribute, sublicense, *
++ * and/or sell copies  of the  Software,  and to permit  persons to whom  the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF MERCHANTABILITY, *
++ * FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#ifndef _AC97_DEVICE_H_
++#define _AC97_DEVICE_H_
++
++#define USE_BUFS 16
++#define FRAMES_PER_BUF 0x4000
++
++#define NAM_RESET          0x0000
++#define NAM_MASTER_VOLUME  0x0002
++#define NAM_MONO_VOLUME    0x0006
++#define NAM_PC_BEEP        0x000A
++#define NAM_PCM_VOLUME     0x0018
++#define NAM_EXT_AUDIO_ID   0x0028
++#define NAM_EXT_AUDIO_STC  0x002A
++#define NAM_FRONT_SPLRATE  0x002C
++#define NAM_LR_SPLRATE     0x0032
++#define NABM_POBDBAR       0x0010
++#define NABM_POLVI         0x0015
++#define NABM_POSTATUS      0x0016
++#define NABM_POPICB        0x0018
++#define NABM_POCONTROL     0x001B
++#define NABM_GLB_CTRL_STAT 0x0060
++
++
++struct ac97_bufdesc {
++    uint32_t pbuf;
++    uint16_t samples;
++    uint16_t flags;
++} __attribute__ ((packed));
++
++struct ac97_card {
++    struct cdi_storage_device cdi_strg_dev;
++    struct cdi_pci_device *cdi_pci_dev;
++    int nambar;
++    int nabmbar;
++    int volume;
++    int sample_rate;
++    struct ac97_bufdesc *bufdesc;
++    struct ac97_bufdesc *pbufdesc;
++    void *buffer[USE_BUFS];
++    uintptr_t pbuffer[USE_BUFS];
++} __attribute__ ((packed));
++
++#endif
+diff --git a/ac97/main.c b/ac97/main.c
+new file mode 100644
+index 0000000..e6ad252
+--- /dev/null
++++ b/ac97/main.c
+@@ -0,0 +1,281 @@
++/******************************************************************************
++ * Copyright (c) 2009 Max Reitz                                               *
++ *                                                                            *
++ * Permission is hereby granted,  free of charge,  to any  person obtaining a *
++ * copy of this software and associated documentation files (the "Software"), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use,  copy, modify, merge, publish,  distribute, sublicense, *
++ * and/or sell copies  of the  Software,  and to permit  persons to whom  the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF MERCHANTABILITY, *
++ * FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "cdi.h"
++#include "cdi/io.h"
++#include "cdi/lists.h"
++#include "cdi/misc.h"
++#include "cdi/pci.h"
++#include "cdi/storage.h"
++
++#include "device.h"
++
++
++static void driver_init(void);
++static void init_dev(struct cdi_device *device);
++static void deinit_dev(struct cdi_device *device);
++static void suicide(struct cdi_driver *drv);
++static int play(struct cdi_storage_device *dev, uint64_t start, uint64_t count,
++    void *buffer);
++static int read_dummy(struct cdi_storage_device *dev, uint64_t start,
++    uint64_t count, void *buffer);
++static void isr(struct cdi_device *device);
++
++static const char *driver_name = "ac97";
++static struct cdi_storage_driver driver_storage;
++
++
++static int card_counter = 0;
++static volatile int buffer_queue = 0, have_qc_waiting = 0, doing_buffer = 0;
++
++
++#ifdef CDI_STANDALONE
++int main(void)
++#else
++int init_ac97(void)
++#endif
++{
++    cdi_init();
++
++    driver_init();
++    cdi_storage_driver_register((struct cdi_storage_driver *)&driver_storage);
++
++    cdi_run_drivers();
++
++    return 0;
++}
++
++static void driver_init(void)
++{
++    struct cdi_pci_device *dev;
++    int i;
++    struct ac97_card *card;
++    cdi_list_t pci_devices;
++
++    cdi_storage_driver_init(&driver_storage);
++
++    driver_storage.drv.name = driver_name;
++    driver_storage.drv.type = CDI_STORAGE;
++
++    driver_storage.drv.init_device = &init_dev;
++    driver_storage.drv.remove_device = &deinit_dev;
++    driver_storage.drv.destroy = &suicide;
++
++    driver_storage.read_blocks = &read_dummy;
++    driver_storage.write_blocks = &play;
++
++    pci_devices = cdi_list_create();
++    cdi_pci_get_all_devices(pci_devices);
++
++    for (i = 0; (dev = cdi_list_get(pci_devices, i)); i++) {
++        if ((dev->vendor_id == 0x8086) && ((dev->device_id == 0x2415) ||
++            (dev->device_id == 0x2425) || (dev->device_id == 0x2445)))
++        {
++            card = malloc(sizeof(*card));
++            card->cdi_pci_dev = dev;
++            cdi_list_push(driver_storage.drv.devices, card);
++        } else {
++            cdi_pci_device_destroy(dev);
++        }
++    }
++
++    cdi_list_destroy(pci_devices);
++}
++
++static void init_dev(struct cdi_device *device)
++{
++    struct ac97_card *card = (struct ac97_card *)device;
++    cdi_list_t pci_res_list;
++    struct cdi_pci_resource *rsrc;
++    int i;
++
++    card->cdi_strg_dev.block_size = 4;
++    card->cdi_strg_dev.block_count = FRAMES_PER_BUF * USE_BUFS;
++    card->cdi_strg_dev.dev.name = malloc(10);
++    sprintf((char *)card->cdi_strg_dev.dev.name, "crd%i", card_counter++);
++
++    cdi_register_irq(card->cdi_pci_dev->irq, &isr, device);
++    cdi_pci_alloc_ioports(card->cdi_pci_dev);
++
++    card->nambar = 0;
++    card->nabmbar = 0;
++
++    pci_res_list = card->cdi_pci_dev->resources;
++    for (i = 0; (rsrc = cdi_list_get(pci_res_list, i)); i++) {
++        if (rsrc->type == CDI_PCI_IOPORTS) {
++            //Die Resourcen liegen r?ckw?rts in der Liste!
++            //Wir nehmen nur die ersten zwei.
++            card->nabmbar = card->nambar;
++            card->nambar = rsrc->start;
++        }
++    }
++
++    cdi_alloc_phys_mem(sizeof(struct ac97_bufdesc) * 32,
++        (void **)&card->bufdesc, (void **)&card->pbufdesc);
++    for (i = 0; i < USE_BUFS; i++) {
++        cdi_alloc_phys_mem(FRAMES_PER_BUF * 4, &card->buffer[i],
++            (void **)&card->pbuffer[i]);
++    }
++    for (i = 0; i < 32; i++) {
++        card->bufdesc[i].pbuf = 0;
++        card->bufdesc[i].samples = 0;
++        card->bufdesc[i].flags = 0x4000;
++    }
++
++    cdi_outw(card->nambar + NAM_RESET, 42);
++    cdi_outb(card->nabmbar + NABM_GLB_CTRL_STAT, 0x02);
++    cdi_sleep_ms(100);
++    card->volume = 0; //Volle Dr?hnung
++    cdi_outw(card->nambar + NAM_MASTER_VOLUME,
++        (card->volume << 8) | card->volume);
++    cdi_outw(card->nambar + NAM_MONO_VOLUME, card->volume);
++    cdi_outw(card->nambar + NAM_PC_BEEP, card->volume);
++    cdi_outw(card->nambar + NAM_PCM_VOLUME,
++        (card->volume << 8) | card->volume);
++    cdi_sleep_ms(10);
++    if (!(cdi_inw(card->nambar + NAM_EXT_AUDIO_ID) & 1)) {
++        card->sample_rate = 48000;
++    } else {
++        cdi_outw(card->nambar + NAM_EXT_AUDIO_STC,
++            cdi_inw(card->nambar + NAM_EXT_AUDIO_STC) | 1);
++        cdi_sleep_ms(10);
++        cdi_outw(card->nambar + NAM_FRONT_SPLRATE, 44100);
++        cdi_outw(card->nambar + NAM_LR_SPLRATE, 44100);
++        cdi_sleep_ms(10);
++        card->sample_rate = cdi_inw(card->nambar + NAM_LR_SPLRATE);
++    }
++
++    cdi_storage_device_init((struct cdi_storage_device *)device);
++}
++
++static void deinit_dev(struct cdi_device *device)
++{
++}
++
++static void suicide(struct cdi_driver *drv)
++{
++}
++
++static int read_dummy(struct cdi_storage_device *dev, uint64_t start,
++    uint64_t count, void *buffer)
++{
++    return 0;
++}
++
++static int play(struct cdi_storage_device *dev, uint64_t start, uint64_t count,
++    void *buffer)
++{
++    struct ac97_card *card = (struct ac97_card *)dev;
++    int size = count * 4, i, final = 0;
++    ptrdiff_t off = 0;
++
++    if (!size) {
++        return 0;
++    }
++
++    if (have_qc_waiting < 0) { //Haha
++        have_qc_waiting = 0;
++    }
++    while (have_qc_waiting++ > 1) {
++        have_qc_waiting--;
++        cdi_wait_irq(card->cdi_pci_dev->irq, 100);
++    }
++
++    while (buffer_queue > 1) {
++        cdi_reset_wait_irq(card->cdi_pci_dev->irq);
++        cdi_wait_irq(card->cdi_pci_dev->irq, 100);
++    }
++
++    //Der letzte Buffer... Wir k?nnen den Rest also kopieren
++
++    for (i = 0; (i < USE_BUFS) && size; i++) {
++        card->bufdesc[i].pbuf = card->pbuffer[i];
++        if ((i == USE_BUFS - 1) || (size <= FRAMES_PER_BUF * 4)) {
++            while ((buffer_queue > 1) ||
++                (cdi_inw(card->nabmbar + NABM_POPICB) > 1764))
++            {
++                //Bis 20 ms vor Ablauf k?nnen wir noch CPU sparen
++                cdi_sleep_ms(1);
++            }
++            while (buffer_queue);
++            if (i) {
++                //Der erste Buffer ist gef?llt, wir k?nnen das Abspielen also
++                //beginnen, bevor wir den letzten f?llen
++                cdi_outl(card->nabmbar + NABM_POBDBAR,
++                    (uint32_t)card->pbufdesc);
++                cdi_outb(card->nabmbar + NABM_POLVI, 15);
++                cdi_outb(card->nabmbar + NABM_POCONTROL, 0x15);
++                buffer_queue = i + 1;
++                doing_buffer = 0;
++            }
++        }
++        if (size >= FRAMES_PER_BUF * 4) {
++            card->bufdesc[i].samples = FRAMES_PER_BUF * 2;
++            size -= FRAMES_PER_BUF * 4;
++            memcpy(card->buffer[i], buffer + off, FRAMES_PER_BUF * 4);
++            off += FRAMES_PER_BUF * 4;
++        } else {
++            card->bufdesc[i].samples = size >> 1;
++            memcpy(card->buffer[i], buffer + off, size);
++            size = 0;
++        }
++        card->bufdesc[i].flags = 0x8000; //IOC
++        if (!size || (i == USE_BUFS - 1)) {
++            card->bufdesc[i].flags |= 0x4000; //BUP
++            final = i;
++        }
++    }
++
++    if (!final) {
++        cdi_outl(card->nabmbar + NABM_POBDBAR, (uint32_t)card->pbufdesc);
++        cdi_outb(card->nabmbar + NABM_POLVI, 15);
++        cdi_outb(card->nabmbar + NABM_POCONTROL, 0x15);
++        buffer_queue = 1;
++        doing_buffer = 0;
++    }
++
++    for (; i < 32; i++) {
++        card->bufdesc[i].samples = 0;
++        card->bufdesc[i].flags = 0xC000;
++    }
++
++    have_qc_waiting = 0;
++
++    return count;
++}
++
++static void isr(struct cdi_device *device)
++{
++    struct ac97_card *card = (struct ac97_card *)device;
++
++    cdi_outb(card->nabmbar + NABM_POSTATUS,
++        cdi_inb(card->nabmbar + NABM_POSTATUS));
++    if (buffer_queue > 0) {
++        card->bufdesc[doing_buffer++].samples = 0;
++        buffer_queue--;
++    }
++}
+-- 
+1.6.3.3
+
+
+From max at tyndur.org  Mon Oct  5 20:04:09 2009
+From: max at tyndur.org (max at tyndur.org)
+Date: Mon,  5 Oct 2009 20:04:09 +0200
+Subject: [cdi-devel] [PATCH] CDI.audio
+Message-ID: <1254765849-9380-1-git-send-email-max@tyndur.org>
+
+From: Max Reitz <max at tyndur.org>
+
++ A new approach on CDI.audio (aka CDI.sound). Up to now, it just
+  consists of a single C header describing the interface between
+  operating system and sound driver.
+
+Signed-off-by: Max Reitz <max at tyndur.org>
+---
+ include/cdi.h       |    2 +
+ include/cdi/audio.h |  147 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 149 insertions(+), 0 deletions(-)
+ create mode 100644 include/cdi/audio.h
+
+diff --git a/include/cdi.h b/include/cdi.h
+index d803751..0b8e468 100644
+--- a/include/cdi.h
++++ b/include/cdi.h
+@@ -19,12 +19,14 @@
+ #include "cdi/lists.h"
+ 
+ #define CDI_STANDALONE
++#define TYNDUR
+ 
+ typedef enum {
+     CDI_UNKNOWN         = 0,
+     CDI_NETWORK         = 1,
+     CDI_STORAGE         = 2,
+     CDI_SCSI            = 3,
++    CDI_AUDIO           = 4,
+ } cdi_device_type_t;
+ 
+ struct cdi_driver;
+diff --git a/include/cdi/audio.h b/include/cdi/audio.h
+new file mode 100644
+index 0000000..bd1fb1a
+--- /dev/null
++++ b/include/cdi/audio.h
+@@ -0,0 +1,147 @@
++/*
++ * Copyright (c) 2009 Max Reitz
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it 
++ * and/or modify it under the terms of the Do What The Fuck You Want 
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * http://sam.zoy.org/projects/COPYING.WTFPL for more details.
++ */
++
++/**
++ * Treiber fuer Soundkarten
++ * \defgroup net
++ */
++/*\@{*/
++
++#ifndef _CDI_AUDIO_H_
++#define _CDI_AUDIO_H_
++
++#include <stddef.h>
++
++#include "cdi.h"
++#include "cdi/list.h"
++
++//Moegliche Operation
++typedef enum {
++    //Abspielen
++    CDI_AUDIO_PLAY = 0,
++    //Aufnehmen
++    CDI_AUDIO_RECORD,
++
++    CDI_AUDIO_NUM_ACTIONS
++} cdi_audio_action_t;
++
++struct cdi_audio_device {
++    struct cdi_device dev;
++
++    //Unterstuetzte Modi fuer eine bestimmte Operation. Ist dieser Wert NULL
++    //oder die Liste ganz einfach leer, dann wird die Operation nicht
++    //unterstuetzt.
++    cdi_list_t        modes[CDI_AUDIO_NUM_ACTIONS];
++};
++
++struct cdi_audio_mode {
++    //Samplerate
++    int sample_rate;
++    //Anzahl der Channels (1 = Mono; 2 = Stereo; ...)
++    int channels;
++    //Bits pro Sample
++    int bits_per_sample;
++};
++
++struct cdi_audio_driver {
++    struct cdi_driver drv;
++
++    /**
++     * Aendert den Modus der Soundkarte fuer eine bestimmte Operation
++     *
++     * @param device Soundkarte
++     * @param action Betreffende Operation
++     * @param mode Gewuenschter Modus (muss in device->modes[action] enthalten
++     *             sein!)
++     *
++     * @return 0, wenn der neue Modus dem angegebenen entspricht, sonst -1.
++     */
++    int (*change_mode)(struct cdi_audio_device* device,
++        cdi_audio_action_t action, struct cdi_audio_mode* mode);
++
++    /**
++     * Liefert den Modus der Soundkarte fuer eine bestimmte Operation
++     *
++     * @param device Soundkarte
++     * @param action Betreffende Operation
++     * @param mode Pointer zur Struktur, in der die Informationen zum Modus
++     *             hinterlegt werden sollen
++     *
++     * @return 0, wenn die Informationen in *mode gespeichert wurden, sonst -1.
++     */
++    int (*get_mode)(struct cdi_audio_device* device, cdi_audio_action_t action,
++        struct cdi_audio_mode* mode);
++
++    /**
++     * Legt die Lautstaerke der angegebenen Operation fest
++     *
++     * @param device Soundkarte
++     * @param action Betreffende Operation
++     * @param volume Neue Lautstaerke (zwischen 0 und 255, wobei 255 am
++     *               lautesten ist; bei -1 wird die Lautstaerke nicht
++     *               veraendert)
++     *
++     * @return Die neue Lautstaerke (nuetzlich mit volume == -1)
++     */
++    int (*set_volume)(struct cdi_audio_device* device,
++        cdi_audio_action_t action, int volume);
++
++    /**
++     * Fuehrt eine Operation aus
++     *
++     * @param device Soundkarte
++     * @param action Auszufuehrende Operation
++     * @param buffer Speicher, in dem die Operation durchgefuehrt werden soll
++     * @param size Groesse des Speichers
++     * @param flags Eventuelle Flags, die die Operation genauer festlegen
++     *
++     * @return 0 bei Erfolg, -1 im Fehlerfall.
++     */
++    int (*act)(struct cdi_audio_device* device, cdi_audio_action_t action,
++        void* buffer, size_t size, int flags);
++
++    /**
++     * Bricht eine Operation ab
++     *
++     * @param device Soundkarte
++     * @param action Abzubrechende Operation
++     */
++    void (*cancel)(struct cdi_audio_device* device, cdi_audio_action_t action);
++};
++
++//Flags fuer act():
++#define CDI_AUDIO_LOOP 0x00000001 //Fuehrt die Operation in einer ewigen
++                                  //Schleife aus (mit cancel() zu unterbrechen)
++
++
++/**
++ * Initialisiert die Datenstrukturen fuer einen Soundkartentreiber
++ * (erzeugt die devices-Liste)
++ *
++ * @param driver Der Treiber
++ */
++void cdi_audio_driver_init(struct cdi_net_driver* driver);
++
++/**
++ * Deinitialisiert die Datenstrukturen fuer einen Soundkartentreiber
++ * (gibt die devices-Liste frei)
++ *
++ * @param driver Der Treiber
++ */
++void cdi_audio_driver_destroy(struct cdi_net_driver* driver);
++
++/**
++ * Initialisiert eine neue Soundkarte
++ *
++ * @param device Die Soundkarte
++ */
++void cdi_audio_device_init(struct cdi_audio_device* device);
++
++#endif
+-- 
+1.6.3.3
+
+
+From max at tyndur.org  Mon Oct  5 20:07:58 2009
+From: max at tyndur.org (max at tyndur.org)
+Date: Mon,  5 Oct 2009 20:07:58 +0200
+Subject: [cdi-devel] [PATCH] CDI.audio - without "#define TYNDUR"
+Message-ID: <1254766078-9519-1-git-send-email-max@tyndur.org>
+
+From: Max Reitz <max at tyndur.org>
+
++ A new approach on CDI.audio (aka CDI.sound). Up to now, it just
+  consists of a single C header describing the interface between
+  operating system and sound driver (this patch does not contain
+  a "#define TYNDUR" in "include/cdi.h").
+
+Signed-off-by: Max Reitz <max at tyndur.org>
+---
+ include/cdi.h       |    1 +
+ include/cdi/audio.h |  147 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 148 insertions(+), 0 deletions(-)
+ create mode 100644 include/cdi/audio.h
+
+diff --git a/include/cdi.h b/include/cdi.h
+index d803751..4f5385c 100644
+--- a/include/cdi.h
++++ b/include/cdi.h
+@@ -25,6 +25,7 @@ typedef enum {
+     CDI_NETWORK         = 1,
+     CDI_STORAGE         = 2,
+     CDI_SCSI            = 3,
++    CDI_AUDIO           = 4,
+ } cdi_device_type_t;
+ 
+ struct cdi_driver;
+diff --git a/include/cdi/audio.h b/include/cdi/audio.h
+new file mode 100644
+index 0000000..bd1fb1a
+--- /dev/null
++++ b/include/cdi/audio.h
+@@ -0,0 +1,147 @@
++/*
++ * Copyright (c) 2009 Max Reitz
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it 
++ * and/or modify it under the terms of the Do What The Fuck You Want 
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * http://sam.zoy.org/projects/COPYING.WTFPL for more details.
++ */
++
++/**
++ * Treiber fuer Soundkarten
++ * \defgroup net
++ */
++/*\@{*/
++
++#ifndef _CDI_AUDIO_H_
++#define _CDI_AUDIO_H_
++
++#include <stddef.h>
++
++#include "cdi.h"
++#include "cdi/list.h"
++
++//Moegliche Operation
++typedef enum {
++    //Abspielen
++    CDI_AUDIO_PLAY = 0,
++    //Aufnehmen
++    CDI_AUDIO_RECORD,
++
++    CDI_AUDIO_NUM_ACTIONS
++} cdi_audio_action_t;
++
++struct cdi_audio_device {
++    struct cdi_device dev;
++
++    //Unterstuetzte Modi fuer eine bestimmte Operation. Ist dieser Wert NULL
++    //oder die Liste ganz einfach leer, dann wird die Operation nicht
++    //unterstuetzt.
++    cdi_list_t        modes[CDI_AUDIO_NUM_ACTIONS];
++};
++
++struct cdi_audio_mode {
++    //Samplerate
++    int sample_rate;
++    //Anzahl der Channels (1 = Mono; 2 = Stereo; ...)
++    int channels;
++    //Bits pro Sample
++    int bits_per_sample;
++};
++
++struct cdi_audio_driver {
++    struct cdi_driver drv;
++
++    /**
++     * Aendert den Modus der Soundkarte fuer eine bestimmte Operation
++     *
++     * @param device Soundkarte
++     * @param action Betreffende Operation
++     * @param mode Gewuenschter Modus (muss in device->modes[action] enthalten
++     *             sein!)
++     *
++     * @return 0, wenn der neue Modus dem angegebenen entspricht, sonst -1.
++     */
++    int (*change_mode)(struct cdi_audio_device* device,
++        cdi_audio_action_t action, struct cdi_audio_mode* mode);
++
++    /**
++     * Liefert den Modus der Soundkarte fuer eine bestimmte Operation
++     *
++     * @param device Soundkarte
++     * @param action Betreffende Operation
++     * @param mode Pointer zur Struktur, in der die Informationen zum Modus
++     *             hinterlegt werden sollen
++     *
++     * @return 0, wenn die Informationen in *mode gespeichert wurden, sonst -1.
++     */
++    int (*get_mode)(struct cdi_audio_device* device, cdi_audio_action_t action,
++        struct cdi_audio_mode* mode);
++
++    /**
++     * Legt die Lautstaerke der angegebenen Operation fest
++     *
++     * @param device Soundkarte
++     * @param action Betreffende Operation
++     * @param volume Neue Lautstaerke (zwischen 0 und 255, wobei 255 am
++     *               lautesten ist; bei -1 wird die Lautstaerke nicht
++     *               veraendert)
++     *
++     * @return Die neue Lautstaerke (nuetzlich mit volume == -1)
++     */
++    int (*set_volume)(struct cdi_audio_device* device,
++        cdi_audio_action_t action, int volume);
++
++    /**
++     * Fuehrt eine Operation aus
++     *
++     * @param device Soundkarte
++     * @param action Auszufuehrende Operation
++     * @param buffer Speicher, in dem die Operation durchgefuehrt werden soll
++     * @param size Groesse des Speichers
++     * @param flags Eventuelle Flags, die die Operation genauer festlegen
++     *
++     * @return 0 bei Erfolg, -1 im Fehlerfall.
++     */
++    int (*act)(struct cdi_audio_device* device, cdi_audio_action_t action,
++        void* buffer, size_t size, int flags);
++
++    /**
++     * Bricht eine Operation ab
++     *
++     * @param device Soundkarte
++     * @param action Abzubrechende Operation
++     */
++    void (*cancel)(struct cdi_audio_device* device, cdi_audio_action_t action);
++};
++
++//Flags fuer act():
++#define CDI_AUDIO_LOOP 0x00000001 //Fuehrt die Operation in einer ewigen
++                                  //Schleife aus (mit cancel() zu unterbrechen)
++
++
++/**
++ * Initialisiert die Datenstrukturen fuer einen Soundkartentreiber
++ * (erzeugt die devices-Liste)
++ *
++ * @param driver Der Treiber
++ */
++void cdi_audio_driver_init(struct cdi_net_driver* driver);
++
++/**
++ * Deinitialisiert die Datenstrukturen fuer einen Soundkartentreiber
++ * (gibt die devices-Liste frei)
++ *
++ * @param driver Der Treiber
++ */
++void cdi_audio_driver_destroy(struct cdi_net_driver* driver);
++
++/**
++ * Initialisiert eine neue Soundkarte
++ *
++ * @param device Die Soundkarte
++ */
++void cdi_audio_device_init(struct cdi_audio_device* device);
++
++#endif
+-- 
+1.6.3.3
+
+
+From kevin at tyndur.org  Mon Oct  5 23:14:40 2009
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Mon, 5 Oct 2009 23:14:40 +0200
+Subject: [cdi-devel] [PATCH] CDI.audio - without "#define TYNDUR"
+In-Reply-To: <1254766078-9519-1-git-send-email-max@tyndur.org>
+References: <1254766078-9519-1-git-send-email-max@tyndur.org>
+Message-ID: <20091005211436.GA5001@silvanus>
+
+Matt, can you have a quick look at it, too? If you still haven't got
+around to learning German, ignore the comments for now - there is noone
+who actually cares about specifications anyway. ;-)
+
+On Mon, Oct 05, 2009 at 08:07:58PM +0200, max at tyndur.org wrote:
+> From: Max Reitz <max at tyndur.org>
+> 
+> + A new approach on CDI.audio (aka CDI.sound). Up to now, it just
+>   consists of a single C header describing the interface between
+>   operating system and sound driver (this patch does not contain
+>   a "#define TYNDUR" in "include/cdi.h").
+
+Just a comment on writing patch descriptions for a changed patch: Things
+like "now without #define TYNDUR" are meaningless in the git history.
+The summary should describe what the patch is doing, not what previous
+(not committed) patches did wrong.
+
+Usually you would put [PATCH v2] into the subject so that it's clear that
+this is meant to replace the first version. Things like what you changed
+in v2 you best describe below the --- line, either directly before or
+after the diffstat. This way we can read the explanation when reviewing
+the patch, but it won't be included in the git commit comment.
+
+> Signed-off-by: Max Reitz <max at tyndur.org>
+> ---
+>  include/cdi.h       |    1 +
+>  include/cdi/audio.h |  147 +++++++++++++++++++++++++++++++++++++++++++++++++++
+>  2 files changed, 148 insertions(+), 0 deletions(-)
+>  create mode 100644 include/cdi/audio.h
+> 
+> diff --git a/include/cdi.h b/include/cdi.h
+> index d803751..4f5385c 100644
+> --- a/include/cdi.h
+> +++ b/include/cdi.h
+> @@ -25,6 +25,7 @@ typedef enum {
+>      CDI_NETWORK         = 1,
+>      CDI_STORAGE         = 2,
+>      CDI_SCSI            = 3,
+> +    CDI_AUDIO           = 4,
+>  } cdi_device_type_t;
+>  
+>  struct cdi_driver;
+> diff --git a/include/cdi/audio.h b/include/cdi/audio.h
+> new file mode 100644
+> index 0000000..bd1fb1a
+> --- /dev/null
+> +++ b/include/cdi/audio.h
+> @@ -0,0 +1,147 @@
+> +/*
+> + * Copyright (c) 2009 Max Reitz
+> + *
+> + * This program is free software. It comes without any warranty, to
+> + * the extent permitted by applicable law. You can redistribute it 
+> + * and/or modify it under the terms of the Do What The Fuck You Want 
+> + * To Public License, Version 2, as published by Sam Hocevar. See
+> + * http://sam.zoy.org/projects/COPYING.WTFPL for more details.
+> + */
+> +
+> +/**
+> + * Treiber fuer Soundkarten
+> + * \defgroup net
+> + */
+> +/*\@{*/
+> +
+> +#ifndef _CDI_AUDIO_H_
+> +#define _CDI_AUDIO_H_
+> +
+> +#include <stddef.h>
+> +
+> +#include "cdi.h"
+> +#include "cdi/list.h"
+> +
+> +//Moegliche Operation
+> +typedef enum {
+> +    //Abspielen
+> +    CDI_AUDIO_PLAY = 0,
+> +    //Aufnehmen
+> +    CDI_AUDIO_RECORD,
+> +
+> +    CDI_AUDIO_NUM_ACTIONS
+> +} cdi_audio_action_t;
+> +
+> +struct cdi_audio_device {
+> +    struct cdi_device dev;
+> +
+> +    //Unterstuetzte Modi fuer eine bestimmte Operation. Ist dieser Wert NULL
+> +    //oder die Liste ganz einfach leer, dann wird die Operation nicht
+> +    //unterstuetzt.
+> +    cdi_list_t        modes[CDI_AUDIO_NUM_ACTIONS];
+> +};
+
+This contains cdi_audio_modes, right? Maybe mention that in the comment.
+
+> +
+> +struct cdi_audio_mode {
+> +    //Samplerate
+> +    int sample_rate;
+
+Which unit?
+
+> +    //Anzahl der Channels (1 = Mono; 2 = Stereo; ...)
+> +    int channels;
+> +    //Bits pro Sample
+> +    int bits_per_sample;
+> +};
+> +
+> +struct cdi_audio_driver {
+> +    struct cdi_driver drv;
+> +
+> +    /**
+> +     * Aendert den Modus der Soundkarte fuer eine bestimmte Operation
+> +     *
+> +     * @param device Soundkarte
+> +     * @param action Betreffende Operation
+> +     * @param mode Gewuenschter Modus (muss in device->modes[action] enthalten
+> +     *             sein!)
+> +     *
+> +     * @return 0, wenn der neue Modus dem angegebenen entspricht, sonst -1.
+> +     */
+> +    int (*change_mode)(struct cdi_audio_device* device,
+> +        cdi_audio_action_t action, struct cdi_audio_mode* mode);
+> +
+> +    /**
+> +     * Liefert den Modus der Soundkarte fuer eine bestimmte Operation
+> +     *
+> +     * @param device Soundkarte
+> +     * @param action Betreffende Operation
+> +     * @param mode Pointer zur Struktur, in der die Informationen zum Modus
+> +     *             hinterlegt werden sollen
+> +     *
+> +     * @return 0, wenn die Informationen in *mode gespeichert wurden, sonst -1.
+> +     */
+> +    int (*get_mode)(struct cdi_audio_device* device, cdi_audio_action_t action,
+> +        struct cdi_audio_mode* mode);
+> +
+> +    /**
+> +     * Legt die Lautstaerke der angegebenen Operation fest
+> +     *
+> +     * @param device Soundkarte
+> +     * @param action Betreffende Operation
+> +     * @param volume Neue Lautstaerke (zwischen 0 und 255, wobei 255 am
+> +     *               lautesten ist; bei -1 wird die Lautstaerke nicht
+> +     *               veraendert)
+> +     *
+> +     * @return Die neue Lautstaerke (nuetzlich mit volume == -1)
+> +     */
+> +    int (*set_volume)(struct cdi_audio_device* device,
+> +        cdi_audio_action_t action, int volume);
+
+I think we'll want to control more than a single channel. I'd suggest
+adding an channel parameter and introducing another function that allows
+enumerating the channels the device supports.
+
+> +
+> +    /**
+> +     * Fuehrt eine Operation aus
+> +     *
+> +     * @param device Soundkarte
+> +     * @param action Auszufuehrende Operation
+> +     * @param buffer Speicher, in dem die Operation durchgefuehrt werden soll
+> +     * @param size Groesse des Speichers
+> +     * @param flags Eventuelle Flags, die die Operation genauer festlegen
+> +     *
+> +     * @return 0 bei Erfolg, -1 im Fehlerfall.
+> +     */
+> +    int (*act)(struct cdi_audio_device* device, cdi_audio_action_t action,
+> +        void* buffer, size_t size, int flags);
+
+You define that -1 is returned in error case, but when is the function
+supposed to fail? When the device is already playing/recording? How
+would one detect that new data needs to be sent?
+
+From matthew at theiselins.net  Tue Oct  6 10:51:28 2009
+From: matthew at theiselins.net (Matthew Iselin)
+Date: Tue, 6 Oct 2009 18:51:28 +1000
+Subject: [cdi-devel] [PATCH] CDI.audio - without "#define TYNDUR"
+In-Reply-To: <20091005211436.GA5001@silvanus>
+References: <1254766078-9519-1-git-send-email-max@tyndur.org>
+	<20091005211436.GA5001@silvanus>
+Message-ID: <f88ae150910060151n71ec6960j5ba0c71485bd5568@mail.gmail.com>
+
+Hi,
+
+I like the looks of the interface, but the points Kevin have brought
+up are, in my opinion, important points to consider.
+
+> +    /**
+> +     * Fuehrt eine Operation aus
+> +     *
+> +     * @param device Soundkarte
+> +     * @param action Auszufuehrende Operation
+> +     * @param buffer Speicher, in dem die Operation durchgefuehrt werden soll
+> +     * @param size Groesse des Speichers
+> +     * @param flags Eventuelle Flags, die die Operation genauer festlegen
+> +     *
+> +     * @return 0 bei Erfolg, -1 im Fehlerfall.
+> +     */
+> +    int (*act)(struct cdi_audio_device* device, cdi_audio_action_t action,
+> +        void* buffer, size_t size, int flags);
+
+Out of interest, why not use a read/write/ioctl style interface? Of
+course, you probably wouldn't call it read, write, and ioctl, but it
+seems to make a little more sense with respect to the concept of audio
+where you're writing streams of audio to the device. An ioctl-style
+function would probably set up the destination for said streams (along
+with other things). I'm interested to hear the rationale here.
+
+Cheers,
+Matt
+

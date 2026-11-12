@@ -1,0 +1,141 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 2/6] kernel2: Non-seekable Ressourcen nur einmal öffnen
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_2/6%3D5D_kernel2%3D3A_Non-seekable_%3F%3D%0A%09%3D%3Futf-8%3Fq%3FRessourcen_nur_einmal_%3DC3%3DB6ffnen%3F%3D&In-Reply-To=%3C1421098871-25847-3-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002478.html">
+   <LINK REL="Next"  HREF="002480.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 2/6] kernel2: Non-seekable Ressourcen nur einmal öffnen</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_2/6%3D5D_kernel2%3D3A_Non-seekable_%3F%3D%0A%09%3D%3Futf-8%3Fq%3FRessourcen_nur_einmal_%3DC3%3DB6ffnen%3F%3D&In-Reply-To=%3C1421098871-25847-3-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 2/6] kernel2: Non-seekable Ressourcen nur einmal öffnen">kevin at tyndur.org
+                  </A><BR>
+    <I>Mo Jan 12 22:41:07 CET 2015</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002478.html">[tyndur-devel] [PATCH 0/6] vterm: Nach LostIOv2 konvertieren
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002480.html">[tyndur-devel] [PATCH 3/6] LostIOv2: close-Event an	Userspace-Services weitergeben
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2479">[ Datum ]</a>
+              <a href="thread.html#2479">[ Thema ]</a>
+              <a href="subject.html#2479">[ Betreff (Subject) ]</a>
+              <a href="author.html#2479">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* kernel2: Wenn man eine non-seekable Ressource ein zweites Mal öffnet,
+  bekommt man nur einen Alias für den existierenden Stream. Dadurch
+  bleibt der Dateizeiger konsistent, auch wenn mehrere Programme vom
+  selben Stream lesen.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/kernel2/src/lostio/client.c             | 21 +++++++++++++++++++++
+ src/kernel2/src/lostio/include/lostio_int.h |  6 ++++++
+ 2 files changed, 27 insertions(+)
+
+diff --git a/src/kernel2/src/lostio/client.c b/src/kernel2/src/lostio/client.c
+index 3b4c2c6..46f2456 100644
+--- a/src/kernel2/src/lostio/client.c
++++ b/src/kernel2/src/lostio/client.c
+@@ -241,6 +241,16 @@ struct lio_stream* lio_open(struct lio_resource* res, int flags)
+         return NULL;
+     }
+ 
++    // Non-seekable Streams dürfen nur einmal geöffnet sein.  Vorläufig den
++    // schon existierenden Stream zurückgeben, falls die Flags passen.
++    // TODO Immer Fehler zurückgeben sobald der Userspace damit klarkommt
++    if (res-&gt;excl_stream) {
++        if (res-&gt;excl_stream-&gt;flags != flags) {
++            return NULL;
++        }
++        return res-&gt;excl_stream;
++    }
++
+     // Stream anlegen und initialisieren
+     s = calloc(1, sizeof(*s));
+     s-&gt;res = s-&gt;res_read = s-&gt;res_write = res;
+@@ -261,6 +271,11 @@ struct lio_stream* lio_open(struct lio_resource* res, int flags)
+         }
+     }
+ 
++    // Non-seekable Streams dürfen nur einmal geöffnet sein
++    if (!res-&gt;seekable) {
++        res-&gt;excl_stream = s;
++    }
++
+     return s;
+ 
+ fail:
+@@ -569,10 +584,16 @@ int lio_truncate(struct lio_stream* s, uint64_t size)
+  */
+ int lio_close(struct lio_stream* s)
+ {
++    // Sicherstellen, dass lio_open() den Stream nicht rausrückt, während wir
++    // ihn gerade schließen
++    s-&gt;flags = 0;
++
+     if (s-&gt;res-&gt;tree-&gt;service-&gt;lio_ops.close) {
+         s-&gt;res-&gt;tree-&gt;service-&gt;lio_ops.close(s);
+     }
+ 
++    s-&gt;res-&gt;excl_stream = NULL;
++
+     free(s);
+     return 0;
+ }
+diff --git a/src/kernel2/src/lostio/include/lostio_int.h b/src/kernel2/src/lostio/include/lostio_int.h
+index a8d112a..4feb05c 100644
+--- a/src/kernel2/src/lostio/include/lostio_int.h
++++ b/src/kernel2/src/lostio/include/lostio_int.h
+@@ -186,6 +186,12 @@ struct lio_resource {
+     /** Sortierung nach usp_id im Baum */
+     struct tree_item            usp_item;
+ 
++    /**
++     * Falls die Ressource nur einmal geöffnet werden kann, der offene Stream,
++     * der sie zugreift, oder NULL, wenn sie nicht geöffnet ist.
++     */
++    struct lio_stream*          excl_stream;
++
+     /** Private Daten des Services */
+     void*                       opaque;
+ };
+-- 
+2.1.2
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002478.html">[tyndur-devel] [PATCH 0/6] vterm: Nach LostIOv2 konvertieren
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002480.html">[tyndur-devel] [PATCH 3/6] LostIOv2: close-Event an	Userspace-Services weitergeben
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2479">[ Datum ]</a>
+              <a href="thread.html#2479">[ Thema ]</a>
+              <a href="subject.html#2479">[ Betreff (Subject)]</a>
+              <a href="author.html#2479">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

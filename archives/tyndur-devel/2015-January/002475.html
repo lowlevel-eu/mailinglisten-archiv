@@ -1,0 +1,133 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 3/4] cdi/scsi: Mehrere Sektoren auf einmal	lesen
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%203/4%5D%20cdi/scsi%3A%20Mehrere%20Sektoren%20auf%20einmal%0A%09lesen&In-Reply-To=%3C1420986222-23055-4-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002474.html">
+   <LINK REL="Next"  HREF="002476.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 3/4] cdi/scsi: Mehrere Sektoren auf einmal	lesen</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%203/4%5D%20cdi/scsi%3A%20Mehrere%20Sektoren%20auf%20einmal%0A%09lesen&In-Reply-To=%3C1420986222-23055-4-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 3/4] cdi/scsi: Mehrere Sektoren auf einmal	lesen">kevin at tyndur.org
+                  </A><BR>
+    <I>So Jan 11 15:23:41 CET 2015</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002474.html">[tyndur-devel] [PATCH 2/4] atapi: Support for transferring more	than one sector
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002476.html">[tyndur-devel] [PATCH 4/4] atapi: Fix CDI_SCSI_WRITE
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2475">[ Datum ]</a>
+              <a href="thread.html#2475">[ Thema ]</a>
+              <a href="subject.html#2475">[ Betreff (Subject) ]</a>
+              <a href="author.html#2475">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* cdi/scsi: Wenn man mehrere Sektoren auf einmal liest statt einen nach
+  dem anderen, dann geht das ein bisschen schneller.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/cdi/lib/scsi/disk.c | 25 ++++++++++++++++---------
+ 1 file changed, 16 insertions(+), 9 deletions(-)
+
+diff --git a/src/modules/cdi/lib/scsi/disk.c b/src/modules/cdi/lib/scsi/disk.c
+index 0e2534e..e34b650 100644
+--- a/src/modules/cdi/lib/scsi/disk.c
++++ b/src/modules/cdi/lib/scsi/disk.c
+@@ -73,28 +73,31 @@ union cdrom_command
+     } __attribute__ ((packed)) ext;
+ };
+ 
+-static int cdrom_read_sector(
+-    struct cdi_scsi_device *device, uint32_t sector, char *buffer)
++static int cdrom_read_partial(
++    struct cdi_scsi_device *device, uint32_t sector, uint64_t nb_sectors,
++     char *buffer)
+ {
+     struct cdi_scsi_packet packet;
+     struct cdi_scsi_driver* drv = (struct cdi_scsi_driver*) device-&gt;dev.driver;
+     union cdrom_command* cmd = (union cdrom_command*) &amp;packet.command;
+ 
++    nb_sectors = (uint32_t) nb_sectors;
++
+     memset(&amp;packet, 0, sizeof(packet));
+     packet.direction = CDI_SCSI_READ;
+     packet.buffer = buffer;
+-    packet.bufsize = 2048;
++    packet.bufsize = 2048 * nb_sectors;
+     packet.cmdsize = 12;
+ 
+     cmd-&gt;ext.opcode = 0xA8;
+     cmd-&gt;ext.address = big_endian_dword(sector);
+-    cmd-&gt;ext.length = 0x01000000;
++    cmd-&gt;ext.length = big_endian_dword(nb_sectors);
+ 
+     if (drv-&gt;request(device, &amp;packet)) {
+         return -1;
+     }
+ 
+-    return 0;
++    return nb_sectors;
+ }
+ 
+ static int cdrom_capacity(struct cdi_scsi_device *device,
+@@ -210,12 +213,16 @@ static int cdi_scsi_disk_read(struct cdi_storage_device* device,
+ {
+     struct cdi_scsi_device* dev = device-&gt;dev.backdev;
+ 
+-    while (count--) {
+-        if (cdrom_read_sector(dev, start, buffer)) {
++    while (count &gt; 0) {
++        uint64_t ret;
++
++        ret = cdrom_read_partial(dev, start, count, buffer);
++        if (ret &lt;= 0) {
+             return -1;
+         }
+-        start ++;
+-        buffer += 2048;
++        start += ret;
++        buffer += ret;
++        count -= ret;
+     }
+ 
+     return 0;
+-- 
+2.1.2
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002474.html">[tyndur-devel] [PATCH 2/4] atapi: Support for transferring more	than one sector
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002476.html">[tyndur-devel] [PATCH 4/4] atapi: Fix CDI_SCSI_WRITE
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2475">[ Datum ]</a>
+              <a href="thread.html#2475">[ Thema ]</a>
+              <a href="subject.html#2475">[ Betreff (Subject)]</a>
+              <a href="author.html#2475">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

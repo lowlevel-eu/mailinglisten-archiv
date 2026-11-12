@@ -1,0 +1,114 @@
+From matthew at theiselins.net  Sat Mar 19 03:21:47 2011
+From: matthew at theiselins.net (Matthew Iselin)
+Date: Sat, 19 Mar 2011 12:21:47 +1000
+Subject: [cdi-devel] [PATCH] e1000: fix RX/TX descriptor alignment.
+Message-ID: <1300501307-9556-1-git-send-email-matthew@theiselins.net>
+
+This patch fixes the e1000 driver in VMware (and potentially some real
+hardware as well) by enforcing a 16-byte alignment for transmit and
+receive descriptors. Without this fix, the card automatically aligns the
+addresses on a 16-byte boundary, causing corruption in several data
+structures.
+
+The specification specifically states "The * Descriptor Base Address must
+point to a 16-byte aligned block of data". VMware appears to be far more
+pedantic than QEMU and VirtualBox when using these buffers.
+
+Signed-off-by: Matthew Iselin <matthew at theiselins.net>
+---
+ e1000/device.c |    6 +++---
+ e1000/device.h |    4 ++--
+ 2 files changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/e1000/device.c b/e1000/device.c
+index 6ce814c..027c3fe 100644
+--- a/e1000/device.c
++++ b/e1000/device.c
+@@ -277,6 +277,7 @@ static void reset_nic(struct e1000_device* netcard)
+     // Rx/Tx-Ring initialisieren
+     reg_outl(netcard, REG_RXDESC_ADDR_HI, 0);
+     reg_outl(netcard, REG_RXDESC_ADDR_LO, PHYS(netcard, rx_desc[0]));
++    printf("RX descriptors at %x", PHYS(netcard, rx_desc[0]));
+     reg_outl(netcard, REG_RXDESC_LEN,
+         RX_BUFFER_NUM * sizeof(struct e1000_rx_descriptor));
+     reg_outl(netcard, REG_RXDESC_HEAD, 0);
+@@ -308,13 +309,12 @@ static void reset_nic(struct e1000_device* netcard)
+     // Rx-Deskriptoren aufsetzen
+     for (i = 0; i < RX_BUFFER_NUM; i++) {
+         netcard->rx_desc[i].length = RX_BUFFER_SIZE;
+-        netcard->rx_desc[i].buffer =
+-            PHYS(netcard, rx_buffer[i * RX_BUFFER_SIZE]);
++        netcard->rx_desc[i].buffer = PHYS(netcard, rx_buffer[i * RX_BUFFER_SIZE]);
+ 
+ #ifdef DEBUG
+         printf("e1000: [%d] Rx: Buffer @ phys %08x, Desc @ phys %08x\n",
+             i,
+-            netcard->rx_desc[i].buffer, 
++            netcard->rx_desc[i].buffer,
+             PHYS(netcard, rx_desc[i]));
+ #endif
+     }
+diff --git a/e1000/device.h b/e1000/device.h
+index af614c2..26f2a45 100644
+--- a/e1000/device.h
++++ b/e1000/device.h
+@@ -163,11 +163,11 @@ struct e1000_device {
+ 
+     uintptr_t                   phys;
+ 
+-    struct e1000_tx_descriptor  tx_desc[TX_BUFFER_NUM];
++    struct e1000_tx_descriptor  tx_desc[TX_BUFFER_NUM] __attribute__((aligned(16)));
+     uint8_t                     tx_buffer[TX_BUFFER_NUM * TX_BUFFER_SIZE];
+     uint32_t                    tx_cur_buffer;
+ 
+-    struct e1000_rx_descriptor  rx_desc[RX_BUFFER_NUM];
++    struct e1000_rx_descriptor  rx_desc[RX_BUFFER_NUM] __attribute__((aligned(16)));
+     uint8_t                     rx_buffer[RX_BUFFER_NUM * RX_BUFFER_SIZE];
+     uint32_t                    rx_cur_buffer;
+ 
+-- 
+1.7.3.1.msysgit.0
+
+
+From kevin at tyndur.org  Sat Mar 26 00:21:45 2011
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 26 Mar 2011 00:21:45 +0100
+Subject: [cdi-devel] [PATCH] e1000: fix RX/TX descriptor alignment.
+In-Reply-To: <1300501307-9556-1-git-send-email-matthew@theiselins.net>
+References: <1300501307-9556-1-git-send-email-matthew@theiselins.net>
+Message-ID: <20110325232143.GA17596@silvanus>
+
+On Sat, Mar 19, 2011 at 12:21:47PM +1000, Matthew Iselin wrote:
+> This patch fixes the e1000 driver in VMware (and potentially some real
+> hardware as well) by enforcing a 16-byte alignment for transmit and
+> receive descriptors. Without this fix, the card automatically aligns the
+> addresses on a 16-byte boundary, causing corruption in several data
+> structures.
+> 
+> The specification specifically states "The * Descriptor Base Address must
+> point to a 16-byte aligned block of data". VMware appears to be far more
+> pedantic than QEMU and VirtualBox when using these buffers.
+> 
+> Signed-off-by: Matthew Iselin <matthew at theiselins.net>
+
+Thanks, good catch. Verified this with tyndur against a patched qemu.
+
+> ---
+>  e1000/device.c |    6 +++---
+>  e1000/device.h |    4 ++--
+>  2 files changed, 5 insertions(+), 5 deletions(-)
+> 
+> diff --git a/e1000/device.c b/e1000/device.c
+> index 6ce814c..027c3fe 100644
+> --- a/e1000/device.c
+> +++ b/e1000/device.c
+> @@ -277,6 +277,7 @@ static void reset_nic(struct e1000_device* netcard)
+>      // Rx/Tx-Ring initialisieren
+>      reg_outl(netcard, REG_RXDESC_ADDR_HI, 0);
+>      reg_outl(netcard, REG_RXDESC_ADDR_LO, PHYS(netcard, rx_desc[0]));
+> +    printf("RX descriptors at %x", PHYS(netcard, rx_desc[0]));
+
+Fixed this one to contain "e1000:" and a \n, and applied the patch.
+
+Kevin
+

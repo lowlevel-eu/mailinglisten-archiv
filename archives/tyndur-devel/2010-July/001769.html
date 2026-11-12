@@ -1,0 +1,163 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 1/3] usb/msd: Deadlock beim Initialisieren neuer Geräte vermeiden
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_1/3%3D5D_usb/msd%3D3A_Deadlock_beim%3F%3D%0A%09%3D%3Futf-8%3Fq%3F_Initialisieren_neuer_Ger%3DC3%3DA4te_vermeiden%3F%3D&In-Reply-To=%3C1280082467-2525-2-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001768.html">
+   <LINK REL="Next"  HREF="001770.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 1/3] usb/msd: Deadlock beim Initialisieren neuer Geräte vermeiden</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_1/3%3D5D_usb/msd%3D3A_Deadlock_beim%3F%3D%0A%09%3D%3Futf-8%3Fq%3F_Initialisieren_neuer_Ger%3DC3%3DA4te_vermeiden%3F%3D&In-Reply-To=%3C1280082467-2525-2-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 1/3] usb/msd: Deadlock beim Initialisieren neuer Geräte vermeiden">kevin at tyndur.org
+                  </A><BR>
+    <I>So Jul 25 20:27:45 CEST 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001768.html">[tyndur-devel] [PATCH 0/3] USB-Fixes
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001770.html">[tyndur-devel] [PATCH 2/3] usb1: Fix für Race bei der Behandlung von Geräten ohne Treiber
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1769">[ Datum ]</a>
+              <a href="thread.html#1769">[ Thema ]</a>
+              <a href="subject.html#1769">[ Betreff (Subject) ]</a>
+              <a href="author.html#1769">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* usb/msd: usb1 darf eigentlich keine RPCs zulassen während es auf
+  seiner Liste arbeitet, ansonsten bekommt man Race Conditions. Der
+  nächste Patch fixt dieses Race, aber damit würde ein Deadlock
+  entstehen. msd muss daher erst die Antwort schicken und dann die
+  weitere Initialisierung machen, in deren Verlauf es auch RPCs an usb1
+  schickt.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/usb/msd/init.c |   15 ++++++++++++---
+ src/modules/usb/msd/msd.h  |   14 +++++++++++---
+ src/modules/usb/msd/rpc.c  |    8 +++++++-
+ 3 files changed, 30 insertions(+), 7 deletions(-)
+
+diff --git a/src/modules/usb/msd/init.c b/src/modules/usb/msd/init.c
+index aa0d4a6..7670194 100644
+--- a/src/modules/usb/msd/init.c
++++ b/src/modules/usb/msd/init.c
+@@ -42,19 +42,28 @@
+ void got_bo_msd(struct usb_prov_dev* dev);
+ void got_cbi_msd(struct usb_prov_dev* dev);
+ 
+-int got_msd(struct usb_prov_dev* dev)
++int is_valid_msd(struct usb_prov_dev* dev)
+ {
+     if (dev-&gt;type.protocol == 0x50) { // Bulk-only
+-        got_bo_msd(dev);
+         return 1;
+     } else if ((dev-&gt;type.subclass == 0x04) &amp;&amp; !dev-&gt;type.protocol) { // UFI/CBI
+-        got_cbi_msd(dev);
+         return 1;
+     }
+ 
+     return 0;
+ }
+ 
++void got_msd(struct usb_prov_dev* dev)
++{
++    if (dev-&gt;type.protocol == 0x50) { // Bulk-only
++        got_bo_msd(dev);
++    } else if ((dev-&gt;type.subclass == 0x04) &amp;&amp; !dev-&gt;type.protocol) { // UFI/CBI
++        got_cbi_msd(dev);
++    } else {
++        abort();
++    }
++}
++
+ void got_bo_msd(struct usb_prov_dev* dev)
+ {
+     int endpoints = usb_get_number_of_endpoints(dev);
+diff --git a/src/modules/usb/msd/msd.h b/src/modules/usb/msd/msd.h
+index 892b207..3545df0 100644
+--- a/src/modules/usb/msd/msd.h
++++ b/src/modules/usb/msd/msd.h
+@@ -85,13 +85,21 @@ struct msc_gen_dev {
+ };
+ 
+ /**
+- * Wird von einem RPC-Handler aufgerufen, sobald ein neues MSD gefunden wurde.
++ * Wird von einem RPC-Handler aufgerufen, um zu prüfen, ob das neue Gerät ein
++ * MSD ist, mit dem der Treiber etwas anfangen kann.
+  *
+  * @param dev Neues Gerät
+  *
+- * @return 1 bei Erfolg, sonst 0
++ * @return 1 wenn das Gerät benutzt werden kann, sonst 0
++ */
++int is_valid_msd(struct usb_prov_dev* dev);
++
++/**
++ * Wird von einem RPC-Handler aufgerufen, sobald ein neues MSD gefunden wurde.
++ *
++ * @param dev Neues Gerät
+  */
+-int got_msd(struct usb_prov_dev* dev);
++void got_msd(struct usb_prov_dev* dev);
+ 
+ /**
+  * Initialisiert das LostIO-Interface.
+diff --git a/src/modules/usb/msd/rpc.c b/src/modules/usb/msd/rpc.c
+index ae48d68..d54fa01 100644
+--- a/src/modules/usb/msd/rpc.c
++++ b/src/modules/usb/msd/rpc.c
+@@ -50,6 +50,7 @@ void msd_got_device_handler(pid_t src, uint32_t corr_id, size_t length,
+     void* data)
+ {
+     struct usb_prov_dev* pd;
++    int ret;
+ 
+     if (length &lt; sizeof(*pd)) {
+         rpc_send_int_response(src, corr_id, 0);
+@@ -59,7 +60,12 @@ void msd_got_device_handler(pid_t src, uint32_t corr_id, size_t length,
+     pd = malloc(sizeof(*pd));
+     memcpy(pd, data, sizeof(*pd));
+ 
+-    rpc_send_int_response(src, corr_id, got_msd(pd));
++    ret = is_valid_msd(pd);
++    rpc_send_int_response(src, corr_id, ret);
++    if (ret) {
++        got_msd(pd);
++    }
++
+ }
+ 
+ void init_rpc_interface(void)
+-- 
+1.6.0.2
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001768.html">[tyndur-devel] [PATCH 0/3] USB-Fixes
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001770.html">[tyndur-devel] [PATCH 2/3] usb1: Fix für Race bei der Behandlung von Geräten ohne Treiber
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1769">[ Datum ]</a>
+              <a href="thread.html#1769">[ Thema ]</a>
+              <a href="subject.html#1769">[ Betreff (Subject)]</a>
+              <a href="author.html#1769">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

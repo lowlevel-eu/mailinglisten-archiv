@@ -1,0 +1,2387 @@
+From kevin at tyndur.org  Sun Jul 12 19:34:07 2015
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 12 Jul 2015 19:34:07 +0200
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH=5D_vterm=3A_Ein_paar_Unicode-An?=
+	=?utf-8?q?f=C3=BChrungszeichen?=
+Message-ID: <1436722447-9365-1-git-send-email-kevin@tyndur.org>
+
++ vterm: Ersatzdarstellung für die verschiedenen Varianten von einfachen
+  und doppelten Anführungszeichen, die Unicode so hat
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/vterm/utf8.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/src/modules/vterm/utf8.c b/src/modules/vterm/utf8.c
+index bd47fa0..3d3cb21 100644
+--- a/src/modules/vterm/utf8.c
++++ b/src/modules/vterm/utf8.c
+@@ -116,6 +116,14 @@ struct {
+     {0x0003C3, 0xE5}, // GREEK SMALL LETTER SIGMA
+     {0x0003C4, 0xE7}, // GREEK SMALL LETTER TAU
+     {0x0003C6, 0xED}, // GREEK SMALL LETTER PHI
++    {0x002018, '\''}, // LEFT SINGLE QUOTATION MARK
++    {0x002019, '\''}, // RIGHT SINGLE QUOTATION MARK
++    {0x00201A, '\''}, // SINGLE LOW-9 QUOTATION MARK
++    {0x00201B, '\''}, // SINGLE HIGH-REVERSED-9 QUOTATION MARK
++    {0x00201C,  '"'}, // LEFT DOUBLE QUOTATION MARK
++    {0x00201D,  '"'}, // RIGHT DOUBLE QUOTATION MARK
++    {0x00201E,  '"'}, // DOUBLE LOW-9 QUOTATION MARK
++    {0x00201F,  '"'}, // DOUBLE HIGH-REVERSED-9 QUOTATION MARK
+     {0x002022, 0x07}, // BULLET
+     {0x00203C, 0x13}, // DOUBLE EXCLAMATION MARK (!!)
+     {0x00207F, 0xFC}, // SUPERSCRIPT LATIN SMALL LETTER N (^n)
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Tue Jul 21 00:45:09 2015
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Tue, 21 Jul 2015 00:45:09 +0200
+Subject: [tyndur-devel] [PATCH v2 0/8] Blockierendes Lesen
+Message-ID: <1437432317-27705-1-git-send-email-kevin@tyndur.org>
+
+Mit ein paar Fixes mehr als in v1 scheint jetzt auch ctris wieder zu
+funktionieren (das mein Beispiel für POSIX-Programme war, die zu allem
+Überfluss auch noch select() benutzen). Ein bisschen mehr getestet
+könnte die Serie noch werden, aber ich hoffe, dass das jetzt soweit
+mergebar wäre.
+
+Kevin Wolf (8):
+  kernel2: lio_seek ohne Veränderung auch für non-seekable erlauben
+  libc: lio_compat_tell() auslagern
+  libc: LIOv2 in lio_compat_eof() abfangen
+  Pascal-RTL: lio_compat_* statt stdio.h-Funktionen benutzen
+  kernel2: LIO-Read-Syscall nimmt jetzt Flags
+  libc: lio_compat_readahead() gefixt
+  libc: POSIX-Dateifunktionen nicht über stdio.h emulieren
+  kernel2: Blockierendes Lesen
+
+ src/include/syscall_structs.h               |  11 ++
+ src/kernel2/include/lostio/client.h         |   4 +-
+ src/kernel2/include/tasks.h                 |   1 +
+ src/kernel2/src/lostio/client.c             |  56 ++++++--
+ src/kernel2/src/lostio/include/lostio_int.h |  11 ++
+ src/kernel2/src/lostio/tree.c               |   6 +
+ src/kernel2/src/syscalls/lio_server.c       |   5 +-
+ src/kernel2/src/syscalls/lostio.c           |   8 +-
+ src/modules/include/lostio.h                |   3 +
+ src/modules/include/syscall.h               |  18 +++
+ src/modules/lib/lostio/client/file.c        |  12 +-
+ src/modules/lib/lostio/client/seek.c        |  33 ++++-
+ src/modules/lib/posix/posix_files.c         | 202 +++++++++++++++++++++-------
+ src/modules/lib/posix/select.c              | 135 -------------------
+ src/modules/lib/stdlibc/file.c              |  68 ++++------
+ src/modules/lib/syscalls/lostio.c           |  10 +-
+ src/modules/pas/lib/rtl/sysfile.inc         | 130 +++++++++++-------
+ src/modules/pas/lib/rtl/system.pas          |  15 ++-
+ 18 files changed, 428 insertions(+), 300 deletions(-)
+ delete mode 100644 src/modules/lib/posix/select.c
+
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Tue Jul 21 00:45:10 2015
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Tue, 21 Jul 2015 00:45:10 +0200
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH_v2_1/8=5D_kernel2=3A_lio=5Fseek?=
+	=?utf-8?q?_ohne_Ver=C3=A4nderung_auch_f=C3=BCr_non-seekable_erlaub?=
+	=?utf-8?q?en?=
+In-Reply-To: <1437432317-27705-1-git-send-email-kevin@tyndur.org>
+References: <1437432317-27705-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1437432317-27705-2-git-send-email-kevin@tyndur.org>
+
+* kernel2: Es gibt Aufrufer, die lio_seek() mit LIO_SEEK_CUR und
+  offset = 0 aufrufen, um die aktuelle Position des Dateizeigers
+  herauszufinden. Das ist auch in Ordnung, wenn die Ressource eigentlich
+  keine Seeks kann.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/src/lostio/client.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/src/kernel2/src/lostio/client.c b/src/kernel2/src/lostio/client.c
+index 545467b..4673a27 100644
+--- a/src/kernel2/src/lostio/client.c
++++ b/src/kernel2/src/lostio/client.c
+@@ -472,7 +472,13 @@ out:
+  */
+ int64_t lio_seek(struct lio_stream* s, int64_t offset, int whence)
+ {
+-    if ((s->res_read != s->res_write) || !s->res_read->seekable) {
++    if (s->res_read != s->res_write) {
++        return -EINVAL;
++    }
++
++    /* LIO_SEEK_CUR zum Herausfinden der aktuellen Position geht auch auf
++     * Ressourcen, die eigentlich kein seek unterstützen. */
++    if (!s->res_read->seekable && (whence != LIO_SEEK_CUR || offset)) {
+         return -EINVAL;
+     }
+ 
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Tue Jul 21 00:45:12 2015
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Tue, 21 Jul 2015 00:45:12 +0200
+Subject: [tyndur-devel] [PATCH v2 3/8] libc: LIOv2 in lio_compat_eof()
+	abfangen
+In-Reply-To: <1437432317-27705-1-git-send-email-kevin@tyndur.org>
+References: <1437432317-27705-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1437432317-27705-4-git-send-email-kevin@tyndur.org>
+
+! libc: lio_compat_eof() bleibt bisher hängen, wenn man es auf einer
+  LIOv2-Ressource benutzt, weil es einen LIOv1-Request schickt und dann
+  vergeblich auf die Antwort wartet. LIOv2-Ressourcen sind einfach nie
+  EOF.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/lib/lostio/client/file.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/src/modules/lib/lostio/client/file.c b/src/modules/lib/lostio/client/file.c
+index 45e7871..fabf7bc 100644
+--- a/src/modules/lib/lostio/client/file.c
++++ b/src/modules/lib/lostio/client/file.c
+@@ -324,6 +324,11 @@ ssize_t lio_compat_write(const void* src, size_t blocksize, size_t blockcount,
+ int lio_compat_eof(io_resource_t* io_res)
+ {
+     io_eof_request_t eof_request;
++
++    if (IS_LIO2(io_res)) {
++        return 0;
++    }
++
+     eof_request.id = io_res->id;
+ 
+     return rpc_get_dword(io_res->pid, "IO_EOF  ", sizeof(io_eof_request_t),
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Tue Jul 21 00:45:11 2015
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Tue, 21 Jul 2015 00:45:11 +0200
+Subject: [tyndur-devel] [PATCH v2 2/8] libc: lio_compat_tell() auslagern
+In-Reply-To: <1437432317-27705-1-git-send-email-kevin@tyndur.org>
+References: <1437432317-27705-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1437432317-27705-3-git-send-email-kevin@tyndur.org>
+
+* libc: Bisher hatte ftell() direkt die Funktionalität, um sowohl auf
+  LIOv1 als auch LIOv2 die Position zurückgeben zu können. Wenn man es
+  raussplittet, ist nicht nur der Code sauberer, sondern man kann es
+  auch ohne stdio.h benutzen.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/include/lostio.h         |  3 +++
+ src/modules/lib/lostio/client/seek.c | 33 ++++++++++++++++++++++++++++++++-
+ src/modules/lib/stdlibc/file.c       | 25 ++++---------------------
+ 3 files changed, 39 insertions(+), 22 deletions(-)
+
+diff --git a/src/modules/include/lostio.h b/src/modules/include/lostio.h
+index 5846be6..58fe314 100644
+--- a/src/modules/include/lostio.h
++++ b/src/modules/include/lostio.h
+@@ -239,6 +239,9 @@ int lio_compat_eof(io_resource_t* io_res);
+ /// Stream-Position setzen
+ bool lio_compat_seek(io_resource_t* io_res, uint64_t offset, int origin);
+ 
++/// Stream-Position abfragen
++int64_t lio_compat_tell(io_resource_t* io_res);
++
+ 
+ /******************************************************************************
+  * LIO2-Server                                                                *
+diff --git a/src/modules/lib/lostio/client/seek.c b/src/modules/lib/lostio/client/seek.c
+index 94d05cc..c7fdcf0 100644
+--- a/src/modules/lib/lostio/client/seek.c
++++ b/src/modules/lib/lostio/client/seek.c
+@@ -30,7 +30,8 @@
+ #include <stdio.h>
+ #include <rpc.h>
+ #include <stdint.h>
+-#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
+ 
+ static bool newlio_flseek(io_resource_t* io_res, uint64_t offset, int origin)
+ {
+@@ -75,3 +76,33 @@ bool lio_compat_seek(io_resource_t* io_res, uint64_t offset, int origin)
+         (char*) &seek_request) == 0);
+ }
+ 
++/**
++ * Aktuelle Cursorposition im Dateihandle abfragen
++ *
++ * @param io_res Dateihandle
++ * @return Aktuelle Position in Bytes vom Dateianfang oder -1 bei Fehler
++ */
++int64_t lio_compat_tell(io_resource_t* io_res)
++{
++    io_tell_request_t tell_request;
++    long result;
++
++    if (IS_LIO2(io_res)) {
++        int64_t pos = lio_seek(io_res->lio2_stream, 0, LIO_SEEK_CUR);
++        return (pos < 0 ? -1 : pos);
++    }
++
++    tell_request.id = io_res->id;
++
++    //Da fuer qwords keine Funktion existiert um sie direkt uber RPC zu
++    // empfangen, muss hier ein kleiner Umweg gemacht werden.
++    response_t* resp = rpc_get_response(io_res->pid, "IO_TELL ",
++        sizeof(io_tell_request_t), (char*) &(tell_request));
++    memcpy(&result, resp->data, sizeof(long));
++
++    //Antwort und Daten wieder freigeben
++    free(resp->data);
++    free(resp);
++
++    return result;
++}
+diff --git a/src/modules/lib/stdlibc/file.c b/src/modules/lib/stdlibc/file.c
+index fc99e17..7482c41 100644
+--- a/src/modules/lib/stdlibc/file.c
++++ b/src/modules/lib/stdlibc/file.c
+@@ -666,29 +666,12 @@ long ftell(FILE* io_res)
+         return EOF;
+     }
+ 
+-    if (IS_LIO2_FILE(io_res)) {
+-        int64_t pos = lio_seek(io_res->res->lio2_stream, 0, LIO_SEEK_CUR);
+-        result = (pos < 0 ? -1 : pos);
+-        goto out;
++    if (!IS_LIO2_FILE(io_res)) {
++        //Sonst könnte die Angabe falsch sein
++        fflush(io_res);
+     }
+ 
+-    io_tell_request_t tell_request;
+-    tell_request.id = io_res->res->id;
+-    
+-    //Sonst könnte die Angabe falsch sein
+-    fflush(io_res);
+-
+-    //Da fuer qwords keine Funktion existiert um sie direkt uber RPC zu
+-    // empfangen, muss hier ein kleiner Umweg gemacht werden.
+-    response_t* resp = rpc_get_response(io_res->res->pid, "IO_TELL ",
+-        sizeof(io_tell_request_t), (char*) &(tell_request));
+-    memcpy(&result, resp->data, sizeof(long));
+-
+-    //Antwort und Daten wieder freigeben
+-    free(resp->data);
+-    free(resp);
+-
+-out:
++    result = lio_compat_tell(io_res->res);
+     if (result >= 0) {
+         result += io_res->buffer_pos - io_res->ungetc_count;
+         if (result < 0) {
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Tue Jul 21 00:45:13 2015
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Tue, 21 Jul 2015 00:45:13 +0200
+Subject: [tyndur-devel] [PATCH v2 4/8] Pascal-RTL: lio_compat_* statt
+	stdio.h-Funktionen benutzen
+In-Reply-To: <1437432317-27705-1-git-send-email-kevin@tyndur.org>
+References: <1437432317-27705-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1437432317-27705-5-git-send-email-kevin@tyndur.org>
+
+* Pascal-RTL: Benutzt jetzt direkt lio_compat_*. Doppelt Puffern ist
+  Blödsinn und sobald fread() blockiert wie es sollte, ist es vollends
+  unbrauchbar für unsere Zwecke.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/pas/lib/rtl/sysfile.inc | 130 +++++++++++++++++++++++-------------
+ src/modules/pas/lib/rtl/system.pas  |  15 +++--
+ 2 files changed, 91 insertions(+), 54 deletions(-)
+
+diff --git a/src/modules/pas/lib/rtl/sysfile.inc b/src/modules/pas/lib/rtl/sysfile.inc
+index b0cd787..7d731a1 100644
+--- a/src/modules/pas/lib/rtl/sysfile.inc
++++ b/src/modules/pas/lib/rtl/sysfile.inc
+@@ -3,25 +3,34 @@ const
+     SEEK_CUR = 1;
+     SEEK_END = 2;
+ 
+-function c_fopen(filename, mode: PChar): THandle; cdecl; external name 'fopen';
+-function c_fclose(f: THandle): integer; cdecl; external name 'fclose';
+-
+-function c_fwrite(src: Pointer; blocksize, blockcount: TSize; f: THandle): TSize; cdecl; external name 'fwrite';
+-function c_fread(dest: Pointer; blocksize, blockcount: TSize; f: THandle): TSize; cdecl; external name 'fread';
+-function c_fseek(f: THandle; offset, whence: longint): longint; cdecl; external name 'fseek';
+-function c_ftell(f: THandle): TSize; cdecl; external name 'ftell';
++const
++    IO_OPEN_MODE_READ = 1;
++    IO_OPEN_MODE_WRITE = 2;
++    IO_OPEN_MODE_APPEND = 4;
++    IO_OPEN_MODE_TRUNC = 8;
++    IO_OPEN_MODE_DIRECTORY = 16;
++    IO_OPEN_MODE_CREATE = 32;
++    IO_OPEN_MODE_LINK = 64;
++    IO_OPEN_MODE_SYNC = 128;
+ 
+-function c_feof(f: THandle): boolean; cdecl; external name 'feof';
++const
++    EAGAIN = 18;
+ 
+-function c_setvbuf(f: THandle; buf: Pointer; mode: integer; size: TSize):
+-    integer; cdecl; external name 'setvbuf';
++function lio_compat_open(filename: PChar; mode: byte): THandle; cdecl; external name 'lio_compat_open';
++function lio_compat_close(io_res: THandle): integer; cdecl; external name 'lio_compat_close';
+ 
++function lio_compat_read(dest: Pointer; blocksize, blockcount: TSize; io_res: THandle): TSSize; cdecl; external name 'lio_compat_read';
++function lio_compat_readahead(dest: Pointer; size: TSize; io_res: THandle): TSSize; cdecl; external name 'lio_compat_readahead';
++function lio_compat_write(src: Pointer; blocksize, blockcount: TSize; io_res: THandle): TSSize; cdecl; external name 'lio_compat_write';
++function lio_compat_eof(io_res: THandle): integer; cdecl; external name 'lio_compat_eof';
++function lio_compat_seek(io_res: THandle; offset: qword; origin: integer): boolean; cdecl; external name 'lio_compat_seek';
++function lio_compat_tell(io_res: THandle): int64; cdecl; external name 'lio_compat_tell';
+ 
+ { TODO errno setzen nicht vergessen }
+ 
+ Procedure Do_Close(f: THandle);
+ begin
+-    c_fclose(f);
++    lio_compat_close(f);
+ end;
+ 
+ Procedure Do_Erase(p:pchar);
+@@ -37,49 +46,70 @@ begin { TODO } end;
+ 
+ Function Do_Write(f: THandle; src: Pointer; len: TSize): TSize;
+ var
+-    ret: TSize;
++    ret: TSSize;
+ begin
+-    InOutRes := 0;
+-
+-    Do_Write := 0;
+-    while len > 0 do begin
+-        ret := c_fwrite(src, 1, len, f);
+-        if (ret = 0) or (ret > len) then begin
+-            InOutRes := 101;
+-            exit(0);
+-        end;
+-
+-        Inc(Do_Write, ret);
+-        Inc(src, ret);
+-        Dec(len, ret);
++    ret := lio_compat_write(src, 1, len, f);
++    if ret < 0 then begin
++        InOutRes := 101;
++        Do_Write := 0;
++    end else begin
++        InOutRes := 0;
++        Do_Write := ret;
+     end;
+ end;
+ 
+ Function Do_Read(f: THandle; dest: Pointer; len: TSize): TSize;
++var
++    ret: TSSize;
+ begin
+     InOutRes := 0;
+ 
+-    repeat
+-        Do_Read := c_fread(dest, 1, len, f);
+-    until (Do_Read <> 0) or (c_feof(f));
++    ret := lio_compat_read(dest, 1, len, f);
++    if ret < 0 then begin
++        InOutRes := 101;
++        exit(0);
++    end else begin
++        Do_Read := ret;
++    end;
+ end;
+ 
+ function Do_FilePos(f: THandle): TSize;
++var
++    ret: int64;
+ begin
+     InOutRes := 0;
+-    Do_FilePos := c_ftell(f);
++    ret := lio_compat_tell(f);
++    if ret < 0 then begin
++        InOutRes := 101;
++        exit(0);
++    end else begin
++        exit(ret);
++    end;
+ end;
+ 
+ Procedure Do_Seek(f: THandle; position: TSize);
++var
++    ret: boolean;
+ begin
+     InOutRes := 0;
+-    c_fseek(f, position, SEEK_SET);
++    ret := lio_compat_seek(f, position, SEEK_SET);
++    if not ret then begin
++        InOutRes := 101;
++    end;
+ end;
+ 
+ Function Do_SeekEnd(f: THandle): TSize;
++var
++    ret: boolean;
+ begin
+     InOutRes := 0;
+-    Do_SeekEnd := c_fseek(f, 0, SEEK_END);
++    ret := lio_compat_seek(f, 0, SEEK_END);
++    if not ret then begin
++        InOutRes := 101;
++        exit(0);
++    end else begin
++        exit(Do_FilePos(f));
++    end;
+ end;
+ 
+ Function Do_FileSize(f: THandle): Longint;
+@@ -95,7 +125,8 @@ end;
+ 
+ Procedure Do_Open(var f; name: PChar; flags: longint);
+ var
+-    c_mode: string[3];
++    c_mode: byte;
++    autoclose: boolean;
+     append: boolean;
+     trunc: boolean;
+     frec: ^FileRec;
+@@ -103,50 +134,55 @@ begin
+     InOutRes := 0;
+     frec := @FileRec(f);
+ 
++    append := (flags and $100 <> 0);
++    trunc := (flags and $1000 <> 0);
++    autoclose := (flags and $10000 <> 0);
++
+     // Wenn eine Datei noch geoeffnet ist, muss sie zuerst
+     // geschlossen werden.
+-    if (frec^.mode = fminput) or (frec^.mode = fmoutput) or (frec^.mode = fminout) then begin
++    if autoclose
++       and ((frec^.mode = fminput) or (frec^.mode = fmoutput) or (frec^.mode = fminout))
++       and (frec^.handle <> 0)
++    then begin
+         Do_Close(frec^.handle);
+     end;
+-    
+-    append := (flags and $100 <> 0);
+-    trunc := (flags and $1000 <> 0);
+ 
+     if name <> '' then begin
+ 
+         // Eine normale Datei
+         case flags and 3 of
+             0:  begin
+-                    c_mode := 'r'#0;
++                    c_mode := IO_OPEN_MODE_READ;
+                     frec^.mode := fmInput;
+                 end;
+ 
+             1:  begin
++                    c_mode := IO_OPEN_MODE_WRITE;
+                     if append then begin
+-                        c_mode := 'a'#0 
+-                    end else begin 
+-                        c_mode := 'w'#0;
++                        c_mode := c_mode or IO_OPEN_MODE_APPEND;
++                    end else if trunc then begin
++                        c_mode := c_mode or IO_OPEN_MODE_CREATE or IO_OPEN_MODE_TRUNC;
+                     end;
+                     frec^.mode := fmOutput;
+                 end;
+-            2:  begin 
++            2:  begin
+                     if append then begin
+-                        c_mode := 'a+'#0 
++                        c_mode := IO_OPEN_MODE_READ or IO_OPEN_MODE_WRITE
++                               or IO_OPEN_MODE_CREATE or IO_OPEN_MODE_APPEND;
+                     end else if trunc then begin
+-                        c_mode := 'w+'#0 
++                        c_mode := IO_OPEN_MODE_READ or IO_OPEN_MODE_WRITE
++                               or IO_OPEN_MODE_CREATE or IO_OPEN_MODE_TRUNC;
+                     end else begin
+-                        c_mode := 'r+'#0;
++                        c_mode := IO_OPEN_MODE_READ or IO_OPEN_MODE_WRITE;
+                     end;
+                     frec^.mode := fmInOut;
+                 end;
+         end;
+ 
+-        frec^.handle := c_fopen(name, @c_mode[1]);
++        frec^.handle := lio_compat_open(name, c_mode);
+ 
+         if frec^.handle = 0 then begin
+             InOutRes := 2;
+-        end else begin
+-            c_setvbuf(frec^.handle, nil, 1, 0);
+         end;
+ 
+     end else begin
+diff --git a/src/modules/pas/lib/rtl/system.pas b/src/modules/pas/lib/rtl/system.pas
+index a658a37..14661a3 100644
+--- a/src/modules/pas/lib/rtl/system.pas
++++ b/src/modules/pas/lib/rtl/system.pas
+@@ -12,6 +12,7 @@ interface
+ 
+ type
+     TSize = dword;
++    TSSize = longint;
+ 
+ const
+  LineEnding = #10;
+@@ -48,7 +49,7 @@ const
+   DefaultTextLineBreakStyle : TTextLineBreakStyle = tlbsLF;
+ 
+ var
+-    argc: dword;
++    argc: integer;
+     argv: PPChar;
+     commandline: PChar;
+ 
+@@ -168,9 +169,9 @@ function c_setvbuf(f: Pointer; buf: Pointer; mode: integer; size: TSize):
+     integer; cdecl; external name 'setvbuf';
+ 
+ var
+-    c_stdin:  dword; external name 'stdin';
+-    c_stdout: dword; external name 'stdout';
+-    c_stderr: dword; external name 'stderr';
++    c_stdin:  ^dword; external name 'stdin';
++    c_stdout: ^dword; external name 'stdout';
++    c_stderr: ^dword; external name 'stderr';
+ 
+ procedure SysInitStdIO;
+ (*
+@@ -200,9 +201,9 @@ begin
+ 
+     c_stdio_init();
+ 
+-    StdInputHandle  := c_stdin;
+-    StdOutputHandle := c_stdout;
+-    StdErrorHandle  := c_stderr;
++    StdInputHandle  := c_stdin^;
++    StdOutputHandle := c_stdout^;
++    StdErrorHandle  := c_stderr^;
+ 
+     c_setvbuf(c_stdout, nil, 1, 0);
+ 
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Tue Jul 21 00:45:14 2015
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Tue, 21 Jul 2015 00:45:14 +0200
+Subject: [tyndur-devel] [PATCH v2 5/8] kernel2: LIO-Read-Syscall nimmt jetzt
+	Flags
+In-Reply-To: <1437432317-27705-1-git-send-email-kevin@tyndur.org>
+References: <1437432317-27705-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1437432317-27705-6-git-send-email-kevin@tyndur.org>
+
++ kernel2: Der LIO-Read-Syscall nimmt jetzt Flags. Bit 0 zeigt wie
+  gehabt an, dass der Dateizeiger benutzt werden soll. Bit 1 ist
+  für blockierendes Lesen vorgesehen, wird aber noch ignoriert.
+
++ libc: lio_readf() erlaubt es, dem Syscall direkt Flags zu übergeben.
+  Das LIO_REQ_BLOCKING-Flag wird bei lio_(p)read gesetzt und wirkt sich
+  aus sobald der Kernel es berücksichtigt.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/include/syscall_structs.h     | 11 +++++++++++
+ src/kernel2/src/syscalls/lostio.c |  4 ++--
+ src/modules/include/syscall.h     | 18 ++++++++++++++++++
+ src/modules/lib/syscalls/lostio.c | 10 +++++-----
+ 4 files changed, 36 insertions(+), 7 deletions(-)
+
+diff --git a/src/include/syscall_structs.h b/src/include/syscall_structs.h
+index e43295b..0d5892c 100644
+--- a/src/include/syscall_structs.h
++++ b/src/include/syscall_structs.h
+@@ -133,6 +133,17 @@ enum lio_flags {
+     LIO_SYMLINK     = 512,
+ };
+ 
++/**
++ * Gibt Optionen zu einem einzelnen Request an.
++ */
++enum lio_req_flags {
++    /** Der Dateizeiger wird nach der Operation bewegt, Offset ignoriert */
++    LIO_REQ_FILEPOS         = 1,
++
++    /** Die Operation blockiert, wenn sie sonst nichts tun würde */
++    LIO_REQ_BLOCKING        = 2,
++};
++
+ 
+ /**
+  * Gibt an, realtiv zu welcher Position in der Datei das lio_seek-Offset
+diff --git a/src/kernel2/src/syscalls/lostio.c b/src/kernel2/src/syscalls/lostio.c
+index 314ca98..b060626 100644
+--- a/src/kernel2/src/syscalls/lostio.c
++++ b/src/kernel2/src/syscalls/lostio.c
+@@ -151,7 +151,7 @@ int syscall_lio_pass_fd(lio_usp_stream_t* stream_id, pid_t pid)
+ 
+ /// Aus Stream lesen
+ void syscall_lio_read(lio_usp_stream_t* stream_id, uint64_t* offset,
+-    size_t bytes, void* buffer, int updatepos, ssize_t* result)
++    size_t bytes, void* buffer, int flags, ssize_t* result)
+ {
+     struct lio_usp_stream* fd;
+ 
+@@ -162,7 +162,7 @@ void syscall_lio_read(lio_usp_stream_t* stream_id, uint64_t* offset,
+         return;
+     }
+ 
+-    if (updatepos) {
++    if (flags & LIO_REQ_FILEPOS) {
+         *result = lio_read(fd->stream, bytes, buffer);
+     } else {
+         *result = lio_pread(fd->stream, *offset, bytes, buffer);
+diff --git a/src/modules/include/syscall.h b/src/modules/include/syscall.h
+index 33cd98e..1528b12 100644
+--- a/src/modules/include/syscall.h
++++ b/src/modules/include/syscall.h
+@@ -184,6 +184,24 @@ int lio_close(lio_stream_t s);
+ lio_stream_t lio_pass_fd(lio_stream_t s, pid_t pid);
+ 
+ /**
++ * Liest aus dem Stream.
++ *
++ * @param s Auszulesender Stream
++ * @param offset Position, ab der gelesen werden soll, in Bytes vom
++ * Dateianfang. Wenn in @flags LIO_REQ_FILEPOS gesetzt ist, wird die Angabe
++ * ignoriert und stattdessen von der aktuellen Position des Dateizeigers
++ * gelesen.
++ * @param bytes Zu lesende Bytes
++ * @param buf Zielpuffer, in dem die ausgelesenen Daten abgelegt werden
++ * @param flags Bitmaske von lio_req_flags
++ *
++ * @return Die Anzahl der erfolgreich gelesenen Bytes ("short reads" sind
++ * möglich) oder negativ, falls sofort ein Fehler aufgetreten ist.
++ */
++ssize_t lio_readf(lio_stream_t s, uint64_t offset, size_t bytes,
++    void* buf, int flags);
++
++/**
+  * Liest aus dem Stream ab der aktuellen Position des Dateizeigers und bewegt
+  * den Dateizeiger hinter das letzte gelesene Byte.
+  *
+diff --git a/src/modules/lib/syscalls/lostio.c b/src/modules/lib/syscalls/lostio.c
+index 6cf8dc1..c702084 100644
+--- a/src/modules/lib/syscalls/lostio.c
++++ b/src/modules/lib/syscalls/lostio.c
+@@ -169,8 +169,8 @@ lio_stream_t lio_pass_fd(lio_stream_t s, pid_t pid)
+     }
+ }
+ 
+-static ssize_t read_syscall(lio_stream_t s, uint64_t offset, size_t bytes,
+-    void* buf, int updatepos)
++ssize_t lio_readf(lio_stream_t s, uint64_t offset, size_t bytes,
++    void* buf, int flags)
+ {
+     volatile ssize_t result;
+ 
+@@ -185,7 +185,7 @@ static ssize_t read_syscall(lio_stream_t s, uint64_t offset, size_t bytes,
+         "int $0x30;"
+         "add $0x18, %%esp;"
+     : : "i" (SYSCALL_LIO_READ), "r" (&s), "r" (&offset), "r" (bytes),
+-        "r" (buf), "r" (updatepos), "r" (&result) : "memory");
++        "r" (buf), "r" (flags), "r" (&result) : "memory");
+ 
+     return result;
+ }
+@@ -203,7 +203,7 @@ static ssize_t read_syscall(lio_stream_t s, uint64_t offset, size_t bytes,
+  */
+ ssize_t lio_read(lio_stream_t s, size_t bytes, void* buf)
+ {
+-    return read_syscall(s, 0, bytes, buf, 1);
++    return lio_readf(s, 0, bytes, buf, LIO_REQ_FILEPOS | LIO_REQ_BLOCKING);
+ }
+ 
+ /**
+@@ -219,7 +219,7 @@ ssize_t lio_read(lio_stream_t s, size_t bytes, void* buf)
+  */
+ ssize_t lio_pread(lio_stream_t s, uint64_t offset, size_t bytes, void* buf)
+ {
+-    return read_syscall(s, offset, bytes, buf, 0);
++    return lio_readf(s, offset, bytes, buf, LIO_REQ_BLOCKING);
+ }
+ 
+ static ssize_t write_syscall(lio_stream_t s, uint64_t offset, size_t bytes,
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Tue Jul 21 00:45:15 2015
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Tue, 21 Jul 2015 00:45:15 +0200
+Subject: [tyndur-devel] [PATCH v2 6/8] libc: lio_compat_readahead() gefixt
+In-Reply-To: <1437432317-27705-1-git-send-email-kevin@tyndur.org>
+References: <1437432317-27705-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1437432317-27705-7-git-send-email-kevin@tyndur.org>
+
+! libc: lio_compat_readahead() darf für den lio_seek()-Rückgabewert
+  keine unsigned-Variable nehmen, wenn es auf Fehler prüfen will.
+
+* libc: Benutze nichtblockierendes Read in lio_compat_readahead()
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/lib/lostio/client/file.c | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/src/modules/lib/lostio/client/file.c b/src/modules/lib/lostio/client/file.c
+index fabf7bc..9e39f4e 100644
+--- a/src/modules/lib/lostio/client/file.c
++++ b/src/modules/lib/lostio/client/file.c
+@@ -336,17 +336,18 @@ int lio_compat_eof(io_resource_t* io_res)
+ }
+ 
+ /**
+- * Liest aus einer Ressource, ohne den Dateizeiger zu verändern
++ * Liest aus einer Ressource, ohne den Dateizeiger zu verändern und ohne zu
++ * blockieren
+  */
+ ssize_t lio_compat_readahead(void* dest, size_t size, io_resource_t* io_res)
+ {
+     if (IS_LIO2(io_res)) {
+-        uint64_t pos = lio_seek(io_res->lio2_stream, 0, LIO_SEEK_CUR);
++        int64_t pos = lio_seek(io_res->lio2_stream, 0, LIO_SEEK_CUR);
+         if (pos < 0) {
+             return pos;
+         }
+ 
+-        return lio_pread(io_res->lio2_stream, pos, size, dest);
++        return lio_readf(io_res->lio2_stream, pos, size, dest, 0);
+     } else {
+         return lio1_read_fn(dest, 1, size, io_res, "IO_READA");
+     }
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Tue Jul 21 00:45:16 2015
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Tue, 21 Jul 2015 00:45:16 +0200
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH_v2_7/8=5D_libc=3A_POSIX-Dateifu?=
+	=?utf-8?q?nktionen_nicht_=C3=BCber_stdio=2Eh_emulieren?=
+In-Reply-To: <1437432317-27705-1-git-send-email-kevin@tyndur.org>
+References: <1437432317-27705-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1437432317-27705-8-git-send-email-kevin@tyndur.org>
+
+! libc: Die POSIX-Dateifunktionen sollten nicht gepuffert sein. Dieser
+  Commit konvertiert alle Funktionen auf direkte LIO-Aufrufe.
+
+  Diese Änderung ist nicht nur sowieso überfällig, sondern auch nötig,
+  damit select() weiterhin nichtblockierendes Readahead benutzen kann,
+  um zu testen, ob es etwas zu lesen gibt. (Ja, das ist kaputt, aber
+  wenigstens funktionierend kaputt.)
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/lib/posix/posix_files.c | 202 ++++++++++++++++++++++++++++--------
+ src/modules/lib/posix/select.c      | 135 ------------------------
+ src/modules/lib/stdlibc/file.c      |  43 ++++----
+ 3 files changed, 180 insertions(+), 200 deletions(-)
+ delete mode 100644 src/modules/lib/posix/select.c
+
+diff --git a/src/modules/lib/posix/posix_files.c b/src/modules/lib/posix/posix_files.c
+index 7b601a3..e557942 100644
+--- a/src/modules/lib/posix/posix_files.c
++++ b/src/modules/lib/posix/posix_files.c
+@@ -34,10 +34,12 @@
+ #include <errno.h>
+ #include <lost/config.h>
+ #include <stdarg.h>
++#include <lostio.h>
++#include <sys/select.h>
+ 
+ /// Ein Element das einen Unix-Dateideskriptor mit einem Normalen verknuepft
+ struct fd_list_element {
+-    FILE* io_res;
++    io_resource_t* io_res;
+     int fd;
+ 
+     int fd_flags;
+@@ -76,7 +78,7 @@ static void posix_files_init(void)
+  *
+  * @return Unix-Dateideskriptor oder -1 im Fehlerfall
+  */
+-int fileno(FILE* io_res)
++static int iores_fileno(io_resource_t* io_res)
+ {
+     if (io_res == NULL) {
+         errno = EBADF;
+@@ -115,6 +117,11 @@ int fileno(FILE* io_res)
+     return fdl_element->fd;
+ }
+ 
++int fileno(FILE* io_res)
++{
++    return iores_fileno(io_res->res);
++}
++
+ /**
+  * Dateihandle andhand des Unix-Deskriptors suchen
+  *
+@@ -122,7 +129,7 @@ int fileno(FILE* io_res)
+  *
+  * @return Pointer auf das Dateihandle oder NULL im Fehlerfall
+  */
+-static FILE* fd_to_file(int fd)
++static io_resource_t* fd_to_file(int fd)
+ {
+     if (fd_list == NULL) {
+         posix_files_init();
+@@ -145,13 +152,21 @@ static FILE* fd_to_file(int fd)
+     }
+ }
+ 
++extern FILE* __create_file_from_iores(io_resource_t* io_res);
++
+ /**
+  * Einen Dateideskriptor als Stream oeffnen.
+  */
+ FILE* fdopen(int fd, const char* mode)
+ {
++    io_resource_t* iores;
++
+     // TODO: Modus pruefen
+-    return fd_to_file(fd);
++    iores = fd_to_file(fd);
++    if (iores == NULL) {
++        return NULL;
++    }
++    return __create_file_from_iores(iores);
+ }
+ 
+ /**
+@@ -236,8 +251,7 @@ int fcntl(int fd, int cmd, ...)
+  */
+ int open(const char* filename, int flags, ...)
+ {
+-    char fopen_flags[4];
+-    size_t flags_size = 0;
++    int lio_flags;
+     int fd;
+ 
+     // Wenn O_CREAT und O_EXCL gleichzeitig gesetzt ist, muessen wir abbrechen
+@@ -269,34 +283,33 @@ int open(const char* filename, int flags, ...)
+         fclose(f);
+     }
+ 
+-    // Open-Flags auf fopen-Kompatible uebersetzen
++    // Open-Flags auf LIO-Kompatible uebersetzen
++    lio_flags = 0;
+     if ((flags & O_RDONLY)) {
+-        fopen_flags[flags_size++] = 'r';
++        lio_flags |= IO_OPEN_MODE_READ;
+     } else if ((flags & O_WRONLY) && (flags & O_TRUNC)) {
+-        fopen_flags[flags_size++] = 'w';
++        lio_flags |= IO_OPEN_MODE_WRITE | IO_OPEN_MODE_TRUNC;
+     } else if ((flags & O_RDWR) && (flags & O_TRUNC)) {
+-        fopen_flags[flags_size++] = 'w';
+-        fopen_flags[flags_size++] = '+';
++        lio_flags |= IO_OPEN_MODE_READ | IO_OPEN_MODE_WRITE |
++                     IO_OPEN_MODE_TRUNC;
+     } else if ((flags & O_WRONLY)) {
+-        fopen_flags[flags_size++] = 'r';
+-        fopen_flags[flags_size++] = '+';
++        /* FIXME IO_OPEN_MODE_READ gehört hier eigentlich nicht rein */
++        lio_flags |= IO_OPEN_MODE_READ | IO_OPEN_MODE_WRITE;
+     } else if ((flags & O_RDWR)) {
+-        fopen_flags[flags_size++] = 'r';
+-        fopen_flags[flags_size++] = '+';
++        lio_flags |= IO_OPEN_MODE_READ | IO_OPEN_MODE_WRITE;
+     }
+     // Append-Flag
+     if ((flags & O_APPEND)) {
+-        fopen_flags[flags_size++] = 'a';
++        lio_flags |= IO_OPEN_MODE_APPEND;
+     }
+-    fopen_flags[flags_size++] = '\0';
+ 
+-    FILE* file = fopen(filename, fopen_flags);
++    io_resource_t* file = lio_compat_open(filename, lio_flags);
+     if (file == NULL) {
+         errno = ENOENT;
+         return -1;
+     }
+ 
+-    fd = fileno(file);
++    fd = iores_fileno(file);
+     fcntl(fd, F_SETFL, flags);
+ 
+     return fd;
+@@ -326,7 +339,8 @@ int creat(const char* filename, mode_t mode)
+  */
+ ssize_t read(int fd, void* buffer, size_t size)
+ {
+-    FILE* file = fd_to_file(fd);
++    io_resource_t* file = fd_to_file(fd);
++    ssize_t ret;
+ 
+     // Bei einem ungueltigen Deskriptor wird abgebrochen
+     if (file == NULL) {
+@@ -334,15 +348,12 @@ ssize_t read(int fd, void* buffer, size_t size)
+         return -1;
+     }
+ 
+-    size_t bytes = fread(buffer, 1, size, file);
+-    // FIXME: Fehlerbehandlung
+-
+-    if ((bytes == 0) && !feof(file)) {
+-        errno = EAGAIN;
+-        return -1;
++    ret = lio_compat_read(buffer, 1, size, file);
++    if (ret < 0) {
++        errno = -ret;
++        ret = -1;
+     }
+-
+-    return bytes;
++    return ret;
+ }
+ 
+ /**
+@@ -356,7 +367,8 @@ ssize_t read(int fd, void* buffer, size_t size)
+  */
+ ssize_t write(int fd, const void* buffer, size_t size)
+ {
+-    FILE* file = fd_to_file(fd);
++    io_resource_t* file = fd_to_file(fd);
++    ssize_t ret;
+ 
+     // Bei einem ungueltigen Deskriptor wird abgebrochen
+     if (file == NULL) {
+@@ -364,9 +376,12 @@ ssize_t write(int fd, const void* buffer, size_t size)
+         return -1;
+     }
+ 
+-    size_t bytes = fwrite(buffer, 1, size, file);
+-    // FIXME: Fehlerbehandlung
+-    return bytes;
++    ret = lio_compat_write(buffer, 1, size, file);
++    if (ret < 0) {
++        errno = -ret;
++        ret = -1;
++    }
++    return ret;
+ }
+ 
+ /**
+@@ -381,7 +396,7 @@ ssize_t write(int fd, const void* buffer, size_t size)
+  */
+ off_t lseek(int fd, off_t offset, int origin)
+ {
+-    FILE* file = fd_to_file(fd);
++    io_resource_t* file = fd_to_file(fd);
+ 
+     // Bei einem ungueltigen Deskriptor wird abgebrochen
+     if (file == NULL) {
+@@ -390,12 +405,12 @@ off_t lseek(int fd, off_t offset, int origin)
+     }
+ 
+     // Seek ausfuehren
+-    if (fseek(file, offset, origin)) {
++    if (!lio_compat_seek(file, offset, origin)) {
+         return -1;
+     }
+ 
+     // Rueckgabewert ist die neue Position
+-    return ftell(file);
++    return lio_compat_tell(file);
+ }
+ 
+ /**
+@@ -419,7 +434,7 @@ int close(int fd)
+     }
+ 
+     // Wenn der Deskriptor ungueltig ist, wird abgebrochen
+-    if ((fdl_element == NULL) || (fclose(fdl_element->io_res) != 0)) {
++    if ((fdl_element == NULL) || (lio_compat_close(fdl_element->io_res) != 0)) {
+         errno = EBADF;
+         return -1;
+     }
+@@ -430,7 +445,7 @@ int close(int fd)
+ /// Aus einer Datei mit gegebenem Offset lesen
+ ssize_t pread(int fd, void *buf, size_t count, off_t offset)
+ {
+-    FILE* file = fd_to_file(fd);
++    io_resource_t* file = fd_to_file(fd);
+     off_t old_pos;
+     ssize_t ret;
+ 
+@@ -440,14 +455,14 @@ ssize_t pread(int fd, void *buf, size_t count, off_t offset)
+         return -1;
+     }
+ 
+-    old_pos = ftell(file);
+-    if (fseek(file, offset, SEEK_SET)) {
++    old_pos = lio_compat_tell(file);
++    if (!lio_compat_seek(file, offset, SEEK_SET)) {
+         return -1;
+     }
+ 
+-    ret = fread(buf, count, 1, file);
++    ret = lio_compat_readahead(buf, count, file);
+ 
+-    if (fseek(file, old_pos, SEEK_SET)) {
++    if (lio_compat_seek(file, old_pos, SEEK_SET)) {
+         return -1;
+     }
+ 
+@@ -457,7 +472,7 @@ ssize_t pread(int fd, void *buf, size_t count, off_t offset)
+ /// In eine Datei mit gegebenem Offset schreiben
+ ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset)
+ {
+-    FILE* file = fd_to_file(fd);
++    io_resource_t* file = fd_to_file(fd);
+     off_t old_pos;
+     ssize_t ret;
+ 
+@@ -467,14 +482,14 @@ ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset)
+         return -1;
+     }
+ 
+-    old_pos = ftell(file);
+-    if (fseek(file, offset, SEEK_SET)) {
++    old_pos = lio_compat_tell(file);
++    if (!lio_compat_seek(file, offset, SEEK_SET)) {
+         return -1;
+     }
+ 
+-    ret = fwrite(buf, count, 1, file);
++    ret = lio_compat_write(buf, count, 1, file);
+ 
+-    if (fseek(file, old_pos, SEEK_SET)) {
++    if (!lio_compat_seek(file, old_pos, SEEK_SET)) {
+         return -1;
+     }
+ 
+@@ -500,5 +515,100 @@ int dup2(int fd, int newfd)
+     return -1;
+ }
+ 
++/**
++ * Prueft, welche der gegebenen Dateideskriptoren bereit zum Lesen oder
++ * Schreiben sind oder ein Fehler fuer sie aufgetreten ist. Dateideskriptoren
++ * die nicht bereit bzw. in einem Fehlerzustand sind, werden aus der Menge
++ * entfernt.
++ *
++ * @param number_fds Nummer des hoechsten Dateideskriptors in einem der
++ * uebergebenen Mengen.
++ * @param readfds Dateideskriptoren, bei denen ueberprueft werden soll, ob sie
++ * zum Lesen bereit sind.
++ * @param writefds Dateideskriptoren, bei denen ueberprueft werden soll, ob sie
++ * zum Schreiben bereit sind.
++ * @param errfds Dateideskriptoren, bei denen ueberprueft werden soll, ob sie
++ * in einem Fehlerzustand sind.
++ * @param timeout Maximales Timeout, das gewartet werden soll, falls kein
++ * Deskriptor bereit ist. NULL fuer dauerhaftes Blockieren.
++ *
++ * @return Anzahl der Dateideskriptoren, die bereit bzw. in einem Fehlerzustand
++ * sind
++ */
++int select(int number_fds, fd_set* readfds, fd_set* writefds,
++    fd_set* errfds, struct timeval* timeout)
++{
++    uint32_t* rd = (uint32_t*) readfds;
++    uint32_t* wr = (uint32_t*) writefds;
++    uint32_t* err = (uint32_t*) errfds;
++    int c;
++    io_resource_t* f;
++    int ret;
++    int fds;
++
++    uint32_t orig_rd = rd ? *rd : 0;
++    uint32_t orig_wr = wr ? *wr : 0;
++
++    uint64_t timeout_tick;
++    if (timeout != NULL) {
++        timeout_tick = get_tick_count() +
++            1000ULL * 1000ULL * timeout->tv_sec +
++            timeout->tv_usec;
++    } else {
++        timeout_tick = (uint64_t) -1;
++    }
++
++    // tyndur ist so toll, bei uns gibt es keine Fehler
++    if (err) {
++        *err = 0;
++    }
++
++    do {
++        int i;
++
++        // Wieder alles zuruecksetzen
++        fds = 0;
++        if (rd) {
++            *rd = orig_rd;
++        }
++        if (wr) {
++            *wr = orig_wr;
++        }
++
++
++        for (i = 0; i < 32; i++) {
++
++            // Versuchsweise ein Zeichen auslesen ohne den Dateizeiger zu
++            // verändern. Wenn das funktioniert, als lesbar werten.
++            if (rd && (*rd & (1 << i))) {
++                f = fd_to_file(i);
++
++                if (f != NULL) {
++                    ret = lio_compat_readahead(&c, 1, f);
++                    if (ret == -EAGAIN) {
++                        *rd &= ~(1 << i);
++                    } else {
++                        // Auch eine Datei, die zu Ende ist, gilt als lesbar
++                        fds++;
++                    }
++                }
++            }
++
++            // Schreiben geht immer
++            if (wr && (*wr & (1 << i))) {
++                fds++;
++            }
++        }
++
++        // Busy Wait waere irgendwie auch doof
++        if (fds == 0) {
++            yield();
++        }
++
++    } while ((fds == 0) && (timeout_tick > get_tick_count()));
++
++    return fds;
++}
++
+ #endif // ndef CONFIG_LIBC_NO_STUBS
+ 
+diff --git a/src/modules/lib/posix/select.c b/src/modules/lib/posix/select.c
+deleted file mode 100644
+index 0508577..0000000
+--- a/src/modules/lib/posix/select.c
++++ /dev/null
+@@ -1,135 +0,0 @@
+-/*
+- * Copyright (c) 2009 The tyndur Project. All rights reserved.
+- *
+- * This code is derived from software contributed to the tyndur Project
+- * by Kevin Wolf.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+- * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+- * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
+- * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+- * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+- * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+- * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+- * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+- * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+- */
+-
+-#include <sys/select.h>
+-#include <sys/time.h>
+-#include <stdio.h>
+-#include <syscall.h>
+-
+-#ifndef CONFIG_LIBC_NO_STUBS
+-/**
+- * Prueft, welche der gegebenen Dateideskriptoren bereit zum Lesen oder
+- * Schreiben sind oder ein Fehler fuer sie aufgetreten ist. Dateideskriptoren
+- * die nicht bereit bzw. in einem Fehlerzustand sind, werden aus der Menge
+- * entfernt.
+- *
+- * @param number_fds Nummer des hoechsten Dateideskriptors in einem der
+- * uebergebenen Mengen.
+- * @param readfds Dateideskriptoren, bei denen ueberprueft werden soll, ob sie
+- * zum Lesen bereit sind.
+- * @param writefds Dateideskriptoren, bei denen ueberprueft werden soll, ob sie
+- * zum Schreiben bereit sind.
+- * @param errfds Dateideskriptoren, bei denen ueberprueft werden soll, ob sie
+- * in einem Fehlerzustand sind.
+- * @param timeout Maximales Timeout, das gewartet werden soll, falls kein
+- * Deskriptor bereit ist. NULL fuer dauerhaftes Blockieren.
+- *
+- * @return Anzahl der Dateideskriptoren, die bereit bzw. in einem Fehlerzustand
+- * sind
+- */
+-int select(int number_fds, fd_set* readfds, fd_set* writefds,
+-    fd_set* errfds, struct timeval* timeout)
+-{
+-    uint32_t* rd = (uint32_t*) readfds;
+-    uint32_t* wr = (uint32_t*) writefds;
+-    uint32_t* err = (uint32_t*) errfds;
+-    int c;
+-    FILE* f;
+-    int ret;
+-
+-    uint32_t orig_rd = rd ? *rd : 0;
+-    uint32_t orig_wr = wr ? *wr : 0;
+-
+-    uint64_t timeout_tick;
+-    if (timeout != NULL) {
+-        timeout_tick = get_tick_count() +
+-            1000ULL * 1000ULL * timeout->tv_sec +
+-            timeout->tv_usec;
+-    } else {
+-        timeout_tick = (uint64_t) -1;
+-    }
+-
+-    // tyndur ist so toll, bei uns gibt es keine Fehler
+-    if (err) {
+-        *err = 0;
+-    }
+-
+-    do {
+-        int i;
+-
+-        // Wieder alles zuruecksetzen
+-        ret = 0;
+-        if (rd) {
+-            *rd = orig_rd;
+-        }
+-        if (wr) {
+-            *wr = orig_wr;
+-        }
+-
+-
+-        for (i = 0; i < 32; i++) {
+-
+-            // Versuchsweise ein Zeichen auslesen. Wenn das funktioniert, als
+-            // lesbar werten und das Zeichen schnell wieder zurueckstecken
+-            // bevor das Programm was merkt.
+-            if (rd && (*rd & (1 << i))) {
+-                f = fdopen(i, NULL);
+-
+-                if (f != NULL) {
+-                    // Eine Datei, die zu Ende ist, gilt als lesbar
+-                    if (feof(f)) {
+-                        ret++;
+-                        continue;
+-                    }
+-
+-                    c = fgetc(f);
+-                    if (c == EOF) {
+-                        *rd &= ~(1 << i);
+-                    } else {
+-                        ungetc(c, f);
+-                        ret++;
+-                    }
+-                }
+-            }
+-
+-            // Schreiben geht immer
+-            if (wr && (*wr & (1 << i))) {
+-                ret++;
+-            }
+-        }
+-
+-        // Busy Wait waere irgendwie auch doof
+-        if (ret == 0) {
+-            yield();
+-        }
+-
+-    } while ((ret == 0) && (timeout_tick > get_tick_count()));
+-
+-    return ret;
+-}
+-#endif
+diff --git a/src/modules/lib/stdlibc/file.c b/src/modules/lib/stdlibc/file.c
+index 7482c41..60c9e83 100644
+--- a/src/modules/lib/stdlibc/file.c
++++ b/src/modules/lib/stdlibc/file.c
+@@ -50,6 +50,29 @@ static bool is_valid_res(FILE* io_res)
+     return (io_res != NULL) && (IS_LIO2(io_res->res) || io_res->res->pid != 0);
+ }
+ 
++FILE* __create_file_from_iores(io_resource_t* io_res)
++{
++    // FILE-Struktur anlegen
++    FILE* int_res;
++
++    int_res = calloc(1, sizeof(*int_res));
++    int_res->res = io_res;
++
++    int_res->buffer_mode = IO_BUFFER_MODE_NONE;
++    int_res->buffer_ptr = NULL;
++    int_res->buffer_size = 0;
++    int_res->buffer_pos = 0;
++    int_res->free_buffer = false;
++    setvbuf(int_res, malloc(BUFSIZ), _IOFBF, BUFSIZ);
++    int_res->free_buffer = true;
++
++    int_res->cur_pos = 0;
++    int_res->error = false;
++    int_res->os_eof = false;
++
++    return int_res;
++}
++
+ /**
+  * Datei oeffnen
+  *
+@@ -104,25 +127,7 @@ FILE* fopen (const char* filename, const char* mode)
+         return NULL;
+     }
+ 
+-    // FILE-Struktur anlegen
+-    FILE* int_res;
+-
+-    int_res = calloc(1, sizeof(*int_res));
+-    int_res->res = io_res;
+-
+-    int_res->buffer_mode = IO_BUFFER_MODE_NONE;
+-    int_res->buffer_ptr = NULL;
+-    int_res->buffer_size = 0;
+-    int_res->buffer_pos = 0;
+-    int_res->free_buffer = false;
+-    setvbuf(int_res, malloc(BUFSIZ), _IOFBF, BUFSIZ);
+-    int_res->free_buffer = true;
+-
+-    int_res->cur_pos = 0;
+-    int_res->error = false;
+-    int_res->os_eof = false;
+-
+-    return int_res;
++    return __create_file_from_iores(io_res);
+ }
+ 
+ /**
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Tue Jul 21 00:45:17 2015
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Tue, 21 Jul 2015 00:45:17 +0200
+Subject: [tyndur-devel] [PATCH v2 8/8] kernel2: Blockierendes Lesen
+In-Reply-To: <1437432317-27705-1-git-send-email-kevin@tyndur.org>
+References: <1437432317-27705-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1437432317-27705-9-git-send-email-kevin@tyndur.org>
+
++ kernel2: lio_(p)read() blockiert jetzt, wenn es gar nichts lesen kann,
+  aber moredata noch gesetzt ist (d.h. es sonst -EAGAIN zurückgeben
+  würde).
+
+  Solange man sich nicht einloggt, verbraten die getterms jetzt nicht
+  mehr 100% CPU um die Tastatur zu pollen, sondern der Idle-Thread kommt
+  zum Zug.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/include/lostio/client.h         |  4 +--
+ src/kernel2/include/tasks.h                 |  1 +
+ src/kernel2/src/lostio/client.c             | 48 ++++++++++++++++++++++++-----
+ src/kernel2/src/lostio/include/lostio_int.h | 11 +++++++
+ src/kernel2/src/lostio/tree.c               |  6 ++++
+ src/kernel2/src/syscalls/lio_server.c       |  5 ++-
+ src/kernel2/src/syscalls/lostio.c           |  4 +--
+ 7 files changed, 66 insertions(+), 13 deletions(-)
+
+diff --git a/src/kernel2/include/lostio/client.h b/src/kernel2/include/lostio/client.h
+index d3490f0..c7b3795 100644
+--- a/src/kernel2/include/lostio/client.h
++++ b/src/kernel2/include/lostio/client.h
+@@ -68,7 +68,7 @@ struct lio_stream* lio_open(struct lio_resource* res, int flags);
+  *
+  * @return Anzahl der gelesenen Bytes oder negativ im Fehlerfall
+  */
+-ssize_t lio_read(struct lio_stream* s, size_t bytes, void* buf);
++ssize_t lio_read(struct lio_stream* s, size_t bytes, void* buf, int flags);
+ 
+ /**
+  * Liest aus einem Stream aus, ohne die Position des streams zu benutzen oder
+@@ -77,7 +77,7 @@ ssize_t lio_read(struct lio_stream* s, size_t bytes, void* buf);
+  * @return Anzahl der gelesenen Bytes oder negativ im Fehlerfall
+  */
+ ssize_t lio_pread(struct lio_stream* s, uint64_t offset, size_t bytes,
+-    void* buf);
++    void* buf, int flags);
+ 
+ /**
+  * Schreibt in einen Stream
+diff --git a/src/kernel2/include/tasks.h b/src/kernel2/include/tasks.h
+index e17d22b..8fac5ad 100644
+--- a/src/kernel2/include/tasks.h
++++ b/src/kernel2/include/tasks.h
+@@ -52,6 +52,7 @@
+ #define PM_STATUS_WAIT_FOR_RPC 3
+ #define PM_STATUS_WAIT_FOR_LIO 4
+ #define PM_STATUS_WAIT_FOR_IO_REQUEST 5
++#define PM_STATUS_WAIT_FOR_DATA 6
+ 
+ typedef struct pm_process {
+     /// Die eindeutige Prozessnummer
+diff --git a/src/kernel2/src/lostio/client.c b/src/kernel2/src/lostio/client.c
+index 4673a27..8f3bcd1 100644
+--- a/src/kernel2/src/lostio/client.c
++++ b/src/kernel2/src/lostio/client.c
+@@ -92,7 +92,7 @@ static struct lio_resource* resolve_symlink(struct lio_resource* link,
+         return NULL;
+     }
+ 
+-    len = lio_read(stream, link->size, buf);
++    len = lio_read(stream, link->size, buf, 0);
+     lio_close(stream);
+ 
+     if (len < 0) {
+@@ -288,11 +288,11 @@ fail:
+  *
+  * @return Anzahl der gelesenen Bytes oder negativ im Fehlerfall
+  */
+-ssize_t lio_read(struct lio_stream* s, size_t bytes, void* buf)
++ssize_t lio_read(struct lio_stream* s, size_t bytes, void* buf, int flags)
+ {
+     ssize_t result;
+ 
+-    result = lio_pread(s, s->pos_read, bytes, buf);
++    result = lio_pread(s, s->pos_read, bytes, buf, flags);
+     if (result > 0) {
+         s->pos_read += result;
+     }
+@@ -302,11 +302,12 @@ ssize_t lio_read(struct lio_stream* s, size_t bytes, void* buf)
+ 
+ /**
+  * Liest aus einem Stream aus, ohne die Position des streams zu benutzen oder
+- * zu veraendern.
++ * zu veraendern. Diese Funktion blockiert nie, sondern gibt -EAGAIN zurück,
++ * wenn es nichts zu lesen gibt.
+  *
+  * @return Anzahl der gelesenen Bytes oder negativ im Fehlerfall
+  */
+-ssize_t lio_pread(struct lio_stream* s, uint64_t offset, size_t bytes,
++ssize_t lio_pread_nonblock(struct lio_stream* s, uint64_t offset, size_t bytes,
+     void* buf)
+ {
+     ssize_t ret = 0;
+@@ -361,6 +362,37 @@ ssize_t lio_pread(struct lio_stream* s, uint64_t offset, size_t bytes,
+     return ret;
+ }
+ 
++static void lio_pread_unblock_cb(void* opaque)
++{
++    pm_thread_t* t = opaque;
++
++    BUG_ON(t->status != PM_STATUS_WAIT_FOR_DATA);
++    t->status = PM_STATUS_READY;
++}
++
++/**
++ * Liest aus einem Stream aus, ohne die Position des streams zu benutzen oder
++ * zu veraendern. Diese Funktion blockiert, bis etwas gelesen werden kann.
++ *
++ * @return Anzahl der gelesenen Bytes oder negativ im Fehlerfall
++ */
++ssize_t lio_pread(struct lio_stream* s, uint64_t offset, size_t bytes,
++    void* buf, int flags)
++{
++    bool blocking = (flags & LIO_REQ_BLOCKING);
++    ssize_t ret;
++
++    ret = lio_pread_nonblock(s, offset, bytes, buf);
++    while (ret == -EAGAIN && blocking) {
++        notifier_add(&s->res_read->on_resize,
++                     lio_pread_unblock_cb, current_thread, true);
++        pm_scheduler_kern_yield(0, PM_STATUS_WAIT_FOR_DATA);
++        ret = lio_pread_nonblock(s, offset, bytes, buf);
++    }
++
++    return ret;
++}
++
+ /**
+  * Schreibt in einen Stream
+  *
+@@ -430,7 +462,7 @@ ssize_t lio_pwrite(struct lio_stream* s, uint64_t offset, size_t bytes,
+         old_flags = s->flags;
+         // FIXME Wenn das mal nicht racy ist...
+         s->flags |= LIO_READ;
+-        ret = lio_pread(s, offset_aligned, bytes_aligned, bounce);
++        ret = lio_pread(s, offset_aligned, bytes_aligned, bounce, 0);
+         s->flags = old_flags;
+     }
+ 
+@@ -447,7 +479,7 @@ ssize_t lio_pwrite(struct lio_stream* s, uint64_t offset, size_t bytes,
+     // Offset zeigt jetzt auf das erste Byte nach dem letzten geschriebenen
+     if (ret > 0){
+         if (res->size < offset) {
+-            res->size = offset;
++            lio_resource_update_size(res, offset);
+         }
+     }
+ 
+@@ -589,7 +621,7 @@ int lio_truncate(struct lio_stream* s, uint64_t size)
+ 
+     /* Anschliessend die Ressourcengroesse anpassen (drv->truncate kann das
+      * u.U. auch schon gemacht haben) */
+-    res->size = size;
++    lio_resource_update_size(res, size);
+ 
+     return 0;
+ }
+diff --git a/src/kernel2/src/lostio/include/lostio_int.h b/src/kernel2/src/lostio/include/lostio_int.h
+index a0f2947..33c055c 100644
+--- a/src/kernel2/src/lostio/include/lostio_int.h
++++ b/src/kernel2/src/lostio/include/lostio_int.h
+@@ -40,6 +40,7 @@
+ #include <syscall_structs.h>
+ 
+ #include "lostio/core.h"
++#include "notifier.h"
+ #include "tasks.h"
+ 
+ #define ROUND_TO_NEXT_BLOCK(bytes, blocksize) \
+@@ -180,6 +181,13 @@ struct lio_resource {
+     bool                        resolvable;
+     bool                        retargetable;
+ 
++    /**
++     * Wird aufgerufen, wenn sich die Größe einer Ressource ändert (dies
++     * schließt Fälle ein, in denen moredata von true zu false wechselt, wenn
++     * dann statt -EGAIN das Dateiende gemeldet wird.
++     */
++    struct notifier*            on_resize;
++
+     /** Id der Ressource fuer Userspace-Programme */
+     lio_usp_resource_t          usp_id;
+ 
+@@ -286,6 +294,9 @@ void lio_resource_remove_child(struct lio_resource* parent,
+ struct lio_node* lio_create_node(struct lio_resource* parent,
+     struct lio_resource* res, const char* name);
+ 
++/** Größe aktualisieren und on_size-Notifier ausführen */
++void lio_resource_update_size(struct lio_resource* res, uint64_t size);
++
+ 
+ /** Weist einer Ressource eine Userspace-ID zu */
+ void lio_usp_add_resource(struct lio_resource* res);
+diff --git a/src/kernel2/src/lostio/tree.c b/src/kernel2/src/lostio/tree.c
+index ee0e481..3fcd2c7 100644
+--- a/src/kernel2/src/lostio/tree.c
++++ b/src/kernel2/src/lostio/tree.c
+@@ -371,3 +371,9 @@ struct lio_node* lio_create_node(struct lio_resource* parent,
+     return n;
+ }
+ 
++/** Größe aktualisieren und on_size-Notifier ausführen */
++void lio_resource_update_size(struct lio_resource* res, uint64_t size)
++{
++    res->size = size;
++    notify(res->on_resize);
++}
+diff --git a/src/kernel2/src/syscalls/lio_server.c b/src/kernel2/src/syscalls/lio_server.c
+index 0ead479..5127d7a 100644
+--- a/src/kernel2/src/syscalls/lio_server.c
++++ b/src/kernel2/src/syscalls/lio_server.c
+@@ -262,7 +262,6 @@ int syscall_lio_srv_res_upload(struct lio_server_resource* resource)
+     }
+ 
+     res->tree = lio_usp_get_tree(resource->tree);
+-    res->size = resource->size;
+     res->blocksize = resource->blocksize;
+     res->readable = ((resource->flags & LIO_SRV_READABLE) ? 1 : 0);
+     res->writable = ((resource->flags & LIO_SRV_WRITABLE) ? 1 : 0);
+@@ -278,6 +277,10 @@ int syscall_lio_srv_res_upload(struct lio_server_resource* resource)
+     }
+     res->opaque = resource->opaque;
+ 
++    /* Auch aufrufen falls sich die Größe nicht geändert hat: moredata könnte
++     * von true auf false gewechselt sein. */
++    lio_resource_update_size(res, resource->size);
++
+     return 0;
+ }
+ 
+diff --git a/src/kernel2/src/syscalls/lostio.c b/src/kernel2/src/syscalls/lostio.c
+index b060626..32efd4b 100644
+--- a/src/kernel2/src/syscalls/lostio.c
++++ b/src/kernel2/src/syscalls/lostio.c
+@@ -163,9 +163,9 @@ void syscall_lio_read(lio_usp_stream_t* stream_id, uint64_t* offset,
+     }
+ 
+     if (flags & LIO_REQ_FILEPOS) {
+-        *result = lio_read(fd->stream, bytes, buffer);
++        *result = lio_read(fd->stream, bytes, buffer, flags);
+     } else {
+-        *result = lio_pread(fd->stream, *offset, bytes, buffer);
++        *result = lio_pread(fd->stream, *offset, bytes, buffer, flags);
+     }
+ }
+ 
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Sat Jul 25 20:50:07 2015
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 25 Jul 2015 20:50:07 +0200
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH_v3_7/8=5D_libc=3A_POSIX-Dateifu?=
+	=?utf-8?q?nktionen_nicht_=C3=BCber_stdio=2Eh_emulieren?=
+In-Reply-To: <1437432317-27705-8-git-send-email-kevin@tyndur.org>
+References: <1437432317-27705-8-git-send-email-kevin@tyndur.org>
+Message-ID: <1437850207-25982-1-git-send-email-kevin@tyndur.org>
+
+! libc: Die POSIX-Dateifunktionen sollten nicht gepuffert sein. Dieser
+  Commit konvertiert alle Funktionen auf direkte LIO-Aufrufe.
+
+  Diese Änderung ist nicht nur sowieso überfällig, sondern auch nötig,
+  damit select() weiterhin nichtblockierendes Readahead benutzen kann,
+  um zu testen, ob es etwas zu lesen gibt. (Ja, das ist kaputt, aber
+  wenigstens funktionierend kaputt.)
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/include/lostio.h        |   4 +
+ src/modules/lib/posix/posix_files.c | 202 ++++++++++++++++++++++++++++--------
+ src/modules/lib/posix/select.c      | 135 ------------------------
+ src/modules/lib/posix/socket.c      |  12 +--
+ src/modules/lib/stdlibc/file.c      |  43 ++++----
+ 5 files changed, 190 insertions(+), 206 deletions(-)
+ delete mode 100644 src/modules/lib/posix/select.c
+
+diff --git a/src/modules/include/lostio.h b/src/modules/include/lostio.h
+index 58fe314..06dafec 100644
+--- a/src/modules/include/lostio.h
++++ b/src/modules/include/lostio.h
+@@ -397,5 +397,9 @@ int lio_request_translated_blocks(struct lio_resource* res, uint64_t offset,
+ 
+ /** @}  */
+ 
++/* Interne Funktionen */
++int __iores_fileno(io_resource_t* io_res);
++struct lostio_internal_file* __create_file_from_iores(io_resource_t* io_res);
++
+ #endif
+ 
+diff --git a/src/modules/lib/posix/posix_files.c b/src/modules/lib/posix/posix_files.c
+index 7b601a3..04405cd 100644
+--- a/src/modules/lib/posix/posix_files.c
++++ b/src/modules/lib/posix/posix_files.c
+@@ -34,10 +34,12 @@
+ #include <errno.h>
+ #include <lost/config.h>
+ #include <stdarg.h>
++#include <lostio.h>
++#include <sys/select.h>
+ 
+ /// Ein Element das einen Unix-Dateideskriptor mit einem Normalen verknuepft
+ struct fd_list_element {
+-    FILE* io_res;
++    io_resource_t* io_res;
+     int fd;
+ 
+     int fd_flags;
+@@ -76,7 +78,7 @@ static void posix_files_init(void)
+  *
+  * @return Unix-Dateideskriptor oder -1 im Fehlerfall
+  */
+-int fileno(FILE* io_res)
++int __iores_fileno(io_resource_t* io_res)
+ {
+     if (io_res == NULL) {
+         errno = EBADF;
+@@ -115,6 +117,11 @@ int fileno(FILE* io_res)
+     return fdl_element->fd;
+ }
+ 
++int fileno(FILE* io_res)
++{
++    return __iores_fileno(io_res->res);
++}
++
+ /**
+  * Dateihandle andhand des Unix-Deskriptors suchen
+  *
+@@ -122,7 +129,7 @@ int fileno(FILE* io_res)
+  *
+  * @return Pointer auf das Dateihandle oder NULL im Fehlerfall
+  */
+-static FILE* fd_to_file(int fd)
++static io_resource_t* fd_to_file(int fd)
+ {
+     if (fd_list == NULL) {
+         posix_files_init();
+@@ -145,13 +152,21 @@ static FILE* fd_to_file(int fd)
+     }
+ }
+ 
++extern FILE* __create_file_from_iores(io_resource_t* io_res);
++
+ /**
+  * Einen Dateideskriptor als Stream oeffnen.
+  */
+ FILE* fdopen(int fd, const char* mode)
+ {
++    io_resource_t* iores;
++
+     // TODO: Modus pruefen
+-    return fd_to_file(fd);
++    iores = fd_to_file(fd);
++    if (iores == NULL) {
++        return NULL;
++    }
++    return __create_file_from_iores(iores);
+ }
+ 
+ /**
+@@ -236,8 +251,7 @@ int fcntl(int fd, int cmd, ...)
+  */
+ int open(const char* filename, int flags, ...)
+ {
+-    char fopen_flags[4];
+-    size_t flags_size = 0;
++    int lio_flags;
+     int fd;
+ 
+     // Wenn O_CREAT und O_EXCL gleichzeitig gesetzt ist, muessen wir abbrechen
+@@ -269,34 +283,33 @@ int open(const char* filename, int flags, ...)
+         fclose(f);
+     }
+ 
+-    // Open-Flags auf fopen-Kompatible uebersetzen
++    // Open-Flags auf LIO-Kompatible uebersetzen
++    lio_flags = 0;
+     if ((flags & O_RDONLY)) {
+-        fopen_flags[flags_size++] = 'r';
++        lio_flags |= IO_OPEN_MODE_READ;
+     } else if ((flags & O_WRONLY) && (flags & O_TRUNC)) {
+-        fopen_flags[flags_size++] = 'w';
++        lio_flags |= IO_OPEN_MODE_WRITE | IO_OPEN_MODE_TRUNC;
+     } else if ((flags & O_RDWR) && (flags & O_TRUNC)) {
+-        fopen_flags[flags_size++] = 'w';
+-        fopen_flags[flags_size++] = '+';
++        lio_flags |= IO_OPEN_MODE_READ | IO_OPEN_MODE_WRITE |
++                     IO_OPEN_MODE_TRUNC;
+     } else if ((flags & O_WRONLY)) {
+-        fopen_flags[flags_size++] = 'r';
+-        fopen_flags[flags_size++] = '+';
++        /* FIXME IO_OPEN_MODE_READ gehört hier eigentlich nicht rein */
++        lio_flags |= IO_OPEN_MODE_READ | IO_OPEN_MODE_WRITE;
+     } else if ((flags & O_RDWR)) {
+-        fopen_flags[flags_size++] = 'r';
+-        fopen_flags[flags_size++] = '+';
++        lio_flags |= IO_OPEN_MODE_READ | IO_OPEN_MODE_WRITE;
+     }
+     // Append-Flag
+     if ((flags & O_APPEND)) {
+-        fopen_flags[flags_size++] = 'a';
++        lio_flags |= IO_OPEN_MODE_APPEND;
+     }
+-    fopen_flags[flags_size++] = '\0';
+ 
+-    FILE* file = fopen(filename, fopen_flags);
++    io_resource_t* file = lio_compat_open(filename, lio_flags);
+     if (file == NULL) {
+         errno = ENOENT;
+         return -1;
+     }
+ 
+-    fd = fileno(file);
++    fd = __iores_fileno(file);
+     fcntl(fd, F_SETFL, flags);
+ 
+     return fd;
+@@ -326,7 +339,8 @@ int creat(const char* filename, mode_t mode)
+  */
+ ssize_t read(int fd, void* buffer, size_t size)
+ {
+-    FILE* file = fd_to_file(fd);
++    io_resource_t* file = fd_to_file(fd);
++    ssize_t ret;
+ 
+     // Bei einem ungueltigen Deskriptor wird abgebrochen
+     if (file == NULL) {
+@@ -334,15 +348,12 @@ ssize_t read(int fd, void* buffer, size_t size)
+         return -1;
+     }
+ 
+-    size_t bytes = fread(buffer, 1, size, file);
+-    // FIXME: Fehlerbehandlung
+-
+-    if ((bytes == 0) && !feof(file)) {
+-        errno = EAGAIN;
+-        return -1;
++    ret = lio_compat_read(buffer, 1, size, file);
++    if (ret < 0) {
++        errno = -ret;
++        ret = -1;
+     }
+-
+-    return bytes;
++    return ret;
+ }
+ 
+ /**
+@@ -356,7 +367,8 @@ ssize_t read(int fd, void* buffer, size_t size)
+  */
+ ssize_t write(int fd, const void* buffer, size_t size)
+ {
+-    FILE* file = fd_to_file(fd);
++    io_resource_t* file = fd_to_file(fd);
++    ssize_t ret;
+ 
+     // Bei einem ungueltigen Deskriptor wird abgebrochen
+     if (file == NULL) {
+@@ -364,9 +376,12 @@ ssize_t write(int fd, const void* buffer, size_t size)
+         return -1;
+     }
+ 
+-    size_t bytes = fwrite(buffer, 1, size, file);
+-    // FIXME: Fehlerbehandlung
+-    return bytes;
++    ret = lio_compat_write(buffer, 1, size, file);
++    if (ret < 0) {
++        errno = -ret;
++        ret = -1;
++    }
++    return ret;
+ }
+ 
+ /**
+@@ -381,7 +396,7 @@ ssize_t write(int fd, const void* buffer, size_t size)
+  */
+ off_t lseek(int fd, off_t offset, int origin)
+ {
+-    FILE* file = fd_to_file(fd);
++    io_resource_t* file = fd_to_file(fd);
+ 
+     // Bei einem ungueltigen Deskriptor wird abgebrochen
+     if (file == NULL) {
+@@ -390,12 +405,12 @@ off_t lseek(int fd, off_t offset, int origin)
+     }
+ 
+     // Seek ausfuehren
+-    if (fseek(file, offset, origin)) {
++    if (!lio_compat_seek(file, offset, origin)) {
+         return -1;
+     }
+ 
+     // Rueckgabewert ist die neue Position
+-    return ftell(file);
++    return lio_compat_tell(file);
+ }
+ 
+ /**
+@@ -419,7 +434,7 @@ int close(int fd)
+     }
+ 
+     // Wenn der Deskriptor ungueltig ist, wird abgebrochen
+-    if ((fdl_element == NULL) || (fclose(fdl_element->io_res) != 0)) {
++    if ((fdl_element == NULL) || (lio_compat_close(fdl_element->io_res) != 0)) {
+         errno = EBADF;
+         return -1;
+     }
+@@ -430,7 +445,7 @@ int close(int fd)
+ /// Aus einer Datei mit gegebenem Offset lesen
+ ssize_t pread(int fd, void *buf, size_t count, off_t offset)
+ {
+-    FILE* file = fd_to_file(fd);
++    io_resource_t* file = fd_to_file(fd);
+     off_t old_pos;
+     ssize_t ret;
+ 
+@@ -440,14 +455,14 @@ ssize_t pread(int fd, void *buf, size_t count, off_t offset)
+         return -1;
+     }
+ 
+-    old_pos = ftell(file);
+-    if (fseek(file, offset, SEEK_SET)) {
++    old_pos = lio_compat_tell(file);
++    if (!lio_compat_seek(file, offset, SEEK_SET)) {
+         return -1;
+     }
+ 
+-    ret = fread(buf, count, 1, file);
++    ret = lio_compat_readahead(buf, count, file);
+ 
+-    if (fseek(file, old_pos, SEEK_SET)) {
++    if (lio_compat_seek(file, old_pos, SEEK_SET)) {
+         return -1;
+     }
+ 
+@@ -457,7 +472,7 @@ ssize_t pread(int fd, void *buf, size_t count, off_t offset)
+ /// In eine Datei mit gegebenem Offset schreiben
+ ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset)
+ {
+-    FILE* file = fd_to_file(fd);
++    io_resource_t* file = fd_to_file(fd);
+     off_t old_pos;
+     ssize_t ret;
+ 
+@@ -467,14 +482,14 @@ ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset)
+         return -1;
+     }
+ 
+-    old_pos = ftell(file);
+-    if (fseek(file, offset, SEEK_SET)) {
++    old_pos = lio_compat_tell(file);
++    if (!lio_compat_seek(file, offset, SEEK_SET)) {
+         return -1;
+     }
+ 
+-    ret = fwrite(buf, count, 1, file);
++    ret = lio_compat_write(buf, count, 1, file);
+ 
+-    if (fseek(file, old_pos, SEEK_SET)) {
++    if (!lio_compat_seek(file, old_pos, SEEK_SET)) {
+         return -1;
+     }
+ 
+@@ -500,5 +515,100 @@ int dup2(int fd, int newfd)
+     return -1;
+ }
+ 
++/**
++ * Prueft, welche der gegebenen Dateideskriptoren bereit zum Lesen oder
++ * Schreiben sind oder ein Fehler fuer sie aufgetreten ist. Dateideskriptoren
++ * die nicht bereit bzw. in einem Fehlerzustand sind, werden aus der Menge
++ * entfernt.
++ *
++ * @param number_fds Nummer des hoechsten Dateideskriptors in einem der
++ * uebergebenen Mengen.
++ * @param readfds Dateideskriptoren, bei denen ueberprueft werden soll, ob sie
++ * zum Lesen bereit sind.
++ * @param writefds Dateideskriptoren, bei denen ueberprueft werden soll, ob sie
++ * zum Schreiben bereit sind.
++ * @param errfds Dateideskriptoren, bei denen ueberprueft werden soll, ob sie
++ * in einem Fehlerzustand sind.
++ * @param timeout Maximales Timeout, das gewartet werden soll, falls kein
++ * Deskriptor bereit ist. NULL fuer dauerhaftes Blockieren.
++ *
++ * @return Anzahl der Dateideskriptoren, die bereit bzw. in einem Fehlerzustand
++ * sind
++ */
++int select(int number_fds, fd_set* readfds, fd_set* writefds,
++    fd_set* errfds, struct timeval* timeout)
++{
++    uint32_t* rd = (uint32_t*) readfds;
++    uint32_t* wr = (uint32_t*) writefds;
++    uint32_t* err = (uint32_t*) errfds;
++    int c;
++    io_resource_t* f;
++    int ret;
++    int fds;
++
++    uint32_t orig_rd = rd ? *rd : 0;
++    uint32_t orig_wr = wr ? *wr : 0;
++
++    uint64_t timeout_tick;
++    if (timeout != NULL) {
++        timeout_tick = get_tick_count() +
++            1000ULL * 1000ULL * timeout->tv_sec +
++            timeout->tv_usec;
++    } else {
++        timeout_tick = (uint64_t) -1;
++    }
++
++    // tyndur ist so toll, bei uns gibt es keine Fehler
++    if (err) {
++        *err = 0;
++    }
++
++    do {
++        int i;
++
++        // Wieder alles zuruecksetzen
++        fds = 0;
++        if (rd) {
++            *rd = orig_rd;
++        }
++        if (wr) {
++            *wr = orig_wr;
++        }
++
++
++        for (i = 0; i < 32; i++) {
++
++            // Versuchsweise ein Zeichen auslesen ohne den Dateizeiger zu
++            // verändern. Wenn das funktioniert, als lesbar werten.
++            if (rd && (*rd & (1 << i))) {
++                f = fd_to_file(i);
++
++                if (f != NULL) {
++                    ret = lio_compat_readahead(&c, 1, f);
++                    if (ret == -EAGAIN) {
++                        *rd &= ~(1 << i);
++                    } else {
++                        // Auch eine Datei, die zu Ende ist, gilt als lesbar
++                        fds++;
++                    }
++                }
++            }
++
++            // Schreiben geht immer
++            if (wr && (*wr & (1 << i))) {
++                fds++;
++            }
++        }
++
++        // Busy Wait waere irgendwie auch doof
++        if (fds == 0) {
++            yield();
++        }
++
++    } while ((fds == 0) && (timeout_tick > get_tick_count()));
++
++    return fds;
++}
++
+ #endif // ndef CONFIG_LIBC_NO_STUBS
+ 
+diff --git a/src/modules/lib/posix/select.c b/src/modules/lib/posix/select.c
+deleted file mode 100644
+index 0508577..0000000
+--- a/src/modules/lib/posix/select.c
++++ /dev/null
+@@ -1,135 +0,0 @@
+-/*
+- * Copyright (c) 2009 The tyndur Project. All rights reserved.
+- *
+- * This code is derived from software contributed to the tyndur Project
+- * by Kevin Wolf.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+- * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+- * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
+- * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+- * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+- * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+- * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+- * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+- * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+- */
+-
+-#include <sys/select.h>
+-#include <sys/time.h>
+-#include <stdio.h>
+-#include <syscall.h>
+-
+-#ifndef CONFIG_LIBC_NO_STUBS
+-/**
+- * Prueft, welche der gegebenen Dateideskriptoren bereit zum Lesen oder
+- * Schreiben sind oder ein Fehler fuer sie aufgetreten ist. Dateideskriptoren
+- * die nicht bereit bzw. in einem Fehlerzustand sind, werden aus der Menge
+- * entfernt.
+- *
+- * @param number_fds Nummer des hoechsten Dateideskriptors in einem der
+- * uebergebenen Mengen.
+- * @param readfds Dateideskriptoren, bei denen ueberprueft werden soll, ob sie
+- * zum Lesen bereit sind.
+- * @param writefds Dateideskriptoren, bei denen ueberprueft werden soll, ob sie
+- * zum Schreiben bereit sind.
+- * @param errfds Dateideskriptoren, bei denen ueberprueft werden soll, ob sie
+- * in einem Fehlerzustand sind.
+- * @param timeout Maximales Timeout, das gewartet werden soll, falls kein
+- * Deskriptor bereit ist. NULL fuer dauerhaftes Blockieren.
+- *
+- * @return Anzahl der Dateideskriptoren, die bereit bzw. in einem Fehlerzustand
+- * sind
+- */
+-int select(int number_fds, fd_set* readfds, fd_set* writefds,
+-    fd_set* errfds, struct timeval* timeout)
+-{
+-    uint32_t* rd = (uint32_t*) readfds;
+-    uint32_t* wr = (uint32_t*) writefds;
+-    uint32_t* err = (uint32_t*) errfds;
+-    int c;
+-    FILE* f;
+-    int ret;
+-
+-    uint32_t orig_rd = rd ? *rd : 0;
+-    uint32_t orig_wr = wr ? *wr : 0;
+-
+-    uint64_t timeout_tick;
+-    if (timeout != NULL) {
+-        timeout_tick = get_tick_count() +
+-            1000ULL * 1000ULL * timeout->tv_sec +
+-            timeout->tv_usec;
+-    } else {
+-        timeout_tick = (uint64_t) -1;
+-    }
+-
+-    // tyndur ist so toll, bei uns gibt es keine Fehler
+-    if (err) {
+-        *err = 0;
+-    }
+-
+-    do {
+-        int i;
+-
+-        // Wieder alles zuruecksetzen
+-        ret = 0;
+-        if (rd) {
+-            *rd = orig_rd;
+-        }
+-        if (wr) {
+-            *wr = orig_wr;
+-        }
+-
+-
+-        for (i = 0; i < 32; i++) {
+-
+-            // Versuchsweise ein Zeichen auslesen. Wenn das funktioniert, als
+-            // lesbar werten und das Zeichen schnell wieder zurueckstecken
+-            // bevor das Programm was merkt.
+-            if (rd && (*rd & (1 << i))) {
+-                f = fdopen(i, NULL);
+-
+-                if (f != NULL) {
+-                    // Eine Datei, die zu Ende ist, gilt als lesbar
+-                    if (feof(f)) {
+-                        ret++;
+-                        continue;
+-                    }
+-
+-                    c = fgetc(f);
+-                    if (c == EOF) {
+-                        *rd &= ~(1 << i);
+-                    } else {
+-                        ungetc(c, f);
+-                        ret++;
+-                    }
+-                }
+-            }
+-
+-            // Schreiben geht immer
+-            if (wr && (*wr & (1 << i))) {
+-                ret++;
+-            }
+-        }
+-
+-        // Busy Wait waere irgendwie auch doof
+-        if (ret == 0) {
+-            yield();
+-        }
+-
+-    } while ((ret == 0) && (timeout_tick > get_tick_count()));
+-
+-    return ret;
+-}
+-#endif
+diff --git a/src/modules/lib/posix/socket.c b/src/modules/lib/posix/socket.c
+index 64b9df8..3586135 100644
+--- a/src/modules/lib/posix/socket.c
++++ b/src/modules/lib/posix/socket.c
+@@ -44,7 +44,7 @@ struct socket {
+     struct tree_item    tinfo;
+ 
+     sa_family_t                     sa_family;
+-    struct lostio_internal_file     conn;
++    io_resource_t                   conn;
+     size_t                          local_address_len;
+     struct sockaddr*                local_address;
+     FILE*                           listen_file;
+@@ -73,7 +73,7 @@ static int create_socket(struct socket* socket)
+         sockets = tree_create(struct socket, tinfo, id);
+     }
+ 
+-    socket->id = fileno(&socket->conn);
++    socket->id = __iores_fileno(&socket->conn);
+     tree_insert(sockets, socket);
+     return socket->id;
+ }
+@@ -131,7 +131,7 @@ int connect(int sock, const struct sockaddr* address, socklen_t address_len)
+     uint16_t port;
+     char* path;
+     int ret = 0;
+-    struct lostio_internal_file* conn;
++    io_resource_t* conn;
+ 
+     if (socket == NULL) {
+         errno = EBADF;
+@@ -152,7 +152,7 @@ int connect(int sock, const struct sockaddr* address, socklen_t address_len)
+         goto out_ip_string;
+     }
+ 
+-    conn = (struct lostio_internal_file*) fopen(path, "r+");
++    conn = lio_compat_open(path, IO_OPEN_MODE_READ | IO_OPEN_MODE_WRITE);
+     if (conn == NULL) {
+         errno = ETIMEDOUT;
+         ret = -1;
+@@ -259,7 +259,7 @@ int accept(int sock, struct sockaddr* address, socklen_t* address_len)
+     char buf[64];
+     int clientsock;
+     struct socket* clientsocket;
+-    struct lostio_internal_file* conn;
++    io_resource_t* conn;
+ 
+     struct socket* socket = get_socket(sock);
+     size_t i;
+@@ -288,7 +288,7 @@ int accept(int sock, struct sockaddr* address, socklen_t* address_len)
+     clientsocket->sa_family = AF_INET;
+     clientsock = create_socket(socket);
+ 
+-    conn = (struct lostio_internal_file*) fopen(buf, "r+");
++    conn = lio_compat_open(buf, IO_OPEN_MODE_READ | IO_OPEN_MODE_WRITE);
+     if (conn == NULL) {
+         free(socket);
+         errno = EAGAIN;
+diff --git a/src/modules/lib/stdlibc/file.c b/src/modules/lib/stdlibc/file.c
+index 7482c41..60c9e83 100644
+--- a/src/modules/lib/stdlibc/file.c
++++ b/src/modules/lib/stdlibc/file.c
+@@ -50,6 +50,29 @@ static bool is_valid_res(FILE* io_res)
+     return (io_res != NULL) && (IS_LIO2(io_res->res) || io_res->res->pid != 0);
+ }
+ 
++FILE* __create_file_from_iores(io_resource_t* io_res)
++{
++    // FILE-Struktur anlegen
++    FILE* int_res;
++
++    int_res = calloc(1, sizeof(*int_res));
++    int_res->res = io_res;
++
++    int_res->buffer_mode = IO_BUFFER_MODE_NONE;
++    int_res->buffer_ptr = NULL;
++    int_res->buffer_size = 0;
++    int_res->buffer_pos = 0;
++    int_res->free_buffer = false;
++    setvbuf(int_res, malloc(BUFSIZ), _IOFBF, BUFSIZ);
++    int_res->free_buffer = true;
++
++    int_res->cur_pos = 0;
++    int_res->error = false;
++    int_res->os_eof = false;
++
++    return int_res;
++}
++
+ /**
+  * Datei oeffnen
+  *
+@@ -104,25 +127,7 @@ FILE* fopen (const char* filename, const char* mode)
+         return NULL;
+     }
+ 
+-    // FILE-Struktur anlegen
+-    FILE* int_res;
+-
+-    int_res = calloc(1, sizeof(*int_res));
+-    int_res->res = io_res;
+-
+-    int_res->buffer_mode = IO_BUFFER_MODE_NONE;
+-    int_res->buffer_ptr = NULL;
+-    int_res->buffer_size = 0;
+-    int_res->buffer_pos = 0;
+-    int_res->free_buffer = false;
+-    setvbuf(int_res, malloc(BUFSIZ), _IOFBF, BUFSIZ);
+-    int_res->free_buffer = true;
+-
+-    int_res->cur_pos = 0;
+-    int_res->error = false;
+-    int_res->os_eof = false;
+-
+-    return int_res;
++    return __create_file_from_iores(io_res);
+ }
+ 
+ /**
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Sun Jul 26 22:50:45 2015
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 26 Jul 2015 22:50:45 +0200
+Subject: [tyndur-devel] [PATCH] libc/kernel2: Kein Busywait in waitpid()
+Message-ID: <1437943845-8684-1-git-send-email-kevin@tyndur.org>
+
++ kernel2: Wenn ein Kindprozess beendet wird, den Elternprozess wieder
+  aufwecken
+
+* libc: Nicht mehr busywaiten bis ein Kindprozess verschwindet, sondern
+  mit wait_for_rpc() auf den passenden Exit-RPC warten. Das wurde bisher
+  nicht gemacht weil der Kindprozess sich nicht zwingend sauber beendet.
+  Mit der Kerneländerung bleiben wir aber auf keinen Fall mehr hängen;
+  nur ein Exitcode, der uns mitteilt, was passiert ist, fehlt nach wie
+  vor. Auf jeden Fall sind wir damit und mit blockierenden Reads die
+  dauerhaft 100% CPU-Auslastung los.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/src/tasks/pm.c   | 7 +++++++
+ src/modules/lib/posix/wait.c | 2 +-
+ 2 files changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/src/kernel2/src/tasks/pm.c b/src/kernel2/src/tasks/pm.c
+index bb95923..61b4626 100644
+--- a/src/kernel2/src/tasks/pm.c
++++ b/src/kernel2/src/tasks/pm.c
+@@ -210,6 +210,7 @@ void pm_prepare_destroy(pm_process_t* process)
+  */
+ void pm_destroy(pm_process_t* process)
+ {
++    pm_process_t* parent = process->parent;
+     struct on_destroy_info* info;
+     int i;
+ 
+@@ -270,6 +271,12 @@ void pm_destroy(pm_process_t* process)
+     
+     // Zu guter letzt wird auch die Prozessstruktur freigegeben
+     free(process);
++
++    // Und schließlich noch den Elternprozess wieder aufwecken, falls er in
++    // einem waitpid() stecken könnte.
++    if (parent && parent->status == PM_STATUS_WAIT_FOR_RPC) {
++        parent->status = PM_STATUS_READY;
++    }
+ }
+ 
+ /**
+diff --git a/src/modules/lib/posix/wait.c b/src/modules/lib/posix/wait.c
+index 2f32ccb..d234c72 100644
+--- a/src/modules/lib/posix/wait.c
++++ b/src/modules/lib/posix/wait.c
+@@ -166,7 +166,7 @@ pid_t waitpid(pid_t pid, int* status, int options)
+         // Warten bis der Prozess terminiert
+         if ((options & WNOHANG) == 0) {
+             while (wait_child->running && (get_parent_pid(pid) != 0)) {
+-                yield();
++                wait_for_rpc();
+             }
+         } else if (wait_child->running) {
+             return 0;
+-- 
+2.1.4
+
+

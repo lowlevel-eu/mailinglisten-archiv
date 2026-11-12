@@ -1,0 +1,212 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH v2] ahci: Initialisation/Reset improvements
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%20v2%5D%20ahci%3A%20Initialisation/Reset%20improvements&In-Reply-To=%3C1428442323-22448-1-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000290.html">
+   <LINK REL="Next"  HREF="000302.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH v2] ahci: Initialisation/Reset improvements</H1>
+    <B>Kevin Wolf</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%20v2%5D%20ahci%3A%20Initialisation/Reset%20improvements&In-Reply-To=%3C1428442323-22448-1-git-send-email-kevin%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH v2] ahci: Initialisation/Reset improvements">kevin at tyndur.org
+       </A><BR>
+    <I>Tue Apr  7 23:32:03 CEST 2015</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000290.html">[cdi-devel] [PATCH] ahci: Initialisation/Reset improvements
+</A></li>
+        <LI>Next message: <A HREF="000302.html">[cdi-devel] [PATCH v2] ahci: Initialisation/Reset improvements
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#291">[ date ]</a>
+              <a href="thread.html#291">[ thread ]</a>
+              <a href="subject.html#291">[ subject ]</a>
+              <a href="author.html#291">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>Surprisingly, real hardware works much better when the disk gets power
+and is spun up. Also disable any automatic transition to power
+management modes just to be on the safe side.
+
+Before resetting a port, the processing of the command list must be
+stopped.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">kevin at tyndur.org</A>&gt;
+---
+v2:
+- Removed the long delays that v1 had while trying to wait for a device on an
+  empty port
+
+ ahci/ahci.h | 12 +++++++++++-
+ ahci/main.c | 52 ++++++++++++++++++++++++++++++++++++++++++++++++----
+ 2 files changed, 59 insertions(+), 5 deletions(-)
+
+diff --git a/ahci/ahci.h b/ahci/ahci.h
+index 24a830b..85d2cd5 100644
+--- a/ahci/ahci.h
++++ b/ahci/ahci.h
+@@ -94,9 +94,16 @@ enum {
+ 
+ enum {
+     PxCMD_ST    = (1 &lt;&lt;  0), /* Start */
++    PxCMD_SUD   = (1 &lt;&lt;  1), /* Spin-Up Device */
++    PxCMD_POD   = (1 &lt;&lt;  2), /* Power On Device */
+     PxCMD_FRE   = (1 &lt;&lt;  4), /* FIS Receive Enable */
+     PxCMD_FR    = (1 &lt;&lt; 14), /* FIS Receive Running */
+     PxCMD_CR    = (1 &lt;&lt; 15), /* Command List Running */
++    PxCMD_CPS   = (1 &lt;&lt; 16), /* Cold Presence State */
++    PxCMD_CPD   = (1 &lt;&lt; 20), /* Cold Presence Detection */
++
++    PxCMD_ICC_MASK      = (0xf &lt;&lt; 28),
++    PxCMD_ICC_ACTIVE    = (0x1 &lt;&lt; 28),
+ };
+ 
+ enum {
+@@ -114,7 +121,10 @@ enum {
+ };
+ 
+ enum {
+-    PxSCTL_DET_MASK     = (0xf &lt;&lt; 0),
++    PxSCTL_DET_MASK     = (0xf &lt;&lt; 0),   /* Device Detection Initialization */
++    PxSCTL_IPM_MASK     = (0xf &lt;&lt; 8),   /* Interface Power Management
++                                           Transitions Allowed */
++    PxSCTL_IPM_NONE     = (0x3 &lt;&lt; 8),
+ };
+ 
+ /* SATA 2.6: &quot;11.3 Software reset protocol&quot; */
+diff --git a/ahci/main.c b/ahci/main.c
+index 1afc03c..35f5141 100644
+--- a/ahci/main.c
++++ b/ahci/main.c
+@@ -46,7 +46,7 @@ static int ahci_init_hardware(struct ahci_device* ahci)
+ {
+     int port;
+     bool all_idle;
+-    uint32_t cmd, ssts, sig;
++    uint32_t cmd, ssts, sig, sctl;
+     int retries;
+ 
+     /* HBA reset (see AHCI 1.3, chapter 10.4.3) */
+@@ -89,21 +89,59 @@ static int ahci_init_hardware(struct ahci_device* ahci)
+     /* Determine number of command slots */
+     ahci-&gt;cmd_slots = (reg_inl(ahci, REG_CAP) &amp; CAP_NCS_MASK) &gt;&gt; CAP_NCS_SHIFT;
+ 
+-    /* Allocate Command List and FIS for each port */
++    /* All ports: Power On Device, Spin-Up Device, Link Active */
+     for (port = 0; port &lt; MAX_PORTS; port++) {
+         if (!(ahci-&gt;ports &amp; BIT(port))) {
+             continue;
+         }
++        cmd = pxreg_inl(ahci, port, REG_PxCMD);
++        cmd &amp;= ~PxCMD_ICC_MASK;
++        cmd |=  PxCMD_POD | PxCMD_SUD | PxCMD_ICC_ACTIVE;
++        pxreg_outl(ahci, port, REG_PxCMD, cmd);
++    }
+ 
+-        /* If there is a device attached, register it */
+-        ssts = pxreg_inl(ahci, port, REG_PxSSTS);
++    /* Detect and initialise devices for each port */
++    retries = 10;
++    for (port = 0; port &lt; MAX_PORTS; port++) {
++        if (!(ahci-&gt;ports &amp; BIT(port))) {
++            continue;
++        }
++
++        /* If we know there is nothing (Cold Presence Detection supported, but
++         * no device detected), skip the device. */
++        cmd = pxreg_inl(ahci, port, REG_PxCMD);
++        if ((cmd &amp; (PxCMD_CPD | PxCMD_CPS)) == PxCMD_CPD) {
++            continue;
++        }
++
++        /* Check whether there is a device */
++        do {
++            ssts = pxreg_inl(ahci, port, REG_PxSSTS);
++            if ((ssts &amp; PxSSTS_DET_MASK) == PxSSTS_DET_PRESENT) {
++                break;
++            } else if ((ssts &amp; PxSSTS_DET_MASK) == 0 &amp;&amp; retries &lt; 10) {
++                /* At least device presence should be detected after 100ms,
++                 * even if Phy communication isn't established yet. */
++                break;
++            } else if (retries) {
++                cdi_sleep_ms(100);
++                retries--;
++            }
++        } while (retries);
+ 
++        /* If there is a device attached, register it */
+         if ((ssts &amp; PxSSTS_DET_MASK) != PxSSTS_DET_PRESENT ||
+             (ssts &amp; PxSSTS_IPM_MASK) != PxSSTS_IPM_ACTIVE)
+         {
+             continue;
+         }
+ 
++        /* Forbid transition to any power mangement states */
++        sctl = pxreg_inl(ahci, port, REG_PxSCTL);
++        sctl &amp;= ~PxSCTL_IPM_MASK;
++        sctl |= PxSCTL_IPM_NONE;
++        pxreg_outl(ahci, port, REG_PxSCTL, sctl);
++
+         /* Create a device with the right driver */
+         sig = pxreg_inl(ahci, port, REG_PxSIG);
+ 
+@@ -145,6 +183,10 @@ static int ahci_init_hardware(struct ahci_device* ahci)
+ void ahci_port_comreset(struct ahci_device* ahci, int port)
+ {
+     uint32_t sctl = pxreg_inl(ahci, port, REG_PxSCTL);
++    uint32_t cmd = pxreg_inl(ahci, port, REG_PxCMD);
++
++    pxreg_outl(ahci, port, REG_PxCMD, cmd &amp; ~PxCMD_ST);
++    while (pxreg_inl(ahci, port, REG_PxCMD) &amp; PxCMD_CR);
+ 
+     sctl &amp;= ~PxSCTL_DET_MASK;
+     sctl |= 0x1;
+@@ -154,6 +196,8 @@ void ahci_port_comreset(struct ahci_device* ahci, int port)
+ 
+     sctl &amp;= ~PxSCTL_DET_MASK;
+     pxreg_outl(ahci, port, REG_PxSCTL, sctl);
++
++    pxreg_outl(ahci, port, REG_PxCMD, cmd);
+ }
+ 
+ static void irq_handler(struct cdi_device* dev)
+-- 
+2.1.4
+
+</PRE>
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000290.html">[cdi-devel] [PATCH] ahci: Initialisation/Reset improvements
+</A></li>
+	<LI>Next message: <A HREF="000302.html">[cdi-devel] [PATCH v2] ahci: Initialisation/Reset improvements
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#291">[ date ]</a>
+              <a href="thread.html#291">[ thread ]</a>
+              <a href="subject.html#291">[ subject ]</a>
+              <a href="author.html#291">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

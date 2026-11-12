@@ -1,0 +1,1401 @@
+Index: trunk/src/modules/include/keycodes.h
+===================================================================
+--- /dev/null
++++ trunk/src/modules/include/keycodes.h
+@@ -0,0 +1,79 @@
++/*
++ * Copyright (c) 2008 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Antoine Kaufmann.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef _KEYCODES_H_
++#define _KEYCODES_H_
++
++/**
++ * Das sind einige der Keycodes die KBC ueber die Callback-Funktion verschickt.
++ * Es handelt sich dabei aber nur um diese Keycodes, die auf allen Layouts am
++ * selben Ort sind.
++ */
++
++#define KEYCODE_SHIFT_LEFT      42
++#define KEYCODE_SHIFT_RIGHT     54
++#define KEYCODE_CONTROL_LEFT    29
++#define KEYCODE_CONTROL_RIGHT   97
++#define KEYCODE_ALT             56
++#define KEYCODE_ALTGR           100
++
++#define KEYCODE_INSERT          110
++#define KEYCODE_DELETE          111
++#define KEYCODE_PAGE_UP         104
++#define KEYCODE_PAGE_DOWN       109
++#define KEYCODE_HOME            102
++#define KEYCODE_END             107
++
++#define KEYCODE_F1              59
++#define KEYCODE_F2              60
++#define KEYCODE_F3              61
++#define KEYCODE_F4              62
++#define KEYCODE_F5              63
++#define KEYCODE_F6              64
++#define KEYCODE_F7              64
++#define KEYCODE_F8              66
++#define KEYCODE_F9              67
++#define KEYCODE_F10             68
++#define KEYCODE_F11             87
++#define KEYCODE_F12             88
++
++#define KEYCODE_ARROW_UP        103
++#define KEYCODE_ARROW_DOWN      108
++#define KEYCODE_ARROW_LEFT      105
++#define KEYCODE_ARROW_RIGHT     106
++
++
++#endif // ifndef _KEYCODES_H_
++
+Index: trunk/src/modules/kbc/keyboard.c
+===================================================================
+--- trunk.orig/src/modules/kbc/keyboard.c
++++ trunk/src/modules/kbc/keyboard.c
+@@ -1,334 +1,214 @@
+-
+-#include "types.h"
+-#include "syscall.h"
+-#include "rpc.h"
+-#include "stdlib.h"
+-#include "stdio.h" 
+-#include "lostio.h"
+-#include "ports.h"
++/*
++ * Copyright (c) 2008 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Antoine Kaufmann.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++#include <syscall.h>
++#include <rpc.h>
++#include <stdlib.h>
++#include <stdio.h>
++#include <lostio.h>
++#include <ports.h>
++#include <collections.h>
+ 
+ #include "keyboard.h"
+ #include "mouse.h"
+ 
+-#define BUFFER_SIZE 1024
+-#define BUFFER_TYPE_RAW 1
+-#define BUFFER_TYPE_ASCII 2
+-
+-
+-void kbd_irq_handler();
+-
+-dword kbd_scancode[256][2] =
+-{
+-    {0,               0},         // 0x00
+-    {27,             27},         // 0x01
+-    {'1',           '|'},         // 0x02
+-    {'2',           '"'},         // 0x03 F5
+-    {'3',             0},         // 0x04 F3
+-    {'4',           '$'},         // 0x05 F1
+-    {'5',           '%'},         // 0x06 F2
+-    {'6',           '&'},         // 0x07 F12
+-    {'7',           '/'},         // 0x08 F10
+-    {'8',           '('},         // 0x09
+-    {'9',           ')'},         // 0x0A F8
+-    {'0',           '='},         // 0x0B F6
+-    {39,            '?'},         // 0x0C'
+-    {'^',           '`'},         // 0x0D
+-    {'\b',         '\b'},         // 0x0E
+-    {'\t',         '\t'},         // 0x0F F4
+-    {'q',           'Q'},         // 0x10
+-    {'w',           'W'},         // 0x11
+-    {'e',           'E'},         // 0x12
+-    {'r',           'R'},         // 0x13
+-    {'t',           'T'},         // 0x14
+-    {'z',           'Z'},         // 0x15 q
+-    {'u',           'U'},         // 0x16 1
+-    {'i',           'I'},         // 0x17
+-    {'o',           'O'},         // 0x18
+-    {'p',           'P'},         // 0x19
+-    {'u',           'e'},         // 0x1A y
+-    {'+',           '*'},         // 0x1B s
+-    {'\n',         '\n'},         // 0x1C a
+-    {0,               0},         // 0x1D w
+-    {'a',           'A'},         // 0x1E 2
+-    {'s',           'S'},         // 0x1F
+-    {'d',           'D'},         // 0x20
+-    {'f',           'F'},         // 0x21 c
+-    {'g',           'G'},         // 0x22 x
+-    {'h',           'H'},         // 0x23 d
+-    {'j',           'J'},         // 0x24 e
+-    {'k',           'K'},         // 0x25 4
+-    {'l',           'L'},         // 0x26 3
+-    {'o',           'e'},         // 0x27
+-    {'a',           'a'},         // 0x28
+-    {0,               0},      // 0x29 space
+-    {0,               0},      // 0x2A v
+-    {'#',          '\''},      // 0x2B f
+-    {'y',           'Y'},      // 0x2C t
+-    {'x',           'X'},      // 0x2D r
+-    {'c',           'C'},      // 0x2E 5
+-    {'v',           'V'},         // 0x2F
+-    {'b',           'B'},         // 0x30
+-    {'n',           'N'},      // 0x31 n
+-    {'m',           'M'},      // 0x32 b
+-    {',',           ';'},      // 0x33 h
+-    {'.',           ':'},      // 0x34 g
+-    {'-',           '_'},      // 0x35 z
+-    {0,               0},      // 0x36 6
+-    {0,               0},         // 0x37
+-    {0,               0},         // 0x38
+-    {' ',           ' '},         // 0x39
+-    {0,               0},      // 0x3A m
+-    {256+59,              0},      // 0x3B j [F1]
+-    {256+60,              0},      // 0x3C u
+-    {256+61,               0},      // 0x3D 7
+-    {256+62,               0},      // 0x3E 8
+-    {256+63,               0},         // 0x3F
+-    {256+64,               0},         // 0x40
+-    {256+65,               0},      // 0x41 ,
+-    {256+66,               0},      // 0x42 k
+-    {256+67,               0},      // 0x43 i
+-    {256+68,               0},      // 0x44 o [F10]
+-    {0,               0},      // 0x45 0
+-    {0,               0},      // 0x46 9
+-    {0,               0},         // 0x47
+-    {0,               0},         // 0x48
+-    {0,               0},      // 0x49 .
+-    {0,               0},      // 0x4A -
+-    {0,               0},      // 0x4B l
+-    {0,               0},      // 0x4C TODO
+-    {0,               0},      // 0x4D p
+-    {0,               0},      // 0x4E Ã?
+-    {0,               0},         // 0x4F
+-    {0,               0},         // 0x50
+-    {0,               0},         // 0x51
+-    {0,               0},      // 0x52 TODO
+-    {0,               0},         // 0x53
+-    {0,               0},      // 0x54 TODO
+-    {0,               0},      // 0x55 
+-    {0,               0},         // 0x56
+-    {256+133,             0},         // 0x57 [F11]
+-    {256+134,             0},         // 0x58 capslock [F12]
+-    {0,               0},         // 0x59
+-    {0,               0},     // 0x5A enter
+-    {0,               0},      // 0x5B +
+-    {0,               0},         // 0x5C
+-    {0,               0},     // 0x5D #
+-    {0,               0},         // 0x5E
+-    {0,               0},         // 0x5F
+-    {0,               0},         // 0x60
+-    {0,               0},         // 0x61
+-    {0,               0},         // 0x62
+-    {0,               0},         // 0x63
+-    {0,               0},         // 0x64
+-    {0,               0},         // 0x65
+-    {0,               0},     // 0x66 backspace
+-    {0,               0},         // 0x67
+-    {0,               0},         // 0x68
+-    {0,               0},         // 0x69 numblock 1 //TODO
+-    {0,               0},         // 0x6A
+-    {0,               0},         // 0x6B numblock 6 //TODO
+-    {0,               0},         // 0x6C numblock 7 //TODO
+-    {0,               0},         // 0x6D
+-    {0,               0},         // 0x6E
+-    {0,               0},         // 0x6F
+-    {0,               0},         // 0x70 numblock 0 //TODO
+-    {0,               0},         // 0x71 numblock , //TODO
+-    {0,               0},         // 0x72 numblock 2 //TODO
+-    {0,               0},         // 0x73 numblock 5 //TODO
+-    {0,               0},         // 0x74 numblock 6 //TODO
+-    {0,               0},         // 0x75 numblock 8 //TODO
+-    {0,               0},         // 0x76 ESC
+-    {0,               0},         // 0x77 NUM
+-    {0,               0},         // 0x78 F11
+-    {0,               0},      // 0x79 numblock + //TODO
+-    {0,               0},         // 0x7A numblock 3 //TODO
+-    {0,               0},      // 0x7B numblock - //TODO
+-    {0,               0},      // 0x7C numblock * //TODO
+-    {0,               0},         // 0x7D numblock 9 //TODO
+-    {0,               0},         // 0x7E scroll lock
+-    {0,               0},         // 0x7F
+-    {0,               0},         // 0x80
+-    {0,               0},         // 0x81
+-    {0,               0},         // 0x82
+-    {0,               0},         // 0x83 F7
+-    {0,               0},         // 0x84
+-    {0,               0},         // 0x85
+-    {0,               0},         // 0x86
+-    {0,               0},         // 0x87
+-    {0,               0},         // 0x88
+-    {0,               0},         // 0x89
+-    {0,               0},         // 0x8A
+-    {0,               0},         // 0x8B
+-    {0,               0},         // 0x8C
+-    {0,               0},         // 0x8D
+-    {0,               0},         // 0x8E
+-    {0,               0},         // 0x8F
+-};
+-
+-
+-size_t kbd_buffer_pos;
+-byte* kbd_ascii_buffer;
+-byte* kbd_work_buffer;
++/**
++ * Liste mit den PIDs die benachrichtitg werden wollen, bei Tastendruecken
++ */
++static list_t* callback_list;
++
++/**
++ * RPC-Handler zum registrieren eines Callbacks fuer Tastendruecke
++ */
++static void rpc_register_callback(pid_t pid, dword cid, size_t data_size,
++    void* data);
++
++
++/**
++ * IRQ-Hander
++ */
++static void kbd_irq_handler(void);
++
++/**
++ * Befehl an den Tastaturkontroller senden
++ */
++void kbd_send_cmd(uint8_t cmd);
++
++
++/**
++ * Tastendruck an wartende Prozesse senden
++ *
++ * @param keycode Der zu sendende Keycode
++ * @param release TRUE wenn die Taste losgelassen wurde
++ */
++static void send_key_event(uint8_t keycode, bool release);
+ 
+-size_t kbd_read_handler(lostio_filehandle_t* filehandle, void* buf,
+-    size_t blocksize, size_t blockcount);
+ 
+-void kbd_send_cmd(byte cmd);
+ 
+-// Keyboard wird initialisiert
++/**
++ * Tastaturtreiber initialisieren
++ */
+ void keyboard_init(void)
+ {
+-    kbd_ascii_buffer = malloc(BUFFER_SIZE);
+-    kbd_work_buffer = malloc(BUFFER_SIZE);
+-    kbd_buffer_pos = 0;
+-  
+-    //Speicher fuer ein neues typehandle allokieren
+-    typehandle_t* typehandle = malloc(sizeof(typehandle_t));
+-    typehandle->id          = 255;
+-    typehandle->not_found   = NULL;
+-    typehandle->pre_open    = NULL;
+-    typehandle->post_open   = NULL;
+-    typehandle->read        = &kbd_read_handler;
+-    typehandle->write       = NULL;
+-    typehandle->seek        = NULL;
+-    typehandle->close       = NULL;
+-    typehandle->link        = NULL;
+-    typehandle->unlink      = NULL;
+-    lostio_register_typehandle(typehandle);
+-
+-    vfstree_create_node("/keyboard", LOSTIO_TYPES_DIRECTORY, 0, 0, 0);
+-    //vfstree_create_node("/raw", 255, 0, (void*)BUFFER_TYPE_RAW);
+-    vfstree_create_node("/keyboard/ascii", 255, 0, (void*)BUFFER_TYPE_ASCII, 0);
++    // Liste mit Prozessen, die benachrichtigt werden wollen ueber Tastendruecke
++    callback_list = list_create();
++    register_message_handler("KBDREGIS", rpc_register_callback);
+ 
++    // Interrupt-Handler fuer die Tastatur registrieren
+     register_intr_handler(0x21, &kbd_irq_handler);
+-    
++
++    // Tastatur-Reset
+     long long timeout = get_tick_count() + 500000;
+     outb(0x60, 0xff);
+-    while ((inb(0x60) != 0xaa) && (get_tick_count() < timeout)) yield();    
++    while ((inb(0x60) != 0xaa) && (get_tick_count() < timeout)) yield();
+ }
+ 
+-
+-void kbd_send_cmd(byte cmd)
++/**
++ * Befehl an den Tastaturkontroller senden
++ */
++void kbd_send_cmd(uint8_t cmd)
+ {
+-    while ((inb(0x64) & 0x02) != 0) yield();
++    while ((inb(0x64) & 0x02) != 0) {
++        yield();
++    }
++
+     outb(0x60, cmd);
+-    while (inb(0x60) != 0xfa) yield();
++
++    while (inb(0x60) != 0xFA) {
++        yield();
++    }
+ }
+ 
+ 
++/**
++ * IRQ-Hander
++ */
+ void kbd_irq_handler() {
++    uint8_t scancode;
++    uint8_t keycode = 0;
++    bool break_code = FALSE;
++
++    // Status-Variablen fuer das Behandeln von e0- und e1-Scancodes
++    static bool     e0_code = FALSE;
++    // Wird auf 1 gesetzt, sobald e1 gelesen wurde, und auf 2, sobald das erste
++    // Datenbyte gelesen wurde
++    static int      e1_code = 0;
++    static uint16_t  e1_prev = 0;
++
+     p();
+ 
+-    byte scancode = inb(0x60);
+-    byte ascii;
+-    bool breakcode;
+-    bool preceding_zero;
+-
+-    static bool state_caps = FALSE;
+-    static bool state_extended = FALSE;
+-    
+-    if (scancode == 0xE0)  {
+-        state_extended = TRUE;
+-        v();
+-        return;
+-    }
++    scancode = inb(0x60);
+ 
+-    if (state_extended) 
+-    {
+-        state_extended = FALSE;
+-        
+-        preceding_zero = TRUE;
+-        switch (scancode) 
+-        {
+-            case 0x4B: ascii = 75; break; // Links
+-            case 0x4D: ascii = 77; break; // Rechts
+-            case 0x48: ascii = 72; break; // Hoch
+-            case 0x50: ascii = 80; break; // Runter
+-            
+-            case 0x49: ascii = 73; break; // Bild Auf
+-            case 0x51: ascii = 81; break; // Bild Ab
+-            
+-            case 0x52: ascii = 82; break; // Einfg
+-            case 0x53: ascii = 83; break; // Entf
+-            case 0x47: ascii = 71; break; // Pos1
+-            case 0x4F: ascii = 79; break; // Ende
+-
+-            default:
+-                if ((scancode & 0x80) == 0) {
+-                    printf("<0E %02x>", scancode);
+-                }
+-                ascii =  0; 
+-                break;
+-        }
+-    } 
+-    else 
+-    {
+-        //Ascii-Zeichen fuer diese Taste holen
+-        if(state_caps == TRUE)
+-        {
+-            ascii = kbd_scancode[scancode][1] & 0xff;
+-            preceding_zero = kbd_scancode[scancode][1] & 0x100;
+-        }
+-        else
+-        {
+-            ascii = kbd_scancode[scancode][0] & 0xff;
+-            preceding_zero = kbd_scancode[scancode][0] & 0x100;
+-        }
+-    }
+ 
+-    // 
+-    if(scancode > 0x80)
+-    {
+-        breakcode = TRUE;
+-    }
+-    else
+-    {
+-        breakcode = FALSE;
++    // Um einen Breakcode handelt es sich, wenn das oberste Bit gesetzt ist und
++    // es kein e0 oder e1 fuer einen Extended-scancode ist
++    if ((scancode & 0x80) &&
++        (e1_code || (scancode != 0xE1)) &&
++        (e0_code || (scancode != 0xE0)))
++    {
++        break_code = TRUE;
++        scancode &= ~0x80;
++    }
++
++    if (e0_code) {
++        // Fertiger e0-Scancode
++        keycode = translate_scancode(1, scancode);
++        e0_code = FALSE;
++    } else if (e1_code == 2) {
++        // Fertiger e1-Scancode
++        // Zweiten Scancode in hoeherwertiges Byte packen
++        e1_prev |= ((uint16_t) scancode << 8);
++        keycode = translate_scancode(2, e1_prev);
++        e1_code = 0;
++    } else if (e1_code == 1) {
++        // Erstes Byte fuer e1-Scancode
++        e1_prev = scancode;
++        e1_code++;
++    } else if (scancode == 0xE0) {
++        // Anfang eines e0-Codes
++        e0_code = TRUE;
++    } else if (scancode == 0xE1) {
++        // Anfang eines e1-Codes
++        e1_code = 1;
++    } else {
++        // Normaler Scancode
++        keycode = translate_scancode(0, scancode);
+     }
+ 
+-    //Eine shift taste
+-    if(((scancode & (~0x80)) == 0x2a) || ((scancode & (~0x80)) == 0x36))
+-    {
+-        state_caps = !breakcode;
+-    }
+-    else if(ascii != 0)
+-    {
+-        if(kbd_buffer_pos < BUFFER_SIZE - (preceding_zero ? 1 : 0))
+-        {
+-            if (preceding_zero) {
+-                kbd_ascii_buffer[kbd_buffer_pos++] = 0;
+-            }
+-            kbd_ascii_buffer[kbd_buffer_pos++] = ascii;
+-        }
+-        else
+-        {
+-            printf("\n[KBC] Tastaturpuffer voll\n");
+-        }
++    if (keycode != 0) {
++        send_key_event(keycode, break_code);
+     }
+ 
+     v();
+ }
+ 
+ 
+-size_t kbd_read_handler(lostio_filehandle_t* filehandle, void* buf,
+-    size_t blocksize, size_t blockcount)
++/**
++ * RPC-Handler zum registrieren eines Callbacks fuer Tastendruecke
++ */
++static void rpc_register_callback(pid_t pid, dword cid, size_t data_size,
++    void* data)
+ {
+-    size_t size = blocksize * blockcount;
++    pid_t* ppid = malloc(sizeof(*ppid));
++    *ppid = pid;
+ 
+-    p();
+-    if(size > kbd_buffer_pos)
+-    {
+-        size = kbd_buffer_pos;
+-    }
+-
+-    memcpy(kbd_work_buffer, kbd_ascii_buffer, size);
+-    memmove(kbd_ascii_buffer, (void*) ((dword)kbd_ascii_buffer + size), kbd_buffer_pos - size);
+-
+-    memcpy(buf, kbd_work_buffer, size);
++    list_push(callback_list, ppid);
++    rpc_send_dword_response(pid, cid, 1);
++}
+ 
+-    kbd_buffer_pos -= size;
+-    v();
++/**
++ * Tastendruck an wartende Prozesse senden
++ *
++ * Der RPC verschickt dabei 2 Bytes, das erste mit dem keycode, das zweite ist
++ * entweder 0 oder != 0 je nachdem, ob die Taste gedrueckt oder losgelassen
++ * wurde.
++ *
++ * @param keycode Der zu sendende Keycode
++ * @param release TRUE wenn die Taste losgelassen wurde
++ */
++static void send_key_event(uint8_t keycode, bool release)
++{
++    pid_t* pid;
++    int i;
++    char data[8 + 2];
++
++    strcpy(data, "KBDEVENT");
++    data[8] = keycode;
++    data[9] = release;
+ 
+-    return size;
++    for (i = 0; (pid = list_get_element_at(callback_list, i)); i++) {
++        send_message(*pid, 512, 0, 8 + 2, data);
++    }
+ }
+ 
+Index: trunk/src/modules/kbc/keyboard.h
+===================================================================
+--- trunk.orig/src/modules/kbc/keyboard.h
++++ trunk/src/modules/kbc/keyboard.h
+@@ -4,4 +4,20 @@
+ 
+ void keyboard_init(void);
+ 
++
++/**
++ * Scancode in einen Keycode uebersetzen
++ *
++ * @param set Zu Benutztende Tabelle:
++ *              0: Normale Scancodes
++ *              1: Extended0 Scancodes
++ *              2: Extended1 Scancodes
++ *
++ * @param code Scancode; keine Breakcodes nur normale Scancodes
++ *             Fuer e1 den zweiten Scancode im hoeherwertigen Byte uebergeben
++ *
++ * @return Keycode oder 0 falls der Scancode nicht bekannt ist
++ */
++uint8_t translate_scancode(int set, uint16_t scancode);
++
+ #endif
+Index: trunk/src/modules/kbc/main.c
+===================================================================
+--- trunk.orig/src/modules/kbc/main.c
++++ trunk/src/modules/kbc/main.c
+@@ -10,8 +10,6 @@
+ #include "keyboard.h"
+ #include "mouse.h"
+ 
+-extern size_t kbd_buffer_pos;
+-
+ int main(int argc, char* argv[])
+ {
+     request_ports(0x60, 1);
+@@ -26,8 +24,6 @@ int main(int argc, char* argv[])
+     
+     init_service_register("kbc");
+     
+-    kbd_buffer_pos = 0;
+-    
+     while(1) {
+         wait_for_rpc();
+     }
+Index: trunk/src/modules/kbc/sc2kc.c
+===================================================================
+--- /dev/null
++++ trunk/src/modules/kbc/sc2kc.c
+@@ -0,0 +1,127 @@
++/*
++ * Copyright (c) 2008 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Antoine Kaufmann.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <stdio.h>
++#include "keyboard.h"
++
++
++/**
++ * Scancode => Keycode Uebersetzungstabelle fuer Scancode Set 1
++ */
++static uint8_t sc_to_kc[][128] = {
++    // Normale Scancodes
++    {
++          0,   1,   2,   3,   4,   5,   6,   7,   8,   9,
++         10,  11,  12,  13,  14,  15,  16,  17,  18,  19,
++         20,  21,  22,  23,  24,  25,  26,  27,  28,  29,
++         30,  31,  32,  33,  34,  35,  36,  37,  38,  39,
++         40,  41,  42,  43,  44,  45,  46,  47,  48,  49,
++         50,  51,  52,  53,  54,  55,  56,  57,  58,  59,
++         60,  61,  62,  63,  64,  65,  66,  67,  68,  69,
++         70,  71,  72,  73,  74,  75,  76,  77,  78,  79,
++         80,  81,  82,  84,  00,  00,  86,  87,  88,  00,
++         00,  00,  00,  00,  00,  00,  00,  00,  00,  00,
++         00,  00,  00,  00,  00,  00,  00,  00,  00,  00,
++         00,  00,  00,  00,  00,  00,  00,  00,  00,  00,
++         00,  00,  00,  00,  00,  00,  00,  00
++    },
++
++    // Extended0-Scancodes (werden mit e0 eingeleitet)
++    {
++         00,  00,  00,  00,  00,  00,  00,  00,  00,  00,
++         00,  00,  00,  00,  00,  00,  00,  00,  00,  00,
++         00,  00,  00,  00,  00,  00,  00,  00,  00,  97,
++         00,  00,  00,  00,  00,  00,  00,  00,  00,  00,
++         00,  00,  00,  00,  00,  00,  00,  00,  00,  00,
++         00,  00,  00,  00,  00,  00, 100,  00,  00,  00,
++         00,  00,  00,  00,  00,  00,  00,  00,  00,  00,
++         00, 102, 103, 104,  00, 105,  00, 106,  00, 107,
++        108, 109, 110, 111,  00,  00,  00,  00,  00,  00,
++         00,  00,  00,  00,  00,  00,  00,  00,  00,  00,
++         00,  00,  00,  00,  00,  00,  00,  00,  00,  00,
++         00,  00,  00,  00,  00,  00,  00,  00,  00,  00,
++         00,  00,  00,  00,  00,  00,  00,  00
++    },
++};
++
++/**
++ * Scancode in einen Keycode uebersetzen
++ *
++ * @param set Zu Benutztende Tabelle:
++ *              0: Normale Scancodes
++ *              1: Extended0 Scancodes
++ *              2: Extended1 Scancodes
++ *
++ * @param code Scancode; keine Breakcodes nur normale Scancodes
++ *             Fuer e1 den zweiten Scancode im hoeherwertigen Byte uebergeben
++ *
++ * @return Keycode oder 0 falls der Scancode nicht bekannt ist
++ */
++uint8_t translate_scancode(int set, uint16_t scancode)
++{
++    uint8_t keycode = 0;
++
++    switch (set) {
++        // Normale scancodes
++        case 0:
++            keycode = sc_to_kc[0][scancode];
++            break;
++
++        // e0-Scancodes
++        case 1:
++            keycode = sc_to_kc[1][scancode];
++            break;
++
++        // e1-Scancodes
++        case 2:
++            // TODO: Hier waere eigentlich eine Tabelle auch schoen
++            switch (scancode) {
++                // Pause
++                case 0x451D:
++                    keycode = 119;
++                    break;
++
++                default:
++                    keycode = 0x0;
++            };
++            break;
++    }
++
++    if (keycode == 0) {
++        printf("kbc: Unbekannter Scancode: 0x%x (%d)\n", scancode, set);
++    }
++
++    return keycode;
++}
+Index: trunk/src/modules/vterm/input.c
+===================================================================
+--- /dev/null
++++ trunk/src/modules/vterm/input.c
+@@ -0,0 +1,219 @@
++/*
++ * Copyright (c) 2008 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Antoine Kaufmann.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <types.h>
++#include <syscall.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <rpc.h>
++#include <init.h>
++#include <keycodes.h>
++
++#include "vterm.h"
++#include "keymap.h"
++
++extern vterminal_t* current_vterm;
++
++/// Pid von kbc
++static pid_t kbc_pid = 0;
++
++/**
++ * Callback bei KBC registieren; Danach kommt bei jedem Tastatur-Ereignis ein
++ * RPC mit Namen KBDEVENT
++ *
++ * @return TRUE bei Erfolg, FALSE sonst
++ */
++static bool kbd_register_callback();
++
++/**
++ * Calback handler
++ */
++static void rpc_kbd_callback(pid_t pid, dword cid, size_t data_size,
++    void* data);
++
++/**
++ * Tastendruecke an ein virtuelles Terminal senden
++ *
++ * @param vterm     Terminal-Handle
++ * @param keycode   Der Keycode
++ * @param release   TRUE wenn die Taste losgelassen wurde, FALSE sonst
++ */
++static void send_key_to_vterm(vterminal_t* vterm, uint8_t keycode,
++    bool release);
++
++
++
++/**
++ * Eingabe initialisieren
++ *
++ * @return TRUE bei Erfolg, FALSE sonst
++ */
++bool init_input()
++{
++    // RPC-Handler fuer die Callbacks von KBD einrichten
++    register_message_handler("KBDEVENT", rpc_kbd_callback);
++
++    return kbd_register_callback();
++}
++
++/**
++ * Callback bei KBD registieren; Danach kommt bei jedem Tastatur-Ereignis ein
++ * RPC mit Namen KBDEVENT
++ *
++ * @return TRUE bei Erfolg, FALSE sonst
++ */
++static bool kbd_register_callback()
++{
++    kbc_pid = init_service_get("kbc");
++    if (!kbc_pid) {
++        return FALSE;
++    }
++
++    return rpc_get_dword(kbc_pid, "KBDREGIS", 0, NULL);
++}
++
++/**
++ * Calback handler
++ */
++static void rpc_kbd_callback(pid_t pid, dword cid, size_t data_size,
++    void* data)
++{
++    uint8_t* kbd_data = data;
++    vterminal_t* vterm = current_vterm;
++
++    if ((pid != kbc_pid) || (data_size != 2)) {
++        return;
++    }
++
++    send_key_to_vterm(vterm, kbd_data[0], !kbd_data[1]);
++}
++
++/**
++ * Eingabe fuer ein virtuelles Terminal initialisieren
++ *
++ * @param vterm Pointer auf die Verwaltungsstruktur fuers vterm
++ */
++bool vterm_input_init(vterminal_t* vterm)
++{
++    //vterm_input_t* in = &(vterm->input);
++
++    return TRUE;
++}
++
++/**
++ * Tastendruecke an ein virtuelles Terminal senden
++ *
++ * @param vterm     Terminal-Handle
++ * @param keycode   Der Keycode
++ * @param down      TRUE wenn die Taste gedrueckt wurde, FALSE sonst
++ */
++static void send_key_to_vterm(vterminal_t* vterm, uint8_t keycode,
++    bool down)
++{
++    static bool st_shift    = FALSE;
++    static bool st_control  = FALSE;
++    static bool st_alt      = FALSE;
++    static bool st_altgr    = FALSE;
++
++    keymap_entry_t* e;
++    //char buf[16];
++    wchar_t c = 0;
++
++    // Modifier-Tasten Verarbeiten
++    switch (keycode) {
++        case KEYCODE_SHIFT_LEFT:
++        case KEYCODE_SHIFT_RIGHT:
++            st_shift = down;
++            return;
++
++        case KEYCODE_CONTROL_LEFT:
++        case KEYCODE_CONTROL_RIGHT:
++            st_control = down;
++            return;
++
++        case KEYCODE_ALT:
++            st_alt = down;
++            return;
++
++        case KEYCODE_ALTGR:
++            st_altgr = down;
++            return;
++    }
++
++    /*printf("Keycode %d %d%d%d%d %s\n", keycode, st_shift, st_control, st_alt,
++        st_altgr, (!down ? " up\n" : " down\n"));*/
++
++    // Von hier an brauchen wir die losgelassenen Tasten nicht mehr
++    if (!down) {
++        return;
++    }
++
++    // FIXME: Ist nur temporaer da, damit Pfeiltasten und andere Spezialtasten
++    // funktionieren wie bisher.
++    switch (keycode) {
++        case KEYCODE_ARROW_UP:      vterm_process_input("\0H", 2); return;
++        case KEYCODE_ARROW_DOWN:    vterm_process_input("\0P", 2); return;
++        case KEYCODE_ARROW_LEFT:    vterm_process_input("\0K", 2); return;
++        case KEYCODE_ARROW_RIGHT:   vterm_process_input("\0M", 2); return;
++        case KEYCODE_PAGE_UP:       vterm_process_input("\0I", 2); return;
++        case KEYCODE_PAGE_DOWN:     vterm_process_input("\0Q", 2); return;
++        case KEYCODE_INSERT:        vterm_process_input("\0R", 2); return;
++        case KEYCODE_HOME:          vterm_process_input("\0G", 2); return;
++        case KEYCODE_END:           vterm_process_input("\0O", 2); return;
++        case KEYCODE_DELETE:        vterm_process_input("\0S", 2); return;
++    }
++
++    // Zeichen auswaehlen
++    e = keymap_get(keycode);
++    // TODO: AltGr+Shift
++    if (st_shift) {
++        c = e->shift;
++    } else if (st_altgr) {
++        c = e->altgr;
++    } else if (st_control) {
++        c = e->ctrl;
++    } else {
++        c = e->normal;
++    }
++    // TODO: Alt
++
++
++    // FIXME: Mit einem richtigen wc tut das nicht, aber dafuer brauche ich erst
++    // ein wctomb.
++    if (c != 0) {
++        vterm_process_input((char*) &c, 1);
++    }
++}
++
+Index: trunk/src/modules/vterm/keymap.c
+===================================================================
+--- /dev/null
++++ trunk/src/modules/vterm/keymap.c
+@@ -0,0 +1,178 @@
++/*
++ * Copyright (c) 2008 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Antoine Kaufmann.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "keymap.h"
++
++keymap_entry_t keymap[] = {
++    { 0,        0,      0,      0 },        // 0
++    { '\033', '\033', '\033', '\033' },
++    { '1',    '!',    '|',      0 },
++    { '2',    '"',      0,      0 },
++    { '3',    '#',      0,      0 },
++    { '4',    '$',      0,      0 },
++    { '5',    '%',      0,      0 },
++    { '6',    '&',      0,      0 },
++    { '7',    '/',      0,      0 },
++    { '8',    '(',      0,      0 },
++    { '9',    ')',      0,      0 },        // 10
++    { '0',    '=',      0,      0 },
++    { '\'',     0,      0,      0 },
++    { '^',      0,      0,      0 },
++    { '\b',     0,      0,      0 },
++    { '\t',     0,      0,      0 },
++    { 'q',    'Q',      0,      0 },
++    { 'w',    'W',      0,      0 },
++    { 'e',    'E',      0,      0 },
++    { 'r',    'R',      0,      0 },
++    { 't',    'T',      0,      0 },        // 20
++    { 'z',    'Z',      0,      0 },
++    { 'u',    'U',      0,      0 },
++    { 'i',    'I',      0,      0 },
++    { 'o',    'O',      0,      0 },
++    { 'p',    'P',      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { '\n',     0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 'a',    'A',      0,      0 },        // 30
++    { 's',    'S',      0,      0 },
++    { 'd',    'D',      0,      0 },
++    { 'f',    'F',      0,      0 },
++    { 'g',    'G',      0,      0 },
++    { 'h',    'H',      0,      0 },
++    { 'j',    'J',      0,      0 },
++    { 'k',    'K',      0,      0 },
++    { 'l',    'L',      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },        // 40
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 'y',    'Y',      0,      0 },
++    { 'x',    'X',      0,      0 },
++    { 'c',    'C',      0,      0 },
++    { 'v',    'V',      0,      0 },
++    { 'b',    'B',      0,      0 },
++    { 'n',    'N',      0,      0 },
++    { 'm',    'M',      0,      0 },        // 50
++    { ',',    ';',      0,      0 },
++    { '.',    ':',      0,      0 },
++    { '-',    '_',      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { ' ',    ' ',    ' ',      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },        // 60
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },        // 70
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },        // 80
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { '<',    '>',    '|',      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },        // 90
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },        // 100
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },        // 110
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },        // 120
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++    { 0,        0,      0,      0 },
++};
++
++/**
++ * Eintrag aus der Keymap auslesen
++ *
++ * @return Pointer auf den Eintrag oder NULL wenn keiner existiert
++ */
++keymap_entry_t* keymap_get(uint8_t keycode)
++{
++    return &keymap[keycode];
++}
++
+Index: trunk/src/modules/vterm/keymap.h
+===================================================================
+--- /dev/null
++++ trunk/src/modules/vterm/keymap.h
+@@ -0,0 +1,59 @@
++/*
++ * Copyright (c) 2008 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Antoine Kaufmann.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef _KEYMAP_H_
++#define _KEYMAP_H_
++#include <stdint.h>
++#include <stddef.h>
++
++/**
++ * Eintrag in der Keymap
++ */
++typedef struct keymap_entry {
++    wchar_t normal;
++    wchar_t shift;
++    wchar_t altgr;
++    wchar_t ctrl;
++} keymap_entry_t;
++
++/**
++ * Eintrag aus der Keymap auslesen
++ *
++ * @return Pointer auf den Eintrag oder NULL wenn keiner existiert
++ */
++keymap_entry_t* keymap_get(uint8_t keycode);
++
++#endif // ifndef _KEYMAP_H_
++
+Index: trunk/src/modules/vterm/term.c
+===================================================================
+--- trunk.orig/src/modules/vterm/term.c
++++ trunk/src/modules/vterm/term.c
+@@ -124,6 +124,7 @@ vterminal_t* vterm_create(char shortcut)
+     if (vterm_output_init(vterm, 100) == FALSE) {
+         // TODO
+     }
++    vterm_input_init(vterm);
+     return vterm;
+ }
+ 
+Index: trunk/src/modules/vterm/vterm.c
+===================================================================
+--- trunk.orig/src/modules/vterm/vterm.c
++++ trunk/src/modules/vterm/vterm.c
+@@ -43,84 +43,29 @@
+ #include "init.h"
+ 
+ 
+-/// Oeffnet Eingabdatei
+-static bool init_io_files();
+ /// Hier kommen die Eingaben fuer all die virtuellen Terminals her
+ FILE* input = NULL;
+ 
+-/// Eingaben einlesen
+-static void get_input();
+-
+ int main(int argc, char* argv[])
+ {
+-    // Eingabedatei oeffnen
+-    if (init_io_files() == FALSE) {
++    // Eingabe initialisieren
++    if (init_input() == FALSE) {
+         // Falls das nicht klappt, ist alles sinnlos. ;-)
+         return -1;
+     }
+ 
+     // Schnittstelle fuer die anderen Prozesse einrichten
+     init_lostio_interface();
+-    
+-    init_output();
+ 
++    init_output();
+     init_vterminals(10);
+-    
++
+     init_service_register("vterm");
+-    
++
+     // Auf Anfragen warten
+-    timer_register(&get_input, 200000);
+     while(TRUE) {
+         wait_for_rpc();
+         lostio_dispatch();
+ 	}
+ }
+ 
+-/**
+- * File-Handle fuer die Eingaben aller Terminals oeffnen
+- *
+- * @return TRUE bei Erfolg, FALSE im Fehlerfall
+- */
+-bool init_io_files()
+-{
+-    int i;
+-    
+-    // Falls das öffnen nicht beim ersten Anlauf klappt, wird weiter Probiert
+-    // 5 Mal im Abstand von einer Sekunde
+-    for (i = 0; (i < 10) && (input == NULL); i++) {
+-        if (input == NULL) {
+-            input = fopen("kbc:/keyboard/ascii", "r");
+-        }
+-
+-        // Pruefen ob schon beide erfolgreich geoeffnet wurden
+-        if ((input == NULL)) {
+-            msleep(500);
+-        }
+-    }
+-    
+-    // Wenn input nicht geoeffnet werden konnten, muss abgebrochen werden
+-    if (input == NULL) {
+-        puts("Input konnte nicht geoeffnet werden!");
+-        return FALSE;
+-    }
+-    
+-    return TRUE;
+-}
+-
+-/**
+- * Eingaben holen... wird vom Timer aufgerufen
+- */
+-static void get_input()
+-{
+-    char buffer[32];
+-    size_t buffer_pos;
+-
+-    buffer_pos = fread(buffer, 1, sizeof(buffer), input);
+-    if (buffer_pos != 0) {
+-        p();
+-        vterm_process_input(buffer, buffer_pos);
+-        v();
+-    }
+-    timer_register(&get_input, 50000);
+-}
+-
+Index: trunk/src/modules/vterm/vterm.h
+===================================================================
+--- trunk.orig/src/modules/vterm/vterm.h
++++ trunk/src/modules/vterm/vterm.h
+@@ -51,9 +51,12 @@ void init_lostio_interface();
+ /// Output-Treiber vorbereiten
+ void init_output();
+ 
++/// Eingabe initialisieren
++bool init_input();
++
+ // Farbe im Videospeicher
+ typedef union {
+-    byte raw;
++    uint8_t raw;
+     struct {
+         unsigned char foreground : 3;
+         unsigned char bold : 1;
+@@ -122,6 +125,9 @@ typedef struct vterm_output {
+     bool vt100_color_reversed;
+ } vterm_output_t;
+ 
++typedef struct vterm_input {
++} vterm_input_t;
++
+ 
+ /// Typ fuer ein  Terminal
+ typedef struct {
+@@ -133,7 +139,10 @@ typedef struct {
+ 
+     /// Struktur fuer den ganzen Ausgabekram
+     vterm_output_t output;
+-    
++
++    /// Struktur fuer den ganzen Eingabekram
++    vterm_input_t input;
++
+     /// LostIO-Node fuer out-Datei
+     vfstree_node_t* out_node;
+ 
+@@ -216,3 +225,6 @@ void vt100_process_output(vterminal_t* v
+ /// UTF8-String in Codepage437-String verwandeln
+ int utf8_to_cp437(vterminal_t* vterm, const char* str, size_t len, char* buf);
+ 
++
++/// Eingabe fuer ein virtuelles Terminal initialisieren
++bool vterm_input_init(vterminal_t* vterm);

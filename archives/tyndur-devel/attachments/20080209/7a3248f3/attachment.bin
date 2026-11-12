@@ -1,0 +1,195 @@
+Index: src/kernel/include/paging.h
+===================================================================
+--- src/kernel/include/paging.h	(Revision 699)
++++ src/kernel/include/paging.h	(Arbeitskopie)
+@@ -11,6 +11,8 @@
+ bool map_page(page_directory_t page_directory, vaddr_t vaddr, paddr_t paddr, int flags);
+ bool unmap_page(page_directory_t page_directory, vaddr_t vaddr);
+ paddr_t resolve_vaddr(page_directory_t page_directory, vaddr_t vaddr);
++bool is_userspace(vaddr_t start, dword len);
++
+ vaddr_t find_contiguous_pages(page_directory_t page_directory, int num, dword lower_limit, dword upper_limit);
+ void increase_user_stack_size(struct task * task_ptr, int pages);
+ 
+Index: src/kernel/src/syscall.c
+===================================================================
+--- src/kernel/src/syscall.c	(Revision 699)
++++ src/kernel/src/syscall.c	(Arbeitskopie)
+@@ -67,22 +67,6 @@
+ dword debug_last_syscall_data[DEBUG_LAST_SYSCALL_DATA_SIZE] = { 0 };
+ #endif 
+ 
+-/**
+- * Prueft, ob ein Speicherbereich komplett gemappt ist und PTE_U gesetzt
+- * hat.
+- *
+- * FIXME Tut sie in dieser Form natuerlich nicht
+- */
+-bool is_userspace(vaddr_t start, dword len)
+-{
+-    if (start + len < start) {
+-        return FALSE;
+-    }
+-
+-    return ((uintptr_t) start >= USER_MEM_START) 
+-        && ((uintptr_t) start + len <= USER_MEM_END);
+-}
+-
+ void syscall(struct int_stack_frame ** esp) 
+ {
+     struct int_stack_frame * isf = *esp;
+@@ -677,13 +661,26 @@
+         {
+             struct task* callee = get_task(*((dword*) isf->esp));
+ 
++            dword metadata_size = *((dword*) (isf->esp + 4));
++            void* metadata = *((void**) (isf->esp + 8));
++            dword data_size = *((dword*) (isf->esp + 12));
++            void* data = *((void**) (isf->esp + 16));
++
++            if (!is_userspace(metadata, metadata_size)) {
++                abort_task("SYSCALL_FASTRPC: Ungueltige Metadaten (%08x)",
++                    (dword) metadata);
++            }
++            
++            if (!is_userspace(data, data_size)) {
++                abort_task("SYSCALL_FASTRPC: Ungueltige Daten (%08x)",
++                    (dword) data);
++            }
++
+             isf->eax = 0;
+             if (fastrpc(
+                 callee,
+-                *((dword*) (isf->esp + 4)),
+-                *((void**) (isf->esp + 8)),
+-                *((dword*) (isf->esp + 12)),
+-                *((void**) (isf->esp + 16))
++                metadata_size, metadata,
++                data_size, data    
+             )) {
+                 schedule_to_task(callee, (dword*) esp);
+             } else {
+Index: src/kernel/src/mm/paging.c
+===================================================================
+--- src/kernel/src/mm/paging.c	(Revision 699)
++++ src/kernel/src/mm/paging.c	(Arbeitskopie)
+@@ -285,18 +285,23 @@
+     return map_page(page_directory, vaddr, NULL, 0);
+ }
+ 
+-
+ /**
+- * Loest eine virtuelle Adresse bezueglich eines Page Directory
+- * in eine physische Adresse auf.
++ * Gibt den Pagetable-Eintrag zu einer gegebenen virtuellen Speicheradresse
++ * zurueck.
+  *
+- * @return Physische Adresse oder NULL, wenn die Page nicht vorhanden ist
++ * @param page_directory Page Directory, auf das sich die Adresse bezieht
++ * @param vaddr Aufzuloesende virtuelle Adresse
++ *
++ * @return Pagetable-Eintrag der 4K-Seite, zu der die gegebene virtuelle
++ * Adresse gehoert. 0, wenn die Adresse nicht in einer Seite liegt, die
++ * present ist.
+  */
+-paddr_t resolve_vaddr(page_directory_t page_directory, vaddr_t vaddr)
++static dword get_pagetable_entry
++    (page_directory_t page_directory, vaddr_t vaddr)
+ {
+     page_table_t page_table;
+     paddr_t phys_page_table;
+-    paddr_t result;
++    dword result;
+     
+     dword vpage = (dword) vaddr / PAGE_SIZE;
+     //kprintf("[Resolv: %x in PD %x]", vaddr, page_directory);
+@@ -304,30 +309,23 @@
+     // Passende Page Table suchen
+     // Bei einer 4M-Page sind wir eigentlich schon am Ziel
+     if ((page_directory[vpage / PAGE_TABLE_LENGTH] & PTE_P) == 0) {
+-        return NULL;
++        return 0;
+     } else if (page_directory[vpage / PAGE_TABLE_LENGTH] & PTE_PS) {
+-      
+-        return (paddr_t) (
+-            (page_directory[vpage / PAGE_TABLE_LENGTH] & ~0x3FFFFF)
+-          | ((dword) vaddr & 0x3FFFFF));
+-        
++        return page_directory[vpage / PAGE_TABLE_LENGTH];
+     } else {
+-        phys_page_table = (page_table_t) (page_directory[vpage / PAGE_TABLE_LENGTH] & ~0xFFF);
++        phys_page_table = (page_table_t) 
++            (page_directory[vpage / PAGE_TABLE_LENGTH] & ~0xFFF);
+     }
+         
+-    // Die Page-Table-Adresse ist eine physische Adresse. Am sichersten ist es, die
+-    // Adresse einfach noch einmal zu mappen.
++    // Die Page-Table-Adresse ist eine physische Adresse. Am sichersten ist es,
++    // die Adresse einfach noch einmal zu mappen.
+     page_table = map_phys_addr(phys_page_table, PAGE_SIZE);
+     
+     // Adresse zusammenbasteln und fertig
+     if (page_table[vpage % PAGE_TABLE_LENGTH] & PTE_P) {
+-        
+-        result = (paddr_t) (
+-            (page_table[vpage % PAGE_TABLE_LENGTH] & ~0xFFF) 
+-          | ((dword) vaddr & 0xFFF));
+-        
++        result = page_table[vpage % PAGE_TABLE_LENGTH]; 
+     } else {
+-        result = NULL;
++        result = 0;
+     }
+         
+     // Falls wir die Page Table extra in den Kerneladressraum gemappt haben,
+@@ -337,8 +335,50 @@
+     return result;
+ }
+ 
++/**
++ * Loest eine virtuelle Adresse bezueglich eines Page Directory
++ * in eine physische Adresse auf.
++ *
++ * @return Physische Adresse oder NULL, wenn die Page nicht vorhanden ist
++ */
++paddr_t resolve_vaddr(page_directory_t page_directory, vaddr_t vaddr)
++{
++    dword pte = get_pagetable_entry(page_directory, vaddr);
++    
++    if ((pte & PTE_PS) == 0) {
++        return (paddr_t) ((pte & ~0xFFF) | ((dword) vaddr & 0xFFF));
++    } else {
++        return (paddr_t) ((pte & ~0x3FFFFF) | ((dword) vaddr & 0x3FFFFF));
++    }
++}
+ 
+ /**
++ * Prueft, ob ein Speicherbereich im Page Directory des aktuellen Tasks
++ * komplett gemappt ist und PTE_U (Zugriffsrecht fuer Usermode) gesetzt hat.
++ */
++bool is_userspace(vaddr_t start, dword len)
++{
++    vaddr_t cur;
++
++    if (start + len < start) {
++        return FALSE;
++    }    
++    
++    for (cur = start; 
++        (cur < start + len) && (cur > (vaddr_t) 0xFFF); 
++        cur += PAGE_SIZE) 
++    {
++        dword pte = get_pagetable_entry(current_task->cr3, cur);
++        if ((pte == 0) || (!pte & PTE_U)) {
++            return FALSE;
++        }
++    }
++
++    return TRUE;
++}
++
++
++/**
+  * Findet einen freien Bereich mit num freien Seiten
+  *
+  * @return Die Anfangsadresse der ersten Seite dieses Bereiches

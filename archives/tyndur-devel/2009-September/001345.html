@@ -1,0 +1,765 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] libc: scanf-Familie
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20libc%3A%20scanf-Familie&In-Reply-To=%3C1253295025-22420-1-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001344.html">
+   <LINK REL="Next"  HREF="001346.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] libc: scanf-Familie</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20libc%3A%20scanf-Familie&In-Reply-To=%3C1253295025-22420-1-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH] libc: scanf-Familie">kevin at tyndur.org
+                  </A><BR>
+    <I>Fr Sep 18 19:30:25 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001344.html">[tyndur-devel] [RFC] libc: sscanf
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001346.html">[tyndur-devel] [PATCH] libc: ctype.h-Funktionen sollten keine	Makros sein
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1345">[ Datum ]</a>
+              <a href="thread.html#1345">[ Thema ]</a>
+              <a href="subject.html#1345">[ Betreff (Subject) ]</a>
+              <a href="author.html#1345">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ libc: scanf, sscanf, fscanf, vscanf, vsscanf, vfscanf
+  Sollte bis auf Fliesskommazahlen und Multibyte-Supprt vollstaendig
+  sein
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/include/stdio.h      |   13 +-
+ src/modules/lib/stdlibc/scanf.c  |  609 ++++++++++++++++++++++++++++++++++++++
+ src/modules/lib/stdlibc/sscanf.c |   40 ---
+ 3 files changed, 618 insertions(+), 44 deletions(-)
+ create mode 100644 src/modules/lib/stdlibc/scanf.c
+ delete mode 100644 src/modules/lib/stdlibc/sscanf.c
+
+diff --git a/src/modules/include/stdio.h b/src/modules/include/stdio.h
+index b3375f2..a4d3bb3 100644
+--- a/src/modules/include/stdio.h
++++ b/src/modules/include/stdio.h
+@@ -78,10 +78,15 @@ int vsnprintf(char * buffer, size_t size, const char * format, va_list);
+ int vfprintf(FILE * fp, const char * format, va_list);
+ int vasprintf(char ** buffer, const char * format, va_list);
+ 
+-#ifndef CONFIG_LIBC_NO_STUBS
+-int fscanf(FILE* fp, const char* format, ...);
+-int sscanf(const char* str, const char* format, ...);
+-#endif
++
++int scanf(const char* fmt, ...);
++int sscanf(const char* input, const char* fmt, ...);
++int fscanf(FILE* f, const char* fmt, ...);
++
++int vscanf(const char* fmt, va_list ap);
++int vsscanf(const char* input, const char* fmt, va_list ap);
++int vfscanf(FILE* f, const char* fmt, va_list ap);
++
+ 
+ //Dateihandling
+ FILE* fopen(const char* filename, const char* mode);
+diff --git a/src/modules/lib/stdlibc/scanf.c b/src/modules/lib/stdlibc/scanf.c
+new file mode 100644
+index 0000000..6f2e776
+--- /dev/null
++++ b/src/modules/lib/stdlibc/scanf.c
+@@ -0,0 +1,609 @@
++/*
++ * Copyright (c) 2009 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include &lt;stdio.h&gt;
++#include &lt;stdarg.h&gt;
++#include &lt;stdlib.h&gt;
++#include &lt;stdint.h&gt;
++#include &lt;stddef.h&gt;
++#include &lt;string.h&gt;
++#include &lt;ctype.h&gt;
++
++typedef int (*jscanf_getc)(void* state);
++typedef void (*jscanf_ungetc)(void* state, char c);
++
++/**
++ * Liest Zahlen passend fuer jscanf ein, d.h. es wird so lange gelesen, wie
++ * theoretisch noch eine gueltige Zahl herauskommen koennte. Das Parsen und
++ * Entscheiden, ob es tatsaechlich eine gueltige Zahl ist, bleibt dem Aufrufer
++ * ueberlassen.
++ *
++ * @param buf Puffer, in den die Zeichen eingelesen werden
++ * @param size Laenge des Puffers in einlesbaren Zeichen. Es muss mindestens
++ * Platz fuer size + 1 Zeichen vorhanden sein, da noch ein Nullbyte geschrieben
++ * wird.
++ * @param jgetc Funktion, um ein Zeichen auszulesen
++ * @param jungetc Funktion, um ein Zeichen zurueckzugeben, wenn es doch nicht
++ * passt
++ * @param state Zustand der Eingabe fuer jgetc/jungetc
++ * @param base Basis der einzulesenden Zahl (8, 10 oder 16)
++ */
++static int jscanf_read_number(char* buf, int size, jscanf_getc jgetc,
++    jscanf_ungetc jungetc, void* state, int base)
++{
++    int valid;
++    int i;
++    int c;
++    int first_digit = 0;
++
++    i = 0;
++    while (i &lt; size) {
++        c = jgetc(state);
++
++        if (c == EOF) {
++            break;
++        }
++
++        valid = 0;
++        switch (c) {
++            case '+':
++            case '-':
++                if (i == 0) {
++                    valid = 1;
++                    first_digit++;
++                }
++                break;
++            case '0':
++                valid = 1;
++                break;
++            case '1' ... '7':
++                if (base == 0) {
++                    base = buf[first_digit] == '0' ? 8 : 10;
++                }
++                valid = 1;
++                break;
++            case '8' ... '9':
++                if (base == 0) {
++                    base = buf[first_digit] == '0' ? 8 : 10;
++                }
++                valid = (base != 8);
++                break;
++            case 'A' ... 'F':
++            case 'a' ... 'f':
++                valid = (base == 16);
++                break;
++            case 'x':
++                if (base == 0) {
++                    base = 16;
++                }
++                if ((base == 16) &amp;&amp; (i == first_digit + 1) &amp;&amp;
++                    (buf[first_digit] == '0'))
++                {
++                    valid = 1;
++                }
++                break;
++        }
++
++        if (!valid) {
++            jungetc(state, c);
++            break;
++        }
++
++        buf[i] = c;
++        i++;
++    }
++
++    buf[i] = '\0';
++
++    return i;
++}
++
++/**
++ * Weist eine Zahl einer Variablen zu. Die Groesse der Variablen wird dabei
++ * als Parameter uebergeben.
++ *
++ * @param ptr Variable, in die die Zahl geschrieben werden soll
++ * @param value Wert, der der Variablen zugewiesen werden soll
++ * @param size Groesse der Variablen in Bytes
++ */
++static void assign_number(void* ptr, uint64_t value, int size)
++{
++    if (size == 1) {
++        uint8_t* tptr = ptr;
++        *tptr = (uint8_t) value;
++    } else if (size == 2) {
++        uint16_t* tptr = ptr;
++        *tptr = (uint16_t) value;
++    } else if (size == 4) {
++        uint32_t* tptr = ptr;
++        *tptr = (uint32_t) value;
++    } else if (size == 8) {
++        uint64_t* tptr = ptr;
++        *tptr = (uint64_t) value;
++    } else {
++        abort();
++    }
++}
++
++/**
++ * Die eigentliche scanf-Engine, die den Formatstring verarbeitet und die
++ * eingelesenen Daten in die uebergebenen Parameter schreibt. Die
++ * Eingabezeichen werden mit den uebergebenen Funktionen geholt.
++ *
++ * @param fmt scanf-Formatstring
++ * @param ap Liste der Ausgabevariablen
++ * @param jgetc Funktion, um ein Zeichen auszulesen
++ * @param jungetc Funktion, um ein Zeichen zurueckzugeben, wenn es doch nicht
++ * passt
++ * @param state Zustand der Eingabe fuer jgetc/jungetc
++ *
++ * @return Anzahl der erfolgreich zugewiesenen Variablen; EOF, wenn ein
++ * Eingabefehler auftritt, bevor mindestens eine Variable erfolgreich
++ * eingelesen wurde.
++ */
++static int jscanf(const char* fmt, va_list ap,
++    jscanf_getc jgetc, jscanf_ungetc jungetc, void* state)
++{
++    int ret = 0;
++    int assign;
++    int len;
++    int size;
++    int c;
++    char* endptr;
++    uint64_t value;
++
++    // 64 Bit oktal = 22 Zeichen, Vorzeichen und \0
++    char buf[24];
++
++    while (*fmt) {
++        switch (*fmt) {
++            case ' ':
++            case '\t':
++            case '\n':
++            case '\f':
++            case '\v':
++                do {
++                    c = jgetc(state);
++                } while (isspace(c));
++                break;
++
++            case '%':
++                fmt++;
++
++                // Ein * bedeutet, dass der Wert nur eingelesen, aber keiner
++                // Variablen zugewiesen wird
++                if (*fmt == '*') {
++                    assign = 0;
++                    fmt++;
++                } else {
++                    assign = 1;
++                }
++
++                // Optional kann jetzt die Feldlaenge kommen
++                if (isdigit(*fmt)) {
++                    len = strtol(fmt, (char**) &amp;fmt, 10);
++                    if (len == 0) {
++                        goto matching_error;
++                    }
++                } else {
++                    len = 0;
++                }
++
++                // Und die Laenge der Variablen kann auch noch angegeben sein
++                switch (*fmt) {
++                    case 'h':
++                        if (*++fmt == 'h') {
++                            fmt++;
++                            size = sizeof(char);
++                        } else {
++                            size = sizeof(short);
++                        }
++                        break;
++                    case 'l':
++                        if (*++fmt == 'l') {
++                            fmt++;
++                            size = sizeof(long long);
++                        } else {
++                            size = sizeof(long);
++                        }
++                        break;
++                    case 'j':
++                        size = sizeof(intmax_t);
++                        break;
++                    case 't':
++                        size = sizeof(ptrdiff_t);
++                        break;
++                    case 'z':
++                        size = sizeof(size_t);
++                        break;
++                    default:
++                        size = sizeof(int);
++                        break;
++                }
++
++                // Whitespace muss uebersprungen werden (ausser %[ %c %n)
++                if ((*fmt != '[') &amp;&amp; (*fmt != 'c') &amp;&amp; (*fmt != 'n')) {
++                    while (isspace(c = jgetc(state)));
++                    if (c != EOF) {
++                        jungetc(state, c);
++                    }
++                }
++
++                // Eingabe parsen
++                switch (*fmt) {
++                    int base;
++
++                    // %i - Integer (strtol mit Basis 0)
++                    // %d - Integer (strtol mit Basis 10)
++                    // %o - Integer (strtoul mit Basis 8
++                    // %u - Integer (strtoul mit Basis 1)
++                    // %x - Integer (strtoul mit Basis 16)
++                    // %X - Integer (strtoul mit Basis 16)
++                    // %p - Pointer (strtoul mit Basis 16)
++                    case 'i':
++                        base = 0;
++                        goto convert_number;
++                    case 'o':
++                        base = 8;
++                        goto convert_number;
++                    case 'x':
++                    case 'X':
++                        base = 16;
++                        goto convert_number;
++                    case 'p':
++                        base = 16;
++                        size = sizeof(void*);
++                        len = 0;
++                        goto convert_number;
++                    case 'd':
++                    case 'u':
++                        base = 10;
++                    convert_number:
++                        if (len == 0 || len &gt;= sizeof(buf)) {
++                            len = sizeof(buf) - 1;
++                        }
++                        len = jscanf_read_number(buf, len, jgetc, jungetc,
++                            state, base);
++
++                        value = strtoull(buf, &amp;endptr, base);
++                        if (endptr != buf + len) {
++                            goto matching_error;
++                        }
++
++                        if (assign) {
++                            void* ptr = va_arg(ap, void*);
++                            assign_number(ptr, value, size);
++                            ret++;
++                        }
++                        break;
++
++                    // %n - Anzahl der bisher zugewiesenen Variablen
++                    case 'n':
++                        if (assign) {
++                            void* ptr = va_arg(ap, void*);
++                            assign_number(ptr, ret, size);
++                            ret++;
++                        }
++                        break;
++
++                    // %c - char-Array (feste Laenge, kein Nullbyte)
++                    case 'c':
++                    {
++                        // TODO Multibyte-Zeichen
++                        int i;
++                        char* ptr = NULL;
++
++                        if (assign) {
++                            ptr = va_arg(ap, char*);
++                        }
++
++                        if (len == 0) {
++                            len = 1;
++                        }
++
++                        for (i = 0; i &lt; len; i++) {
++                            c = jgetc(state);
++                            if (c == EOF) {
++                                goto matching_error;
++                            }
++                            if (assign) {
++                                ptr[i] = c;
++                            }
++                        }
++
++                        if (assign) {
++                            ret++;
++                        }
++                        break;
++                    }
++
++                    // %s - Whitespaceterminierter String
++                    case 's':
++                    {
++                        // TODO MUltibyte-Zeichen
++                        char* ptr = NULL;
++
++                        if (assign) {
++                            ptr = va_arg(ap, char*);
++                        }
++
++                        if (len == 0) {
++                            len = -1;
++                        }
++
++                        while ((len == -1) || len--) {
++                            c = jgetc(state);
++                            if (isspace(c)) {
++                                jungetc(state, c);
++                                break;
++                            } else if (c == EOF) {
++                                break;
++                            }
++                            if (assign) {
++                                *ptr++ = c;
++                            }
++                        }
++
++                        if (assign) {
++                            *ptr = '\0';
++                            ret++;
++                        }
++                        break;
++                    }
++
++                    // %[ - String aus einer Zeicheklasse
++                    case '[':
++                    {
++                        const char* p = fmt;
++                        const char* end;
++                        int negation = 0;
++                        char* ptr = NULL;
++
++                        if (assign) {
++                            ptr = va_arg(ap, char*);
++                        }
++
++                        // Wenn das Scanset mit ^ anfaengt, duerfen die Zeichen
++                        // des Scansets _nicht_ vorkommen
++                        if (*++p == '^') {
++                            negation = 1;
++                            p++;
++                        }
++
++                        // Scanset zusammenbasteln
++                        if (*p == '\0') {
++                            abort();
++                        }
++
++                        end = strchr(p + 1, ']');
++                        if (end == NULL) {
++                            abort();
++                        }
++
++                        char scanset[end - p + 1];
++                        scanset[end - p] = '\0';
++                        strncpy(scanset, p, end - p);
++
++                        // Hier kommt das eigentliche Matching
++                        if (len == 0) {
++                            len = -1;
++                        }
++
++                        while ((len == -1) || len--) {
++                            c = jgetc(state);
++                            if (!!strchr(scanset, c) == negation) {
++                                jungetc(state, c);
++                                break;
++                            } else if (c == EOF) {
++                                break;
++                            }
++                            if (assign) {
++                                *ptr++ = c;
++                            }
++                        }
++
++                        if (assign) {
++                            *ptr = '\0';
++                            ret++;
++                        }
++
++                        fmt = end + 1;
++
++                        break;
++                    }
++
++                    // %% - Prozentzeichen
++                    case '%':
++                        goto parse_percent;
++
++                    // Das Verhalten bei ungueltiger Conversion Specification
++                    // ist undefiniert.
++                    default:
++                        abort();
++                }
++                break;
++
++            // Ein einzelnes Zeichen wird direkt gematcht
++            parse_percent:
++            default:
++                c = jgetc(state);
++                if (c == EOF) {
++                    goto input_error;
++                }
++                if (c != *fmt) {
++                    goto matching_error;
++                }
++                break;
++        }
++
++        fmt++;
++    }
++
++matching_error:
++    return ret;
++
++input_error:
++    if (ret == 0) {
++        return EOF;
++    }
++    return ret;
++}
++
++
++
++///////////////////////////////////////////////////////////////////////////////
++// sscanf - Eingabe aus einem String
++
++struct sscanf_state {
++    const char* input;
++    int pos;
++};
++
++static int sscanf_getc(void* state)
++{
++    struct sscanf_state* s = state;
++    int ret = EOF;
++
++    if (s-&gt;input[s-&gt;pos]) {
++        ret = s-&gt;input[s-&gt;pos];
++        s-&gt;pos++;
++    }
++
++    return ret;
++}
++
++static void sscanf_ungetc(void* state, char c)
++{
++    struct sscanf_state* s = state;
++
++    if (s-&gt;pos &gt; 0) {
++        s-&gt;pos--;
++        if (s-&gt;input[s-&gt;pos] != c) {
++            abort();
++        }
++    } else {
++        abort();
++    }
++}
++
++/**
++ * Fuehrt ein jscanf mit Eingabe aus einem String aus
++ */
++int vsscanf(const char* input, const char* fmt, va_list ap)
++{
++    struct sscanf_state state = {
++        .input = input,
++        .pos = 0,
++    };
++
++    return jscanf(fmt, ap, sscanf_getc, sscanf_ungetc, &amp;state);
++}
++
++/**
++ * Fuehrt ein jscanf mit Eingabe aus einem String aus
++ */
++int sscanf(const char* input, const char* fmt, ...)
++{
++    va_list ap;
++    int ret;
++
++    va_start(ap, fmt);
++    ret = vsscanf(input, fmt, ap);
++    va_end(ap);
++
++    return ret;
++}
++
++
++
++///////////////////////////////////////////////////////////////////////////////
++// fscanf - Eingabe aus einer Datei
++
++static int fscanf_getc(void* state)
++{
++    FILE* f = state;
++
++    return fgetc(f);
++}
++
++static void fscanf_ungetc(void* state, char c)
++{
++    FILE* f = state;
++
++    ungetc(c, f);
++}
++
++/**
++ * Fuehrt ein jscanf mit Eingabe aus einer Datei aus
++ */
++int vfscanf(FILE* f, const char* fmt, va_list ap)
++{
++    return jscanf(fmt, ap, fscanf_getc, fscanf_ungetc, f);
++}
++
++/**
++ * Fuehrt ein jscanf mit Eingabe aus einer Datei aus
++ */
++int fscanf(FILE* f, const char* fmt, ...)
++{
++    va_list ap;
++    int ret;
++
++    va_start(ap, fmt);
++    ret = vfscanf(f, fmt, ap);
++    va_end(ap);
++
++    return ret;
++}
++
++
++///////////////////////////////////////////////////////////////////////////////
++// scanf - Eingabe aus der Standardeingabe
++
++/**
++ * Fuehrt ein jscanf mit Eingabe aus der Standardeingabe aus
++ */
++int vscanf(const char* fmt, va_list ap)
++{
++    return vfscanf(stdin, fmt, ap);
++}
++
++/**
++ * Fuehrt ein jscanf mit Eingabe aus der Standardeingabe aus
++ */
++int scanf(const char* fmt, ...)
++{
++    va_list ap;
++    int ret;
++
++    va_start(ap, fmt);
++    ret = vscanf(fmt, ap);
++    va_end(ap);
++
++    return ret;
++}
+diff --git a/src/modules/lib/stdlibc/sscanf.c b/src/modules/lib/stdlibc/sscanf.c
+deleted file mode 100644
+index 3082e3d..0000000
+--- a/src/modules/lib/stdlibc/sscanf.c
++++ /dev/null
+@@ -1,40 +0,0 @@
+-/*
+- * Copyright (c) 2007 The tyndur Project. All rights reserved.
+- *
+- * This code is derived from software contributed to the tyndur Project
+- * by Antoine Kaufmann.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+- * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+- * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
+- * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+- * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+- * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+- * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+- * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+- * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+- */
+-
+-#include &lt;stdio.h&gt;
+-#include &lt;lost/config.h&gt;
+-
+-#ifndef CONFIG_LIBC_NO_STUBS
+-int sscanf(const char* str, const char* format, ...)
+-{
+-    // FIXME
+-    puts(&quot;TODO in LOST-Libc: sscanf!&quot;);
+-    return 0;
+-}
+-#endif
+-
+-- 
+1.6.0.2
+
+</PRE>
+
+
+
+
+
+
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001344.html">[tyndur-devel] [RFC] libc: sscanf
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001346.html">[tyndur-devel] [PATCH] libc: ctype.h-Funktionen sollten keine	Makros sein
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1345">[ Datum ]</a>
+              <a href="thread.html#1345">[ Thema ]</a>
+              <a href="subject.html#1345">[ Betreff (Subject)]</a>
+              <a href="author.html#1345">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

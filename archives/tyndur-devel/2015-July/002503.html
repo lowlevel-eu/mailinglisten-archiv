@@ -1,0 +1,657 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH v2 7/8] libc: POSIX-Dateifunktionen nicht über stdio.h emulieren
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_v2_7/8%3D5D_libc%3D3A_POSIX-Dateifu%3F%3D%0A%09%3D%3Futf-8%3Fq%3Fnktionen_nicht_%3DC3%3DBCber_stdio%3D2Eh_emulieren%3F%3D&In-Reply-To=%3C1437432317-27705-8-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002502.html">
+   <LINK REL="Next"  HREF="002505.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH v2 7/8] libc: POSIX-Dateifunktionen nicht über stdio.h emulieren</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_v2_7/8%3D5D_libc%3D3A_POSIX-Dateifu%3F%3D%0A%09%3D%3Futf-8%3Fq%3Fnktionen_nicht_%3DC3%3DBCber_stdio%3D2Eh_emulieren%3F%3D&In-Reply-To=%3C1437432317-27705-8-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH v2 7/8] libc: POSIX-Dateifunktionen nicht über stdio.h emulieren">kevin at tyndur.org
+                  </A><BR>
+    <I>Di Jul 21 00:45:16 CEST 2015</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002502.html">[tyndur-devel] [PATCH v2 6/8] libc: lio_compat_readahead() gefixt
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002505.html">[tyndur-devel] [PATCH v3 7/8] libc: POSIX-Dateifunktionen nicht über stdio.h emulieren
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2503">[ Datum ]</a>
+              <a href="thread.html#2503">[ Thema ]</a>
+              <a href="subject.html#2503">[ Betreff (Subject) ]</a>
+              <a href="author.html#2503">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>! libc: Die POSIX-Dateifunktionen sollten nicht gepuffert sein. Dieser
+  Commit konvertiert alle Funktionen auf direkte LIO-Aufrufe.
+
+  Diese Änderung ist nicht nur sowieso überfällig, sondern auch nötig,
+  damit select() weiterhin nichtblockierendes Readahead benutzen kann,
+  um zu testen, ob es etwas zu lesen gibt. (Ja, das ist kaputt, aber
+  wenigstens funktionierend kaputt.)
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/lib/posix/posix_files.c | 202 ++++++++++++++++++++++++++++--------
+ src/modules/lib/posix/select.c      | 135 ------------------------
+ src/modules/lib/stdlibc/file.c      |  43 ++++----
+ 3 files changed, 180 insertions(+), 200 deletions(-)
+ delete mode 100644 src/modules/lib/posix/select.c
+
+diff --git a/src/modules/lib/posix/posix_files.c b/src/modules/lib/posix/posix_files.c
+index 7b601a3..e557942 100644
+--- a/src/modules/lib/posix/posix_files.c
++++ b/src/modules/lib/posix/posix_files.c
+@@ -34,10 +34,12 @@
+ #include &lt;errno.h&gt;
+ #include &lt;lost/config.h&gt;
+ #include &lt;stdarg.h&gt;
++#include &lt;lostio.h&gt;
++#include &lt;sys/select.h&gt;
+ 
+ /// Ein Element das einen Unix-Dateideskriptor mit einem Normalen verknuepft
+ struct fd_list_element {
+-    FILE* io_res;
++    io_resource_t* io_res;
+     int fd;
+ 
+     int fd_flags;
+@@ -76,7 +78,7 @@ static void posix_files_init(void)
+  *
+  * @return Unix-Dateideskriptor oder -1 im Fehlerfall
+  */
+-int fileno(FILE* io_res)
++static int iores_fileno(io_resource_t* io_res)
+ {
+     if (io_res == NULL) {
+         errno = EBADF;
+@@ -115,6 +117,11 @@ int fileno(FILE* io_res)
+     return fdl_element-&gt;fd;
+ }
+ 
++int fileno(FILE* io_res)
++{
++    return iores_fileno(io_res-&gt;res);
++}
++
+ /**
+  * Dateihandle andhand des Unix-Deskriptors suchen
+  *
+@@ -122,7 +129,7 @@ int fileno(FILE* io_res)
+  *
+  * @return Pointer auf das Dateihandle oder NULL im Fehlerfall
+  */
+-static FILE* fd_to_file(int fd)
++static io_resource_t* fd_to_file(int fd)
+ {
+     if (fd_list == NULL) {
+         posix_files_init();
+@@ -145,13 +152,21 @@ static FILE* fd_to_file(int fd)
+     }
+ }
+ 
++extern FILE* __create_file_from_iores(io_resource_t* io_res);
++
+ /**
+  * Einen Dateideskriptor als Stream oeffnen.
+  */
+ FILE* fdopen(int fd, const char* mode)
+ {
++    io_resource_t* iores;
++
+     // TODO: Modus pruefen
+-    return fd_to_file(fd);
++    iores = fd_to_file(fd);
++    if (iores == NULL) {
++        return NULL;
++    }
++    return __create_file_from_iores(iores);
+ }
+ 
+ /**
+@@ -236,8 +251,7 @@ int fcntl(int fd, int cmd, ...)
+  */
+ int open(const char* filename, int flags, ...)
+ {
+-    char fopen_flags[4];
+-    size_t flags_size = 0;
++    int lio_flags;
+     int fd;
+ 
+     // Wenn O_CREAT und O_EXCL gleichzeitig gesetzt ist, muessen wir abbrechen
+@@ -269,34 +283,33 @@ int open(const char* filename, int flags, ...)
+         fclose(f);
+     }
+ 
+-    // Open-Flags auf fopen-Kompatible uebersetzen
++    // Open-Flags auf LIO-Kompatible uebersetzen
++    lio_flags = 0;
+     if ((flags &amp; O_RDONLY)) {
+-        fopen_flags[flags_size++] = 'r';
++        lio_flags |= IO_OPEN_MODE_READ;
+     } else if ((flags &amp; O_WRONLY) &amp;&amp; (flags &amp; O_TRUNC)) {
+-        fopen_flags[flags_size++] = 'w';
++        lio_flags |= IO_OPEN_MODE_WRITE | IO_OPEN_MODE_TRUNC;
+     } else if ((flags &amp; O_RDWR) &amp;&amp; (flags &amp; O_TRUNC)) {
+-        fopen_flags[flags_size++] = 'w';
+-        fopen_flags[flags_size++] = '+';
++        lio_flags |= IO_OPEN_MODE_READ | IO_OPEN_MODE_WRITE |
++                     IO_OPEN_MODE_TRUNC;
+     } else if ((flags &amp; O_WRONLY)) {
+-        fopen_flags[flags_size++] = 'r';
+-        fopen_flags[flags_size++] = '+';
++        /* FIXME IO_OPEN_MODE_READ gehört hier eigentlich nicht rein */
++        lio_flags |= IO_OPEN_MODE_READ | IO_OPEN_MODE_WRITE;
+     } else if ((flags &amp; O_RDWR)) {
+-        fopen_flags[flags_size++] = 'r';
+-        fopen_flags[flags_size++] = '+';
++        lio_flags |= IO_OPEN_MODE_READ | IO_OPEN_MODE_WRITE;
+     }
+     // Append-Flag
+     if ((flags &amp; O_APPEND)) {
+-        fopen_flags[flags_size++] = 'a';
++        lio_flags |= IO_OPEN_MODE_APPEND;
+     }
+-    fopen_flags[flags_size++] = '\0';
+ 
+-    FILE* file = fopen(filename, fopen_flags);
++    io_resource_t* file = lio_compat_open(filename, lio_flags);
+     if (file == NULL) {
+         errno = ENOENT;
+         return -1;
+     }
+ 
+-    fd = fileno(file);
++    fd = iores_fileno(file);
+     fcntl(fd, F_SETFL, flags);
+ 
+     return fd;
+@@ -326,7 +339,8 @@ int creat(const char* filename, mode_t mode)
+  */
+ ssize_t read(int fd, void* buffer, size_t size)
+ {
+-    FILE* file = fd_to_file(fd);
++    io_resource_t* file = fd_to_file(fd);
++    ssize_t ret;
+ 
+     // Bei einem ungueltigen Deskriptor wird abgebrochen
+     if (file == NULL) {
+@@ -334,15 +348,12 @@ ssize_t read(int fd, void* buffer, size_t size)
+         return -1;
+     }
+ 
+-    size_t bytes = fread(buffer, 1, size, file);
+-    // FIXME: Fehlerbehandlung
+-
+-    if ((bytes == 0) &amp;&amp; !feof(file)) {
+-        errno = EAGAIN;
+-        return -1;
++    ret = lio_compat_read(buffer, 1, size, file);
++    if (ret &lt; 0) {
++        errno = -ret;
++        ret = -1;
+     }
+-
+-    return bytes;
++    return ret;
+ }
+ 
+ /**
+@@ -356,7 +367,8 @@ ssize_t read(int fd, void* buffer, size_t size)
+  */
+ ssize_t write(int fd, const void* buffer, size_t size)
+ {
+-    FILE* file = fd_to_file(fd);
++    io_resource_t* file = fd_to_file(fd);
++    ssize_t ret;
+ 
+     // Bei einem ungueltigen Deskriptor wird abgebrochen
+     if (file == NULL) {
+@@ -364,9 +376,12 @@ ssize_t write(int fd, const void* buffer, size_t size)
+         return -1;
+     }
+ 
+-    size_t bytes = fwrite(buffer, 1, size, file);
+-    // FIXME: Fehlerbehandlung
+-    return bytes;
++    ret = lio_compat_write(buffer, 1, size, file);
++    if (ret &lt; 0) {
++        errno = -ret;
++        ret = -1;
++    }
++    return ret;
+ }
+ 
+ /**
+@@ -381,7 +396,7 @@ ssize_t write(int fd, const void* buffer, size_t size)
+  */
+ off_t lseek(int fd, off_t offset, int origin)
+ {
+-    FILE* file = fd_to_file(fd);
++    io_resource_t* file = fd_to_file(fd);
+ 
+     // Bei einem ungueltigen Deskriptor wird abgebrochen
+     if (file == NULL) {
+@@ -390,12 +405,12 @@ off_t lseek(int fd, off_t offset, int origin)
+     }
+ 
+     // Seek ausfuehren
+-    if (fseek(file, offset, origin)) {
++    if (!lio_compat_seek(file, offset, origin)) {
+         return -1;
+     }
+ 
+     // Rueckgabewert ist die neue Position
+-    return ftell(file);
++    return lio_compat_tell(file);
+ }
+ 
+ /**
+@@ -419,7 +434,7 @@ int close(int fd)
+     }
+ 
+     // Wenn der Deskriptor ungueltig ist, wird abgebrochen
+-    if ((fdl_element == NULL) || (fclose(fdl_element-&gt;io_res) != 0)) {
++    if ((fdl_element == NULL) || (lio_compat_close(fdl_element-&gt;io_res) != 0)) {
+         errno = EBADF;
+         return -1;
+     }
+@@ -430,7 +445,7 @@ int close(int fd)
+ /// Aus einer Datei mit gegebenem Offset lesen
+ ssize_t pread(int fd, void *buf, size_t count, off_t offset)
+ {
+-    FILE* file = fd_to_file(fd);
++    io_resource_t* file = fd_to_file(fd);
+     off_t old_pos;
+     ssize_t ret;
+ 
+@@ -440,14 +455,14 @@ ssize_t pread(int fd, void *buf, size_t count, off_t offset)
+         return -1;
+     }
+ 
+-    old_pos = ftell(file);
+-    if (fseek(file, offset, SEEK_SET)) {
++    old_pos = lio_compat_tell(file);
++    if (!lio_compat_seek(file, offset, SEEK_SET)) {
+         return -1;
+     }
+ 
+-    ret = fread(buf, count, 1, file);
++    ret = lio_compat_readahead(buf, count, file);
+ 
+-    if (fseek(file, old_pos, SEEK_SET)) {
++    if (lio_compat_seek(file, old_pos, SEEK_SET)) {
+         return -1;
+     }
+ 
+@@ -457,7 +472,7 @@ ssize_t pread(int fd, void *buf, size_t count, off_t offset)
+ /// In eine Datei mit gegebenem Offset schreiben
+ ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset)
+ {
+-    FILE* file = fd_to_file(fd);
++    io_resource_t* file = fd_to_file(fd);
+     off_t old_pos;
+     ssize_t ret;
+ 
+@@ -467,14 +482,14 @@ ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset)
+         return -1;
+     }
+ 
+-    old_pos = ftell(file);
+-    if (fseek(file, offset, SEEK_SET)) {
++    old_pos = lio_compat_tell(file);
++    if (!lio_compat_seek(file, offset, SEEK_SET)) {
+         return -1;
+     }
+ 
+-    ret = fwrite(buf, count, 1, file);
++    ret = lio_compat_write(buf, count, 1, file);
+ 
+-    if (fseek(file, old_pos, SEEK_SET)) {
++    if (!lio_compat_seek(file, old_pos, SEEK_SET)) {
+         return -1;
+     }
+ 
+@@ -500,5 +515,100 @@ int dup2(int fd, int newfd)
+     return -1;
+ }
+ 
++/**
++ * Prueft, welche der gegebenen Dateideskriptoren bereit zum Lesen oder
++ * Schreiben sind oder ein Fehler fuer sie aufgetreten ist. Dateideskriptoren
++ * die nicht bereit bzw. in einem Fehlerzustand sind, werden aus der Menge
++ * entfernt.
++ *
++ * @param number_fds Nummer des hoechsten Dateideskriptors in einem der
++ * uebergebenen Mengen.
++ * @param readfds Dateideskriptoren, bei denen ueberprueft werden soll, ob sie
++ * zum Lesen bereit sind.
++ * @param writefds Dateideskriptoren, bei denen ueberprueft werden soll, ob sie
++ * zum Schreiben bereit sind.
++ * @param errfds Dateideskriptoren, bei denen ueberprueft werden soll, ob sie
++ * in einem Fehlerzustand sind.
++ * @param timeout Maximales Timeout, das gewartet werden soll, falls kein
++ * Deskriptor bereit ist. NULL fuer dauerhaftes Blockieren.
++ *
++ * @return Anzahl der Dateideskriptoren, die bereit bzw. in einem Fehlerzustand
++ * sind
++ */
++int select(int number_fds, fd_set* readfds, fd_set* writefds,
++    fd_set* errfds, struct timeval* timeout)
++{
++    uint32_t* rd = (uint32_t*) readfds;
++    uint32_t* wr = (uint32_t*) writefds;
++    uint32_t* err = (uint32_t*) errfds;
++    int c;
++    io_resource_t* f;
++    int ret;
++    int fds;
++
++    uint32_t orig_rd = rd ? *rd : 0;
++    uint32_t orig_wr = wr ? *wr : 0;
++
++    uint64_t timeout_tick;
++    if (timeout != NULL) {
++        timeout_tick = get_tick_count() +
++            1000ULL * 1000ULL * timeout-&gt;tv_sec +
++            timeout-&gt;tv_usec;
++    } else {
++        timeout_tick = (uint64_t) -1;
++    }
++
++    // tyndur ist so toll, bei uns gibt es keine Fehler
++    if (err) {
++        *err = 0;
++    }
++
++    do {
++        int i;
++
++        // Wieder alles zuruecksetzen
++        fds = 0;
++        if (rd) {
++            *rd = orig_rd;
++        }
++        if (wr) {
++            *wr = orig_wr;
++        }
++
++
++        for (i = 0; i &lt; 32; i++) {
++
++            // Versuchsweise ein Zeichen auslesen ohne den Dateizeiger zu
++            // verändern. Wenn das funktioniert, als lesbar werten.
++            if (rd &amp;&amp; (*rd &amp; (1 &lt;&lt; i))) {
++                f = fd_to_file(i);
++
++                if (f != NULL) {
++                    ret = lio_compat_readahead(&amp;c, 1, f);
++                    if (ret == -EAGAIN) {
++                        *rd &amp;= ~(1 &lt;&lt; i);
++                    } else {
++                        // Auch eine Datei, die zu Ende ist, gilt als lesbar
++                        fds++;
++                    }
++                }
++            }
++
++            // Schreiben geht immer
++            if (wr &amp;&amp; (*wr &amp; (1 &lt;&lt; i))) {
++                fds++;
++            }
++        }
++
++        // Busy Wait waere irgendwie auch doof
++        if (fds == 0) {
++            yield();
++        }
++
++    } while ((fds == 0) &amp;&amp; (timeout_tick &gt; get_tick_count()));
++
++    return fds;
++}
++
+ #endif // ndef CONFIG_LIBC_NO_STUBS
+ 
+diff --git a/src/modules/lib/posix/select.c b/src/modules/lib/posix/select.c
+deleted file mode 100644
+index 0508577..0000000
+--- a/src/modules/lib/posix/select.c
++++ /dev/null
+@@ -1,135 +0,0 @@
+-/*
+- * Copyright (c) 2009 The tyndur Project. All rights reserved.
+- *
+- * This code is derived from software contributed to the tyndur Project
+- * by Kevin Wolf.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+- * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+- * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
+- * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+- * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+- * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+- * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+- * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+- * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+- */
+-
+-#include &lt;sys/select.h&gt;
+-#include &lt;sys/time.h&gt;
+-#include &lt;stdio.h&gt;
+-#include &lt;syscall.h&gt;
+-
+-#ifndef CONFIG_LIBC_NO_STUBS
+-/**
+- * Prueft, welche der gegebenen Dateideskriptoren bereit zum Lesen oder
+- * Schreiben sind oder ein Fehler fuer sie aufgetreten ist. Dateideskriptoren
+- * die nicht bereit bzw. in einem Fehlerzustand sind, werden aus der Menge
+- * entfernt.
+- *
+- * @param number_fds Nummer des hoechsten Dateideskriptors in einem der
+- * uebergebenen Mengen.
+- * @param readfds Dateideskriptoren, bei denen ueberprueft werden soll, ob sie
+- * zum Lesen bereit sind.
+- * @param writefds Dateideskriptoren, bei denen ueberprueft werden soll, ob sie
+- * zum Schreiben bereit sind.
+- * @param errfds Dateideskriptoren, bei denen ueberprueft werden soll, ob sie
+- * in einem Fehlerzustand sind.
+- * @param timeout Maximales Timeout, das gewartet werden soll, falls kein
+- * Deskriptor bereit ist. NULL fuer dauerhaftes Blockieren.
+- *
+- * @return Anzahl der Dateideskriptoren, die bereit bzw. in einem Fehlerzustand
+- * sind
+- */
+-int select(int number_fds, fd_set* readfds, fd_set* writefds,
+-    fd_set* errfds, struct timeval* timeout)
+-{
+-    uint32_t* rd = (uint32_t*) readfds;
+-    uint32_t* wr = (uint32_t*) writefds;
+-    uint32_t* err = (uint32_t*) errfds;
+-    int c;
+-    FILE* f;
+-    int ret;
+-
+-    uint32_t orig_rd = rd ? *rd : 0;
+-    uint32_t orig_wr = wr ? *wr : 0;
+-
+-    uint64_t timeout_tick;
+-    if (timeout != NULL) {
+-        timeout_tick = get_tick_count() +
+-            1000ULL * 1000ULL * timeout-&gt;tv_sec +
+-            timeout-&gt;tv_usec;
+-    } else {
+-        timeout_tick = (uint64_t) -1;
+-    }
+-
+-    // tyndur ist so toll, bei uns gibt es keine Fehler
+-    if (err) {
+-        *err = 0;
+-    }
+-
+-    do {
+-        int i;
+-
+-        // Wieder alles zuruecksetzen
+-        ret = 0;
+-        if (rd) {
+-            *rd = orig_rd;
+-        }
+-        if (wr) {
+-            *wr = orig_wr;
+-        }
+-
+-
+-        for (i = 0; i &lt; 32; i++) {
+-
+-            // Versuchsweise ein Zeichen auslesen. Wenn das funktioniert, als
+-            // lesbar werten und das Zeichen schnell wieder zurueckstecken
+-            // bevor das Programm was merkt.
+-            if (rd &amp;&amp; (*rd &amp; (1 &lt;&lt; i))) {
+-                f = fdopen(i, NULL);
+-
+-                if (f != NULL) {
+-                    // Eine Datei, die zu Ende ist, gilt als lesbar
+-                    if (feof(f)) {
+-                        ret++;
+-                        continue;
+-                    }
+-
+-                    c = fgetc(f);
+-                    if (c == EOF) {
+-                        *rd &amp;= ~(1 &lt;&lt; i);
+-                    } else {
+-                        ungetc(c, f);
+-                        ret++;
+-                    }
+-                }
+-            }
+-
+-            // Schreiben geht immer
+-            if (wr &amp;&amp; (*wr &amp; (1 &lt;&lt; i))) {
+-                ret++;
+-            }
+-        }
+-
+-        // Busy Wait waere irgendwie auch doof
+-        if (ret == 0) {
+-            yield();
+-        }
+-
+-    } while ((ret == 0) &amp;&amp; (timeout_tick &gt; get_tick_count()));
+-
+-    return ret;
+-}
+-#endif
+diff --git a/src/modules/lib/stdlibc/file.c b/src/modules/lib/stdlibc/file.c
+index 7482c41..60c9e83 100644
+--- a/src/modules/lib/stdlibc/file.c
++++ b/src/modules/lib/stdlibc/file.c
+@@ -50,6 +50,29 @@ static bool is_valid_res(FILE* io_res)
+     return (io_res != NULL) &amp;&amp; (IS_LIO2(io_res-&gt;res) || io_res-&gt;res-&gt;pid != 0);
+ }
+ 
++FILE* __create_file_from_iores(io_resource_t* io_res)
++{
++    // FILE-Struktur anlegen
++    FILE* int_res;
++
++    int_res = calloc(1, sizeof(*int_res));
++    int_res-&gt;res = io_res;
++
++    int_res-&gt;buffer_mode = IO_BUFFER_MODE_NONE;
++    int_res-&gt;buffer_ptr = NULL;
++    int_res-&gt;buffer_size = 0;
++    int_res-&gt;buffer_pos = 0;
++    int_res-&gt;free_buffer = false;
++    setvbuf(int_res, malloc(BUFSIZ), _IOFBF, BUFSIZ);
++    int_res-&gt;free_buffer = true;
++
++    int_res-&gt;cur_pos = 0;
++    int_res-&gt;error = false;
++    int_res-&gt;os_eof = false;
++
++    return int_res;
++}
++
+ /**
+  * Datei oeffnen
+  *
+@@ -104,25 +127,7 @@ FILE* fopen (const char* filename, const char* mode)
+         return NULL;
+     }
+ 
+-    // FILE-Struktur anlegen
+-    FILE* int_res;
+-
+-    int_res = calloc(1, sizeof(*int_res));
+-    int_res-&gt;res = io_res;
+-
+-    int_res-&gt;buffer_mode = IO_BUFFER_MODE_NONE;
+-    int_res-&gt;buffer_ptr = NULL;
+-    int_res-&gt;buffer_size = 0;
+-    int_res-&gt;buffer_pos = 0;
+-    int_res-&gt;free_buffer = false;
+-    setvbuf(int_res, malloc(BUFSIZ), _IOFBF, BUFSIZ);
+-    int_res-&gt;free_buffer = true;
+-
+-    int_res-&gt;cur_pos = 0;
+-    int_res-&gt;error = false;
+-    int_res-&gt;os_eof = false;
+-
+-    return int_res;
++    return __create_file_from_iores(io_res);
+ }
+ 
+ /**
+-- 
+2.1.4
+
+</PRE>
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002502.html">[tyndur-devel] [PATCH v2 6/8] libc: lio_compat_readahead() gefixt
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002505.html">[tyndur-devel] [PATCH v3 7/8] libc: POSIX-Dateifunktionen nicht über stdio.h emulieren
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2503">[ Datum ]</a>
+              <a href="thread.html#2503">[ Thema ]</a>
+              <a href="subject.html#2503">[ Betreff (Subject)]</a>
+              <a href="author.html#2503">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

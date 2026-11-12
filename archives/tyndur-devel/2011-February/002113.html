@@ -1,0 +1,214 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 1/5 v2] kernel2: IRQ-Sharing
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%201/5%20v2%5D%20kernel2%3A%20IRQ-Sharing&In-Reply-To=%3C1297515452-8041-1-git-send-email-max%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002114.html">
+   <LINK REL="Next"  HREF="002115.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 1/5 v2] kernel2: IRQ-Sharing</H1>
+    <B>max at tyndur.org</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%201/5%20v2%5D%20kernel2%3A%20IRQ-Sharing&In-Reply-To=%3C1297515452-8041-1-git-send-email-max%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 1/5 v2] kernel2: IRQ-Sharing">max at tyndur.org
+                  </A><BR>
+    <I>Sa Feb 12 13:57:32 CET 2011</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002114.html">[tyndur-devel] [PATCH] kbc: Race zwischen send_kbd_command und IRQ-Handler gefixt
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002115.html">[tyndur-devel] [PATCH] Englische Übersetzung für servmgr
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2113">[ Datum ]</a>
+              <a href="thread.html#2113">[ Thema ]</a>
+              <a href="subject.html#2113">[ Betreff (Subject) ]</a>
+              <a href="author.html#2113">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>From: Max Reitz &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">max at tyndur.org</A>&gt;
+
++ Bis zu vier Tasks können jetzt beim Auftreten eines IRQs
+  benachrichtigt werden.
+
+Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">max at tyndur.org</A>&gt;
+---
+ src/kernel2/src/interrupts/im.c |   87 ++++++++++++++++++++++++++++-----------
+ 1 files changed, 63 insertions(+), 24 deletions(-)
+
+diff --git a/src/kernel2/src/interrupts/im.c b/src/kernel2/src/interrupts/im.c
+index cdb3199..18e11ef 100644
+--- a/src/kernel2/src/interrupts/im.c
++++ b/src/kernel2/src/interrupts/im.c
+@@ -33,6 +33,7 @@
+  * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
++#include &lt;stdbool.h&gt;
+ #include &lt;types.h&gt;
+ #include &lt;lost/config.h&gt;
+ 
+@@ -51,8 +52,18 @@ extern size_t cpu_count;
+ /** Einheit: Mikrosekunden */
+ uint64_t timer_ticks = 0;
+ 
+-static pm_process_t* intr_handling_task[IM_NUM_INTERRUPTS];
+-static uint32_t intr_to_send[IM_NUM_INTERRUPTS];
++#define MAX_INTERRUPTS 4
++
++// Wenn mehrere Tasks für einen Interrupt registriert sind, dann werden sie im
++// Array so angeordnet, dass nur die ersten Einträge gefüllt sind
++static pm_process_t* intr_handling_task[IM_NUM_INTERRUPTS][MAX_INTERRUPTS];
++static uint32_t intr_to_send[IM_NUM_INTERRUPTS][MAX_INTERRUPTS];
++// Anzahl von Tasks pro Interrupt
++static int intr_num_tasks[IM_NUM_INTERRUPTS];
++// Gibt an, ob überhaupt irgendein Interrupt für die jeweilige Nummer
++// auszuliefern ist (ist also false, wenn alle intr_to_send-Einträge für den
++// Interrupt 0 sind, sonst true).
++static bool any_intr[IM_NUM_INTERRUPTS];
+ 
+ void im_send_interrupts(void);
+ bool fastrpc_irq(pm_process_t* callee, size_t metadata_size, void* metadata,
+@@ -193,7 +204,11 @@ interrupt_stack_frame_t* im_handler(interrupt_stack_frame_t* isf)
+             // Timer ausloesen, wenn noetig
+             timer_notify(timer_ticks);
+         } else {
+-            intr_to_send[int_num]++;
++            int i;
++            for (i = 0; i &lt; intr_num_tasks[int_num]; i++) {
++                intr_to_send[int_num][i]++;
++            }
++            any_intr[int_num] = true;
+             im_disable_irq(int_num - IM_IRQ_BASE);
+         }
+     } else if (int_num == 0x30) {
+@@ -261,12 +276,23 @@ static void on_process_destroy(pm_process_t* process, void* prv)
+         panic(&quot;im.c: on_process_destroy(): Korrupte Interruptnummer %d&quot;, intr);
+     }
+ 
+-    if (intr_handling_task[intr] != process) {
+-        panic(&quot;im.c: on_process_destroy(): Prozess nicht fuer Interrupt %d &quot;
+-            &quot;zustaendig&quot;, intr);
++    int i, j;
++    for (i = 0; i &lt; intr_num_tasks[intr]; i++) {
++        if (intr_handling_task[intr][i] == process) {
++            // Nach vorn schieben, sodass immer nur die vorderen Plätze des
++            // Arrays belegt sind
++            int last = --intr_num_tasks[intr];
++            for (j = i + 1; j &lt;= last; j++) {
++                intr_handling_task[intr][j - 1] = intr_handling_task[intr][j];
++            }
++            intr_handling_task[intr][last] = NULL;
++
++            return;
++        }
+     }
+ 
+-    intr_handling_task[intr] = NULL;
++    panic(&quot;im.c: on_process_destroy(): Prozess nicht fuer Interrupt %d &quot;
++        &quot;zustaendig&quot;, intr);
+ }
+ 
+ /**
+@@ -280,16 +306,21 @@ static void on_process_destroy(pm_process_t* process, void* prv)
+  */
+ bool im_add_handler(uint32_t intr, pm_process_t* handler)
+ {
+-    if ((intr &gt;= IM_NUM_INTERRUPTS) || intr_handling_task[intr]) {
++    if (intr &gt;= IM_NUM_INTERRUPTS) {
+         return false;
+     }
+ 
+-    intr_handling_task[intr] = handler;
++    if (intr_num_tasks[intr] &gt;= MAX_INTERRUPTS) {
++        // Kein Platz für diesen IRQ mehr übrig
++        return false;
++    }
++
++    intr_handling_task[intr][intr_num_tasks[intr]++] = handler;
+     pm_register_on_destroy(handler, on_process_destroy, (void*) intr);
+ 
+     // Moeglicherweise ist der IRQ frueher maskiert worden, weil es keinen
+     // Treiber dafuer gab. Spaetestens jetzt brauchen wir ihn aber wieder.
+-    if ((intr &gt;= IM_IRQ_BASE) &amp;&amp; (intr&lt; (IM_IRQ_BASE + 16))) {
++    if ((intr &gt;= IM_IRQ_BASE) &amp;&amp; (intr &lt; (IM_IRQ_BASE + 16))) {
+         im_enable_irq(intr - IM_IRQ_BASE);
+     }
+ 
+@@ -307,23 +338,31 @@ void im_send_interrupts(void)
+ 
+     for (intr = 0; intr &lt; IM_NUM_INTERRUPTS; intr++)
+     {
+-        while (intr_to_send[intr] &gt; 0) {
+-            if (intr_handling_task[intr] == NULL) {
+-                intr_to_send[intr] = 0;
+-                break;
+-            }
++        if (!any_intr[intr]) {
++            continue;
++        }
+ 
+-            // Dieses Wechseln des Tasks ist wichtig: IRQs werden nur
+-            // angenommen, wenn der Task sie sich selbst schickt
+-            current_thread = new_thread =
+-                list_get_element_at(intr_handling_task[intr]-&gt;threads, 0);
++        any_intr[intr] = false;
++
++        int i;
++        for (i = 0; i &lt; intr_num_tasks[intr]; i++) {
++            while (intr_to_send[intr][i] &gt; 0) {
++                // Dieses Wechseln des Tasks ist wichtig: IRQs werden nur
++                // angenommen, wenn der Task sie sich selbst schickt
++                current_thread = new_thread =
++                    list_get_element_at(intr_handling_task[intr][i]-&gt;threads, 0);
++
++                if (!fastrpc_irq(intr_handling_task[intr][i], 0, 0,
++                    sizeof(intr), (char*) &amp;intr, intr - IM_IRQ_BASE))
++                {
++                    break;
++                }
++                intr_to_send[intr][i]--;
++            }
+ 
+-            if (!fastrpc_irq(intr_handling_task[intr], 0, 0,
+-                sizeof(intr), (char*) &amp;intr, intr - IM_IRQ_BASE))
+-            {
+-                break;
++            if (intr_to_send[intr][i]) {
++                any_intr[intr] = true;
+             }
+-            intr_to_send[intr]--;
+         }
+     }
+ 
+-- 
+1.7.1
+
+</PRE>
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002114.html">[tyndur-devel] [PATCH] kbc: Race zwischen send_kbd_command und IRQ-Handler gefixt
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002115.html">[tyndur-devel] [PATCH] Englische Übersetzung für servmgr
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2113">[ Datum ]</a>
+              <a href="thread.html#2113">[ Thema ]</a>
+              <a href="subject.html#2113">[ Betreff (Subject)]</a>
+              <a href="author.html#2113">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

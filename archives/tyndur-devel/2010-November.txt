@@ -1,0 +1,3567 @@
+From kevin at tyndur.org  Mon Nov  1 15:03:04 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Mon,  1 Nov 2010 15:03:04 +0100
+Subject: [tyndur-devel] [PATCH] kernel2: PIT initialisieren
+Message-ID: <1288620184-14797-1-git-send-email-kevin@tyndur.org>
+
++ kernel2: PIT initialisieren
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/src/timer.c |   15 +++++++++++++++
+ 1 files changed, 15 insertions(+), 0 deletions(-)
+
+diff --git a/src/kernel2/src/timer.c b/src/kernel2/src/timer.c
+index 6535e12..33d0dcb 100644
+--- a/src/kernel2/src/timer.c
++++ b/src/kernel2/src/timer.c
+@@ -37,6 +37,7 @@
+ #include <stdbool.h>
+ #include <collections.h>
+ #include <stdlib.h>
++#include <ports.h>
+ 
+ #include "timer.h"
+ #include "syscall.h"
+@@ -61,12 +62,26 @@ struct timeout {
+     uint64_t        timeout;
+ };
+ 
++#define PIT_COUNTER_0       (0x0 << 6)
++#define PIT_RW_LO_BYTE      (0x1 << 4)
++#define PIT_RW_HI_BYTE      (0x2 << 4)
++#define PIT_RW_FULL         (0x3 << 4)
++#define PIT_MODE_2_RATE_GEN (0x2 << 1)
++
+ /**
+  * Initialisiert die Timerverwaltung
+  */
+ void timer_init(void)
+ {
++    uint16_t reload_value;
++
+     timers = list_create();
++
++    // PIT initialisieren
++    reload_value = 1193182 / CONFIG_TIMER_HZ;
++    outb(0x43, PIT_COUNTER_0 | PIT_RW_FULL | PIT_MODE_2_RATE_GEN);
++    outb(0x40, reload_value & 0xff);
++    outb(0x40, reload_value >> 8);
+ }
+ 
+ /**
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Mon Nov  1 15:05:06 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Mon,  1 Nov 2010 15:05:06 +0100
+Subject: [tyndur-devel] [PATCH] vterm: Deadlock verhindern
+Message-ID: <1288620306-16421-1-git-send-email-kevin@tyndur.org>
+
+! vterm: Sobald der Service registriert ist, sollte er auch benutzbar
+  sein. Wenn waehrend einem init_service_get() init unterbrochen wird
+  und ein open auf ein vterm-Terminal machen soll, entsteht sonst ein
+  Deadlock.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/vterm/vterm.c |   10 ++++------
+ 1 files changed, 4 insertions(+), 6 deletions(-)
+
+diff --git a/src/modules/vterm/vterm.c b/src/modules/vterm/vterm.c
+index d0afc99..0ff461f 100644
+--- a/src/modules/vterm/vterm.c
++++ b/src/modules/vterm/vterm.c
+@@ -54,6 +54,10 @@ int main(int argc, char* argv[])
+     // Schnittstelle fuer die anderen Prozesse einrichten
+     init_lostio_interface();
+ 
++    // Virtuelle Terminal initialisieren
++    init_output();
++    init_vterminals(10);
++
+     // Service registrieren
+     //
+     // HACK: Wenn wir uns fast gleichzeitig bei init und servmgr anmelden,
+@@ -61,7 +65,6 @@ int main(int argc, char* argv[])
+     // vterm:/vterm8/out zu oeffnen und init will "service_register" auf stdout
+     // schreiben, das beim servmgr liegt). Also warten wir, bis init fertig
+     // ist.
+-    p();
+     init_service_register("vterm");
+     while(!init_service_get("vterm")) {
+         yield();
+@@ -73,11 +76,6 @@ int main(int argc, char* argv[])
+         rpc_get_dword(servmgr_pid, "VTERM   ", 0, NULL);
+     }
+ 
+-    // Virtuelle Terminal initialisieren
+-    init_output();
+-    init_vterminals(10);
+-    v();
+-
+     // Eingabe initialisieren
+     // Dies registriert einen RPC-Callbackhandler bei kbc. Der Aufruf
+     // von init_input() darf daher erst geschehen, wenn auch das Registrieren
+-- 
+1.6.0.2
+
+
+From max at tyndur.org  Tue Nov  2 20:17:24 2010
+From: max at tyndur.org (Max Reitz)
+Date: Tue, 02 Nov 2010 20:17:24 +0100
+Subject: [tyndur-devel] [PATCH] kernel2: PIT initialisieren
+Message-ID: <4CD063C4.1040109@tyndur.org>
+
+(2010?11?01? 15:03), Kevin Wolf wrote:
+> + kernel2: PIT initialisieren
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+> ---
+>  src/kernel2/src/timer.c |   15 +++++++++++++++
+>  1 files changed, 15 insertions(+), 0 deletions(-)
+> 
+> diff --git a/src/kernel2/src/timer.c b/src/kernel2/src/timer.c
+> index 6535e12..33d0dcb 100644
+> --- a/src/kernel2/src/timer.c
+> +++ b/src/kernel2/src/timer.c
+> @@ -37,6 +37,7 @@
+>  #include <stdbool.h>
+>  #include <collections.h>
+>  #include <stdlib.h>
+> +#include <ports.h>
+>  
+>  #include "timer.h"
+>  #include "syscall.h"
+> @@ -61,12 +62,26 @@ struct timeout {
+>      uint64_t        timeout;
+>  };
+>  
+> +#define PIT_COUNTER_0       (0x0 << 6)
+> +#define PIT_RW_LO_BYTE      (0x1 << 4)
+> +#define PIT_RW_HI_BYTE      (0x2 << 4)
+> +#define PIT_RW_FULL         (0x3 << 4)
+> +#define PIT_MODE_2_RATE_GEN (0x2 << 1)
+> +
+>  /**
+>   * Initialisiert die Timerverwaltung
+>   */
+>  void timer_init(void)
+>  {
+> +    uint16_t reload_value;
+> +
+>      timers = list_create();
+> +
+> +    // PIT initialisieren
+> +    reload_value = 1193182 / CONFIG_TIMER_HZ;
+> +    outb(0x43, PIT_COUNTER_0 | PIT_RW_FULL | PIT_MODE_2_RATE_GEN);
+> +    outb(0x40, reload_value & 0xff);
+> +    outb(0x40, reload_value >> 8);
+>  }
+>  
+>  /**
+
+Mein Wiki sagt zwar 1193180 statt 1193182, aber ansonsten sieht das soweit in Ordnung aus (ohne, dass man viel falsch machen könnte). *g*
+
+Acked-by: Max Reitz <max at tyndur.org>
+
+From max at tyndur.org  Tue Nov  2 20:17:42 2010
+From: max at tyndur.org (Max Reitz)
+Date: Tue, 02 Nov 2010 20:17:42 +0100
+Subject: [tyndur-devel] [PATCH] vterm: Deadlock verhindern
+In-Reply-To: <1288620306-16421-1-git-send-email-kevin@tyndur.org>
+References: <1288620306-16421-1-git-send-email-kevin@tyndur.org>
+Message-ID: <4CD063D6.1040903@tyndur.org>
+
+Am 01.11.2010 15:05, schrieb Kevin Wolf:
+> ! vterm: Sobald der Service registriert ist, sollte er auch benutzbar
+>   sein. Wenn waehrend einem init_service_get() init unterbrochen wird
+>   und ein open auf ein vterm-Terminal machen soll, entsteht sonst ein
+>   Deadlock.
+
+Acked-by: Max Reitz <max at tyndur.org>
+
+From max at tyndur.org  Tue Nov  2 20:17:52 2010
+From: max at tyndur.org (Max Reitz)
+Date: Tue, 02 Nov 2010 20:17:52 +0100
+Subject: [tyndur-devel] [PATCH] kernel2: Bei einer Exception nur den
+ Prozess beenden
+In-Reply-To: <1288553387-16611-1-git-send-email-kevin@tyndur.org>
+References: <1288553387-16611-1-git-send-email-kevin@tyndur.org>
+Message-ID: <4CD063E0.8030608@tyndur.org>
+
+Am 31.10.2010 20:29, schrieb Kevin Wolf:
+> * kernel2: Bei einer Exception im Usermodus wird nur der aktuelle
+>   Prozess beendet. Bei einer Exception im Kernelmodus wird weiterhin das
+>   System angehalten.
+
+Acked-by: Max Reitz <max at tyndur.org>
+
+From max at tyndur.org  Tue Nov  2 20:19:42 2010
+From: max at tyndur.org (Max Reitz)
+Date: Tue, 02 Nov 2010 20:19:42 +0100
+Subject: [tyndur-devel] [PATCH 1/2] kernel2: cpu_prepare_current_task
+In-Reply-To: <1288552193-936-2-git-send-email-kevin@tyndur.org>
+References: <1288552193-936-1-git-send-email-kevin@tyndur.org>
+	<1288552193-936-2-git-send-email-kevin@tyndur.org>
+Message-ID: <4CD0644E.9000402@tyndur.org>
+
+Am 31.10.2010 20:09, schrieb Kevin Wolf:
+> * kernel2: Architekturspezifischen Teil des Taskwechsels
+>   (TSS-Manipulationen) in eine eigene Funktion ausgelagert
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Max Reitz <max at tyndur.org>
+
+From max at tyndur.org  Tue Nov  2 20:28:41 2010
+From: max at tyndur.org (Max Reitz)
+Date: Tue, 02 Nov 2010 20:28:41 +0100
+Subject: [tyndur-devel] [PATCH 2/2] kernel2: I/O-Bitmap benutzen
+In-Reply-To: <1288552193-936-3-git-send-email-kevin@tyndur.org>
+References: <1288552193-936-1-git-send-email-kevin@tyndur.org>
+	<1288552193-936-3-git-send-email-kevin@tyndur.org>
+Message-ID: <4CD06669.9020604@tyndur.org>
+
+Am 31.10.2010 20:09, schrieb Kevin Wolf:
+> ! kernel2: Echte Verwaltung der I/O-Bitmap anstatt zufaellig Ports
+>   freizugeben, weil der groesste Teil des TSS aus Nullen besteht
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Max Reitz <max at tyndur.org>
+
+From max at tyndur.org  Tue Nov  2 20:30:32 2010
+From: max at tyndur.org (Max Reitz)
+Date: Tue, 02 Nov 2010 20:30:32 +0100
+Subject: [tyndur-devel] [PATCH] kernel2: Aktiven Thread in
+ pm_thread_destroy wechseln
+In-Reply-To: <1287775231-24873-1-git-send-email-kevin@tyndur.org>
+References: <1287775231-24873-1-git-send-email-kevin@tyndur.org>
+Message-ID: <4CD066D8.2080201@tyndur.org>
+
+Am 22.10.2010 21:20, schrieb Kevin Wolf:
+> ! kernel2: Wir brauchen immer einen gültigen aktiven Thread, ansonsten
+>   fliegen selbst Dinge wie die Exceptionhandler auf die Schnauze.
+>   Anstatt erst nach dem Beenden eines Prozesses zum nächsten zu
+>   wechseln, wird jetzt beim Löschen des aktiven Threads geschedult.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Max Reitz <max at tyndur.org>
+
+From max at tyndur.org  Tue Nov  2 20:31:06 2010
+From: max at tyndur.org (Max Reitz)
+Date: Tue, 02 Nov 2010 20:31:06 +0100
+Subject: [tyndur-devel] [PATCH 1/2] kernel2: Bei Stacktraces nicht ins
+ Leere	greifen
+In-Reply-To: <1287775213-24588-2-git-send-email-kevin@tyndur.org>
+References: <1287775213-24588-1-git-send-email-kevin@tyndur.org>
+	<1287775213-24588-2-git-send-email-kevin@tyndur.org>
+Message-ID: <4CD066FA.9010908@tyndur.org>
+
+Am 22.10.2010 21:20, schrieb Kevin Wolf:
+> ! kernel2: Bei einem kaputten Stack passiert es leicht, dass ein Page
+>   Fault nach dem anderen auftritt, weil wir nicht aufpassen. Eine
+>   Prüfung, ob die Adresse auch wirklich gemappt ist, sollte dem Abhilfe
+>   schaffen.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Oh ja, das ist immer hübsch. :-)
+
+Acked-by: Max Reitz <max at tyndur.org>
+
+From max at tyndur.org  Tue Nov  2 20:32:25 2010
+From: max at tyndur.org (Max Reitz)
+Date: Tue, 02 Nov 2010 20:32:25 +0100
+Subject: [tyndur-devel] [PATCH 2/2] kernel2: Stacktraces umformatiert
+In-Reply-To: <1287775213-24588-3-git-send-email-kevin@tyndur.org>
+References: <1287775213-24588-1-git-send-email-kevin@tyndur.org>
+	<1287775213-24588-3-git-send-email-kevin@tyndur.org>
+Message-ID: <4CD06749.9040504@tyndur.org>
+
+Am 22.10.2010 21:20, schrieb Kevin Wolf:
+> * kernel2: Alle Adressen in Stacktraces auf 8 Zeichen ausgerichtet und
+>   Leerzeichen statt Nullen als Padding, damit man in der objdump-Ausgabe
+>   suchen kann ohne manuell Nullen zu entfernen.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Nicht, dass ich das gutheißen würde, aber mein 0x%08X kann ich wohl sowieso nicht durchsetzen. *g*
+
+Acked-by: Max Reitz <max at tyndur.org>
+
+From max at tyndur.org  Tue Nov  2 20:38:10 2010
+From: max at tyndur.org (Max Reitz)
+Date: Tue, 02 Nov 2010 20:38:10 +0100
+Subject: [tyndur-devel] [PATCH 1/2] kernel2: mmc_find_free_pages
+	exportieren
+In-Reply-To: <1287313332-30638-2-git-send-email-kevin@tyndur.org>
+References: <1287313332-30638-1-git-send-email-kevin@tyndur.org>
+	<1287313332-30638-2-git-send-email-kevin@tyndur.org>
+Message-ID: <4CD068A2.3000507@tyndur.org>
+
+Am 17.10.2010 13:02, schrieb Kevin Wolf:
+> * kernel2: find_contiguous_pages in mmc_find_free_pages umbenannt und
+>   global zugänglich gemacht
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Max Reitz <max at tyndur.org>
+
+From max at tyndur.org  Tue Nov  2 20:40:36 2010
+From: max at tyndur.org (Max Reitz)
+Date: Tue, 02 Nov 2010 20:40:36 +0100
+Subject: [tyndur-devel] [PATCH 2/2] kernel2: mmc_map_user
+In-Reply-To: <1287313332-30638-3-git-send-email-kevin@tyndur.org>
+References: <1287313332-30638-1-git-send-email-kevin@tyndur.org>
+	<1287313332-30638-3-git-send-email-kevin@tyndur.org>
+Message-ID: <4CD06934.5000801@tyndur.org>
+
+Am 17.10.2010 13:02, schrieb Kevin Wolf:
+> + kernel2: Neue Funktion, um virtuell zusammenhängenden Speicher
+>   zusätzlich woanders hinzumappen (mit vorgegebener Adresse statt
+>   irgendwohin wie bei mmc_automap_user)
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Max Reitz <max at tyndur.org>
+
+From max at tyndur.org  Tue Nov  2 20:41:18 2010
+From: max at tyndur.org (Max Reitz)
+Date: Tue, 02 Nov 2010 20:41:18 +0100
+Subject: [tyndur-devel]
+ =?iso-8859-1?q?=5BPATCH=5D_shell=3A_PF_in_Dateinam?=
+ =?iso-8859-1?q?envervollst=E4ndigung_gefixt?=
+In-Reply-To: <1287236779-20007-1-git-send-email-kevin@tyndur.org>
+References: <1287236779-20007-1-git-send-email-kevin@tyndur.org>
+Message-ID: <4CD0695E.7040705@tyndur.org>
+
+Am 16.10.2010 15:46, schrieb Kevin Wolf:
+> ! shell: Wenn irgendein Phantasiepfad vervollständigt werden soll, der
+>   mit einem nicht existierenden Verzeichnis anfängt, darf nicht
+>   directory_close(NULL) aufgerufen werden, sonst gibt es rot.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Max Reitz <max at tyndur.org>
+
+From max at tyndur.org  Tue Nov  2 20:41:55 2010
+From: max at tyndur.org (Max Reitz)
+Date: Tue, 02 Nov 2010 20:41:55 +0100
+Subject: [tyndur-devel] [PATCH] shell: Unbenutzte Funktion entfernt
+In-Reply-To: <1285965135-17238-1-git-send-email-kevin@tyndur.org>
+References: <1285965135-17238-1-git-send-email-kevin@tyndur.org>
+Message-ID: <4CD06983.3090002@tyndur.org>
+
+Am 01.10.2010 22:32, schrieb Kevin Wolf:
+> - shell: shell_check_command ist kaputt und unbenutzt. Weg damit.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Kaputt wäre allein kein Argument. ;-)
+
+Acked-by: Max Reitz <max at tyndur.org>
+
+From kevin at tyndur.org  Sat Nov  6 23:39:09 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat,  6 Nov 2010 23:39:09 +0100
+Subject: [tyndur-devel] [PATCH] gitignore: *.rst und *.orig
+Message-ID: <1289083149-19991-1-git-send-email-kevin@tyndur.org>
+
++ gitignore: *.rst sind FPC-Ressourcenstrings und *.orig werden wohl von
+  diff angelegt. Beides nichts, was man im Repo haben will.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ .gitignore |    2 ++
+ 1 files changed, 2 insertions(+), 0 deletions(-)
+
+diff --git a/.gitignore b/.gitignore
+index 2ad9475..a0467f1 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -5,3 +5,5 @@ Makefile
+ *.ppu
+ link.res
+ ppas.sh
++*.rst
++*.orig
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sat Nov  6 23:42:03 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat,  6 Nov 2010 23:42:03 +0100
+Subject: [tyndur-devel] [PATCH 0/3] tms: Mehrsprachige C-Programme
+Message-ID: <1289083326-22314-1-git-send-email-kevin@tyndur.org>
+
+Diese Serie überträgt die für Pascalprogramme benutzte Methode für
+Übersetzungen auf C-Programme. Als Beispiel für die Benutzung bekommt
+die Shell eine teilweise Übersetzung ins Englische.
+
+Kevin Wolf (3):
+  tms: In libc verschieben
+  tms: Implementierung für C
+  shell: Teilweise englische Übersetzung
+
+ src/modules/c/shell/Makefile.all   |    4 +-
+ src/modules/c/shell/commmands.c    |   64 ++++++++++++++----------
+ src/modules/c/shell/lang/lang_en.c |   75 ++++++++++++++++++++++++++++
+ src/modules/c/shell/lang/resstr.h  |   41 +++++++++++++++
+ src/modules/c/shell/shell.c        |    3 +
+ src/modules/include/tms.h          |   95 ++++++++++++++++++++++++++++++++++++
+ src/modules/lib/tms.c              |   73 +++++++++++++++++++++++++++
+ src/modules/pas/include/tms.h      |   48 ------------------
+ 8 files changed, 326 insertions(+), 77 deletions(-)
+ create mode 100644 src/modules/c/shell/lang/lang_en.c
+ create mode 100644 src/modules/c/shell/lang/resstr.h
+ create mode 100644 src/modules/include/tms.h
+ create mode 100644 src/modules/lib/tms.c
+ delete mode 100644 src/modules/pas/include/tms.h
+
+
+From kevin at tyndur.org  Sat Nov  6 23:42:04 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat,  6 Nov 2010 23:42:04 +0100
+Subject: [tyndur-devel] [PATCH 1/3] tms: In libc verschieben
+In-Reply-To: <1289083326-22314-1-git-send-email-kevin@tyndur.org>
+References: <1289083326-22314-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1289083326-22314-2-git-send-email-kevin@tyndur.org>
+
+* tms: Header aus pas/include nach include verschieben
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/include/tms.h     |   48 +++++++++++++++++++++++++++++++++++++++++
+ src/modules/pas/include/tms.h |   48 -----------------------------------------
+ 2 files changed, 48 insertions(+), 48 deletions(-)
+ create mode 100644 src/modules/include/tms.h
+ delete mode 100644 src/modules/pas/include/tms.h
+
+diff --git a/src/modules/include/tms.h b/src/modules/include/tms.h
+new file mode 100644
+index 0000000..c7a6823
+--- /dev/null
++++ b/src/modules/include/tms.h
+@@ -0,0 +1,48 @@
++/*
++ * Copyright (c) 2009 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef _TMS_H_
++#define _TMS_H_
++
++struct tms_strings {
++    void*   resstr;
++    char*   translation;
++} __attribute__((packed));
++
++struct tms_lang {
++    char*   lang;
++    int     numbers;
++    int     (*get_number)(int);
++
++    const struct tms_strings* strings;
++};
++
++#define LANGUAGE(x) \
++    static const void* __attribute__((section("tmslang"), used)) __lang = (x);
++
++#endif
+diff --git a/src/modules/pas/include/tms.h b/src/modules/pas/include/tms.h
+deleted file mode 100644
+index c7a6823..0000000
+--- a/src/modules/pas/include/tms.h
++++ /dev/null
+@@ -1,48 +0,0 @@
+-/*
+- * Copyright (c) 2009 The tyndur Project. All rights reserved.
+- *
+- * This code is derived from software contributed to the tyndur Project
+- * by Kevin Wolf.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+- * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+- * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
+- * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+- * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+- * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+- * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+- * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+- * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+- */
+-
+-#ifndef _TMS_H_
+-#define _TMS_H_
+-
+-struct tms_strings {
+-    void*   resstr;
+-    char*   translation;
+-} __attribute__((packed));
+-
+-struct tms_lang {
+-    char*   lang;
+-    int     numbers;
+-    int     (*get_number)(int);
+-
+-    const struct tms_strings* strings;
+-};
+-
+-#define LANGUAGE(x) \
+-    static const void* __attribute__((section("tmslang"), used)) __lang = (x);
+-
+-#endif
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sat Nov  6 23:42:05 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat,  6 Nov 2010 23:42:05 +0100
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH_2/3=5D_tms=3A_Implementierung_f?=
+	=?utf-8?b?w7xyIEM=?=
+In-Reply-To: <1289083326-22314-1-git-send-email-kevin@tyndur.org>
+References: <1289083326-22314-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1289083326-22314-3-git-send-email-kevin@tyndur.org>
+
++ tms: Einfache Implementierung für mehrsprachige Programme in C durch
+  Umbiegen von Pointern auf die jeweilige Übersetzung. Eine Umsetzung
+  von FormatNum in C fehlt noch.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/include/tms.h |   47 +++++++++++++++++++++++++++++
+ src/modules/lib/tms.c     |   73 +++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 120 insertions(+), 0 deletions(-)
+ create mode 100644 src/modules/lib/tms.c
+
+diff --git a/src/modules/include/tms.h b/src/modules/include/tms.h
+index c7a6823..357333b 100644
+--- a/src/modules/include/tms.h
++++ b/src/modules/include/tms.h
+@@ -45,4 +45,51 @@ struct tms_lang {
+ #define LANGUAGE(x) \
+     static const void* __attribute__((section("tmslang"), used)) __lang = (x);
+ 
++#define tms_glue(x, y, z) x ## y ## ## z
++#define tms_xglue(x, y, z) tms_glue(x, y, z)
++#define tms_stringify(x) #x
++#define tms_xstringify(x) tms_stringify(x)
++
++/**
++ * Das Makro TMS_MODULE kann vor dem Einbinden dieses Headers optional gesetzt
++ * werden und enthält dann den Namen des einbindenden Moduls. Dieser Name wird
++ * in die Symbolnamen der Strings eingebaut.
++ */
++#ifndef TMS_MODULE
++#define TMS_XMODULE
++#else
++#define TMS_XMODULE tms_xglue(TMS_MODULE, _,)
++#endif
++
++#define TMS_NAME(sym) tms_xglue(__tms_, TMS_XMODULE, sym)
++#define TMS_SNAME(sym) tms_xstringify(TMS_NAME(sym))
++
++/**
++ * Definiert einen übersetzbaren String. Das Makro wird an Stelle eines
++ * Stringliterals verwendet (z.B. printf(TMS(hello, "Hello World\n")))
++ *
++ * @param sym Eindeutiger Bezeichner für den String. Das Makro legt eine
++ * Variable der Form __tms_module_sym, wobei module für TMS_MODULE steht.
++ * @param string Der zu übersetzende String. Wenn keine Übersetzung
++ * verfügbar ist, wird dieser String benutzt
++ */
++#define TMS(sym, string) \
++    ({ \
++        asm volatile( \
++            ".section tmsstring,\"aw\", at progbits\n" \
++            ".global " TMS_SNAME(sym) "\n" \
++            TMS_SNAME(sym)":\n"\
++            ".int %P0\n" \
++            ".section .text" : : "i" (string)); \
++        extern void* TMS_NAME(sym); \
++        TMS_NAME(sym); \
++    })
++
++
++/**
++ * Initialisiert ein mehrsprachiges Programm durch Aktivieren der
++ * Übersetzungen, die zur Sprache in der Umgebungsvariablen LANG passen.
++ */
++void tms_init(void);
++
+ #endif
+diff --git a/src/modules/lib/tms.c b/src/modules/lib/tms.c
+new file mode 100644
+index 0000000..30401d9
+--- /dev/null
++++ b/src/modules/lib/tms.c
+@@ -0,0 +1,73 @@
++/*
++ * Copyright (c) 2010 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <tms.h>
++#include <string.h>
++#include <env.h>
++
++extern struct tms_lang* __start_tmslang;
++extern struct tms_lang* __stop_tmslang;
++
++/**
++ * Lädt die Übersetzungen einer bestimmten Sprache.
++ *
++ * @param lang Sprachcode der zu ladenden Sprache
++ */
++static void init_lang(const char* lang)
++{
++    struct tms_lang** plang;
++    const struct tms_strings* strings;
++
++    plang= &__start_tmslang;
++    while (plang < &__stop_tmslang) {
++
++        if (!strcmp((*plang)->lang, lang)) {
++            strings = (*plang)->strings;
++            while (strings->resstr) {
++                *(const char**)strings->resstr = strings->translation;
++                strings++;
++            }
++            break;
++        }
++
++        plang++;
++    }
++}
++
++/**
++ * Initialisiert ein mehrsprachiges Programm durch Aktivieren der
++ * Übersetzungen, die zur Sprache in der Umgebungsvariablen LANG passen.
++ */
++void tms_init(void)
++{
++    const char* lang = getenv("LANG");
++
++    if (lang != NULL) {
++        init_lang(lang);
++    }
++}
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sat Nov  6 23:42:06 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat,  6 Nov 2010 23:42:06 +0100
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH_3/3=5D_shell=3A_Teilweise_engli?=
+	=?utf-8?q?sche_=C3=9Cbersetzung?=
+In-Reply-To: <1289083326-22314-1-git-send-email-kevin@tyndur.org>
+References: <1289083326-22314-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1289083326-22314-4-git-send-email-kevin@tyndur.org>
+
++ shell: Angefangene Übersetzung ins Englische (commmands.c mit Ausnahme
+  der Ausgabe von help)
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/c/shell/Makefile.all   |    4 +-
+ src/modules/c/shell/commmands.c    |   64 ++++++++++++++++++-------------
+ src/modules/c/shell/lang/lang_en.c |   75 ++++++++++++++++++++++++++++++++++++
+ src/modules/c/shell/lang/resstr.h  |   41 +++++++++++++++++++
+ src/modules/c/shell/shell.c        |    3 +
+ 5 files changed, 158 insertions(+), 29 deletions(-)
+ create mode 100644 src/modules/c/shell/lang/lang_en.c
+ create mode 100644 src/modules/c/shell/lang/resstr.h
+
+diff --git a/src/modules/c/shell/Makefile.all b/src/modules/c/shell/Makefile.all
+index dcf40c0..e2d67da 100644
+--- a/src/modules/c/shell/Makefile.all
++++ b/src/modules/c/shell/Makefile.all
+@@ -5,9 +5,9 @@ echo "LD   $1/apps/sh"
+ 
+ if [ -z "`grep '#define CONFIG_SHELL_BUILTIN_ONLY' ../../../include/lost/config.h`" ];
+ then
+-	$LOST_TOOLS_LD -osh $LDSCRIPT *.o --start-group $2 --end-group
++	$LOST_TOOLS_LD -osh $LDSCRIPT *.o lang/*.o --start-group $2 --end-group
+ else
+-	$LOST_TOOLS_LD -osh $LDSCRIPT *.o cmds/*.o --start-group $2 --end-group
++	$LOST_TOOLS_LD -osh $LDSCRIPT *.o lang/*.o cmds/*.o --start-group $2 --end-group
+ fi
+ 
+ $LOST_TOOLS_STRIP -s sh -o $1/apps/sh
+diff --git a/src/modules/c/shell/commmands.c b/src/modules/c/shell/commmands.c
+index d2ef5ba..4b2e748 100644
+--- a/src/modules/c/shell/commmands.c
++++ b/src/modules/c/shell/commmands.c
+@@ -48,6 +48,9 @@
+ #include <io.h>
+ #include <env.h>
+ 
++#define TMS_MODULE cmd
++#include <tms.h>
++
+ #include <lost/config.h>
+ 
+ 
+@@ -111,7 +114,7 @@ int shell_command_default(int argc, char* argv[], const char* cmd)
+         return 0;
+     }
+ 
+-    puts("Befehl wurde nicht gefunden!");
++    puts(TMS(exec_not_found, "Befehl wurde nicht gefunden!"));
+     return -1;
+ }
+ 
+@@ -124,7 +127,7 @@ int shell_command_start(int argc, char* argv[], const char* cmd)
+     DEBUG_MSG("start");
+ 
+     if (argc < 2) {
+-        puts("Aufruf: start <Pfad> [Argumente ...]");
++        puts(TMS(start_usage, "Aufruf: start <Pfad> [Argumente ...]"));
+         return -1;
+     }
+ 
+@@ -135,9 +138,9 @@ int shell_command_start(int argc, char* argv[], const char* cmd)
+ 
+     if (shell_start_path_app(program, false) == 0) {
+         return 0;
+-    }   
+-    
+-    puts("Befehl wurde nicht gefunden!");
++    }
++
++    puts(TMS(start_not_found, "Befehl wurde nicht gefunden!"));
+     return -1;
+ }
+ 
+@@ -236,35 +239,41 @@ int shell_command_exit(int argc, char* argv[], const char* args)
+ int shell_command_cd(int argc, char* argv[], const char* args)
+ {
+     char* cd_args = strchr(args, ' ');
++    char* path;
++    DIR* dir;
+ 
+     if (cd_args == NULL) {
+-        puts("Aufruf: cd <Verzeichnis>");
+-        return -1;
+-    } else {
+-        cd_args++;
+-        char* path = io_get_absolute_path(cd_args);
+-        if (path == NULL) {
+-            puts("Aufruf: cd <Verzeichnis>");
+-            return -1;
+-        }
++        goto usage;
++    }
+ 
+-        DIR* dir = opendir(path);
+-        if (dir == NULL) {
+-            printf("Wechseln in das Verzeichnis '%s' nicht moeglich\n", path);
+-        } else {
+-            chdir(path);
+-            closedir(dir);
+-        }
+-        free(path);
++    cd_args++;
++    path = io_get_absolute_path(cd_args);
++    if (path == NULL) {
++        goto usage;
++    }
++
++    dir = opendir(path);
++    if (dir == NULL) {
++        printf(TMS(cd_error, "Wechseln in das Verzeichnis '%s' "
++            "nicht moeglich\n"), path);
++    } else {
++        chdir(path);
++        closedir(dir);
+     }
++    free(path);
++
+     return 0;
++
++usage:
++    puts(TMS(cd_usage, "Aufruf: cd <Verzeichnis>"));
++    return -1;
+ }
+ 
+ int shell_command_source(int argc, char* argv[], const char* args)
+ {
+     const char* path;
+     if (argc != 2) {
+-        puts("Aufruf: source <Pfad>");
++        puts(TMS(source_usage, "Aufruf: source <Pfad>"));
+         return -1;
+     }
+ 
+@@ -272,7 +281,8 @@ int shell_command_source(int argc, char* argv[], const char* args)
+     if (shell_script(path)) {
+         return 0;
+     } else {
+-        printf("Ausfuehren des Skripts '%s' fehlgeschlagen.\n", path);
++        printf(TMS(source_error, "Ausfuehren des Skripts '%s' "
++            "fehlgeschlagen.\n"), path);
+         return -1;
+     }
+ }
+@@ -337,8 +347,8 @@ void set_list_vars()
+ 
+ void set_display_usage()
+ {
+-    puts("\nAufruf: set [-d] [<Variable> [<Wert>]]");
+-    puts("  -d: Defaultwert setzen. Wenn die Variable schon gesetzt ist, wird "
+-        "ihr Wert\n      nicht geändert.\n");
++    puts(TMS(set_usage, "\nAufruf: set [-d] [<Variable> [<Wert>]]\n"
++        "  -d: Defaultwert setzen. Wenn die Variable schon gesetzt ist, wird "
++        "ihr Wert\n      nicht geändert.\n"));
+ }
+ 
+diff --git a/src/modules/c/shell/lang/lang_en.c b/src/modules/c/shell/lang/lang_en.c
+new file mode 100644
+index 0000000..d9cb5fe
+--- /dev/null
++++ b/src/modules/c/shell/lang/lang_en.c
+@@ -0,0 +1,75 @@
++/*
++ * Copyright (c) 2009 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <tms.h>
++#include "resstr.h"
++
++static int get_number(int n)
++{
++    return (n == 1 ? 0 : 1);
++}
++
++static const struct tms_strings dict[] = {
++    &__tms_cmd_exec_not_found,
++    "Command not found",
++
++    &__tms_cmd_start_not_found,
++    "Executable not found",
++
++    &__tms_cmd_start_usage,
++    "Usage: start <path> [arguments ...]",
++
++    &__tms_cmd_cd_error,
++    "Cannot change to directory '%s'\n",
++
++    &__tms_cmd_cd_usage,
++    "Usage: cd <directory>",
++
++    &__tms_cmd_source_error,
++    "Cannot execute script '%s'\n",
++
++    &__tms_cmd_source_usage,
++    "Usage: source <path>",
++
++    &__tms_cmd_set_usage,
++    "\nUsage: set [-d] [<variable>] [<value>]\n"
++    "  -d: Set a default value. If the variable is already set, its value is\n"
++    "      not changed\n",
++
++    0,
++    0,
++};
++
++static const struct tms_lang lang = {
++    .lang = "en",
++    .numbers = 2,
++    .get_number = get_number,
++    .strings = dict,
++};
++
++LANGUAGE(&lang)
+diff --git a/src/modules/c/shell/lang/resstr.h b/src/modules/c/shell/lang/resstr.h
+new file mode 100644
+index 0000000..073a262
+--- /dev/null
++++ b/src/modules/c/shell/lang/resstr.h
+@@ -0,0 +1,41 @@
++/*
++ * Copyright (c) 2009 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL;
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO;
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY;
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef RESSTR_H
++#define RESSTR_H
++
++extern void* __tms_cmd_exec_not_found;
++extern void* __tms_cmd_start_not_found;
++extern void* __tms_cmd_start_usage;
++extern void* __tms_cmd_cd_error;
++extern void* __tms_cmd_cd_usage;
++extern void* __tms_cmd_source_error;
++extern void* __tms_cmd_source_usage;
++extern void* __tms_cmd_set_usage;
++
++#endif
+diff --git a/src/modules/c/shell/shell.c b/src/modules/c/shell/shell.c
+index f9d57f8..07cde7a 100644
+--- a/src/modules/c/shell/shell.c
++++ b/src/modules/c/shell/shell.c
+@@ -47,6 +47,7 @@
+ #include <lost/config.h>
+ #include <sleep.h>
+ #include <env.h>
++#include <tms.h>
+ 
+ #include <readline/readline.h>
+ #include <readline/history.h>
+@@ -107,6 +108,8 @@ shell_command_t shell_commands[] = {
+ 
+ int main(int argc, char* argv[])
+ {
++    tms_init();
++
+     // Startskript ausfuehren
+     shell_script("file:/config/shell/start.lsh");
+ 
+-- 
+1.6.0.2
+
+
+From toni at tyndur.org  Sun Nov  7 09:40:51 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Sun, 7 Nov 2010 09:40:51 +0100
+Subject: [tyndur-devel] [PATCH 1/3] tms: In libc verschieben
+In-Reply-To: <1289083326-22314-2-git-send-email-kevin@tyndur.org>
+References: <1289083326-22314-1-git-send-email-kevin@tyndur.org>
+	<1289083326-22314-2-git-send-email-kevin@tyndur.org>
+Message-ID: <20101107084050.GA10706@neo.geekcave.lan>
+
+On Sat, Nov 06 23:42, Kevin Wolf wrote:
+> * tms: Header aus pas/include nach include verschieben
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20101107/5be20626/attachment.pgp>
+
+From toni at tyndur.org  Sun Nov  7 09:54:25 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Sun, 7 Nov 2010 09:54:25 +0100
+Subject: [tyndur-devel]
+	=?iso-8859-1?q?=5BPATCH_2/3=5D_tms=3A_Implementier?=
+	=?iso-8859-1?q?ung_f=FCr_C?=
+In-Reply-To: <1289083326-22314-3-git-send-email-kevin@tyndur.org>
+References: <1289083326-22314-1-git-send-email-kevin@tyndur.org>
+	<1289083326-22314-3-git-send-email-kevin@tyndur.org>
+Message-ID: <20101107085425.GB10706@neo.geekcave.lan>
+
+On Sat, Nov 06 23:42, Kevin Wolf wrote:
+> + tms: Einfache Implementierung für mehrsprachige Programme in C durch
+>   Umbiegen von Pointern auf die jeweilige Übersetzung. Eine Umsetzung
+>   von FormatNum in C fehlt noch.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+> ---
+>  src/modules/include/tms.h |   47 +++++++++++++++++++++++++++++
+>  src/modules/lib/tms.c     |   73 +++++++++++++++++++++++++++++++++++++++++++++
+>  2 files changed, 120 insertions(+), 0 deletions(-)
+>  create mode 100644 src/modules/lib/tms.c
+> 
+> diff --git a/src/modules/include/tms.h b/src/modules/include/tms.h
+> index c7a6823..357333b 100644
+> --- a/src/modules/include/tms.h
+> +++ b/src/modules/include/tms.h
+> @@ -45,4 +45,51 @@ struct tms_lang {
+>  #define LANGUAGE(x) \
+>      static const void* __attribute__((section("tmslang"), used)) __lang = (x);
+>  
+> +#define tms_glue(x, y, z) x ## y ## ## z
+> +#define tms_xglue(x, y, z) tms_glue(x, y, z)
+> +#define tms_stringify(x) #x
+> +#define tms_xstringify(x) tms_stringify(x)
+
+Ich sehe noch nicht wofür du die beiden Makros tms_xglue und
+tms_xstringify benötigst.
+
+> +
+> +/**
+> + * Das Makro TMS_MODULE kann vor dem Einbinden dieses Headers optional gesetzt
+> + * werden und enthält dann den Namen des einbindenden Moduls. Dieser Name wird
+> + * in die Symbolnamen der Strings eingebaut.
+> + */
+> +#ifndef TMS_MODULE
+> +#define TMS_XMODULE
+> +#else
+> +#define TMS_XMODULE tms_xglue(TMS_MODULE, _,)
+> +#endif
+> +
+> +#define TMS_NAME(sym) tms_xglue(__tms_, TMS_XMODULE, sym)
+> +#define TMS_SNAME(sym) tms_xstringify(TMS_NAME(sym))
+> +
+> +/**
+> + * Definiert einen übersetzbaren String. Das Makro wird an Stelle eines
+> + * Stringliterals verwendet (z.B. printf(TMS(hello, "Hello World\n")))
+> + *
+> + * @param sym Eindeutiger Bezeichner für den String. Das Makro legt eine
+> + * Variable der Form __tms_module_sym, wobei module für TMS_MODULE steht.
+> + * @param string Der zu übersetzende String. Wenn keine Übersetzung
+> + * verfügbar ist, wird dieser String benutzt
+> + */
+> +#define TMS(sym, string) \
+> +    ({ \
+> +        asm volatile( \
+> +            ".section tmsstring,\"aw\", at progbits\n" \
+> +            ".global " TMS_SNAME(sym) "\n" \
+> +            TMS_SNAME(sym)":\n"\
+> +            ".int %P0\n" \
+> +            ".section .text" : : "i" (string)); \
+> +        extern void* TMS_NAME(sym); \
+
+Muss das hier wirklich ein void* sein? Spricht etwas gegen einen char*?
+
+> +        TMS_NAME(sym); \
+> +    })
+> +
+> +
+> +/**
+> + * Initialisiert ein mehrsprachiges Programm durch Aktivieren der
+> + * Übersetzungen, die zur Sprache in der Umgebungsvariablen LANG passen.
+> + */
+> +void tms_init(void);
+> +
+>  #endif
+> diff --git a/src/modules/lib/tms.c b/src/modules/lib/tms.c
+> new file mode 100644
+> index 0000000..30401d9
+> --- /dev/null
+> +++ b/src/modules/lib/tms.c
+> @@ -0,0 +1,73 @@
+> +/*
+> + * Copyright (c) 2010 The tyndur Project. All rights reserved.
+> + *
+> + * This code is derived from software contributed to the tyndur Project
+> + * by Kevin Wolf.
+> + *
+> + * Redistribution and use in source and binary forms, with or without
+> + * modification, are permitted provided that the following conditions
+> + * are met:
+> + * 1. Redistributions of source code must retain the above copyright
+> + *    notice, this list of conditions and the following disclaimer.
+> + * 2. Redistributions in binary form must reproduce the above copyright
+> + *    notice, this list of conditions and the following disclaimer in the
+> + *    documentation and/or other materials provided with the distribution.
+> + *
+> + * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+> + * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+> + * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+> + * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
+> + * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+> + * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+> + * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+> + * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+> + * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+> + * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+> + * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+> + */
+> +
+> +#include <tms.h>
+> +#include <string.h>
+> +#include <env.h>
+> +
+> +extern struct tms_lang* __start_tmslang;
+> +extern struct tms_lang* __stop_tmslang;
+> +
+> +/**
+> + * Lädt die Übersetzungen einer bestimmten Sprache.
+> + *
+> + * @param lang Sprachcode der zu ladenden Sprache
+> + */
+> +static void init_lang(const char* lang)
+
+Diese Funktion könnte man auch global machen, oder? Spricht ja nichts
+dagegen, dass ein Programm das ändern kann.
+
+> +{
+> +    struct tms_lang** plang;
+> +    const struct tms_strings* strings;
+> +
+> +    plang= &__start_tmslang;
+> +    while (plang < &__stop_tmslang) {
+> +
+> +        if (!strcmp((*plang)->lang, lang)) {
+> +            strings = (*plang)->strings;
+> +            while (strings->resstr) {
+> +                *(const char**)strings->resstr = strings->translation;
+> +                strings++;
+> +            }
+> +            break;
+> +        }
+> +
+> +        plang++;
+> +    }
+> +}
+> +
+> +/**
+> + * Initialisiert ein mehrsprachiges Programm durch Aktivieren der
+> + * Übersetzungen, die zur Sprache in der Umgebungsvariablen LANG passen.
+> + */
+> +void tms_init(void)
+> +{
+> +    const char* lang = getenv("LANG");
+> +
+> +    if (lang != NULL) {
+> +        init_lang(lang);
+> +    }
+> +}
+> -- 
+> 1.6.0.2
+
+Sonst sieht das gut aus, glaube ich. Wenn du die oben genannten Punkte
+korrigiert oder verworfen hast, rein damit. ;-)
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20101107/9b0c2566/attachment-0001.pgp>
+
+From toni at tyndur.org  Sun Nov  7 10:07:42 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Sun, 7 Nov 2010 10:07:42 +0100
+Subject: [tyndur-devel]
+	=?iso-8859-1?q?=5BPATCH_3/3=5D_shell=3A_Teilweise_?=
+	=?iso-8859-1?q?englische_=DCbersetzung?=
+In-Reply-To: <1289083326-22314-4-git-send-email-kevin@tyndur.org>
+References: <1289083326-22314-1-git-send-email-kevin@tyndur.org>
+	<1289083326-22314-4-git-send-email-kevin@tyndur.org>
+Message-ID: <20101107090742.GC10706@neo.geekcave.lan>
+
+On Sat, Nov 06 23:42, Kevin Wolf wrote:
+> + shell: Angefangene Übersetzung ins Englische (commmands.c mit Ausnahme
+>   der Ausgabe von help)
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20101107/ea3a6d66/attachment.pgp>
+
+From toni at tyndur.org  Sun Nov  7 10:11:22 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Sun, 7 Nov 2010 10:11:22 +0100
+Subject: [tyndur-devel] [PATCH] gitignore: *.rst und *.orig
+In-Reply-To: <1289083149-19991-1-git-send-email-kevin@tyndur.org>
+References: <1289083149-19991-1-git-send-email-kevin@tyndur.org>
+Message-ID: <20101107091122.GD10706@neo.geekcave.lan>
+
+On Sat, Nov 06 23:39, Kevin Wolf wrote:
+> + gitignore: *.rst sind FPC-Ressourcenstrings und *.orig werden wohl von
+>   diff angelegt. Beides nichts, was man im Repo haben will.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Sind die .orig nicht von patch? Aber jo spielt eigentlich keine Rolle.
+;-)
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20101107/a7c42f5e/attachment.pgp>
+
+From kevin at tyndur.org  Sat Nov 13 00:06:50 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 13 Nov 2010 00:06:50 +0100
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH=5D_Pascal-RTL=3A_tar=3A_Durch_5?=
+	=?utf-8?q?12_teilbaren_Dateigr=C3=B6=C3=9Fen?=
+Message-ID: <1289603210-21413-1-git-send-email-kevin@tyndur.org>
+
+! Pascal-RTL: tar: Für genau durch 512 teilbare Dateien wurde ein Block
+  zu viel aus dem Archiv gelesen.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/pas/lib/tar/tar.pas |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/src/modules/pas/lib/tar/tar.pas b/src/modules/pas/lib/tar/tar.pas
+index dd49a05..ca3b12b 100644
+--- a/src/modules/pas/lib/tar/tar.pas
++++ b/src/modules/pas/lib/tar/tar.pas
+@@ -241,7 +241,7 @@ begin
+     end;
+ 
+     if (size mod TAR_BUFFER_SIZE) > 0 then begin
+-        for i := 0 to ((size mod TAR_BUFFER_SIZE) div 512) do begin
++        for i := 0 to ((size mod TAR_BUFFER_SIZE - 1) div 512) do begin
+             ReadNextBlock(i * 512);
+         end;
+         BlockWrite(outfile, buffer, size mod TAR_BUFFER_SIZE);
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sat Nov 13 12:11:40 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 13 Nov 2010 12:11:40 +0100
+Subject: [PATCH 0/4] lpt: UnterstÃ¼tzung fÃ¼r Links in Paketen
+Message-ID: <1289646704-8500-1-git-send-email-kevin@tyndur.org>
+
+Das git-Paket besteht aus einem Haufen Hardlinks. Mit dieser Serie
+sollte zumindest lpt damit zurechtkommen. Fehlt eigentlich nur noch
+die UnterstÃ¼tzung im OS...
+
+Kevin Wolf (4):
+  Pascal-RTL: tar: FileDone raussplitten
+  Pascal-RTL: tar: Dateityp Ã¼berprÃ¼fen
+  Pascal-RTL: tar: Links entpacken
+  lpt: UnterstÃ¼tzung fÃ¼r Links in Paketen
+
+ src/modules/pas/lib/tar/tar.pas |  105 ++++++++++++++++++++++++++++++--------
+ src/modules/pas/lpt/helpers.pas |    6 ++-
+ 2 files changed, 88 insertions(+), 23 deletions(-)
+
+
+From kevin at tyndur.org  Sat Nov 13 12:11:41 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 13 Nov 2010 12:11:41 +0100
+Subject: [tyndur-devel] [PATCH 1/4] Pascal-RTL: tar: FileDone raussplitten
+In-Reply-To: <1289646704-8500-1-git-send-email-kevin@tyndur.org>
+References: <1289646704-8500-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1289646704-8500-2-git-send-email-kevin@tyndur.org>
+
+* Pascal-RTL: tar: Wenn eine Datei fertig behandelt ist, passiert immmr
+  das gleiche, egal ob die jetzt übersprungen, in eine Datei oder in
+  einen String entpackt worden ist. Also kommt das in eine gemeinsame
+  Funktion.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/pas/lib/tar/tar.pas |   41 +++++++++++++++++---------------------
+ 1 files changed, 18 insertions(+), 23 deletions(-)
+
+diff --git a/src/modules/pas/lib/tar/tar.pas b/src/modules/pas/lib/tar/tar.pas
+index ca3b12b..abe3b28 100644
+--- a/src/modules/pas/lib/tar/tar.pas
++++ b/src/modules/pas/lib/tar/tar.pas
+@@ -31,6 +31,7 @@ type
+         private
+             procedure ReadNextBlock(buffer_offset: dword);
+             function BufferIsZero: boolean;
++            procedure FileDone;
+ 
+         private
+             f: file;
+@@ -165,6 +166,20 @@ begin
+     end;
+ end;
+ 
++procedure TTarArchive.FileDone;
++begin
++    // Header der naechsten Datei einlesen
++    ReadNextBlock(0);
++
++    // Zwei Leerbloecke bedeuten das Ende der Datei
++    if not end_of_archive and BufferIsZero() then begin
++        ReadNextBlock(0);
++        if not end_of_archive and BufferIsZero() then begin
++            end_of_archive := true;
++        end;
++    end;
++end;
++
+ function TTarArchive.ExtractString(silent: boolean = false): string;
+ var
+     filename: String;
+@@ -206,14 +221,7 @@ begin
+         WriteLn(#13, '[', filename, '] ', size, '/', size, ' Bytes entpackt');
+     end;
+ 
+-    ReadNextBlock(0);
+-
+-    if not end_of_archive and BufferIsZero() then begin
+-        ReadNextBlock(0);
+-        if not end_of_archive and BufferIsZero() then begin
+-            end_of_archive := true;
+-        end;
+-    end;
++    FileDone;
+ 
+     ExtractString := target;
+ end;
+@@ -248,14 +256,8 @@ begin
+     end;
+     WriteLn(#13, '[', filename, '] ', size, '/', size, ' Bytes entpackt');
+ 
+-    ReadNextBlock(0);
++    FileDone;
+ 
+-    if not end_of_archive and BufferIsZero() then begin
+-        ReadNextBlock(0);
+-        if not end_of_archive and BufferIsZero() then begin
+-            end_of_archive := true;
+-        end;
+-    end;
+ end;
+ 
+ procedure TTarArchive.SkipFile;
+@@ -269,14 +271,7 @@ begin
+         ReadNextBlock(0);
+     end;
+ 
+-    ReadNextBlock(0);
+-
+-    if not end_of_archive and BufferIsZero() then begin
+-        ReadNextBlock(0);
+-        if not end_of_archive and BufferIsZero() then begin
+-            end_of_archive := true;
+-        end;
+-    end;
++    FileDone;
+ end;
+ 
+ end.
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sat Nov 13 12:11:42 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 13 Nov 2010 12:11:42 +0100
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH_2/4=5D_Pascal-RTL=3A_tar=3A_Dat?=
+	=?utf-8?b?ZWl0eXAgw7xiZXJwcsO8ZmVu?=
+In-Reply-To: <1289646704-8500-1-git-send-email-kevin@tyndur.org>
+References: <1289646704-8500-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1289646704-8500-3-git-send-email-kevin@tyndur.org>
+
+! Pascal-RTL: tar: Vor dem Entpacken überprüfen, ob der aktuelle Eintrag
+  überhaupt eine reguläre Datei ist
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/pas/lib/tar/tar.pas |    8 ++++++++
+ 1 files changed, 8 insertions(+), 0 deletions(-)
+
+diff --git a/src/modules/pas/lib/tar/tar.pas b/src/modules/pas/lib/tar/tar.pas
+index abe3b28..2faeee9 100644
+--- a/src/modules/pas/lib/tar/tar.pas
++++ b/src/modules/pas/lib/tar/tar.pas
+@@ -191,6 +191,10 @@ begin
+     size := NextSize;
+     filename := NextFilename;
+ 
++    if NextFiletype <> TAR_TYPE_FILE then begin
++        exit('');
++    end;
++
+     target := '';
+ 
+     if not silent then begin
+@@ -236,6 +240,10 @@ begin
+     size := NextSize;
+     filename := NextFilename;
+ 
++    if NextFiletype <> TAR_TYPE_FILE then begin
++        exit;
++    end;
++
+     Write('[', filename, '] Entpacken...');
+     for i := 1 to size div TAR_BUFFER_SIZE do begin
+         buffer_pos := 0;
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sat Nov 13 12:11:43 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 13 Nov 2010 12:11:43 +0100
+Subject: [tyndur-devel] [PATCH 3/4] Pascal-RTL: tar: Links entpacken
+In-Reply-To: <1289646704-8500-1-git-send-email-kevin@tyndur.org>
+References: <1289646704-8500-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1289646704-8500-4-git-send-email-kevin@tyndur.org>
+
++ Pascal-RTL: tar: Unterstützung für harte und symbolische Links
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/pas/lib/tar/tar.pas |   58 +++++++++++++++++++++++++++++++++++++++
+ 1 files changed, 58 insertions(+), 0 deletions(-)
+
+diff --git a/src/modules/pas/lib/tar/tar.pas b/src/modules/pas/lib/tar/tar.pas
+index 2faeee9..7ce475c 100644
+--- a/src/modules/pas/lib/tar/tar.pas
++++ b/src/modules/pas/lib/tar/tar.pas
+@@ -7,6 +7,7 @@ const
+     TAR_BUFFER_SIZE  = 65536;
+ 
+     TAR_TYPE_FILE      = '0';
++    TAR_TYPE_HARDLINK  = '1';
+     TAR_TYPE_SYMLINK   = '2';
+     TAR_TYPE_DIRECTORY = '5';
+ 
+@@ -22,10 +23,12 @@ type
+         function NextFilename: String;
+         function NextSize: dword;
+         function NextFiletype: char;
++        function NextLinkTarget: String;
+ 
+         function ExtractString(silent: boolean = false): String;
+ 
+         procedure ExtractFile(var outfile: file);
++        procedure ExtractLink(basepath: String);
+         procedure SkipFile;
+ 
+         private
+@@ -43,6 +46,24 @@ type
+ 
+ implementation
+ 
++{$IF DEFINED(LINUX)}
++uses baseunix;
++
++procedure c_io_create_link(target, link: PChar; hardlink: boolean);
++begin
++    if hardlink then begin
++        fpLink(target, link);
++    end else begin
++        fpSymlink(target, link);
++    end;
++end;
++{$ELSEIF DEFINED(TYNDUR)}
++procedure c_io_create_link(target, link: PChar; hardlink: boolean);
++    cdecl; external name 'io_create_link';
++{$ELSE}
++{$ERROR OS not supported!}
++{$ENDIF}
++
+ type
+     TTarFileHeader = packed record
+         name:   array [1..100] of char;
+@@ -153,6 +174,20 @@ begin
+     end;
+ end;
+ 
++function TTarArchive.NextLinkTarget: String;
++var
++    i: longint;
++begin
++    NextLinkTarget := PTarFileHeader(@buffer)^.link;
++
++    for i := 1 to 100 do begin
++        if NextLinkTarget[i] = #0 then begin
++            SetLength(NextLinkTarget, i - 1);
++            break;
++        end;
++    end;
++end;
++
+ function TTarArchive.NextSize: dword;
+ begin
+     NextSize := OctalToInt(PTarFileHeader(@buffer)^.size);
+@@ -265,7 +300,30 @@ begin
+     WriteLn(#13, '[', filename, '] ', size, '/', size, ' Bytes entpackt');
+ 
+     FileDone;
++end;
+ 
++procedure TTarArchive.ExtractLink(basepath: String);
++var
++    target_fn, target_path: String;
++    link_fn, link_path:     String;
++    hard:                   boolean;
++begin
++    if not (NextFiletype in [TAR_TYPE_SYMLINK, TAR_TYPE_HARDLINK]) then begin
++        exit;
++    end;
++
++    link_fn := NextFilename;
++    link_path := basepath + '/' + link_fn + #0;
++
++    target_fn := NextLinkTarget;
++    target_path := basepath + '/' + target_fn + #0;
++
++    hard := (NextFiletype = TAR_TYPE_HARDLINK);
++
++    c_io_create_link(@target_path[1], @link_path[1], hard);
++    WriteLn('[', link_fn, '] Link auf ' + target_fn + ' erstellt');
++
++    FileDone;
+ end;
+ 
+ procedure TTarArchive.SkipFile;
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sat Nov 13 12:11:44 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 13 Nov 2010 12:11:44 +0100
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH_4/4=5D_lpt=3A_Unterst=C3=BCtzun?=
+	=?utf-8?q?g_f=C3=BCr_Links_in_Paketen?=
+In-Reply-To: <1289646704-8500-1-git-send-email-kevin@tyndur.org>
+References: <1289646704-8500-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1289646704-8500-5-git-send-email-kevin@tyndur.org>
+
++ lpt: Unterstützung für harte und symbolische Links in Paketen
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/pas/lpt/helpers.pas |    6 +++++-
+ 1 files changed, 5 insertions(+), 1 deletions(-)
+
+diff --git a/src/modules/pas/lpt/helpers.pas b/src/modules/pas/lpt/helpers.pas
+index b26ff4b..b9a4b76 100644
+--- a/src/modules/pas/lpt/helpers.pas
++++ b/src/modules/pas/lpt/helpers.pas
+@@ -217,6 +217,7 @@ var
+     dir, filename, ext: String;
+ 
+     f: file;
++    filetype: char;
+ begin
+     while tar.hasNext do begin
+         path := tar.NextFilename;
+@@ -224,11 +225,14 @@ begin
+ 
+         mkpath(targetpath + '/' + dir);
+ 
+-        if tar.NextFiletype = TAR_TYPE_FILE then begin
++        filetype := tar.NextFiletype;
++        if filetype = TAR_TYPE_FILE then begin
+             Assign(f, targetpath + '/' + path);
+             Rewrite(f, 1);
+             tar.ExtractFile(f);
+             Close(f);
++        end else if filetype in [TAR_TYPE_HARDLINK, TAR_TYPE_SYMLINK] then begin
++            tar.ExtractLink(targetpath);
+         end else begin
+             tar.SkipFile;
+         end;
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sat Nov 13 13:03:52 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 13 Nov 2010 13:03:52 +0100
+Subject: [tyndur-devel] [PATCH 0/2] Strg+Pfeiltaste in der Shell
+Message-ID: <1289649834-15188-1-git-send-email-kevin@tyndur.org>
+
+Wortweises Bewegen haben wir zwar schon mit Alt drin, aber ich benutze
+normal Strg und wundere mich stÃ¤ndig, wenn die Shell nicht tut, was ich
+meine. ;-)
+
+Kevin Wolf (2):
+  vterm: vt100-Sequenzen fÃ¼r Strg+Pfeiltaste
+  libc: readline: Strg+Pfeiltaste fÃ¼r wortweise Bewegung
+
+ src/modules/lib/readline.c      |    4 ++++
+ src/modules/vterm/input.c       |    3 ++-
+ src/modules/vterm/vt100_input.c |   29 +++++++++++++++++++++++------
+ src/modules/vterm/vterm.h       |    5 +++--
+ 4 files changed, 32 insertions(+), 9 deletions(-)
+
+
+From kevin at tyndur.org  Sat Nov 13 13:03:53 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 13 Nov 2010 13:03:53 +0100
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH_1/2=5D_vterm=3A_vt100-Sequenzen?=
+	=?utf-8?q?_f=C3=BCr_Strg+Pfeiltaste?=
+In-Reply-To: <1289649834-15188-1-git-send-email-kevin@tyndur.org>
+References: <1289649834-15188-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1289649834-15188-2-git-send-email-kevin@tyndur.org>
+
++ vterm: vt100-Sequenzen für Strg+Pfeiltaste
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/vterm/input.c       |    3 ++-
+ src/modules/vterm/vt100_input.c |   29 +++++++++++++++++++++++------
+ src/modules/vterm/vterm.h       |    5 +++--
+ 3 files changed, 28 insertions(+), 9 deletions(-)
+
+diff --git a/src/modules/vterm/input.c b/src/modules/vterm/input.c
+index 25fb78f..95cf991 100644
+--- a/src/modules/vterm/input.c
++++ b/src/modules/vterm/input.c
+@@ -167,7 +167,8 @@ static void send_key_to_vterm(vterminal_t* vterm, uint8_t keycode,
+     }
+ 
+     // Eingabe an vt100-Emulation weiterleiten
+-    len = vt100_process_input(current_vterm, keycode, buf, sizeof(buf));
++    len = vt100_process_input(current_vterm, keycode, &modifiers,
++        buf, sizeof(buf));
+     if (len != -1) {
+         vterm_process_input(buf, len);
+         return;
+diff --git a/src/modules/vterm/vt100_input.c b/src/modules/vterm/vt100_input.c
+index 0b3a02e..6520351 100644
+--- a/src/modules/vterm/vt100_input.c
++++ b/src/modules/vterm/vt100_input.c
+@@ -45,14 +45,15 @@
+  *
+  * @param vterm     VTerm-Handle
+  * @param keycode   Keycode der gedrueckten Taste
++ * @param mod       Gedrueckte Modifier-Tasten
+  * @param buffer    Puffer in dem das Resultat abgelegt werden kann
+  * @param buffer_sz Groesse des Puffers
+  *
+  * @return Anzahl der Zeichen die neu im Puffer sind oder -1 wenn die Emulation
+  *         nichts mit der Taste anfangen kann
+  */
+-int vt100_process_input(vterminal_t* vterm, uint8_t keycode, char* buffer,
+-    size_t buffer_sz)
++int vt100_process_input(vterminal_t* vterm, uint8_t keycode,
++    struct modifiers* mod, char* buffer, size_t buffer_sz)
+ {
+     const char* res = NULL;
+ 
+@@ -60,22 +61,38 @@ int vt100_process_input(vterminal_t* vterm, uint8_t keycode, char* buffer,
+     switch (keycode) {
+         case KEYCODE_ARROW_UP:
+             // vt52: <ESC>A  w CKM: \033[A  wo CKM: \033OA
+-            res = "\033[A";
++            if (mod->control) {
++                res = "\033[1;5A";
++            } else {
++                res = "\033[A";
++            }
+             break;
+ 
+         case KEYCODE_ARROW_DOWN:
+             // vt52: <ESC>B  w CKM: \033[B  wo CKM: \033OB
+-            res = "\033[B";
++            if (mod->control) {
++                res = "\033[1;5B";
++            } else {
++                res = "\033[B";
++            }
+             break;
+ 
+         case KEYCODE_ARROW_RIGHT:
+             // vt52: <ESC>C  w CKM: \033[C  wo CKM: \033OC
+-            res = "\033[C";
++            if (mod->control) {
++                res = "\033[1;5C";
++            } else {
++                res = "\033[C";
++            }
+             break;
+ 
+         case KEYCODE_ARROW_LEFT:
+             // vt52: <ESC>D  w CKM: \033[D  wo CKM: \033OD
+-            res = "\033[D";
++            if (mod->control) {
++                res = "\033[1;5D";
++            } else {
++                res = "\033[D";
++            }
+             break;
+ 
+         case KEYCODE_HOME:
+diff --git a/src/modules/vterm/vterm.h b/src/modules/vterm/vterm.h
+index 2f1f68e..a7b6ef7 100644
+--- a/src/modules/vterm/vterm.h
++++ b/src/modules/vterm/vterm.h
+@@ -241,14 +241,15 @@ static inline void buffer_position(vterm_output_t* out, position_t screen_pos,
+  *
+  * @param vterm     VTerm-Handle
+  * @param keycode   Keycode der gedrueckten Taste
++ * @param mod       Gedrueckte Modifier-Tasten
+  * @param buffer    Puffer in dem das Resultat abgelegt werden kann
+  * @param buffer_sz Groesse des Puffers
+  *
+  * @return Anzahl der Zeichen die neu im Puffer sind oder -1 wenn die Emulation
+  *         nichts mit der Taste anfangen kann
+  */
+-int vt100_process_input(vterminal_t* vterm, uint8_t keycode, char* buffer,
+-    size_t buffer_sz);
++int vt100_process_input(vterminal_t* vterm, uint8_t keycode,
++    struct modifiers* mod, char* buffer, size_t buffer_sz);
+ 
+ 
+ /// Ausgabe in vt100-Emulation verarbeiten
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sat Nov 13 13:03:54 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 13 Nov 2010 13:03:54 +0100
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH_2/2=5D_libc=3A_readline=3A_Strg?=
+	=?utf-8?q?+Pfeiltaste_f=C3=BCr_wortweise_Bewegung?=
+In-Reply-To: <1289649834-15188-1-git-send-email-kevin@tyndur.org>
+References: <1289649834-15188-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1289649834-15188-3-git-send-email-kevin@tyndur.org>
+
++ libc: readline: Wortweises Bewegen geht jezt nicht nur mit
+  Alt+Pfeiltaste, sondern auch mit Strg+Pfeiltaste
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/lib/readline.c |    4 ++++
+ 1 files changed, 4 insertions(+), 0 deletions(-)
+
+diff --git a/src/modules/lib/readline.c b/src/modules/lib/readline.c
+index 163cf70..d27835c 100644
+--- a/src/modules/lib/readline.c
++++ b/src/modules/lib/readline.c
+@@ -94,6 +94,10 @@ static struct {
+     { L"\033\033[C", FORWARD_WORD },
+     /// Alt + Pfeil links
+     { L"\033\033[D", BACKWARD_WORD },
++    /// Strg + Pfeil rechts
++    { L"\033[1;5C", FORWARD_WORD },
++    /// Strg + Pfeil links
++    { L"\033[1;5D", BACKWARD_WORD },
+ 
+     /// Enter
+     { L"\n", ACCEPT_LINE },
+-- 
+1.6.0.2
+
+
+From toni at tyndur.org  Sun Nov 14 09:26:43 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Sun, 14 Nov 2010 09:26:43 +0100
+Subject: [tyndur-devel]
+	=?iso-8859-1?q?=5BPATCH=5D_Pascal-RTL=3A_tar=3A_Du?=
+	=?iso-8859-1?q?rch_512_teilbaren_Dateigr=F6=DFen?=
+In-Reply-To: <1289603210-21413-1-git-send-email-kevin@tyndur.org>
+References: <1289603210-21413-1-git-send-email-kevin@tyndur.org>
+Message-ID: <20101114082643.GA585@thales.kaufmann.lan>
+
+On Sat, Nov 13 00:06, Kevin Wolf wrote:
+> ! Pascal-RTL: tar: Für genau durch 512 teilbare Dateien wurde ein Block
+>   zu viel aus dem Archiv gelesen.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20101114/085d78e6/attachment.pgp>
+
+From max at tyndur.org  Sun Nov 14 21:02:58 2010
+From: max at tyndur.org (max at tyndur.org)
+Date: Sun, 14 Nov 2010 21:02:58 +0100
+Subject: [tyndur-devel] [PATCH] shell: lang_en
+Message-ID: <1289764978-31282-1-git-send-email-max@tyndur.org>
+
+From: Max Reitz <max at tyndur.org>
+
+* -Werror mag es nicht, wenn bei der Initialisierung von Strukturen
+  in einem Array keine eigenen Klammern verwendet werden.
+
+Signed-off-by: Max Reitz <max at tyndur.org>
+---
+ src/modules/c/shell/lang/lang_en.c |   58 +++++++++++++++++++++++------------
+ 1 files changed, 38 insertions(+), 20 deletions(-)
+
+diff --git a/src/modules/c/shell/lang/lang_en.c b/src/modules/c/shell/lang/lang_en.c
+index d9cb5fe..f209955 100644
+--- a/src/modules/c/shell/lang/lang_en.c
++++ b/src/modules/c/shell/lang/lang_en.c
+@@ -35,34 +35,52 @@ static int get_number(int n)
+ }
+ 
+ static const struct tms_strings dict[] = {
+-    &__tms_cmd_exec_not_found,
+-    "Command not found",
++    {
++        &__tms_cmd_exec_not_found,
++        "Command not found"
++    },
+ 
+-    &__tms_cmd_start_not_found,
+-    "Executable not found",
++    {
++        &__tms_cmd_start_not_found,
++        "Executable not found"
++    },
+ 
+-    &__tms_cmd_start_usage,
+-    "Usage: start <path> [arguments ...]",
++    {
++        &__tms_cmd_start_usage,
++        "Usage: start <path> [arguments ...]"
++    },
+ 
+-    &__tms_cmd_cd_error,
+-    "Cannot change to directory '%s'\n",
++    {
++        &__tms_cmd_cd_error,
++        "Cannot change to directory '%s'\n"
++    },
+ 
+-    &__tms_cmd_cd_usage,
+-    "Usage: cd <directory>",
++    {
++        &__tms_cmd_cd_usage,
++        "Usage: cd <directory>"
++    },
+ 
+-    &__tms_cmd_source_error,
+-    "Cannot execute script '%s'\n",
++    {
++        &__tms_cmd_source_error,
++        "Cannot execute script '%s'\n"
++    },
+ 
+-    &__tms_cmd_source_usage,
+-    "Usage: source <path>",
++    {
++        &__tms_cmd_source_usage,
++        "Usage: source <path>"
++    },
+ 
+-    &__tms_cmd_set_usage,
+-    "\nUsage: set [-d] [<variable>] [<value>]\n"
+-    "  -d: Set a default value. If the variable is already set, its value is\n"
+-    "      not changed\n",
++    {
++        &__tms_cmd_set_usage,
++        "\nUsage: set [-d] [<variable>] [<value>]\n"
++        "  -d: Set a default value. If the variable is already set, its value is\n"
++        "      not changed\n"
++    },
+ 
+-    0,
+-    0,
++    {
++        0,
++        0
++    },
+ };
+ 
+ static const struct tms_lang lang = {
+-- 
+1.7.1
+
+
+From kevin at tyndur.org  Sun Nov 14 21:14:05 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 14 Nov 2010 21:14:05 +0100
+Subject: [tyndur-devel] [PATCH] shell: Build-Fix fuer lang_en
+In-Reply-To: <1289764978-31282-1-git-send-email-max@tyndur.org>
+References: <1289764978-31282-1-git-send-email-max@tyndur.org>
+Message-ID: <1289765645-6114-1-git-send-email-kevin@tyndur.org>
+
+! shell: Wenn man boese Syntax benutzt, darf man nicht vergessen, die
+  Makefile.conf einzuchecken, die die passende Warnung abschaltet
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+
+Das hier wäre die Alternativlösung, die für die Pascalprogramme schon
+fleißig eingesetzt wird. Ich bin da relativ leidenschaftslos, welchen
+von beiden Patches wir nehmen.
+
+Jetzt muss nur jemand entscheiden... Toni?
+
+ src/modules/c/shell/lang/Makefile.conf |    1 +
+ 1 files changed, 1 insertions(+), 0 deletions(-)
+ create mode 100644 src/modules/c/shell/lang/Makefile.conf
+
+diff --git a/src/modules/c/shell/lang/Makefile.conf b/src/modules/c/shell/lang/Makefile.conf
+new file mode 100644
+index 0000000..594ef2a
+--- /dev/null
++++ b/src/modules/c/shell/lang/Makefile.conf
+@@ -0,0 +1 @@
++CC_FLAGS_APPEND="-Wno-missing-braces"
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sun Nov 14 21:18:10 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 14 Nov 2010 21:18:10 +0100
+Subject: [tyndur-devel] [PATCH 0/3] Unser lpt soll schoener werden
+Message-ID: <1289765893-6272-1-git-send-email-kevin@tyndur.org>
+
+Ein paar Kleinigkeiten für lpt.
+
+Kevin Wolf (3):
+  Pascal-RTL: multilang: Defaultsprache
+  lpt: Statistik nach dem Herunterladen anzeigen
+  lpt: User-Agent senden
+
+ src/modules/pas/lib/tyndur/multilang.pas |   22 ++++++++++++++++++++++
+ src/modules/pas/lpt/helpers.pas          |   12 ++++++++++++
+ src/modules/pas/lpt/lang/lang_en.c       |    4 ++++
+ src/modules/pas/lpt/lang/resstr.h        |    1 +
+ 4 files changed, 39 insertions(+), 0 deletions(-)
+
+
+From kevin at tyndur.org  Sun Nov 14 21:18:11 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 14 Nov 2010 21:18:11 +0100
+Subject: [tyndur-devel] [PATCH 1/3] Pascal-RTL: multilang: Defaultsprache
+In-Reply-To: <1289765893-6272-1-git-send-email-kevin@tyndur.org>
+References: <1289765893-6272-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1289765893-6272-2-git-send-email-kevin@tyndur.org>
+
+! Pascal-RTL: multilang: Wenn keine Sprache initialisiert ist gibt
+  FormatNum einen Segfault, weil es get_number von der aktuellen Sprache
+  aufruft. Beim Start wird jetzt eine Defaultsprache geladen, die auf
+  deutsche (und englische) Grammatik passt.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/pas/lib/tyndur/multilang.pas |   22 ++++++++++++++++++++++
+ 1 files changed, 22 insertions(+), 0 deletions(-)
+
+diff --git a/src/modules/pas/lib/tyndur/multilang.pas b/src/modules/pas/lib/tyndur/multilang.pas
+index 112e2ba..888d9d8 100644
+--- a/src/modules/pas/lib/tyndur/multilang.pas
++++ b/src/modules/pas/lib/tyndur/multilang.pas
+@@ -54,6 +54,10 @@ implementation
+         i: integer;
+     begin
+         dict := arg;
++        if dict = nil then begin
++            exit(value);
++        end;
++
+         i := 0;
+         while dict[i].resstr <> nil do begin
+             if Pointer(name) = Pointer(dict[i].resstr^.name) then begin
+@@ -152,12 +156,30 @@ implementation
+         exit(Format(s, args));
+     end;
+ 
++function default_get_number(n: integer): integer; cdecl;
++begin
++    if n = 1 then begin
++        exit(0);
++    end else begin
++        exit(1);
++    end;
++end;
+ 
+ var
+     tmslang_start: PLanguage; external name '__start_tmslang';
+     tmslang_end: PLanguage; external name '__stop_tmslang';
+ 
++    default_lang: TLanguageData;
++
+ initialization
++    with default_lang do begin
++        lang        := 'C';
++        numbers     := 2;
++        get_number  := @default_get_number;
++        strings     := nil;
++    end;
++
++    cur_lang := @default_lang;
+ 
+     lang := @tmslang_start;
+     num_lang := PPLanguage(@tmslang_end) - PPLanguage(@tmslang_start);
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sun Nov 14 21:18:12 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 14 Nov 2010 21:18:12 +0100
+Subject: [tyndur-devel] [PATCH 2/3] lpt: Statistik nach dem Herunterladen
+	anzeigen
+In-Reply-To: <1289765893-6272-1-git-send-email-kevin@tyndur.org>
+References: <1289765893-6272-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1289765893-6272-3-git-send-email-kevin@tyndur.org>
+
++ lpt: Dateigroesse und benoetigte Zeit anzeigen, nachdem eine Datei
+  heruntergeladen worden ist.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/pas/lpt/helpers.pas    |   11 +++++++++++
+ src/modules/pas/lpt/lang/lang_en.c |    4 ++++
+ src/modules/pas/lpt/lang/resstr.h  |    1 +
+ 3 files changed, 16 insertions(+), 0 deletions(-)
+
+diff --git a/src/modules/pas/lpt/helpers.pas b/src/modules/pas/lpt/helpers.pas
+index b9a4b76..b4783b9 100644
+--- a/src/modules/pas/lpt/helpers.pas
++++ b/src/modules/pas/lpt/helpers.pas
+@@ -22,6 +22,7 @@ resourcestring
+     rsBytesReceivedPartial = '%d/%d Bytes empfangen';
+ 
+     rsDownloading = 'Herunterladen von %s';
++    rsDownloadSummary = '%d %[0:Byte:Bytes] in %ds heruntergeladen';
+     rsConnecting = 'Verbinde...';
+     rsHTTPError = 'Fehler: HTTP-Statuscode';
+ 
+@@ -110,16 +111,26 @@ begin
+     end;
+ end;
+ 
++function GetTickCount: Int64; cdecl; external name 'get_tick_count';
++
+ function DownloadToTarArchive(url: String): TTarArchive;
+ var
+     f: File;
+     httpc: HTTPRequest;
+     tar: TTarArchive;
+     i: integer;
++
++    start_time, end_time: Int64;
+ begin
+     DownloadToTarArchive := nil;
++
++    start_time := GetTickCount;
+     httpc := StartDownload(url);
++    end_time := GetTickCount;
++
+     if httpc <> nil then begin
++        WriteLn(FormatNum(rsDownloadSummary, [httpc.responseLength,
++            ((end_time - start_time) div 1000000)]));
+         tar := TTarArchive.create(httpc.binaryResponseBody, httpc.responseLength);
+         DownloadToTarArchive := tar;
+     end;
+diff --git a/src/modules/pas/lpt/lang/lang_en.c b/src/modules/pas/lpt/lang/lang_en.c
+index 2a11663..327e837 100644
+--- a/src/modules/pas/lpt/lang/lang_en.c
++++ b/src/modules/pas/lpt/lang/lang_en.c
+@@ -47,6 +47,10 @@ static const struct tms_strings dict[] = {
+     &RESSTR_HELPERS_RSDOWNLOADING,
+     "Downloading %s",
+ 
++    // %d %[0:Byte:Bytes] in %ds heruntergeladen
++    &RESSTR_HELPERS_RSDOWNLOADSUMMARY,
++    "Downloaded %d %[0:byte:bytes] in %ds",
++
+     // Verbinde...
+     &RESSTR_HELPERS_RSCONNECTING,
+     "Connecting...",
+diff --git a/src/modules/pas/lpt/lang/resstr.h b/src/modules/pas/lpt/lang/resstr.h
+index 707c725..4797955 100644
+--- a/src/modules/pas/lpt/lang/resstr.h
++++ b/src/modules/pas/lpt/lang/resstr.h
+@@ -32,6 +32,7 @@
+ extern void* RESSTR_HELPERS_RSBYTESRECEIVED;
+ extern void* RESSTR_HELPERS_RSBYTESRECEIVEDPARTIAL;
+ extern void* RESSTR_HELPERS_RSDOWNLOADING;
++extern void* RESSTR_HELPERS_RSDOWNLOADSUMMARY;
+ extern void* RESSTR_HELPERS_RSCONNECTING;
+ extern void* RESSTR_HELPERS_RSHTTPERROR;
+ extern void* RESSTR_P$LPT_RSUSAGE;
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sun Nov 14 21:18:13 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 14 Nov 2010 21:18:13 +0100
+Subject: [tyndur-devel] [PATCH 3/3] lpt: User-Agent senden
+In-Reply-To: <1289765893-6272-1-git-send-email-kevin@tyndur.org>
+References: <1289765893-6272-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1289765893-6272-4-git-send-email-kevin@tyndur.org>
+
++ lpt: User-Agent mitsenden
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/pas/lpt/helpers.pas |    1 +
+ 1 files changed, 1 insertions(+), 0 deletions(-)
+
+diff --git a/src/modules/pas/lpt/helpers.pas b/src/modules/pas/lpt/helpers.pas
+index b4783b9..f143ead 100644
+--- a/src/modules/pas/lpt/helpers.pas
++++ b/src/modules/pas/lpt/helpers.pas
+@@ -78,6 +78,7 @@ begin
+     httpc := HTTPRequest.create(url);
+     httpc.setRequestHeader('Pragma', 'no-cache');
+     httpc.setRequestHeader('Cache-Control', 'no-cache');
++    httpc.setRequestHeader('User-Agent', 'lpt');
+     WriteLn(Format(rsDownloading, [url]));
+     Write(rsConnecting);
+     httpc.onReadTick := @DrawProgress;
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Mon Nov 15 22:50:08 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Mon, 15 Nov 2010 22:50:08 +0100
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH=5D_rpcbench=3A_Benchmark_f?=
+	=?utf-8?q?=C3=BCr_Syscall?=
+Message-ID: <1289857808-15324-1-git-send-email-kevin@tyndur.org>
+
++ rpcbench: Mit dem Parameter sys misst rpcbench jetzt die Dauer eines
+  get_tick_count-Syscalls. Das ist recht hilfreich, wenn man am
+  Optimieren des Kernels verzweifeln möchte.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/rpcbench/rpcbench.c |   23 +++++++++++++++++++++++
+ 1 files changed, 23 insertions(+), 0 deletions(-)
+
+diff --git a/src/modules/rpcbench/rpcbench.c b/src/modules/rpcbench/rpcbench.c
+index f4fc41c..7b407eb 100644
+--- a/src/modules/rpcbench/rpcbench.c
++++ b/src/modules/rpcbench/rpcbench.c
+@@ -49,6 +49,7 @@
+ void display_usage(void);
+ 
+ int client(void);
++int syscall(void);
+ void display_stats(uint32_t time, uint64_t data_size);
+ 
+ int server(void);
+@@ -72,6 +73,8 @@ int main(int argc, char* argv[])
+         return client();
+     } else if (strcmp(argv[1], "server") == 0) {
+         return server();
++    } else if (strcmp(argv[1], "sys") == 0) {
++        return syscall();
+     } else {
+         display_usage();
+         return -1;
+@@ -128,6 +131,26 @@ int client()
+     return 0;
+ }
+ 
++int syscall(void)
++{
++    int i;
++    uint64_t total, t1, t2;
++
++    total = 0;
++    for (i = 0; i < 30; i++) {
++        asm volatile("rdtsc" : "=A" (t1));
++        get_tick_count();
++        asm volatile("rdtsc" : "=A" (t2));
++        printf("syscalls: %lld Takte\n", t2 - t1);
++        total += t2 - t1;
++    }
++    printf("syscalls: Insgesamt %lld Takte, Durchschnitt %lld\n\n",
++        total, total / 30);
++
++
++    return 0;
++}
++
+ void display_stats(uint32_t time, uint64_t data_size)
+ {
+     printf(" %lld Bytes in %d Sekunden transportiert\n", data_size, 
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Tue Nov 16 23:45:17 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Tue, 16 Nov 2010 23:45:17 +0100
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH=5D_kernel2=3A_Kein_EOI_f=C3=BCr?=
+	=?utf-8?q?_Syscalls?=
+Message-ID: <1289947517-16956-1-git-send-email-kevin@tyndur.org>
+
+! kernel2: Für jeden Syscall an beide PICs einen EOI zu schicken,
+  verursacht ziemlich viel unnötige I/O-Last, was vor allem unter KVM
+  sehr deutlich zu spüren ist
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/src/arch/i386/interrupts/im.c |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/src/kernel2/src/arch/i386/interrupts/im.c b/src/kernel2/src/arch/i386/interrupts/im.c
+index d8a7c1b..cbf6b14 100644
+--- a/src/kernel2/src/arch/i386/interrupts/im.c
++++ b/src/kernel2/src/arch/i386/interrupts/im.c
+@@ -719,7 +719,7 @@ void im_end_of_interrupt(uint8_t interrupt)
+ {
+     // Nur mit dem traditionellen PIC
+     if (use_apic == false) {
+-        if ((interrupt >= IM_IRQ_BASE) && (interrupt <= IM_IRQ_BASE + 16)) {
++        if ((interrupt >= IM_IRQ_BASE) && (interrupt < IM_IRQ_BASE + 16)) {
+             pic_eoi(interrupt - IM_IRQ_BASE);
+         }
+     } else {
+-- 
+1.6.0.2
+
+
+From toni at tyndur.org  Wed Nov 17 00:21:31 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Wed, 17 Nov 2010 00:21:31 +0100
+Subject: [tyndur-devel]
+	=?iso-8859-1?q?=5BPATCH=5D_kernel2=3A_Kein_EOI_f?=
+	=?iso-8859-1?q?=FCr_Syscalls?=
+In-Reply-To: <1289947517-16956-1-git-send-email-kevin@tyndur.org>
+References: <1289947517-16956-1-git-send-email-kevin@tyndur.org>
+Message-ID: <20101116232130.GA10413@thales.kaufmann.lan>
+
+On Tue, Nov 16 23:45, Kevin Wolf wrote:
+> ! kernel2: Für jeden Syscall an beide PICs einen EOI zu schicken,
+>   verursacht ziemlich viel unnötige I/O-Last, was vor allem unter KVM
+>   sehr deutlich zu spüren ist
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20101117/6d016dc6/attachment.pgp>
+
+From kevin at tyndur.org  Wed Nov 17 22:47:10 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Wed, 17 Nov 2010 22:47:10 +0100
+Subject: [tyndur-devel] [PATCH] kernel2 wird Standard
+Message-ID: <1290030430-682-1-git-send-email-kevin@tyndur.org>
+
+- .nobuild in kernel2 entfernt
+* menu.lst: Reihenfolge von kernel2 und kernel1 umgekehrt, so dass
+  kernel2 Default wird. Sprachauswahl für kernel2 eingeführt, kernel1
+  ist jetzt nur noch in der deutschen Version im Menü.
+! menu.lst: pci muss auch für kernel2 in der servmgr-Zeile aufgeführt
+  werden
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ build/config/grub_hd.cfg         |   12 +-----------
+ build/config/grub_hd_kernel2.cfg |   14 ++++++++++++--
+ build/scripts/image_hd           |    6 +++---
+ 3 files changed, 16 insertions(+), 16 deletions(-)
+ delete mode 100644 src/kernel2/.nobuild
+
+diff --git a/build/config/grub_hd.cfg b/build/config/grub_hd.cfg
+index 74c2133..b8dc878 100644
+--- a/build/config/grub_hd.cfg
++++ b/build/config/grub_hd.cfg
+@@ -1,4 +1,4 @@
+-title tyndur (Deutsch)
++title tyndur (kernel1)
+ kernel /boot/tyndur debug=s
+ module /modules/init boot=file:/
+ module /modules/pci
+@@ -7,13 +7,3 @@ module /modules/ext2
+ module /modules/console servmgr:/term servmgr:/term
+ module /modules/servmgr ata:/ata00_p0|ext2:/ vterm:/vterm8/out ata ext2 console pci
+ boot
+-
+-title tyndur (English)
+-kernel /boot/tyndur debug=s
+-module /modules/init boot=file:/ env.LANG=en
+-module /modules/pci
+-module /modules/ata
+-module /modules/ext2
+-module /modules/console servmgr:/term servmgr:/term
+-module /modules/servmgr ata:/ata00_p0|ext2:/ vterm:/vterm8/out ata ext2 console pci
+-boot
+diff --git a/build/config/grub_hd_kernel2.cfg b/build/config/grub_hd_kernel2.cfg
+index 38d2b4b..0737858 100644
+--- a/build/config/grub_hd_kernel2.cfg
++++ b/build/config/grub_hd_kernel2.cfg
+@@ -1,9 +1,19 @@
+-title tyndur2
++title tyndur2 (Deutsch)
+ kernel /boot/tyndur2 debug=s
+ module /modules/init boot=file:/
+ module /modules/pci
+ module /modules/ata
+ module /modules/ext2
+ module /modules/console servmgr:/term servmgr:/term
+-module /modules/servmgr ata:/ata00_p0|ext2:/ vterm:/vterm8/out ata ext2 console
++module /modules/servmgr ata:/ata00_p0|ext2:/ vterm:/vterm8/out ata ext2 console pci
++boot
++
++title tyndur (English)
++kernel /boot/tyndur2 debug=s
++module /modules/init boot=file:/ env.LANG=en
++module /modules/pci
++module /modules/ata
++module /modules/ext2
++module /modules/console servmgr:/term servmgr:/term
++module /modules/servmgr ata:/ata00_p0|ext2:/ vterm:/vterm8/out ata ext2 console pci
+ boot
+diff --git a/build/scripts/image_hd b/build/scripts/image_hd
+index 85156e8..70ce748 100755
+--- a/build/scripts/image_hd
++++ b/build/scripts/image_hd
+@@ -92,12 +92,12 @@ cp -rP --preserve=links,timestamps $ROOT/* $ROOT_COMMON/* $ROOT_HD/* $MOUNT/
+ # GRUB-Konfiguration kopieren
+ mkdir -p $MOUNT/boot/grub
+ rm -f $MOUNT/boot/grub/menu.lst
+-if [ -e $MOUNT/boot/tyndur ]; then
+-    cat build/config/grub_hd.cfg >> $MOUNT/boot/grub/menu.lst
+-fi
+ if [ -e $MOUNT/boot/tyndur2 ]; then
+ 	cat build/config/grub_hd_kernel2.cfg >> $MOUNT/boot/grub/menu.lst
+ fi
++if [ -e $MOUNT/boot/tyndur ]; then
++    cat build/config/grub_hd.cfg >> $MOUNT/boot/grub/menu.lst
++fi
+ 
+ 
+ # Grub kopieren
+diff --git a/src/kernel2/.nobuild b/src/kernel2/.nobuild
+deleted file mode 100644
+index e69de29..0000000
+-- 
+1.6.0.2
+
+
+From toni at tyndur.org  Wed Nov 17 23:44:47 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Wed, 17 Nov 2010 23:44:47 +0100
+Subject: [tyndur-devel] [PATCH] kernel2 wird Standard
+In-Reply-To: <1290030430-682-1-git-send-email-kevin@tyndur.org>
+References: <1290030430-682-1-git-send-email-kevin@tyndur.org>
+Message-ID: <20101117224447.GA5404@neo.geekcave.lan>
+
+On Wed, Nov 17 22:47, Kevin Wolf wrote:
+> - .nobuild in kernel2 entfernt
+> * menu.lst: Reihenfolge von kernel2 und kernel1 umgekehrt, so dass
+>   kernel2 Default wird. Sprachauswahl für kernel2 eingeführt, kernel1
+>   ist jetzt nur noch in der deutschen Version im Menü.
+> ! menu.lst: pci muss auch für kernel2 in der servmgr-Zeile aufgeführt
+>   werden
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20101117/253c6817/attachment.pgp>
+
+From kevin at tyndur.org  Sun Nov 21 11:23:24 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 21 Nov 2010 11:23:24 +0100
+Subject: [tyndur-devel] =?utf-8?b?W1BBVENIXSBrZXJuZWwyOiBSUEM6IMOcYmVyZmw=?=
+	=?utf-8?q?=C3=BCssiges_tempor=C3=A4res_Mapping_entfernt?=
+Message-ID: <1290335004-11060-1-git-send-email-kevin@tyndur.org>
+
+* kernel2: Es gibt keinen Grund, für das ISF des aufgerufenen Prozesses
+  ein temporäres Mapping durchzuführen - ist eh Kernelspeicher und daher
+  überall zugreifbar
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/src/syscalls/rpc.c |   11 +----------
+ 1 files changed, 1 insertions(+), 10 deletions(-)
+
+diff --git a/src/kernel2/src/syscalls/rpc.c b/src/kernel2/src/syscalls/rpc.c
+index 6fcf8b1..e898021 100644
+--- a/src/kernel2/src/syscalls/rpc.c
++++ b/src/kernel2/src/syscalls/rpc.c
+@@ -196,23 +196,16 @@ int do_fastrpc(pid_t callee_pid, size_t metadata_size, void* metadata,
+         goto fail_retry;
+     }
+ 
+-    // Interrupt Stack Frame des aufgerufenen Tasks mappen
+-    paddr_t callee_isf_phys =
+-        mmc_resolve(&callee->process->context, callee->user_isf);
+-
+-    interrupt_stack_frame_t* callee_isf = (interrupt_stack_frame_t*)
+-        vmm_kernel_automap(callee_isf_phys, sizeof(*callee_isf));
+-
+     // Wenn sich der Task gerade in einem Kernel-Int befindet, lassen wir ihn
+     // besser in Ruhe und probieren spaeter nochmal.
+     if ((current_thread != callee) &&
+         (callee->kernel_stack != callee->user_isf))
+     {
+-        vmm_kernel_unmap(callee_isf, sizeof(*callee_isf));
+         return -EAGAIN;
+     }
+ 
+     // RPC-Backlinkinformation anlegen
++    interrupt_stack_frame_t* callee_isf = callee->user_isf;
+     rpc_t* rpc = malloc(sizeof(rpc_t));
+ 
+     rpc->old_eip = callee_isf->eip;
+@@ -279,8 +272,6 @@ int do_fastrpc(pid_t callee_pid, size_t metadata_size, void* metadata,
+     mmc_unmap(&mmc_current_context(), first_stack_page,
+         NUM_PAGES(rounded_data_size));
+ 
+-    vmm_kernel_unmap(callee_isf, sizeof(*callee_isf));
+-
+ //    kprintf("[%d => %d] RPC durchgefuehrt.\n",
+ //        current_process->pid,
+ //        callee->process->pid);
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sun Nov 21 11:26:02 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 21 Nov 2010 11:26:02 +0100
+Subject: [tyndur-devel] [PATCH v2 0/2] rpcbench sys
+Message-ID: <1290335164-11215-1-git-send-email-kevin@tyndur.org>
+
+Der neue Unterbefehl rpcbench sys misst jetzt die Dauer von bestimmten
+Operationen in Takten.
+
+Kevin Wolf (2):
+  rpcbench: Benchmark fÃ¼r Syscall
+  rpcbench: Messungen fÃ¼r RPC
+
+ src/modules/rpcbench/rpcbench.c |   56 +++++++++++++++++++++++++++++++++++++++
+ 1 files changed, 56 insertions(+), 0 deletions(-)
+
+
+From kevin at tyndur.org  Sun Nov 21 11:26:03 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 21 Nov 2010 11:26:03 +0100
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH_v2_1/2=5D_rpcbench=3A_Benchmark?=
+	=?utf-8?q?_f=C3=BCr_Syscall?=
+In-Reply-To: <1290335164-11215-1-git-send-email-kevin@tyndur.org>
+References: <1290335164-11215-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1290335164-11215-2-git-send-email-kevin@tyndur.org>
+
++ rpcbench: Mit dem Parameter sys misst rpcbench jetzt die Dauer eines
+  get_tick_count-Syscalls. Das ist recht hilfreich, wenn man am
+  Optimieren des Kernels verzweifeln möchte.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/rpcbench/rpcbench.c |   23 +++++++++++++++++++++++
+ 1 files changed, 23 insertions(+), 0 deletions(-)
+
+diff --git a/src/modules/rpcbench/rpcbench.c b/src/modules/rpcbench/rpcbench.c
+index f4fc41c..7b407eb 100644
+--- a/src/modules/rpcbench/rpcbench.c
++++ b/src/modules/rpcbench/rpcbench.c
+@@ -49,6 +49,7 @@
+ void display_usage(void);
+ 
+ int client(void);
++int syscall(void);
+ void display_stats(uint32_t time, uint64_t data_size);
+ 
+ int server(void);
+@@ -72,6 +73,8 @@ int main(int argc, char* argv[])
+         return client();
+     } else if (strcmp(argv[1], "server") == 0) {
+         return server();
++    } else if (strcmp(argv[1], "sys") == 0) {
++        return syscall();
+     } else {
+         display_usage();
+         return -1;
+@@ -128,6 +131,26 @@ int client()
+     return 0;
+ }
+ 
++int syscall(void)
++{
++    int i;
++    uint64_t total, t1, t2;
++
++    total = 0;
++    for (i = 0; i < 30; i++) {
++        asm volatile("rdtsc" : "=A" (t1));
++        get_tick_count();
++        asm volatile("rdtsc" : "=A" (t2));
++        printf("syscalls: %lld Takte\n", t2 - t1);
++        total += t2 - t1;
++    }
++    printf("syscalls: Insgesamt %lld Takte, Durchschnitt %lld\n\n",
++        total, total / 30);
++
++
++    return 0;
++}
++
+ void display_stats(uint32_t time, uint64_t data_size)
+ {
+     printf(" %lld Bytes in %d Sekunden transportiert\n", data_size, 
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sun Nov 21 11:26:04 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 21 Nov 2010 11:26:04 +0100
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH_v2_2/2=5D_rpcbench=3A_Messungen?=
+	=?utf-8?b?IGbDvHIgUlBD?=
+In-Reply-To: <1290335164-11215-1-git-send-email-kevin@tyndur.org>
+References: <1290335164-11215-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1290335164-11215-3-git-send-email-kevin@tyndur.org>
+
++ rpcbench: Messung der Takte, die ein RPC braucht
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/rpcbench/rpcbench.c |   41 +++++++++++++++++++++++++++++++++++---
+ 1 files changed, 37 insertions(+), 4 deletions(-)
+
+diff --git a/src/modules/rpcbench/rpcbench.c b/src/modules/rpcbench/rpcbench.c
+index 7b407eb..7033096 100644
+--- a/src/modules/rpcbench/rpcbench.c
++++ b/src/modules/rpcbench/rpcbench.c
+@@ -131,22 +131,55 @@ int client()
+     return 0;
+ }
+ 
++#define NUM_SYSCALL_ITERATIONS 500
+ int syscall(void)
+ {
+     int i;
+     uint64_t total, t1, t2;
+ 
++    // Einfacher Syscall
+     total = 0;
+-    for (i = 0; i < 30; i++) {
++    for (i = 0; i < NUM_SYSCALL_ITERATIONS; i++) {
+         asm volatile("rdtsc" : "=A" (t1));
+         get_tick_count();
+         asm volatile("rdtsc" : "=A" (t2));
+-        printf("syscalls: %lld Takte\n", t2 - t1);
+         total += t2 - t1;
+     }
+-    printf("syscalls: Insgesamt %lld Takte, Durchschnitt %lld\n\n",
+-        total, total / 30);
++    printf("get_tick_count:     Insgesamt %10lld Takte, Durchschnitt %7lld\n",
++        total, total / NUM_SYSCALL_ITERATIONS);
+ 
++    //Versuchen an die PID des Serverprozesses zu kommen
++    pid_t server_pid = init_service_get("rpcbench");
++
++    if (server_pid == 0) {
++        puts("Fehler: Serverprozess konnte nicht gefunden werden!");
++        puts("   Wurde er gestartet?");
++        return -2;
++    }
++
++    // Ein RPC zum Server ohne Antwort
++    total = 0;
++    for (i = 0; i < NUM_SYSCALL_ITERATIONS; i++) {
++        asm volatile("rdtsc" : "=A" (t1));
++        send_message(server_pid, 1234, 0, 0, NULL);
++        asm volatile("rdtsc" : "=A" (t2));
++        total += t2 - t1;
++    }
++    printf("send_message:       Insgesamt %10lld Takte, Durchschnitt %7lld\n",
++        total, total / NUM_SYSCALL_ITERATIONS);
++
++    // Ein RPC zum Server und zurück
++    total = 0;
++    for (i = 0; i < NUM_SYSCALL_ITERATIONS; i++) {
++        response_t* resp;
++        asm volatile("rdtsc" : "=A" (t1));
++        resp = rpc_get_response(server_pid, "GET_DATA", 0, NULL);
++        asm volatile("rdtsc" : "=A" (t2));
++        free(resp);
++        total += t2 - t1;
++    }
++    printf("rpc_get_response:   Insgesamt %10lld Takte, Durchschnitt %7lld\n",
++        total, total / NUM_SYSCALL_ITERATIONS);
+ 
+     return 0;
+ }
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sun Nov 21 18:01:28 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 21 Nov 2010 18:01:28 +0100
+Subject: [tyndur-devel] [PATCH 0/8] kernel2: Taskstatus-Fixes
+Message-ID: <1290358896-11861-1-git-send-email-kevin@tyndur.org>
+
+Im Moment ist der Taskstatus ein gut gemeinter Hinweis, der ab und zu
+sogar zutriftt, aber eigentlich nichts zu sagen hat: Manche Threads
+laufen, obwohl sie nicht RUNNING sind, andere Threads sind in der
+Schedulingqueue und ändern ihren Zustand von READY auf irgendwas
+anderes.
+
+Das ist alles nicht so geschickt, weil diese falschen Einträge über
+kurz oder lang zu Rot führen. Diese Serie schafft ein bisschen mehr
+Ordnung.
+
+Kevin Wolf (8):
+  kernel2: Idle-Task
+  kernel2: Keine laufenden Thread mit PM_STATUS_WAIT_FOR_RPC
+  kernel2: Panic, wenn ein nicht lauffähiger Task laufen soll
+  kernel2: pm_scheduler_try_switch()
+  kernel2: Threadstatus bei RPC-Rückkehr beachten
+  kernel2: Taskswitch zum Interrupthandler
+  kernel2: STATUS_RUNNING korrekt setzen
+  kernel2: Panic, wenn aktiver Task nicht PM_STATUS_RUNNING hat
+
+ src/kernel2/include/tasks.h       |    3 +++
+ src/kernel2/src/arch/i386/vm86.c  |    1 +
+ src/kernel2/src/interrupts/im.c   |   22 ++++++++++++++++++++--
+ src/kernel2/src/syscalls/pm.c     |    2 +-
+ src/kernel2/src/syscalls/rpc.c    |    8 ++------
+ src/kernel2/src/tasks/pm.c        |   25 ++++++++++++++++++++++++-
+ src/kernel2/src/tasks/scheduler.c |   37 +++++++++++++++++++++++++++++++++++--
+ 7 files changed, 86 insertions(+), 12 deletions(-)
+
+
+From kevin at tyndur.org  Sun Nov 21 18:01:29 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 21 Nov 2010 18:01:29 +0100
+Subject: [tyndur-devel] [PATCH 1/8] kernel2: Idle-Task
+In-Reply-To: <1290358896-11861-1-git-send-email-kevin@tyndur.org>
+References: <1290358896-11861-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1290358896-11861-2-git-send-email-kevin@tyndur.org>
+
++ kernel2: Ein Idle-Task, der dann zum Zug kommt, wenn alle anderen
+  Tasks blockiert sind. Im Moment passiert das am Anfang des
+  Bootvorgangs ein paarmal.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/src/tasks/pm.c        |   25 ++++++++++++++++++++++++-
+ src/kernel2/src/tasks/scheduler.c |   13 +++++++++++--
+ 2 files changed, 35 insertions(+), 3 deletions(-)
+
+diff --git a/src/kernel2/src/tasks/pm.c b/src/kernel2/src/tasks/pm.c
+index b066493..94fbbbf 100644
+--- a/src/kernel2/src/tasks/pm.c
++++ b/src/kernel2/src/tasks/pm.c
+@@ -60,15 +60,38 @@ static pid_t next_pid = 1;
+ 
+ extern void scheduler_init(void);
+ extern pm_process_t init_process;
++extern pm_thread_t* idle_task;
++
++/**
++ * Implementierung des Idle-Task
++ */
++static void idle(void)
++{
++    while(1) {
++        asm volatile("hlt");
++    }
++}
+ 
+ /**
+  * Die Prozessverwaltung initialisieren
+  */
+ void pm_init()
+ {
++    interrupt_stack_frame_t* isf;
++
+     // Prozessliste erstellen
+     process_list = list_create();
+-    
++
++    // Idle-Task erstellen
++    idle_task = pm_thread_create(&init_process, &idle);
++    isf = (interrupt_stack_frame_t*) idle_task->kernel_stack;
++    isf->cs = 0x08;
++    isf->ss = 0x10;
++    isf->ds = 0x10;
++    isf->es = 0x10;
++    pm_scheduler_delete(idle_task);
++
++    // Scheduler initialisieren
+     scheduler_init();
+ }
+ 
+diff --git a/src/kernel2/src/tasks/scheduler.c b/src/kernel2/src/tasks/scheduler.c
+index 84c7348..7c7c4ce 100644
+--- a/src/kernel2/src/tasks/scheduler.c
++++ b/src/kernel2/src/tasks/scheduler.c
+@@ -53,6 +53,9 @@ static list_t* threads_scheduled;
+ /// Lock
+ static lock_t scheduler_lock;
+ 
++/// Idle-Task
++pm_thread_t* idle_task;
++
+ /**
+  * Scheduler initialisieren
+  */
+@@ -154,7 +157,7 @@ pm_thread_t* pm_scheduler_pop()
+     thread = list_pop(threads_scheduled);
+ 
+     // Falls das nicht geklappt hat, wird solange probiert, 
+-    while (thread == NULL) {
++    if (thread == NULL) {
+         // FIXME: Das ist so nicht wirklich geschickt, wenn der aufrufer dafÃ¼r
+         // sorgen muss, dass wir nicht hÃ¤ngen bleiben.
+         unlock(&scheduler_lock);
+@@ -164,9 +167,15 @@ pm_thread_t* pm_scheduler_pop()
+ 
+         // FIXME: s.o
+         lock(&scheduler_lock);
+-        
++
+         // Ein weiterer Versuch, einen Thread zu erhalten.
++        // Wenn dann immer noch keiner bereit ist, kommt der Idle-Task zum Zug
+         thread = list_pop(threads_scheduled);
++        if (thread == NULL) {
++            unlock(&scheduler_lock);
++            idle_task->status = PM_STATUS_RUNNING;
++            return idle_task;
++        }
+     }
+ 
+     // Sobald der richtige Thread gefunden wurde, kann der Scheduler wieder
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sun Nov 21 18:01:30 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 21 Nov 2010 18:01:30 +0100
+Subject: [tyndur-devel] [PATCH 2/8] kernel2: Keine laufenden Thread mit
+	PM_STATUS_WAIT_FOR_RPC
+In-Reply-To: <1290358896-11861-1-git-send-email-kevin@tyndur.org>
+References: <1290358896-11861-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1290358896-11861-3-git-send-email-kevin@tyndur.org>
+
+! kernel2: syscall_pm_wait_for_rpc() hat dem Scheduler erlaubt, den
+  aufrufenden Tasks gleich wieder zu starten, hat aber den Status
+  PM_STATUS_WAIT_FOR_RPC gesetzt. Jetzt wird der Task auf jeden Fall
+  schlafen gelegt. Für den Fall, dass kein anderer Task laufen will,
+  haben wir jetzt den Idle-Task.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/src/syscalls/pm.c |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/src/kernel2/src/syscalls/pm.c b/src/kernel2/src/syscalls/pm.c
+index bb31d40..0b36df3 100644
+--- a/src/kernel2/src/syscalls/pm.c
++++ b/src/kernel2/src/syscalls/pm.c
+@@ -226,8 +226,8 @@ void syscall_pm_sleep(void)
+ void syscall_pm_wait_for_rpc(void)
+ {
+     pm_thread_t* thread = current_thread;
+-    syscall_pm_sleep();
+     thread->status = PM_STATUS_WAIT_FOR_RPC;
++    current_thread = pm_scheduler_pop();
+ }
+ 
+ /**
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sun Nov 21 18:01:31 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 21 Nov 2010 18:01:31 +0100
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH_3/8=5D_kernel2=3A_Panic=2C_wenn?=
+	=?utf-8?q?_ein_nicht_lauff=C3=A4higer_Task_laufen_soll?=
+In-Reply-To: <1290358896-11861-1-git-send-email-kevin@tyndur.org>
+References: <1290358896-11861-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1290358896-11861-4-git-send-email-kevin@tyndur.org>
+
+! kernel2: Bevor der pm_scheduler_pop einen Task zurückgibt, prüft es
+  jetzt, ob der Task überhaupt noch im richtigen Status ist. Wenn nicht,
+  haben wir einen Kernelbug.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/src/tasks/scheduler.c |    4 ++++
+ 1 files changed, 4 insertions(+), 0 deletions(-)
+
+diff --git a/src/kernel2/src/tasks/scheduler.c b/src/kernel2/src/tasks/scheduler.c
+index 7c7c4ce..bf282c2 100644
+--- a/src/kernel2/src/tasks/scheduler.c
++++ b/src/kernel2/src/tasks/scheduler.c
+@@ -184,6 +184,10 @@ pm_thread_t* pm_scheduler_pop()
+     
+     // Thread-Struktur sperren und Status setzen
+     lock(&thread->lock);
++    if (thread->status != PM_STATUS_READY) {
++        panic("Thread soll laufen, ist aber nicht bereit (Status %d)",
++            thread->status);
++    }
+     thread->status = PM_STATUS_RUNNING;
+     unlock(&thread->lock);
+     
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sun Nov 21 18:01:32 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 21 Nov 2010 18:01:32 +0100
+Subject: [tyndur-devel] [PATCH 4/8] kernel2: pm_scheduler_try_switch()
+In-Reply-To: <1290358896-11861-1-git-send-email-kevin@tyndur.org>
+References: <1290358896-11861-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1290358896-11861-5-git-send-email-kevin@tyndur.org>
+
++ kernel2: pm_scheduler_try_switch() wechselt zu einem gegebenen Thread,
+  wenn dieser lauffähig ist.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/include/tasks.h       |    3 +++
+ src/kernel2/src/tasks/scheduler.c |   20 ++++++++++++++++++++
+ 2 files changed, 23 insertions(+), 0 deletions(-)
+
+diff --git a/src/kernel2/include/tasks.h b/src/kernel2/include/tasks.h
+index 382a362..fc0bc88 100644
+--- a/src/kernel2/include/tasks.h
++++ b/src/kernel2/include/tasks.h
+@@ -205,6 +205,9 @@ void pm_scheduler_push(pm_thread_t* thread);
+ /// Kontrolle vom aktuellen Kernelthread an einen anderen Thread abgeben
+ void pm_scheduler_yield(void);
+ 
++/// Versucht einen Taskwechsel zum übergebenen Thread
++void pm_scheduler_try_switch(pm_thread_t* thread);
++
+ /**
+  * Initialisierung
+  */
+diff --git a/src/kernel2/src/tasks/scheduler.c b/src/kernel2/src/tasks/scheduler.c
+index bf282c2..43c8180 100644
+--- a/src/kernel2/src/tasks/scheduler.c
++++ b/src/kernel2/src/tasks/scheduler.c
+@@ -233,3 +233,23 @@ void pm_scheduler_yield(void)
+     asm volatile("int $0x30;" : : "a" (SYSCALL_PM_SLEEP));
+ }
+ 
++/**
++ * Macht den übergebenen Thread zum aktuellen Thread dieser CPU, wenn er
++ * momentan lauffähig ist. Wenn nicht, bleibt der bisherige Thread aktiv.
++ */
++void pm_scheduler_try_switch(pm_thread_t* thread)
++{
++    cpu_t* cpu;
++
++    if (thread->status != PM_STATUS_READY) {
++        return;
++    }
++
++    cpu = cpu_get_current();
++    if (cpu->thread != thread) {
++        pm_scheduler_push(cpu->thread);
++        pm_scheduler_get(thread);
++        thread->status = PM_STATUS_RUNNING;
++        cpu->thread = thread;
++    }
++}
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sun Nov 21 18:01:33 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 21 Nov 2010 18:01:33 +0100
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH_5/8=5D_kernel2=3A_Threadstatus_?=
+	=?utf-8?q?bei_RPC-R=C3=BCckkehr_beachten?=
+In-Reply-To: <1290358896-11861-1-git-send-email-kevin@tyndur.org>
+References: <1290358896-11861-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1290358896-11861-6-git-send-email-kevin@tyndur.org>
+
+! kernel2: Wenn der Aufrufer im Moment nicht bereit ist zu laufen, dann
+  sollte die Rückkehr von einem RPC ihn nicht aktivieren.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/src/syscalls/rpc.c |    4 +---
+ 1 files changed, 1 insertions(+), 3 deletions(-)
+
+diff --git a/src/kernel2/src/syscalls/rpc.c b/src/kernel2/src/syscalls/rpc.c
+index 6fcf8b1..e0ebd34 100644
+--- a/src/kernel2/src/syscalls/rpc.c
++++ b/src/kernel2/src/syscalls/rpc.c
+@@ -386,9 +386,7 @@ void syscall_fastrpc_ret(void)
+ 
+     // Wechsel zum aufrufenden Task
+     if (rpc->caller) {
+-        pm_scheduler_push(current_thread);
+-        pm_scheduler_get(rpc->caller);
+-        current_thread = rpc->caller;
++        pm_scheduler_try_switch(rpc->caller);
+     }
+ 
+     // Wenn es ein IRQ-verarbeitender RPC war, den Interrupt jetzt
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sun Nov 21 18:01:34 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 21 Nov 2010 18:01:34 +0100
+Subject: [tyndur-devel] [PATCH 6/8] kernel2: Taskswitch zum Interrupthandler
+In-Reply-To: <1290358896-11861-1-git-send-email-kevin@tyndur.org>
+References: <1290358896-11861-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1290358896-11861-7-git-send-email-kevin@tyndur.org>
+
+* kernel2: Wenn ein IRQ an den Userspace zugestellt wird, auch zum
+  passenden Task wechseln, damit er gleich ausgeführt wird.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/src/interrupts/im.c |    8 ++++++--
+ 1 files changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/src/kernel2/src/interrupts/im.c b/src/kernel2/src/interrupts/im.c
+index e4ac8e4..23cec59 100644
+--- a/src/kernel2/src/interrupts/im.c
++++ b/src/kernel2/src/interrupts/im.c
+@@ -287,6 +287,7 @@ void im_send_interrupts(void)
+ {
+     uint32_t intr;
+     pm_thread_t* old_thread = current_thread;
++    pm_thread_t* new_thread = old_thread;
+ 
+     for (intr = 0; intr < IM_NUM_INTERRUPTS; intr++)
+     {
+@@ -298,8 +299,8 @@ void im_send_interrupts(void)
+ 
+             // Dieses Wechseln des Tasks ist wichtig: IRQs werden nur
+             // angenommen, wenn der Task sie sich selbst schickt
+-            // TODO schedule_to_task(intr_handling_task[intr], esp);
+-            current_thread = list_get_element_at(intr_handling_task[intr]->threads, 0);
++            current_thread = new_thread =
++                list_get_element_at(intr_handling_task[intr]->threads, 0);
+ 
+             if (!fastrpc_irq(intr_handling_task[intr], 0, 0,
+                 sizeof(intr), (char*) &intr, intr - IM_IRQ_BASE))
+@@ -311,4 +312,7 @@ void im_send_interrupts(void)
+     }
+ 
+     current_thread = old_thread;
++    if (new_thread!= old_thread) {
++        pm_scheduler_try_switch(new_thread);
++    }
+ }
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sun Nov 21 18:01:35 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 21 Nov 2010 18:01:35 +0100
+Subject: [tyndur-devel] [PATCH 7/8] kernel2: STATUS_RUNNING korrekt setzen
+In-Reply-To: <1290358896-11861-1-git-send-email-kevin@tyndur.org>
+References: <1290358896-11861-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1290358896-11861-8-git-send-email-kevin@tyndur.org>
+
+! kernel2: Wenn der aktive Task wechselt, muss auch der Status entsprechend
+  aktualisiert werden.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/src/arch/i386/vm86.c |    1 +
+ src/kernel2/src/syscalls/rpc.c   |    4 +---
+ 2 files changed, 2 insertions(+), 3 deletions(-)
+
+diff --git a/src/kernel2/src/arch/i386/vm86.c b/src/kernel2/src/arch/i386/vm86.c
+index b4cbd05..7418203 100644
+--- a/src/kernel2/src/arch/i386/vm86.c
++++ b/src/kernel2/src/arch/i386/vm86.c
+@@ -160,6 +160,7 @@ static int create_vm86_task(int intr, vm86_regs_t* regs, uintptr_t stack)
+     // waehrenddessen nicht in den Scheduler zurueckgegeben und gestoppt.
+     current_thread->status = PM_STATUS_BLOCKED;
+     current_thread = task;
++    task->status = PM_STATUS_RUNNING;
+ 
+     return 0;
+ }
+diff --git a/src/kernel2/src/syscalls/rpc.c b/src/kernel2/src/syscalls/rpc.c
+index e0ebd34..114fe1d 100644
+--- a/src/kernel2/src/syscalls/rpc.c
++++ b/src/kernel2/src/syscalls/rpc.c
+@@ -291,9 +291,7 @@ int do_fastrpc(pid_t callee_pid, size_t metadata_size, void* metadata,
+     }
+ 
+     // Zum aufgerufenen Task wechseln
+-    pm_scheduler_push(current_thread);
+-    pm_scheduler_get(callee);
+-    current_thread = callee;
++    pm_scheduler_try_switch(callee);
+ 
+     return 0;
+ 
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sun Nov 21 18:01:36 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 21 Nov 2010 18:01:36 +0100
+Subject: [tyndur-devel] [PATCH 8/8] kernel2: Panic,
+	wenn aktiver Task nicht PM_STATUS_RUNNING hat
+In-Reply-To: <1290358896-11861-1-git-send-email-kevin@tyndur.org>
+References: <1290358896-11861-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1290358896-11861-9-git-send-email-kevin@tyndur.org>
+
++ kernel2: Wenn der aktive Task nicht den richtigen Status hat, gibt es
+  jetzt einen Panic.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/src/interrupts/im.c |   14 ++++++++++++++
+ 1 files changed, 14 insertions(+), 0 deletions(-)
+
+diff --git a/src/kernel2/src/interrupts/im.c b/src/kernel2/src/interrupts/im.c
+index 23cec59..9923b7a 100644
+--- a/src/kernel2/src/interrupts/im.c
++++ b/src/kernel2/src/interrupts/im.c
+@@ -153,6 +153,9 @@ interrupt_stack_frame_t* im_handler(interrupt_stack_frame_t* isf)
+     uint8_t int_num = isf->interrupt_number;
+     interrupt_stack_frame_t* new_isf = isf;
+     uintptr_t isf_addr = (uintptr_t) isf;
++#ifndef CONFIG_RELEASE_VERSION
++    uint32_t eax = isf->eax;
++#endif
+ 
+     if ((isf_addr < (uintptr_t) thread->kernel_stack_bottom) ||
+         (isf_addr >=
+@@ -209,7 +212,18 @@ interrupt_stack_frame_t* im_handler(interrupt_stack_frame_t* isf)
+     im_send_interrupts();
+ 
+     thread = current_thread;
++
+     if (thread != old_thread) {
++
++#ifndef CONFIG_RELEASE_VERSION
++        if (thread->status != PM_STATUS_RUNNING) {
++            panic("Aktiver Task hat nicht PM_STATUS_RUNNING: "
++                "PID %d, int %x, eax = %d\n",
++                thread->process->pid, int_num, eax);
++        }
++#endif
++
++        /* FIXME Was bei einem exit-Syscall? */
+         old_thread->kernel_stack = isf;
+         new_isf = im_prepare_current_thread();
+     }
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sat Nov 27 14:21:01 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 27 Nov 2010 14:21:01 +0100
+Subject: [tyndur-devel] [PATCH] cdi: Auf PCI-Service warten
+Message-ID: <1290864061-5273-1-git-send-email-kevin@tyndur.org>
+
+! cdi: Beim Lesen der Liste aller PCI-Geraete sollte man erstmal warten,
+  bis der PCI-Service da ist, sonst wird die Liste recht leer. Damit
+  hängt jetzt die Benutzung von Busmaster-IDE auch nicht mehr von einem
+  Race ab.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/cdi/lib/pci.c |   17 ++++++++++++++++-
+ 1 files changed, 16 insertions(+), 1 deletions(-)
+
+diff --git a/src/modules/cdi/lib/pci.c b/src/modules/cdi/lib/pci.c
+index 9c2e47f..9b37da8 100644
+--- a/src/modules/cdi/lib/pci.c
++++ b/src/modules/cdi/lib/pci.c
+@@ -23,6 +23,19 @@
+ #include "cdi/lists.h"
+ #include "cdi/pci.h"
+ 
++/*
++ * Wartet, bis der PCI-Service auftaucht
++ */
++static void wait_for_pci_service(void)
++{
++    static bool pci_started = false;
++
++    if (!pci_started) {
++        servmgr_need("pci");
++        pci_started = true;
++    }
++}
++
+ /**
+  * Liest die Daten eines PCI-Geraets ein
+  */
+@@ -78,7 +91,7 @@ static struct cdi_pci_device* read_pci_device(uint8_t* data, size_t size)
+ 
+     return cdi_device;
+ }
+-    
++
+ /**
+  * Gibt alle PCI-Geraete im System zurueck. Die Geraete werden dazu
+  * in die uebergebene Liste eingefuegt.
+@@ -89,6 +102,8 @@ void cdi_pci_get_all_devices(cdi_list_t list)
+     uint8_t* data;
+     int ret;
+ 
++    wait_for_pci_service();
++
+     ret = init_dev_list(&devs);
+     if (ret < 0) {
+         return;
+-- 
+1.6.0.2
+
+
+From max at tyndur.org  Sat Nov 27 22:35:19 2010
+From: max at tyndur.org (Max Reitz)
+Date: Sat, 27 Nov 2010 22:35:19 +0100
+Subject: [tyndur-devel] [PATCH] cdi: Auf PCI-Service warten
+In-Reply-To: <1290864061-5273-1-git-send-email-kevin@tyndur.org>
+References: <1290864061-5273-1-git-send-email-kevin@tyndur.org>
+Message-ID: <4CF17997.1030708@tyndur.org>
+
+Kevin Wolf wrote:
+> ! cdi: Beim Lesen der Liste aller PCI-Geraete sollte man erstmal warten,
+>   bis der PCI-Service da ist, sonst wird die Liste recht leer. Damit
+>   hängt jetzt die Benutzung von Busmaster-IDE auch nicht mehr von einem
+>   Race ab.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Max Reitz <max at tyndur.org>
+
+From max at tyndur.org  Sat Nov 27 22:40:23 2010
+From: max at tyndur.org (Max Reitz)
+Date: Sat, 27 Nov 2010 22:40:23 +0100
+Subject: [tyndur-devel]
+ =?iso-8859-1?q?=5BPATCH=5D_kernel2=3A_RPC=3A_=DCbe?=
+ =?iso-8859-1?q?rfl=FCssiges_tempor=E4res_Mapping_entfernt?=
+In-Reply-To: <1290335004-11060-1-git-send-email-kevin@tyndur.org>
+References: <1290335004-11060-1-git-send-email-kevin@tyndur.org>
+Message-ID: <4CF17AC7.3030004@tyndur.org>
+
+Kevin Wolf wrote:
+> * kernel2: Es gibt keinen Grund, für das ISF des aufgerufenen Prozesses
+>   ein temporäres Mapping durchzuführen - ist eh Kernelspeicher und daher
+>   überall zugreifbar
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Max Reitz <max at tyndur.org>
+
+From max at tyndur.org  Sat Nov 27 22:47:20 2010
+From: max at tyndur.org (Max Reitz)
+Date: Sat, 27 Nov 2010 22:47:20 +0100
+Subject: [tyndur-devel]
+ =?iso-8859-1?q?=5BPATCH_v2_1/2=5D_rpcbench=3A_Benc?=
+ =?iso-8859-1?q?hmark_f=FCr_Syscall?=
+In-Reply-To: <1290335164-11215-2-git-send-email-kevin@tyndur.org>
+References: <1290335164-11215-1-git-send-email-kevin@tyndur.org>
+	<1290335164-11215-2-git-send-email-kevin@tyndur.org>
+Message-ID: <4CF17C68.1070409@tyndur.org>
+
+Kevin Wolf wrote:
+> + rpcbench: Mit dem Parameter sys misst rpcbench jetzt die Dauer eines
+>   get_tick_count-Syscalls. Das ist recht hilfreich, wenn man am
+>   Optimieren des Kernels verzweifeln möchte.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Max Reitz <max at tyndur.org>
+
+PS: Danke für =A :-)
+
+From max at tyndur.org  Sat Nov 27 22:50:27 2010
+From: max at tyndur.org (Max Reitz)
+Date: Sat, 27 Nov 2010 22:50:27 +0100
+Subject: [tyndur-devel]
+ =?iso-8859-1?q?=5BPATCH_v2_2/2=5D_rpcbench=3A_Mess?=
+ =?iso-8859-1?q?ungen_f=FCr_RPC?=
+In-Reply-To: <1290335164-11215-3-git-send-email-kevin@tyndur.org>
+References: <1290335164-11215-1-git-send-email-kevin@tyndur.org>
+	<1290335164-11215-3-git-send-email-kevin@tyndur.org>
+Message-ID: <4CF17D23.4060803@tyndur.org>
+
+Kevin Wolf wrote:
+> + rpcbench: Messung der Takte, die ein RPC braucht
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Max Reitz <max at tyndur.org>
+
+From max at tyndur.org  Sat Nov 27 22:52:48 2010
+From: max at tyndur.org (Max Reitz)
+Date: Sat, 27 Nov 2010 22:52:48 +0100
+Subject: [tyndur-devel] [PATCH 2/8] kernel2: Keine laufenden Thread mit
+ PM_STATUS_WAIT_FOR_RPC
+In-Reply-To: <1290358896-11861-3-git-send-email-kevin@tyndur.org>
+References: <1290358896-11861-1-git-send-email-kevin@tyndur.org>
+	<1290358896-11861-3-git-send-email-kevin@tyndur.org>
+Message-ID: <4CF17DB0.5030602@tyndur.org>
+
+Kevin Wolf wrote:
+> ! kernel2: syscall_pm_wait_for_rpc() hat dem Scheduler erlaubt, den
+>   aufrufenden Tasks gleich wieder zu starten, hat aber den Status
+>   PM_STATUS_WAIT_FOR_RPC gesetzt. Jetzt wird der Task auf jeden Fall
+>   schlafen gelegt. Für den Fall, dass kein anderer Task laufen will,
+>   haben wir jetzt den Idle-Task.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Max Reitz <max at tyndur.org>
+
+From max at tyndur.org  Sat Nov 27 22:53:32 2010
+From: max at tyndur.org (Max Reitz)
+Date: Sat, 27 Nov 2010 22:53:32 +0100
+Subject: [tyndur-devel]
+ =?iso-8859-1?q?=5BPATCH_3/8=5D_kernel2=3A_Panic=2C?=
+ =?iso-8859-1?q?_wenn_ein_nicht_lauff=E4higer_Task_laufen_soll?=
+In-Reply-To: <1290358896-11861-4-git-send-email-kevin@tyndur.org>
+References: <1290358896-11861-1-git-send-email-kevin@tyndur.org>
+	<1290358896-11861-4-git-send-email-kevin@tyndur.org>
+Message-ID: <4CF17DDC.9050601@tyndur.org>
+
+Kevin Wolf wrote:
+> ! kernel2: Bevor der pm_scheduler_pop einen Task zurückgibt, prüft es
+>   jetzt, ob der Task überhaupt noch im richtigen Status ist. Wenn nicht,
+>   haben wir einen Kernelbug.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Max Reitz <max at tyndur.org>
+
+From max at tyndur.org  Sat Nov 27 22:54:31 2010
+From: max at tyndur.org (Max Reitz)
+Date: Sat, 27 Nov 2010 22:54:31 +0100
+Subject: [tyndur-devel] [PATCH 4/8] kernel2: pm_scheduler_try_switch()
+In-Reply-To: <1290358896-11861-5-git-send-email-kevin@tyndur.org>
+References: <1290358896-11861-1-git-send-email-kevin@tyndur.org>
+	<1290358896-11861-5-git-send-email-kevin@tyndur.org>
+Message-ID: <4CF17E17.7000800@tyndur.org>
+
+Kevin Wolf wrote:
+> + kernel2: pm_scheduler_try_switch() wechselt zu einem gegebenen Thread,
+>   wenn dieser lauffähig ist.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Max Reitz <max at tyndur.org>
+
+From max at tyndur.org  Sat Nov 27 23:05:07 2010
+From: max at tyndur.org (Max Reitz)
+Date: Sat, 27 Nov 2010 23:05:07 +0100
+Subject: [tyndur-devel]
+ =?iso-8859-1?q?=5BPATCH_5/8=5D_kernel2=3A_Threadst?=
+ =?iso-8859-1?q?atus_bei_RPC-R=FCckkehr_beachten?=
+In-Reply-To: <1290358896-11861-6-git-send-email-kevin@tyndur.org>
+References: <1290358896-11861-1-git-send-email-kevin@tyndur.org>
+	<1290358896-11861-6-git-send-email-kevin@tyndur.org>
+Message-ID: <4CF18093.6070901@tyndur.org>
+
+Kevin Wolf wrote:
+> ! kernel2: Wenn der Aufrufer im Moment nicht bereit ist zu laufen, dann
+>   sollte die Rückkehr von einem RPC ihn nicht aktivieren.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Max Reitz <max at tyndur.org>
+
+From max at tyndur.org  Sat Nov 27 23:08:16 2010
+From: max at tyndur.org (Max Reitz)
+Date: Sat, 27 Nov 2010 23:08:16 +0100
+Subject: [tyndur-devel] [PATCH 6/8] kernel2: Taskswitch zum
+	Interrupthandler
+In-Reply-To: <1290358896-11861-7-git-send-email-kevin@tyndur.org>
+References: <1290358896-11861-1-git-send-email-kevin@tyndur.org>
+	<1290358896-11861-7-git-send-email-kevin@tyndur.org>
+Message-ID: <4CF18150.5050500@tyndur.org>
+
+Kevin Wolf wrote:
+> * kernel2: Wenn ein IRQ an den Userspace zugestellt wird, auch zum
+>   passenden Task wechseln, damit er gleich ausgeführt wird.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Max Reitz <max at tyndur.org>
+
+From max at tyndur.org  Sat Nov 27 23:09:07 2010
+From: max at tyndur.org (Max Reitz)
+Date: Sat, 27 Nov 2010 23:09:07 +0100
+Subject: [tyndur-devel] [PATCH 7/8] kernel2: STATUS_RUNNING korrekt
+	setzen
+In-Reply-To: <1290358896-11861-8-git-send-email-kevin@tyndur.org>
+References: <1290358896-11861-1-git-send-email-kevin@tyndur.org>
+	<1290358896-11861-8-git-send-email-kevin@tyndur.org>
+Message-ID: <4CF18183.7070005@tyndur.org>
+
+Kevin Wolf wrote:
+> ! kernel2: Wenn der aktive Task wechselt, muss auch der Status entsprechend
+>   aktualisiert werden.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Max Reitz <max at tyndur.org>
+
+From max at tyndur.org  Sat Nov 27 23:10:49 2010
+From: max at tyndur.org (Max Reitz)
+Date: Sat, 27 Nov 2010 23:10:49 +0100
+Subject: [tyndur-devel] [PATCH 8/8] kernel2: Panic,
+ wenn aktiver Task nicht PM_STATUS_RUNNING hat
+In-Reply-To: <1290358896-11861-9-git-send-email-kevin@tyndur.org>
+References: <1290358896-11861-1-git-send-email-kevin@tyndur.org>
+	<1290358896-11861-9-git-send-email-kevin@tyndur.org>
+Message-ID: <4CF181E9.8030003@tyndur.org>
+
+Kevin Wolf wrote:
+> + kernel2: Wenn der aktive Task nicht den richtigen Status hat, gibt es
+>   jetzt einen Panic.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Max Reitz <max at tyndur.org>
+
+From max at tyndur.org  Sat Nov 27 23:13:12 2010
+From: max at tyndur.org (Max Reitz)
+Date: Sat, 27 Nov 2010 23:13:12 +0100
+Subject: [tyndur-devel] [PATCH 1/8] kernel2: Idle-Task
+In-Reply-To: <1290358896-11861-2-git-send-email-kevin@tyndur.org>
+References: <1290358896-11861-1-git-send-email-kevin@tyndur.org>
+	<1290358896-11861-2-git-send-email-kevin@tyndur.org>
+Message-ID: <4CF18278.7070500@tyndur.org>
+
+Kevin Wolf wrote:
+> + kernel2: Ein Idle-Task, der dann zum Zug kommt, wenn alle anderen
+>   Tasks blockiert sind. Im Moment passiert das am Anfang des
+>   Bootvorgangs ein paarmal.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Max Reitz <max at tyndur.org>
+
+From kevin at tyndur.org  Tue Nov 30 00:21:29 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Tue, 30 Nov 2010 00:21:29 +0100
+Subject: [tyndur-devel] [PATCH 1/2] shell: pipe braucht kein kaputtes fread
+	mehr
+In-Reply-To: <1291072890-19375-1-git-send-email-kevin@tyndur.org>
+References: <1291072890-19375-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1291072890-19375-2-git-send-email-kevin@tyndur.org>
+
+! shell: fread gibt mit LIOv2 die Anzahl der vollstaendig gelesenen
+  Elemente zurueck, nicht die Anzahl Bytes
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/c/shell/cmds/pipe.c |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/src/modules/c/shell/cmds/pipe.c b/src/modules/c/shell/cmds/pipe.c
+index 2f2dfdd..a6b333e 100644
+--- a/src/modules/c/shell/cmds/pipe.c
++++ b/src/modules/c/shell/cmds/pipe.c
+@@ -91,7 +91,7 @@ void pipe_display_usage(void);
+         
+         while (no_eof || !feof(f)) { 
+             char buf[1024];
+-            size_t length = fread(buf, 1023, 1, f);
++            size_t length = fread(buf, 1, 1023, f);
+             if (length > 0) {
+                 buf[length] = '\0';
+                 printf("%s", buf);
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Tue Nov 30 00:21:28 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Tue, 30 Nov 2010 00:21:28 +0100
+Subject: [tyndur-devel] [PATCH 0/2] Verdrehte fread-Parameter korrigieren
+Message-ID: <1291072890-19375-1-git-send-email-kevin@tyndur.org>
+
+Kevin Wolf (2):
+  shell: pipe braucht kein kaputtes fread mehr
+  Pascal-RTL: Nicht mehr auf kaputtes fread verlassen
+
+ src/modules/c/shell/cmds/pipe.c     |    2 +-
+ src/modules/pas/lib/rtl/sysfile.inc |    4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+
+From kevin at tyndur.org  Tue Nov 30 00:21:30 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Tue, 30 Nov 2010 00:21:30 +0100
+Subject: [tyndur-devel] [PATCH 2/2] Pascal-RTL: Nicht mehr auf kaputtes
+	fread verlassen
+In-Reply-To: <1291072890-19375-1-git-send-email-kevin@tyndur.org>
+References: <1291072890-19375-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1291072890-19375-3-git-send-email-kevin@tyndur.org>
+
+! Pascal-RTL: fread gibt mit LIOv2 die Anzahl der vollstaendig gelesenen
+  Elemente zurueck, nicht die Anzahl Bytes
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/pas/lib/rtl/sysfile.inc |    4 ++--
+ 1 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/modules/pas/lib/rtl/sysfile.inc b/src/modules/pas/lib/rtl/sysfile.inc
+index e357f62..5143ef8 100644
+--- a/src/modules/pas/lib/rtl/sysfile.inc
++++ b/src/modules/pas/lib/rtl/sysfile.inc
+@@ -37,13 +37,13 @@ begin { TODO } end;
+ 
+ Function Do_Write(f: THandle; src: Pointer; len: TSize): TSize;
+ begin 
+-    Do_Write := c_fwrite(src, len, 1, f);
++    Do_Write := c_fwrite(src, 1, len, f);
+ end;
+ 
+ Function Do_Read(f: THandle; dest: Pointer; len: TSize): TSize;
+ begin 
+     repeat
+-        Do_Read := c_fread(dest, len, 1, f);
++        Do_Read := c_fread(dest, 1, len, f);
+     until (Do_Read <> 0) or (c_feof(f));
+ end;
+ 
+-- 
+1.6.0.2
+
+

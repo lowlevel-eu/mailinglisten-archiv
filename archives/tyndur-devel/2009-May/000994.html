@@ -1,0 +1,411 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] libc: Strings aus breiten Zeichen in	readline() benutzen
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20libc%3A%20Strings%20aus%20breiten%20Zeichen%20in%0A%09readline%28%29%20benutzen&In-Reply-To=%3C1243498953-22429-1-git-send-email-toni%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="000929.html">
+   <LINK REL="Next"  HREF="001011.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] libc: Strings aus breiten Zeichen in	readline() benutzen</H1>
+    <B>Antoine Kaufmann</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20libc%3A%20Strings%20aus%20breiten%20Zeichen%20in%0A%09readline%28%29%20benutzen&In-Reply-To=%3C1243498953-22429-1-git-send-email-toni%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH] libc: Strings aus breiten Zeichen in	readline() benutzen">toni at tyndur.org
+                  </A><BR>
+    <I>Do Mai 28 10:22:33 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="000929.html">[tyndur-devel] [PATCH 2/4] libc: Strings aus breiten Zeichen in	readline() benutzen
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001011.html">[tyndur-devel] [PATCH] libc: Strings aus breiten Zeichen in	readline() benutzen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#994">[ Datum ]</a>
+              <a href="thread.html#994">[ Thema ]</a>
+              <a href="subject.html#994">[ Betreff (Subject) ]</a>
+              <a href="author.html#994">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* libc: Strings aus breiten Zeichen in readline() benutzen intern, da
+        das ganze sonst äusserst mühsam wird mit Multibyte-Zeichen wenn
+        beispielsweise wortweise Navigation eingabaut werden soll.
+
+Signed-off-by: Antoine Kaufmann &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">toni at tyndur.org</A>&gt;
+---
+ src/modules/lib/readline.c |  178 +++++++++++++++++---------------------------
+ 1 files changed, 68 insertions(+), 110 deletions(-)
+
+diff --git a/src/modules/lib/readline.c b/src/modules/lib/readline.c
+index b2df3fc..79a0cfe 100644
+--- a/src/modules/lib/readline.c
++++ b/src/modules/lib/readline.c
+@@ -133,94 +133,28 @@ static wint_t keyboard_read_char(void)
+ /**
+  * Loescht ein Zeichen aus dem Puffer
+  */
+-static void delchar(char* buffer, int pos, int* size)
++static void delchar(wchar_t* buffer, int pos, int* size)
+ {
+-    int i;
+-    size_t len = strlen(buffer);
+-    int clen;
+-
+-    if (len &lt; pos) {
++    if (pos &gt;= *size) {
+         return;
+     }
+ 
+-    clen = mblen(buffer + pos, len - pos + 1);
+-    for (i = pos; i &lt; BUFFER_SIZE - clen; i++) {
+-        buffer[i] = buffer[i + clen];
+-        if (buffer[i] == '\0') {
+-            break;
+-        }
+-    }
+-
+-    buffer[BUFFER_SIZE - clen] = '\0';
+-    *size -= clen;
++    wmemmove(buffer + pos, buffer + pos + 1, *size - pos - 1);
++    buffer[--(*size)] = L'\0';
+ }
+ 
+ /**
+  * Fuegt ein Zeichen in den Buffer ein
+  */
+-static void inschar(char* buffer, int* pos, int* size, wint_t c)
++static void inschar(wchar_t* buffer, int* pos, int* size, wint_t c)
+ {
+-    int i;
+-    size_t len = strlen(buffer);
+-    char mbbuf[MB_CUR_MAX];
+-    int clen;
+-
+-
+-    clen = wctomb(mbbuf, c);
+-    if ((len &lt; *pos) || (len + clen &gt;= BUFFER_SIZE) || (clen == -1)) {
++    if ((*pos &gt; *size) || (*size + 1 &gt;= BUFFER_SIZE)) {
+         return;
+     }
+ 
+-    for (i = len + clen; i &gt; *pos; i--) {
+-        buffer[i] = buffer[i - clen];
+-    }
+-
+-    memcpy(buffer + *pos, mbbuf, clen);
+-
+-    *pos += clen;
+-    *size += clen;
+-}
+-
+-/**
+- * Veraendert die Pufferposition; positiv =&gt; rechts, negativ =&gt; links
+- */
+-static void move_cursor(char* buffer, int* pos, int size, int offset)
+-{
+-    int clen;
+-
+-    if (offset &gt;  0) {
+-        // Rechts
+-        if ((clen = mblen(buffer + *pos, size - *pos + 1)) &gt; 0) {
+-            *pos += clen;
+-        }
+-    } else {
+-        // Links, bis wir ein ganzes Zeichen haben
+-        while (--(*pos) &amp;&amp; (mblen(buffer + *pos, size - *pos + 1) == -1)) { }
+-    }
+-}
+-
+-/**
+- * Zaehlt die Anzahl der angezeigten Zeichen im Puffer
+- *
+- * @param start Position von der angefangen werden soll zu zaehlen
+- * @param size  Anzahl Zeichen im Puffer
+- */
+-static int count_visible_chars(char* buffer, int start, int size)
+-{
+-    int clen;
+-    int count = 0;
+-
+-    while ((start &lt; size)) {
+-        if ((clen = mblen(buffer + start, size - start + 1)) == -1) {
+-            // Unvollstaendiges MB-Zeichen wird uebersprungen
+-            start++;
+-        } else {
+-            count++;
+-            start += clen;
+-        }
+-    }
+-
+-    return count;
++    wmemmove(buffer + *pos + 1, buffer + *pos, *size - *pos);
++    buffer[(*pos)++] = c;
++    buffer[++(*size)] = L'\0';
+ }
+ 
+ /**
+@@ -254,14 +188,13 @@ static void free_matches_array(char** matches)
+  *         Zeile umgebrochen wurde, FALSE wenn entweder nichts gemacht wurde,
+  *         oder nur ein passender Match geliefert wurde.
+  */
+-static bool complete_word(char* buffer, int* pos, int* len)
++static bool complete_word(wchar_t* buffer, int* pos, int* len)
+ {
+     int word_pos;
+     int match_count;
+-    int word_len;
++    size_t wword_len;
+     char** matches;
+     char* replacement;
+-    int replacement_len;
+     bool matches_list_displayed = FALSE;
+ 
+ 
+@@ -272,16 +205,20 @@ static bool complete_word(char* buffer, int* pos, int* len)
+     if ((buffer[word_pos] == ' ') &amp;&amp; (*pos &gt; word_pos)) {
+         word_pos++;
+     }
+-    word_len = *pos - word_pos;
++    wword_len = *pos - word_pos;
+ 
+     // Wort in einen eigenen Buffer kopieren
++    wchar_t wword[wword_len + 1];
++    wcsncpy(wword, buffer + word_pos, wword_len);
++    wword[wword_len] = 0;
++
++    size_t word_len = wcstombs(NULL, wword, 0);
+     char word[word_len + 1];
+-    strncpy(word, buffer + word_pos, word_len);
+-    word[word_len] = 0;
++    wcstombs(word, wword, word_len + 1);
+ 
+     matches = rl_attempted_completion_function(word, word_pos, *pos);
+ 
+-    // Wir haben nochmal Glueck gehabt, es gibt nicht zu vervollstaendigen ;-)
++    // Wir haben nochmal Glueck gehabt, es gibt nichts zu vervollstaendigen ;-)
+     if (matches == NULL) {
+         return FALSE;
+     }
+@@ -319,27 +256,35 @@ static bool complete_word(char* buffer, int* pos, int* len)
+ 
+ 
+         replacement = matches[0];
+-        replacement_len = matching_chars;
++
++        // Wir haben mehrere Matches, wollen aber nur soviel vervollstaendigen
++        // wie allen gemeinsam ist. Deshalb muessen wir vorher ein Nullbyte
++        // reinbasteln, damit nur soviel benutzt wird von mbstowcs.
++        replacement[matching_chars] = '\0';
+     } else {
+         replacement = matches[0];
+-        replacement_len = strlen(replacement);
+     }
+ 
++    // Neuen Text in breiten String konvertieren
++    size_t wrepl_len = mbstowcs(NULL, replacement, 0);
++    wchar_t wrepl[wrepl_len + 1];
++    mbstowcs(wrepl, replacement, wrepl_len + 1);
++
+     // Pruefen ob das ganze nachher noch in den Puffer passt
+-    if (*len + replacement_len &gt; BUFFER_SIZE) {
++    if (*len + wrepl_len + 1 &gt; BUFFER_SIZE) {
+         return matches_list_displayed;
+     }
+ 
+     // Text, der dem zu ersetzenden Wort folgt nach hinten schieben
+-    memmove(buffer + word_pos + replacement_len, buffer + *pos, (*len - word_len) -
++    wmemmove(buffer + word_pos + wrepl_len, buffer + *pos, (*len - word_len) -
+         word_pos + 1);
+ 
+     // Wort ersetzen
+-    memcpy(buffer + word_pos, replacement, replacement_len);
++    wmemcpy(buffer + word_pos, wrepl, wrepl_len);
+ 
+     // Position und Laenge des Puffers korrigieren
+-    *pos = word_pos + replacement_len;
+-    *len = *len + replacement_len - word_len ;
++    *pos = word_pos + wrepl_len;
++    *len = *len + wrepl_len - word_len ;
+ 
+     free_matches_array(matches);
+ 
+@@ -393,7 +338,7 @@ char* readline(const char* prompt)
+         return NULL;
+     }
+ 
+-    char* buffer = malloc(BUFFER_SIZE);
++    wchar_t buffer[BUFFER_SIZE];
+     int old_pos, pos, size;
+     bool enter = FALSE;
+     int history_pos = -1;
+@@ -402,12 +347,10 @@ char* readline(const char* prompt)
+     wchar_t cmd_buf[8];
+     size_t cmd_pos = 0;
+ 
+-    rl_line_buffer = buffer;
+-
+     printf(&quot;%s&quot;, prompt);
+     fflush(stdout);
+ 
+-    memset(buffer, 0, BUFFER_SIZE);
++    wmemset(buffer, 0, BUFFER_SIZE);
+     pos = size = 0;
+     while (!enter)
+     {
+@@ -434,7 +377,9 @@ again:
+ 
+             // Neu eingefuegtes Zeichen und allenfalls Folgende auf den
+             // Bildschirm bringen
+-            printf(&quot;\033[K\033[s%s\033[u\033[1C&quot;, &amp;buffer[old_pos]);
++            printf(&quot;\033[K\033[s&quot;);
++            fputws(&amp;buffer[old_pos], stdout);
++            printf(&quot;\033[u\033[1C&quot;);
+             fflush(stdout);
+ 
+             // Erstes Zeichen weg(raus aus dem Befehlspuffer und rein in den
+@@ -450,7 +395,7 @@ again:
+                 if (pos &gt; 0) {
+                     printf(&quot;\033[1D&quot;);
+                     fflush(stdout);
+-                    move_cursor(buffer, &amp;pos, size, -1);
++                    pos--;
+                 }
+                 break;
+ 
+@@ -458,20 +403,19 @@ again:
+                 if (pos &lt; size) {
+                     printf(&quot;\033[1C&quot;);
+                     fflush(stdout);
+-                    move_cursor(buffer, &amp;pos, size, 1);
++                    pos++;
+                 }
+                 break;
+ 
+             case BEGINNING_OF_LINE:
+-                printf(&quot;\033[%dD&quot;, count_visible_chars(buffer, 0, pos));
++                printf(&quot;\033[%dD&quot;, pos);
+                 pos = 0;
+                 fflush(stdout);
+                 break;
+ 
+             case END_OF_LINE:
+-                printf(&quot;\033[%dC&quot;,
+-                    count_visible_chars(buffer, pos, size));
+-                pos = strlen(buffer);
++                printf(&quot;\033[%dC&quot;, size - pos);
++                pos = size;
+                 fflush(stdout);
+                 break;
+ 
+@@ -492,36 +436,41 @@ again:
+                     }
+                 }
+ 
+-                memset(buffer, 0, BUFFER_SIZE);
++                memset(buffer, 0, BUFFER_SIZE * sizeof(wchar_t));
+                 if (history_pos &gt; -1) {
+-                    strncpy(buffer,
++                    mbstowcs(buffer,
+                         list_get_element_at(history, history_pos),
+                         BUFFER_SIZE - 1);
+                 }
+ 
+                 char* format;
+                 asprintf(&amp;format, &quot;\033[%dD&quot;, pos);
+-                printf(&quot;%s\033[K%s&quot;, format, buffer);
++                printf(&quot;%s\033[K&quot;, format);
++                fputws(buffer, stdout);
+                 free(format);
+                 fflush(stdout);
+ 
+-                pos = size = strlen(buffer);
++                pos = size = wcslen(buffer);
+                 break;
+ 
+ 
+             case DELETE_CHAR:
+                 if (pos &lt; size) {
+                     delchar(buffer, pos, &amp;size);
+-                    printf(&quot;\033[K\033[s%s\033[u&quot;, &amp;buffer[pos]);
++                    printf(&quot;\033[K\033[s&quot;);
++                    fputws(&amp;buffer[pos], stdout);
++                    printf(&quot;\033[u&quot;);
+                     fflush(stdout);
+                 }
+                 break;
+ 
+             case BACKWARD_DELETE_CHAR:
+                 if (pos &gt; 0) {
+-                    move_cursor(buffer, &amp;pos, size, -1);
++                    pos--;
+                     delchar(buffer, pos, &amp;size);
+-                    printf(&quot;\033[1D\033[K\033[s%s\033[u&quot;, &amp;buffer[pos]);
++                    printf(&quot;\033[1D\033[K\033[s&quot;);
++                    fputws(&amp;buffer[pos], stdout);
++                    printf(&quot;\033[u&quot;);
+                     fflush(stdout);
+                 }
+                 break;
+@@ -541,12 +490,16 @@ again:
+                     if (!complete_word(buffer, &amp;pos, &amp;size)) {
+                         // Wenn die Match-Liste nicht angezeigt wurde, muss die
+                         // Zeile aktualisiert werden
+-                        printf(&quot;\033[s\033[%dD%s\033[u&quot;, old_pos, buffer);
++                        printf(&quot;\033[s\033[%dD&quot;, old_pos);
++                        fputws(buffer, stdout);
++                        printf(&quot;\033[u&quot;);
+                         if (old_pos != pos) {
+                             printf(&quot;\033[%dC&quot;, pos - old_pos);
+                         }
+                     } else {
+-                        printf(&quot;%s%s\033[%dD&quot;, prompt, buffer, size - pos);
++                        printf(&quot;%s&quot;, prompt);
++                        fputws(buffer, stdout);
++                        printf(&quot;\033[%dD&quot;, size - pos);
+                     }
+ 
+                     fflush(stdout);
+@@ -558,7 +511,12 @@ again:
+         }
+     }
+ 
+-    return realloc(buffer, strlen(buffer) + 1);
++    size_t needed_size = wcstombs(NULL, buffer, 0) + 1;
++    char* return_buf = malloc(needed_size);
++    rl_line_buffer = return_buf;
++    wcstombs(return_buf, buffer, needed_size);
++
++    return return_buf;
+ }
+ 
+ /**
+-- 
+1.6.0.6
+
+</PRE>
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="000929.html">[tyndur-devel] [PATCH 2/4] libc: Strings aus breiten Zeichen in	readline() benutzen
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001011.html">[tyndur-devel] [PATCH] libc: Strings aus breiten Zeichen in	readline() benutzen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#994">[ Datum ]</a>
+              <a href="thread.html#994">[ Thema ]</a>
+              <a href="subject.html#994">[ Betreff (Subject)]</a>
+              <a href="author.html#994">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

@@ -1,0 +1,249 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 3/4] cdi: PCI-Geraete von init holen statt	ueber LIO
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%203/4%5D%20cdi%3A%20PCI-Geraete%20von%20init%20holen%20statt%0A%09ueber%20LIO&In-Reply-To=%3C1273765834-15957-4-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001710.html">
+   <LINK REL="Next"  HREF="001717.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 3/4] cdi: PCI-Geraete von init holen statt	ueber LIO</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%203/4%5D%20cdi%3A%20PCI-Geraete%20von%20init%20holen%20statt%0A%09ueber%20LIO&In-Reply-To=%3C1273765834-15957-4-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 3/4] cdi: PCI-Geraete von init holen statt	ueber LIO">kevin at tyndur.org
+                  </A><BR>
+    <I>Do Mai 13 17:50:33 CEST 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001710.html">[tyndur-devel] [PATCH 2/4] pci: Geraete bei init registrieren
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001717.html">[tyndur-devel] [PATCH 3/4] cdi: PCI-Geraete von init holen statt ueber LIO
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1696">[ Datum ]</a>
+              <a href="thread.html#1696">[ Thema ]</a>
+              <a href="subject.html#1696">[ Betreff (Subject) ]</a>
+              <a href="author.html#1696">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* cdi: Nachdem init jetzt alle Geraete kennt, koennen wir sie auch
+  genauso gut von dort holen.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/cdi/lib/pci.c |  132 +++++++++++++++++++++------------------------
+ 1 files changed, 61 insertions(+), 71 deletions(-)
+
+diff --git a/src/modules/cdi/lib/pci.c b/src/modules/cdi/lib/pci.c
+index e14f48a..145942c 100644
+--- a/src/modules/cdi/lib/pci.c
++++ b/src/modules/cdi/lib/pci.c
+@@ -12,8 +12,10 @@
+ #include &lt;stdlib.h&gt;
+ #include &lt;syscall.h&gt;
+ #include &lt;stdio.h&gt;
++#include &lt;string.h&gt;
+ #include &lt;services.h&gt;
+ 
++#include &lt;init.h&gt;
+ #include &lt;pci.h&gt;
+ #include &lt;dir.h&gt;
+ 
+@@ -22,71 +24,57 @@
+ #include &quot;cdi/pci.h&quot;
+ 
+ /**
+- * Liest aus einer LOST-pci:/devices-Datei die Daten eines PCI-Geraets ein
++ * Liest die Daten eines PCI-Geraets ein
+  */
+-static struct cdi_pci_device* read_pci_device(char* filename) 
++static struct cdi_pci_device* read_pci_device(uint8_t* data, size_t size)
+ {
+-    FILE* f = fopen(filename, &quot;r&quot;);
+-    if (f == NULL) {
+-        fprintf(stderr, &quot;PCI-Geraet %s nicht gefunden.\n&quot;, filename);
+-        return NULL;
+-    }
+-
+-    struct pci_device device;
+-    if (!fread(&amp;device, sizeof(device), 1, f)) {
+-        fprintf(stderr, &quot;Konnte nicht von %s lesen.\n&quot;, filename);
+-        fclose(f);
+-        return NULL;
+-    }
++    struct pci_device* device = (struct pci_device*) data;
+ 
+     // CDI-Struktur initialisieren
+     struct cdi_pci_device* cdi_device = malloc(sizeof(*cdi_device));
+-    cdi_device-&gt;bus          = device.bus;
+-    cdi_device-&gt;dev          = device.device;
+-    cdi_device-&gt;function     = device.function;
+-    cdi_device-&gt;vendor_id    = device.vendor_id;
+-    cdi_device-&gt;device_id    = device.device_id;
+-    cdi_device-&gt;class_id     = device.class_id;
+-    cdi_device-&gt;subclass_id  = device.subclass_id;
+-    cdi_device-&gt;interface_id = device.interface_id;
+-    cdi_device-&gt;rev_id       = device.rev_id;
+-    cdi_device-&gt;irq          = device.irq;
++    cdi_device-&gt;bus          = device-&gt;bus;
++    cdi_device-&gt;dev          = device-&gt;device;
++    cdi_device-&gt;function     = device-&gt;function;
++    cdi_device-&gt;vendor_id    = device-&gt;vendor_id;
++    cdi_device-&gt;device_id    = device-&gt;device_id;
++    cdi_device-&gt;class_id     = device-&gt;class_id;
++    cdi_device-&gt;subclass_id  = device-&gt;subclass_id;
++    cdi_device-&gt;interface_id = device-&gt;interface_id;
++    cdi_device-&gt;rev_id       = device-&gt;rev_id;
++    cdi_device-&gt;irq          = device-&gt;irq;
+     cdi_device-&gt;resources    = cdi_list_create();
+ 
+     // Ressourcen hinzufuegen
+     struct pci_resource res;
+     struct cdi_pci_resource* cdi_res;
+     int index = 0;
+-    while (!feof(f)) {
+-        if (fread(&amp;res, sizeof(res), 1, f)) {
+-            
+-            cdi_res = malloc(sizeof(*cdi_res));
+-            cdi_res-&gt;start = res.start;
+-            cdi_res-&gt;length = res.length;
+-            cdi_res-&gt;index = index++;
+-            cdi_res-&gt;address = 0;
+-
+-            switch (res.type) {
+-                case PCI_RESOURCE_MEM:
+-                    cdi_res-&gt;type = CDI_PCI_MEMORY;
+-                    break;
+-                
+-                case PCI_RESOURCE_PORT:
+-                    cdi_res-&gt;type = CDI_PCI_IOPORTS;
+-                    break;
+-            }
+-
+-            cdi_list_push(cdi_device-&gt;resources, cdi_res);
+-
+-        } else {
+-            fprintf(stderr, &quot;Konnte nicht von %s lesen.\n&quot;, filename);
+-            fclose(f);
+-            cdi_pci_device_destroy(cdi_device);
+-            return NULL;
++
++    size -= sizeof(*device);
++    data += sizeof(*device);
++
++    while (size &gt;= sizeof(res)) {
++        memcpy(&amp;res, data, sizeof(res));
++        size -= sizeof(res);
++        data += sizeof(res);
++
++        cdi_res = malloc(sizeof(*cdi_res));
++        cdi_res-&gt;start = res.start;
++        cdi_res-&gt;length = res.length;
++        cdi_res-&gt;index = index++;
++        cdi_res-&gt;address = 0;
++
++        switch (res.type) {
++            case PCI_RESOURCE_MEM:
++                cdi_res-&gt;type = CDI_PCI_MEMORY;
++                break;
++
++            case PCI_RESOURCE_PORT:
++                cdi_res-&gt;type = CDI_PCI_IOPORTS;
++                break;
+         }
+-    }
+ 
+-    fclose(f);
++        cdi_list_push(cdi_device-&gt;resources, cdi_res);
++    }
+ 
+     return cdi_device;
+ }
+@@ -97,33 +85,35 @@ static struct cdi_pci_device* read_pci_device(char* filename)
+  */
+ void cdi_pci_get_all_devices(cdi_list_t list)
+ {
+-    servmgr_need(&quot;pci&quot;);
++    struct init_dev_desc* devs;
++    uint8_t* data;
++    int ret;
+ 
+-    io_resource_t* dir_res = directory_open(&quot;pci:/devices/&quot;);
+-    
+-    if (dir_res == NULL) {
+-        fprintf(stderr, &quot;Konnte pci:/devices/ nicht oeffnen\n&quot;);
++    ret = init_dev_list(&amp;devs);
++    if (ret &lt; 0) {
+         return;
+     }
+ 
+-    io_direntry_t* direntry;
+-    while ((direntry = directory_read(dir_res))) {
+-        if (direntry-&gt;type == IO_DIRENTRY_FILE) {
+-            struct cdi_pci_device* device;
+-            char* buffer = NULL;
+-            asprintf(&amp;buffer, &quot;pci:/devices/%s&quot;, direntry-&gt;name);
++    data = (uint8_t*) devs;
++    while (1) {
++        size_t size;
+ 
+-            device = read_pci_device(buffer);
+-            if (device != NULL) {
+-                cdi_list_push(list, device);
+-            }
++        if (ret &lt; sizeof(struct init_dev_desc)) {
++            break;
++        }
+ 
+-            free(buffer);
++        devs = (struct init_dev_desc*) data;
++        size = sizeof(struct init_dev_desc) + devs-&gt;bus_data_size;
++        if (ret &lt; size) {
++            break;
+         }
+-        free(direntry);
+-    }
+ 
+-    directory_close(dir_res);
++        if (devs-&gt;type == CDI_PCI) {
++            cdi_list_push(list, read_pci_device(devs-&gt;bus_data, size));
++        }
++        ret -= size;
++        data += size;
++    };
+ }
+ 
+ /**
+-- 
+1.6.0.2
+
+</PRE>
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001710.html">[tyndur-devel] [PATCH 2/4] pci: Geraete bei init registrieren
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001717.html">[tyndur-devel] [PATCH 3/4] cdi: PCI-Geraete von init holen statt ueber LIO
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1696">[ Datum ]</a>
+              <a href="thread.html#1696">[ Thema ]</a>
+              <a href="subject.html#1696">[ Betreff (Subject)]</a>
+              <a href="author.html#1696">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

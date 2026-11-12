@@ -1,0 +1,221 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 1/9] lpt: Aktuellste und nicht erste Version	installieren
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%201/9%5D%20lpt%3A%20Aktuellste%20und%20nicht%20erste%20Version%0A%09installieren&In-Reply-To=%3C1260725504-9035-2-git-send-email-toni%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001532.html">
+   <LINK REL="Next"  HREF="001555.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 1/9] lpt: Aktuellste und nicht erste Version	installieren</H1>
+    <B>Antoine Kaufmann</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%201/9%5D%20lpt%3A%20Aktuellste%20und%20nicht%20erste%20Version%0A%09installieren&In-Reply-To=%3C1260725504-9035-2-git-send-email-toni%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 1/9] lpt: Aktuellste und nicht erste Version	installieren">toni at tyndur.org
+                  </A><BR>
+    <I>So Dez 13 18:31:36 CET 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001532.html">[tyndur-devel] Updates und Entfernen fuer lpt
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001555.html">[tyndur-devel] [PATCH 1/9] lpt: Aktuellste und nicht erste Version installieren
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1533">[ Datum ]</a>
+              <a href="thread.html#1533">[ Thema ]</a>
+              <a href="subject.html#1533">[ Betreff (Subject) ]</a>
+              <a href="author.html#1533">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* lpt: Aktuellste und nicht erste Version im Repo installieren
+
+Signed-off-by: Antoine Kaufmann &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">toni at tyndur.org</A>&gt;
+---
+ src/modules/pas/lpt/packages.pas |  115 +++++++++++++++++++++++++++++++++++++-
+ 1 files changed, 113 insertions(+), 2 deletions(-)
+
+diff --git a/src/modules/pas/lpt/packages.pas b/src/modules/pas/lpt/packages.pas
+index d5a0218..7cab104 100644
+--- a/src/modules/pas/lpt/packages.pas
++++ b/src/modules/pas/lpt/packages.pas
+@@ -60,6 +60,9 @@ type
+ 
+             function add(number: String): TPackageVersion;
+ 
++            (** Neuste Version dieser Section suchen. *)
++            function getCurrentVersion(): TPackageVersion;
++
+         public
+             section:    String;
+             versions:   TCollection;
+@@ -76,6 +79,20 @@ type
+             procedure addDependency(typ: char; dep: String);
+             procedure copyDependencies(from: TPackageVersion);
+ 
++            (**
++             * n-ten Teil der Versionsnummer auslesen. Teile, die nicht gesetzt
++             * sind, werden einfach als -1 zurueckgegeben.
++             *)
++            function getVersionPart(n: Integer): Integer;
++
++            (**
++             * Diese Version mit der angegebenen vergleichen. Ist die angegebene
++             * neuer wird ein Wert kleiner 0 zurueckgegeben, ist sie aelter,
++             * wird ein Wert groesser 0 zurueckgegeben. Falls die beiden
++             * Versionen geleich sind, wird 0 zurueckgegeben.
++             **)
++            function compareTo(other: TPackageVersion): integer;
++
+             property preinstDependencies: TCollection read instDep;
+             property runDependencies: TCollection read runDep;
+ 
+@@ -124,8 +141,7 @@ begin
+         if pkg.name = pkgname then begin
+             sect := pkg.section[sectname];
+             if (sect &lt;&gt; nil) and (sect.versions.count &gt; 0) then begin
+-                // TODO Aktuellste Version nehmen
+-                exit(TPackageVersion(sect.versions.items[0]));
++                exit(sect.getCurrentVersion);
+             end;
+         end;
+     end;
+@@ -293,6 +309,26 @@ begin
+     exit(version);
+ end;
+ 
++(** Neuste Version dieser Section suchen. *)
++function TPackageSection.getCurrentVersion(): TPackageVersion;
++var
++    cur, other: TPackageVersion;
++    curVer, i: Integer;
++begin
++    (* Mit erstbester Version anfangen und immer wenn wir eine neuere finden
++       die als Aktuelle hernehmen. *)
++    cur := TPackageVersion(versions.items[0]);
++    for i := 1 to versions.count - 1 do begin
++        other := TPackageVersion(versions.items[i]);
++        if cur.compareTo(other) &lt; 0 then begin
++            cur := other;
++        end;
++    end;
++
++    Exit(cur);
++end;
++
++
+ constructor TPackageVersion.create(parent: TCollection);
+ begin
+     inherited;
+@@ -350,4 +386,79 @@ begin
+     end;
+ end;
+ 
++(**
++ * n-ten Teil der Versionsnummer auslesen. Teile, die nicht gesetzt
++ * sind, werden einfach als -1 zurueckgegeben.
++ *)
++function TPackageVersion.getVersionPart(n: Integer): Integer;
++var
++    part, ver: String;
++    i, dotpos, num: Integer;
++begin
++    ver := version;
++    dotpos := 1;
++
++    (* Wir spalten den String Stueck fuer Stueck bei . und - auf und fuellen
++       ihn in ein Array *)
++    for i := 1 to n do begin
++        dotpos := Pos('.', ver);
++        if dotpos &lt;= 0 then begin
++            dotpos := Pos('-', ver);
++        end;
++
++        (* Kein . oder - mehr gefunden, wenn noch ein Stueck uebrig ist, nehmen
++         wir das noch, sonst sind wir fertig. *)
++        if (Length(ver) = 0) then begin
++            Exit(-1);
++        end else if dotpos &lt;= 0 then begin
++            dotpos := Length(ver) + 1;
++        end;
++
++        part := Copy(ver, 1, dotpos - 1);
++        ver := Copy(ver, dotpos + 1, Length(ver));
++        num := StrToInt(part);
++    end;
++
++    Exit(num);
++end;
++
++(**
++ * Diese Version mit der angegebenen vergleichen. Ist die angegebene
++ * neuer wird ein Wert kleiner 0 zurueckgegeben, ist sie aelter,
++ * wird ein Wert groesser 0 zurueckgegeben. Falls die beiden
++ * Versionen geleich sind, wird 0 zurueckgegeben.
++ **)
++function TPackageVersion.compareTo(other: TPackageVersion): integer;
++var
++    partA, partB, n: Integer;
++    aInv, bInv: Boolean;
++begin
++    n := 1;
++    aInv := false;
++    bInv := false;
++    repeat begin
++        partA := getVersionPart(n);
++        partB := other.getVersionPart(n);
++
++        (* Wenn eine Versionsnummer kuerzer ist als die andere, hat eine -1 und
++           die andere noch eine vernuenftige Zahl. Ist diese Zufaelligerweise 0,
++           muss der Vergleich trotzdem passen, da 0.2 = 0.2.0 *)
++        if partA = -1 then begin
++            aInv := true;
++            partA := 0;
++        end;
++        if partB = -1 then begin
++            bInv := true;
++            partB := 0;
++        end;
++
++        if (partA - partB) &lt;&gt; 0 then begin
++            Exit(partA - partB);
++        end;
++
++        Inc(n);
++    end; until aInv and bInv;
++    Exit(0);
++end;
++
+ end.
+-- 
+1.6.3.3
+
+</PRE>
+
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001532.html">[tyndur-devel] Updates und Entfernen fuer lpt
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001555.html">[tyndur-devel] [PATCH 1/9] lpt: Aktuellste und nicht erste Version installieren
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1533">[ Datum ]</a>
+              <a href="thread.html#1533">[ Thema ]</a>
+              <a href="subject.html#1533">[ Betreff (Subject)]</a>
+              <a href="author.html#1533">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

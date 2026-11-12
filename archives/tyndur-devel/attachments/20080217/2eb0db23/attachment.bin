@@ -1,0 +1,1272 @@
+Index: fdisk/partition.h
+===================================================================
+--- fdisk/partition.h	(Revision 0)
++++ fdisk/partition.h	(Revision 0)
+@@ -0,0 +1,111 @@
++/*
++ * Copyright (c) 2008 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Martin Kleusberg.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef __FDISK_PARTITION_H__
++#define __FDISK_PARTITION_H__
++
++#include <stdint.h>
++
++#define DISK_SIGNATURE_START 440
++#define PARTITION_ENTRY_SIZE 16
++#define PARTITION_TABLE_START 446
++#define BOOT_SIGNATURE_POS 0x1FE
++#define BOOT_SIGNATURE 0xAA55
++
++#define SECTORS_PER_TRACK 63
++
++#define BOOTFLAG_SET 0x80
++#define BOOTFLAG_UNSET 0x00
++
++#define DEFAULT_PARTITION_TYPE 0x83
++#define DEFAULT_BOOTABLE_FLAG BOOTFLAG_UNSET
++
++#define PARTITION_TYPE_PRIMARY 0
++#define PARTITION_TYPE_EXTENDED 1
++#define PARTITION_TYPE_LOGICAL 2
++
++/* A pointer to argv[1] or better: the device name */
++char *device_name;
++/* Number of heads */
++unsigned long device_numheads;
++
++/* This is a single entry in the partition table. Its size should
++   be PARTITION_ENTRY_SIZE */
++struct partition_entry_t
++{
++	uint8_t bootable;		/* 0x0 DB Bootflag (0x00 not bootable, 0x80 bootable) */
++	uint8_t start[3];		/* Start position in chs format */
++	uint8_t type;			/* Partition type (file system) */
++	uint8_t end[3];			/* End position in chs format */
++	uint32_t start_sector;		/* LBA start position */
++	uint32_t num_sectors;		/* Total number of sectors */
++} __attribute__ ((__packed__));
++
++/* Contains all information about a single partition that is needed
++   by fdisk */
++struct partition_t
++{
++	char exists;				/* 1 if the partition exists, 0 if not */
++	unsigned int number;			/* Number of the partition, starting with 1 */
++	char type;				/* 0 is primary, 1 extended, 2 logical */
++	
++	struct partition_entry_t data;		/* Actual data */
++};
++
++/* Small helper function to calculate the end sector of a partition */
++long getEndSector(struct partition_t *p);
++/* Splits the 3bytes sized start and end chs entry */
++void uncompressCHS(uint8_t *compressed, unsigned int *cylinder, unsigned int *head, unsigned int *sector);
++/* Combine the cylinder, head, sector to a 3byte array */
++void compressCHS(uint8_t *compressed, unsigned int cylinder, unsigned int head, unsigned int sector);
++/* Convert a CHS to a LBA value */
++unsigned int CHS2LBA(unsigned int cylinder, unsigned int head, unsigned int sector);
++/* Convert a LBA to a CHS value */
++void LBA2CHS(unsigned int lba, unsigned int *cylinder, unsigned int *head, unsigned int *sector);
++/* Read the partition data from disk. Returns 0 if successfull */
++char readPartitions(char *filename);
++/* Build a new MBR and write it to disk. Returns 0 if successfull */
++char applyChanges();
++/* Delete a partition */
++void deletePartition(struct partition_t *p);
++/* Create a new partition */
++void createPartition(struct partition_t *p, unsigned int number, unsigned int start_cyl, unsigned int start_head, unsigned int start_sec, unsigned int start_lba,
++			unsigned int end_cyl, unsigned int end_head, unsigned int end_sec, unsigned int end_lba);
++
++/* Global variables to store the MBR and the partition data */
++unsigned char MBR[512];
++struct partition_t MBR_Partitions[4];
++
++#endif
+
+Eigenschaftsänderungen: fdisk/partition.h
+___________________________________________________________________
+Name: svn:eol-style
+   + native
+
+Index: fdisk/fdisk.c
+===================================================================
+--- fdisk/fdisk.c	(Revision 0)
++++ fdisk/fdisk.c	(Revision 0)
+@@ -0,0 +1,523 @@
++/*
++ * Copyright (c) 2008 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Martin Kleusberg.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "types.h"
++#include "stdlib.h"
++#include "stdio.h"
++#include "unistd.h"
++#include "string.h"
++#include "ctype.h"
++#define _USE_START_
++#include "init.h"
++
++#include <readline/readline.h>
++#include "partition.h"
++#include "typeids.h"
++
++#define PROG_VERSION "0.1"
++
++/* Set the size of the command buffer. This can be a rather low value, since
++   all commands are very short */
++#define COMMAND_BUFFER_SIZE 16
++
++/* This variable is set to 1 if there are unsaved changes, and will be resetted
++   to 0 if these changes are saved */
++char unsaved_changes;
++
++/* We need this small function, because getchar is not waiting
++   for a key press at the moment */
++char keyboard_read_char()
++{
++	fflush(stdout);
++	char c = 0;
++	while(!fread(&c, 1, 1, stdin));
++	putchar(c);
++	return c;
++}
++
++/* This function takes to characters and converts them into a 8bit integer
++   For example: c1 = F and c2 = F => return value = 255 */
++unsigned char hex2uint8(char c1, char c2)
++{
++	unsigned char temp = 0;
++	char ret_val = 0;
++	
++	if(c1 >= '0' && c1 <= '9')
++		temp = c1 - '0';
++	if(c1 >= 'A' && c1 <= 'F')
++		temp = c1 - 'A' + 10;
++	if(c1 >= 'a' && c1 <= 'f')
++		temp = c1 - 'a' + 10;
++	ret_val = temp * 16;
++	
++	if(c2 >= '0' && c2 <= '9')
++		temp = c2 - '0';
++	if(c2 >= 'A' && c2 <= 'F')
++		temp = c2 - 'A' + 10;
++	if(c2 >= 'a' && c2 <= 'f')
++		temp = c2 - 'a' + 10;
++	ret_val += temp;
++	
++	return ret_val;
++}
++
++void shell_list_partitions()
++{
++	/* Print general data */
++	printf("%s\n", device_name);
++	printf("  Disk Signature: 0x%08x\n\n", *(uint32_t*)(&MBR[DISK_SIGNATURE_START]));
++	
++	/* Print table header */
++	printf("# | Start      | End        | Boot | Type\n");
++	
++	/* TODO Support extended/logical partitions */
++	int i;
++	for(i=0;i<4;i++)
++	{
++		/* Print only information if thr partition exists */
++		if(MBR_Partitions[i].exists)
++			printf("%2i|%12i|%12i| %c    | %02x\n", MBR_Partitions[i].number, MBR_Partitions[i].data.start_sector, getEndSector(&MBR_Partitions[i]),
++				MBR_Partitions[i].data.bootable == BOOTFLAG_SET ? '*' : ' ', (int)MBR_Partitions[i].data.type);
++	}
++}
++
++void shell_toggle_bootable()
++{
++	/* Ask the user for the partition number. Decrease it by 0 to get the array index */
++	printf("Which partition (0 to cancel)? ");
++	int partition = (int)(keyboard_read_char()-'0');
++	printf("\n");
++	
++	/* TODO Support extended/logical partitions */
++	
++	/* Cancel? */
++	if(partition == 0)
++		return;
++	
++	/* Check the input. It should be a valid number and the partition must exist */
++	if(partition < 1 || partition > 4 || MBR_Partitions[partition-1].exists == 0)
++	{
++		printf("Invalid partition\n");
++	} else {
++		if(MBR_Partitions[partition-1].data.bootable == BOOTFLAG_UNSET)
++		{
++			MBR_Partitions[partition-1].data.bootable = BOOTFLAG_SET;
++		} else if(MBR_Partitions[partition-1].data.bootable == BOOTFLAG_SET) {
++			MBR_Partitions[partition-1].data.bootable = BOOTFLAG_UNSET;
++		} else {
++			printf("WARNING: The bootable flag was invalid! Maybe the partition table is corrupted!\n");
++			printf("         It's now set to not bootable.\n");
++			MBR_Partitions[partition-1].data.bootable = BOOTFLAG_UNSET;
++		}
++		unsaved_changes = 1;
++	}
++}
++
++void shell_write()
++{
++	/* Ask the user whether to continue */
++	printf("WARNING: You should be absoulutely sure what you do! You may destroy your data and it's hard to undo this step.\n");
++	printf("Continue? [Yn] ");
++	char answer = keyboard_read_char();
++	printf("\n");
++	
++	if(answer == 'Y')
++	{
++		if(!applyChanges())
++		{
++			printf("Saved. You should restart your computer now.\n");
++			unsaved_changes = 0;
++		}
++	}
++}
++
++void shell_delete()
++{
++	/* Ask the user for the partition number. Decrease it by 0 to get the array index */
++	printf("Which partition (0 to cancel)? ");
++	int partition = (int)(keyboard_read_char()-'0');
++	printf("\n");
++	
++	/* TODO Support extended/logical partitions */
++	
++	/* Cancel? */
++	if(partition == 0)
++		return;
++	
++	/* Check the input. It should be a valid number and the partition must exist */
++	if(partition < 1 || partition > 4 || MBR_Partitions[partition-1].exists == 0)
++	{
++		printf("Invalid partition\n");
++	} else {
++		deletePartition(&MBR_Partitions[partition-1]);
++		unsaved_changes = 1;
++	}
++}
++
++void shell_typelist()
++{
++	int i;
++	int types_printed = 0;
++	for(i=0;i<256;i++)
++	{
++		if(PartitionTypeID[i].name != 0)
++		{
++			/* Print 3 entries per line, to change this edit the 15 and the 3 below */
++			printf("%02x %-15s", i, PartitionTypeID[i].name);
++			if(((++types_printed) % 3 == 0) || (i == 255))
++				printf("\n");
++			else
++				printf(" - ");
++		}
++	}
++}
++
++void shell_settype()
++{
++	/* Ask the user for the partition number. Decrease it by 0 to get the array index */
++	printf("Which partition (0 to cancel)? ");
++	int partition = (int)(keyboard_read_char()-'0');
++	printf("\n");
++	
++	/* TODO Support extended/logical partitions */
++	
++	/* Cancel? */
++	if(partition == 0)
++		return;
++	
++	/* Check the input. It should be a valid number and the partition must exist */
++	if(partition < 1 || partition > 4 || MBR_Partitions[partition-1].exists == 0)
++	{
++		printf("Invalid partition\n");
++	} else {
++		/* TODO: Make this more comfortable by allowing the user to search in the type list and
++		         restricting the input format */
++		/* Ask for the type until the user gives proper input */
++		char good_input = 0;
++		char buffer[2];
++		do
++		{
++			char *input = readline("Please enter the new type as two digit hex code or h for help: ");
++			if(input)
++			{
++				strncpy(buffer, input, 2);
++				free(input);
++				if(strcmp(buffer, "h") == 0)
++					shell_typelist();
++				else if(isxdigit(buffer[0]) && isxdigit(buffer[1]))
++					good_input = 1;
++			}
++		} while(good_input == 0);
++		/* Convert the string data to a unsigned char and save it */
++		MBR_Partitions[partition-1].data.type = hex2uint8(buffer[0], buffer[1]);
++		
++		unsaved_changes = 1;
++	}
++}
++
++void shell_new()
++{
++	/* TODO Support extended/logical partitions */
++	/* TODO Do some clean up here. Maybe split it into some more functions */
++	
++	/* Ask the user for the partition number. Decrease it by 0 to get the array index */
++	printf("Which partition (0 to cancel)? ");
++	int partition = (int)(keyboard_read_char()-'0');
++	printf("\n");
++	
++	/* Cancel? */
++	if(partition == 0)
++		return;
++	
++	/* Check the input. It should be a valid number and the partition mustn't exist */
++	if(partition < 1 || partition > 4 || MBR_Partitions[partition-1].exists != 0)
++	{
++		printf("Invalid partition number\n");
++	} else {
++		/* TODO: Accept only valid values, so that it's not possible to create
++		         partitions that are too big, have their start behind the disk's
++		         end, are overlapping with other partitions or have their end
++		         point not behind their starting point */
++		
++		/* Ask for the start positition's address format */
++		printf("Start Position: CHS or LBA? [CL]  ");
++		char input_type = 0;
++		do
++		{
++			printf("\b");		/* NOTE: This one removes the char left from the last try. However the \b causes some problems atm */
++			input_type = keyboard_read_char();
++		} while(input_type != 'C' && input_type != 'c' && input_type != 'L' && input_type != 'l');
++		printf("\n");
++		
++		/* Get the start position */
++		unsigned int start_cylinder, start_head, start_sector, start_lba;
++		if(input_type == 'C' || input_type == 'c')
++		{
++			/* User want's to enter it in CHS format */
++			char *input = readline("Start Position: Cylinder? ");
++			char buffer[COMMAND_BUFFER_SIZE];
++			if(input)
++			{
++				strncpy(buffer, input, COMMAND_BUFFER_SIZE);
++				free(input);
++				start_cylinder = atoi(buffer);
++			} else {
++				return;
++			}
++			input = readline("Start Position: Head? ");
++			if(input)
++			{
++				strncpy(buffer, input, COMMAND_BUFFER_SIZE);
++				free(input);
++				start_head = atoi(buffer);
++			} else {
++				return;
++			}
++			input = readline("Start Position: Sector? ");
++			if(input)
++			{
++				strncpy(buffer, input, COMMAND_BUFFER_SIZE);
++				free(input);
++				start_sector = atoi(buffer);
++			} else {
++				return;
++			}
++			
++			start_lba = CHS2LBA(start_cylinder, start_head, start_sector);
++		} else {
++			/* It's in LBA format */
++			char *input = readline("Start Position: LBA Address? ");
++			char buffer[COMMAND_BUFFER_SIZE];
++			if(input)
++			{
++				strncpy(buffer, input, COMMAND_BUFFER_SIZE);
++				free(input);
++				start_lba = atoi(buffer);
++			} else {
++				return;
++			}
++			
++			LBA2CHS(start_lba, &start_cylinder, &start_head, &start_sector);
++		}
++		
++		/* Ask the user wether he wants to input a size or and end position in chs or
++		   lba format */
++		printf("End Position: CHS, LBA or calculate from size? [CLS]  ");
++		input_type = 0;
++		do
++		{
++			printf("\b");
++			input_type = keyboard_read_char();
++		} while(input_type != 'C' && input_type != 'c' && input_type != 'L' && input_type != 'l' && input_type != 'S' && input_type != 's');
++		printf("\n");
++		
++		/* Get the size or end position */
++		unsigned int end_cylinder, end_head, end_sector, end_lba;
++		if(input_type == 'C' || input_type == 'c')
++		{
++			/* User want's to enter it in CHS format */
++			char *input = readline("End Position: Cylinder? ");
++			char buffer[COMMAND_BUFFER_SIZE];
++			if(input)
++			{
++				strncpy(buffer, input, COMMAND_BUFFER_SIZE);
++				free(input);
++				end_cylinder = atoi(buffer);
++			} else {
++				return;
++			}
++			input = readline("End Position: Head? ");
++			if(input)
++			{
++				strncpy(buffer, input, COMMAND_BUFFER_SIZE);
++				free(input);
++				end_head = atoi(buffer);
++			} else {
++				return;
++			}
++			input = readline("End Position: Sector? ");
++			if(input)
++			{
++				strncpy(buffer, input, COMMAND_BUFFER_SIZE);
++				free(input);
++				end_sector = atoi(buffer);
++			} else {
++				return;
++			}
++			
++			end_lba = CHS2LBA(end_cylinder, end_head, end_sector);
++		} else if(input_type == 'L' || input_type == 'l') {
++			/* It's in LBA format */
++			char *input = readline("End Position: LBA Address? ");
++			char buffer[COMMAND_BUFFER_SIZE];
++			if(input)
++			{
++				strncpy(buffer, input, COMMAND_BUFFER_SIZE);
++				free(input);
++				end_lba = atoi(buffer);
++			} else {
++				return;
++			}
++			
++			LBA2CHS(end_lba, &end_cylinder, &end_head, &end_sector);
++		} else {
++			/* Get the partition size and calculate the other stuff */
++			char *input = readline("End Position: Partition size (in sectors)? ");
++			char buffer[COMMAND_BUFFER_SIZE];
++			if(input)
++			{
++				strncpy(buffer, input, COMMAND_BUFFER_SIZE);
++				free(input);
++				end_lba = start_lba + atoi(buffer);
++			} else {
++				return;
++			}
++			
++			LBA2CHS(end_lba, &end_cylinder, &end_head, &end_sector);
++		}
++		
++		/* Create the new partition */
++		createPartition(&MBR_Partitions[partition-1], partition, start_cylinder, start_head, start_sector, start_lba, end_cylinder, end_head, end_sector, end_lba);
++		
++		unsaved_changes = 1;
++	}
++}
++
++void shell()
++{
++	printf("Type h for help\n");
++	
++	char command_buffer[COMMAND_BUFFER_SIZE];
++	memset(command_buffer, 0, COMMAND_BUFFER_SIZE);
++	while(1)
++	{
++		/* Get input */
++		char *input = readline("> ");
++		if(input)
++		{
++			strncpy(command_buffer, input, COMMAND_BUFFER_SIZE);
++			free(input);
++		} else {
++			continue;
++		}
++		
++		/* Check command */
++		if(strcmp(command_buffer, "h") == 0)			/* Help */
++		{
++			/* NOTE: The \t does not work atm. Should be changed in printf... */
++			printf("Type one of the following commands:\n");
++			printf("b\t\t\tToggle bootable flag\n");
++			printf("d\t\t\tDelete partition\n");
++			printf("h\t\t\tHelp\n");
++			printf("l\t\t\tList partitions\n");
++			printf("n\t\t\tCreate a new partition\n");
++			printf("q\t\t\tQuit\n");
++			printf("t\t\t\tChange a partition's type\n");
++			printf("tl\t\t\tList all partition types\n");
++			printf("w\t\t\tWrite changes to disk\n");
++		} else if(strcmp(command_buffer, "q") == 0)		/* Quit */
++		{
++			if(unsaved_changes == 1)
++			{
++				printf("You are about to quit. Any unsaved changes will be lost, do you want to continue? [Yn] ");
++				char answer = keyboard_read_char();
++				printf("\n");
++				if(answer == 'Y')
++					break;
++			} else {
++				break;
++			}
++		} else if(strcmp(command_buffer, "l") == 0)		/* List */
++		{
++			shell_list_partitions();
++		} else if(strcmp(command_buffer, "b") == 0)		/* Toggle bootable flag */
++		{
++			shell_toggle_bootable();
++		} else if(strcmp(command_buffer, "w") == 0)		/* Write changes */
++		{
++			shell_write();
++		} else if(strcmp(command_buffer, "d") == 0)		/* Delete a partition */
++		{
++			shell_delete();
++		} else if(strcmp(command_buffer, "t") == 0)		/* Change partition type */
++		{
++			shell_settype();
++		} else if(strcmp(command_buffer, "n") == 0)		/* Create a new partition */
++		{
++			shell_new();
++		} else if(strcmp(command_buffer, "tl") == 0)		/* List partition types */
++		{
++			shell_typelist();
++		} else {
++			printf("Unknown command (h for help)\n");
++		}
++	}
++}
++
++int main(int argc, char *argv[])
++{
++	/* Check the command line */
++	if(argc != 2)
++	{
++		printf("Usage: fdisk device\n");
++		printf("For example: fdisk ata:/ata00\n");
++		return 0;
++	}
++	
++	/* Print title and version */
++	printf("fdisk - Version %s\nThis program is in development. Be careful!\n\n", PROG_VERSION);
++	
++	/* Read in the current partitions */
++	if(readPartitions(argv[1]))
++		return 1;
++	
++	/* No unsaved changes yet */
++	unsaved_changes = 0;
++	
++	/* Ask the user for the number of heads */
++	/* TODO: Detect this automatically */
++	char *input = readline("Please enter the number of heads: ");
++	if(input)
++	{
++		device_numheads = atoi(input);
++		free(input);
++	}
++	
++	/* All initialized, start the interactive mode */
++	shell();
++	
++	/* Exit, without an error code */
++	return 0;
++}
+
+Eigenschaftsänderungen: fdisk/fdisk.c
+___________________________________________________________________
+Name: svn:eol-style
+   + native
+
+Index: fdisk/typeids.c
+===================================================================
+--- fdisk/typeids.c	(Revision 0)
++++ fdisk/typeids.c	(Revision 0)
+@@ -0,0 +1,299 @@
++/*
++ * Copyright (c) 2008 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Martin Kleusberg.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "typeids.h"
++
++struct PartitionTypeID_t PartitionTypeID[257] = 
++	/* See http://www.win.tue.nl/~aeb/partitions/partition_types-1.html */
++	/* TODO: Make them shorter, max size should be about 15 */
++	{
++	{0x00, "No Part."},
++	{0x01, "FAT12"},
++	{0x02, "XENIX root"},
++	{0x03, "XENIX user"},
++	{0x04, "FAT16 <32MB"},
++	{0x05, "Extended"},
++	{0x06, "FAT16 >32MB"},
++	{0x07, "NTFS/HPFS"},
++	{0x08, "AIX"},
++	{0x09, "AIX bootable"},
++	{0x0A, "OS/2 Boot Manager"},
++	{0x0B, "FAT32"},
++	{0x0C, "FAT32 (LBA)"},
++	{0x0D, 0},
++	{0x0E, "FAT16 (LBA)"},
++	{0x0F, "W95 Extended (LBA)"},
++	{0x10, "OPUS"},
++	{0x11, "FAT12 (Hidden)"},
++	{0x12, "Diagnostic"},
++	{0x13, 0},
++	{0x14, "FAT16 <32MB hidden"},
++	{0x15, 0},
++	{0x16, "FAT16 >32MB hidden"},
++	{0x17, "NTFS/HPFS hidden"},
++	{0x18, "AST SmartSleep"},
++	{0x19, 0},
++	{0x1A, 0},
++	{0x1B, "FAT32 hidden"},
++	{0x1C, "FAT32 hidden, LBA)"},
++	{0x1D, 0},
++	{0x1E, "FAT16 hidden, LBA)"},
++	{0x1F, 0},
++	{0x20, 0},
++	{0x21, 0},
++	{0x22, 0},
++	{0x23, 0},
++	{0x24, "NEC DOS"},
++	{0x25, 0},
++	{0x26, 0},
++	{0x27, 0},
++	{0x28, 0},
++	{0x29, 0},
++	{0x2A, "AtheOS AFS"},
++	{0x2B, "SyllableSecure"},
++	{0x2C, 0},
++	{0x2D, 0},
++	{0x2E, 0},
++	{0x2F, 0},
++	{0x30, 0},
++	{0x31, 0},
++	{0x32, "NOS"},
++	{0x33, 0},
++	{0x34, 0},
++	{0x35, "JFS on OS/2"},
++	{0x36, 0},
++	{0x37, 0},
++	{0x38, "THEOS 2GB"},
++	{0x39, "Plan9"},
++	{0x3A, "THEOS 4GB"},
++	{0x3B, "THEOS extended"},
++	{0x3C, "PartitionMagic"},
++	{0x3D, "NetWare Hidden"},
++	{0x3E, 0},
++	{0x3F, 0},
++	{0x40, "Venix 80286"},
++	{0x41, "PPC PReP Boot"},
++	{0x42, "SFS"},
++	{0x43, 0},
++	{0x44, "GoBack"},
++	{0x45, "Priam"},
++	{0x46, "Eumel/Ergos L3"},
++	{0x47, "Eumel/Ergos L3"},
++	{0x48, "Eumel/Ergos L3"},
++	{0x49, 0},
++	{0x4A, "AdaOS"},
++	{0x4B, 0},
++	{0x4C, "Oberon"},
++	{0x4D, "QNX4.x"},
++	{0x4E, "QNX4.x 2nd part"},
++	{0x4F, "QNX4.x 3rd part"},
++	{0x50, "OnTrack DM"},
++	{0x51, "OnTrack DM6 Aux1"},
++	{0x52, "CP/M"},
++	{0x53, "OnTrack DM6 Aux3"},
++	{0x54, "OnTrack DM6 DDO"},
++	{0x55, "EZ-Drive"},
++	{0x56, "Golden Bow"},
++	{0x57, "DrivePro"},
++	{0x58, 0},
++	{0x59, 0},
++	{0x5A, 0},
++	{0x5B, 0},
++	{0x5C, "Priam EDisk"},
++	{0x5D, 0},
++	{0x5E, 0},
++	{0x5F, 0},
++	{0x60, 0},
++	{0x61, "SpeedStor"},
++	{0x62, 0},
++	{0x63, "GNU Hurd/System V"},
++	{0x64, "Novell Netware 286"},
++	{0x65, "Novell Netware 386"},
++	{0x66, "Novell Netware SMS"},
++	{0x67, "Novell"},
++	{0x68, "Novell"},
++	{0x69, "Novell Netware 5+"},
++	{0x6A, 0},
++	{0x6B, 0},
++	{0x6C, 0},
++	{0x6D, 0},
++	{0x6E, 0},
++	{0x6F, 0},
++	{0x70, "DiskSecure MultiBoot"},
++	{0x71, 0},
++	{0x72, "V7/x86"},
++	{0x73, 0},
++	{0x74, 0},
++	{0x75, "PX/IX"},
++	{0x76, 0},
++	{0x77, "M2FS/M2CS"},
++	{0x77, "VNDI"},
++	{0x78, "XOSL FS"},
++	{0x79, 0},
++	{0x7A, 0},
++	{0x7B, 0},
++	{0x7C, 0},
++	{0x7D, 0},
++	{0x7E, 0},
++	{0x7F, 0},
++	{0x80, "Minix < 1.4a"},
++	{0x81, "Minix > 1.4b/Old Linux"},
++	{0x82, "Linux swap/Solaris x86"},
++	{0x83, "Linux"},
++	{0x84, "OS/2 hidden C:"},
++	{0x85, "Linux extended"},
++	{0x86, "FAT16 volume set"},
++	{0x87, "NTFS volume set"},
++	{0x88, "Linux plaintext"},
++	{0x89, 0},
++	{0x8A, 0},
++	{0x8B, 0},
++	{0x8C, 0},
++	{0x8D, "FreeDOS hidden FAT12"},
++	{0x8E, "Linux LVM"},
++	{0x8F, 0},
++	{0x90, "FreeDOS hidden FAT16"},
++	{0x91, "FreeDOS hidden extended"},
++	{0x92, "FreeDOS hidden FAT16 large"},
++	{0x93, "Amoeba"},
++	{0x94, "Amoeba BBT"},
++	{0x95, "MIT EXOPC"},
++	{0x96, 0},
++	{0x97, "FreeDOS hidden FAT32"},
++	{0x98, "FreeDOS hidden FAT32 LBA"},
++	{0x99, 0},
++	{0x9A, "FreeDOS hidden FAT16 LBA"},
++	{0x9B, "FreeDOS hidden ext'd LBA"},
++	{0x9C, 0},
++	{0x9D, 0},
++	{0x9E, 0},
++	{0x9F, "BSD/OS"},
++	{0xA0, "IBM Thinkpad hibernation"},
++	{0xA1, 0},
++	{0xA2, 0},
++	{0xA3, 0},
++	{0xA4, 0},
++	{0xA5, "NetBSD/FreeBSD"},
++	{0xA6, "OpenBSD"},
++	{0xA7, "MeXTStep"},
++	{0xA8, "Darwin UFS"},
++	{0xA9, "NetBSD"},
++	{0xAA, 0},
++	{0xAB, "Darwin boot"},
++	{0xAC, 0},
++	{0xAD, 0},
++	{0xAE, "ShagOS"},
++	{0xAF, "ShagOS swap"},
++	{0xB0, 0},
++	{0xB1, 0},
++	{0xB2, 0},
++	{0xB3, 0},
++	{0xB4, 0},
++	{0xB5, 0},
++	{0xB6, 0},
++	{0xB7, "BSDI BSD/386"},
++	{0xB8, "BSDI BSD swap"},
++	{0xB9, 0},
++	{0xBA, 0},
++	{0xBB, "BootWizard hidden"},
++	{0xBC, 0},
++	{0xBD, 0},
++	{0xBE, "Solaris 8 boot"},
++	{0xBF, "Solaris x86"},
++	{0xC0, "CTOS/DRDOS"},
++	{0xC1, "DRDOS secured FAT12"},
++	{0xC2, "Hidden Linux"},
++	{0xC3, "Hidden Linux swap"},
++	{0xC4, "DRDOS sec'd FAT16 <32M"},
++	{0xC5, "DRDOS sec'd ext'd"},
++	{0xC6, "DRDOS sec'd FAT16 >=32M"},
++	{0xC7, "Syrinx"},
++	{0xC8, 0},
++	{0xC9, 0},
++	{0xCA, 0},
++	{0xCB, "DRDOS sec'd FAT32"},
++	{0xCC, "DRDOS sec'd FAT32 LBA"},
++	{0xCD, 0},
++	{0xCE, "DRDOS sec'd FAT16X LBA"},
++	{0xCF, "DRDOS sec'd ext'd LBA"},
++	{0xD0, 0},
++	{0xD1, 0},
++	{0xD2, 0},
++	{0xD3, 0},
++	{0xD4, 0},
++	{0xD5, 0},
++	{0xD6, 0},
++	{0xD7, 0},
++	{0xD8, "CP/M-86"},
++	{0xD9, 0},
++	{0xDA, "Non-FS data"},
++	{0xDB, "CP/M / CTOS"},
++	{0xDC, 0},
++	{0xDD, 0},
++	{0xDE, "Dell PowerEdge"},
++	{0xDF, "BootIt"},
++	{0xE0, 0},
++	{0xE1, "DOS access"},
++	{0xE2, 0},
++	{0xE3, "DOS R/O"},
++	{0xE4, "SpeedStor"},
++	{0xE5, "Tandy MDOS"},
++	{0xE6, 0},
++	{0xE7, 0},
++	{0xE8, "LUKS"},
++	{0xE9, 0},
++	{0xEA, 0},
++	{0xEB, "BeOS BFS"},
++	{0xEC, "SkyOS SkyFS"},
++	{0xED, 0},
++	{0xEE, "EFI GPT"},
++	{0xEF, "EFI"},
++	{0xF0, "Linux/PA-RISC boot"},
++	{0xF1, "SpeedStor"},
++	{0xF2, "DOS 3.3+ secondary"},
++	{0xF3, 0},
++	{0xF4, "SpeedStor"},
++	{0xF5, 0},
++	{0xF6, "SpeedStor"},
++	{0xF7, 0},
++	{0xF8, 0},
++	{0xF9, "pCache"},
++	{0xFA, "Bochs"},
++	{0xFB, "VMware FS"},
++	{0xFC, "VMware swap"},
++	{0xFD, "Linux raid auto"},
++	{0xFE, "LANstep"},
++	{0xFF, "Xenix BBT"}
++	};
+
+Eigenschaftsänderungen: fdisk/typeids.c
+___________________________________________________________________
+Name: svn:eol-style
+   + native
+
+Index: fdisk/Makefile.all
+===================================================================
+--- fdisk/Makefile.all	(Revision 0)
++++ fdisk/Makefile.all	(Revision 0)
+@@ -0,0 +1,8 @@
++shopt -s extglob
++source $LOST_BUILDMK_ROOT/config.sh
++
++echo "LD   $1/apps/fdisk"
++$LOST_TOOLS_LD -ofdisk -Ttext=0x40000000 *.o --start-group $2 --end-group
++
++mv fdisk $1/apps/
++strip $1/apps/fdisk
+Index: fdisk/typeids.h
+===================================================================
+--- fdisk/typeids.h	(Revision 0)
++++ fdisk/typeids.h	(Revision 0)
+@@ -0,0 +1,53 @@
++/*
++ * Copyright (c) 2008 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Martin Kleusberg.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef __FDISK_TYPEIDS_H__
++#define __FDISK_TYPEIDS_H__
++
++/* The extended partition types. There are some more
++   but they are not important, I think */
++#define TYPE_EXTENDED_PARTITION_1 0x05
++#define TYPE_EXTENDED_PARTITION_2 0x0F
++#define TYPE_EXTENDED_PARTITION_3 0x85
++
++struct PartitionTypeID_t
++{
++	unsigned char id;
++	char *name;
++};
++
++extern struct PartitionTypeID_t PartitionTypeID[257];
++
++#endif
+
+Eigenschaftsänderungen: fdisk/typeids.h
+___________________________________________________________________
+Name: svn:eol-style
+   + native
+
+Index: fdisk/partition.c
+===================================================================
+--- fdisk/partition.c	(Revision 0)
++++ fdisk/partition.c	(Revision 0)
+@@ -0,0 +1,218 @@
++/*
++ * Copyright (c) 2008 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Martin Kleusberg.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "types.h"
++#include "stdlib.h"
++#include "stdio.h"
++#include "unistd.h"
++#include "string.h"
++#include "partition.h"
++#include "typeids.h"
++
++long getEndSector(struct partition_t *p)
++{
++	return p->data.start_sector+p->data.num_sectors-1;
++}
++void uncompressCHS(uint8_t *compressed, unsigned int *cylinder, unsigned int *head, unsigned int *sector)
++{
++	*head = compressed[0];
++	
++	*cylinder = (compressed[1] & 0xC0) << 2;
++	*cylinder += compressed[2];
++	
++	*sector = compressed[1] & 0x3F;
++}
++void compressCHS(uint8_t *compressed, unsigned int cylinder, unsigned int head, unsigned int sector)
++{
++	if(head > 255)
++		head = 254;
++	if(cylinder > 1024)
++		cylinder = 1023;
++	if(sector > 63)
++		sector = 63;
++	if(sector < 1)
++		sector = 1;
++	
++	compressed[0] = head;
++	
++	compressed[1] = (cylinder & 0x300) >> 2;
++	compressed[1] += sector;
++	
++	compressed[2] = cylinder & 0xFF;
++}
++unsigned int CHS2LBA(unsigned int cylinder, unsigned int head, unsigned int sector)
++{
++	return(cylinder * device_numheads * SECTORS_PER_TRACK + head * SECTORS_PER_TRACK + (sector - 1));
++}
++void LBA2CHS(unsigned int lba, unsigned int *cylinder, unsigned int *head, unsigned int *sector)
++{
++	*cylinder = lba / (device_numheads * SECTORS_PER_TRACK);
++	*head = (lba % (device_numheads * SECTORS_PER_TRACK)) / SECTORS_PER_TRACK;
++	*sector = ((lba % (device_numheads * SECTORS_PER_TRACK)) % SECTORS_PER_TRACK) + 1;
++}
++
++char applyChanges()
++{
++	/* TODO: Support extended/logical partitions */
++	
++	/* Open the device */
++	FILE *dev = fopen(device_name, "w");
++	if(dev == 0)
++	{
++		printf("Could not open device \"%s\"\nAborting!\n", dev);
++		return -1;
++	}
++	
++	/* Change the MBR, but keep the beginning unmodified */
++	int i;
++	for(i=0;i<4;i++)
++	{
++		/* If the partition exists copy the data, if not, just set everything to 0 */
++		if(MBR_Partitions[i].exists)
++			memcpy(&MBR[PARTITION_TABLE_START+i*PARTITION_ENTRY_SIZE], &MBR_Partitions[i].data, PARTITION_ENTRY_SIZE);
++		else
++			memset(&MBR[PARTITION_TABLE_START+i*PARTITION_ENTRY_SIZE], 0, PARTITION_ENTRY_SIZE);
++	}
++	
++	/* Make sure the boot signature is correct */
++	uint16_t *signature = (uint16_t*)(MBR + BOOT_SIGNATURE_POS);
++	*signature = BOOT_SIGNATURE;
++	
++	/* Write it to disk and close the file */
++	fwrite(MBR, 1, 512, dev);
++	fflush(dev);
++	fclose(dev);
++	
++	return 0;
++}
++
++void deletePartition(struct partition_t *p)
++{
++	/* TODO Support extended/logical partitions */
++	
++	memset(&(p->data), 0, PARTITION_ENTRY_SIZE);
++	p->number = 0;
++	p->exists = 0;
++}
++
++void createNewMBRPartitionTable()
++{
++	memset(&MBR[PARTITION_TABLE_START], 0, 4*PARTITION_ENTRY_SIZE);
++	*((uint16_t*)&MBR[BOOT_SIGNATURE_POS]) = BOOT_SIGNATURE;
++}
++
++char readPartitions(char *filename)
++{
++	/* TODO: Extended and logical partition support */
++	
++	/* Save device file name */
++	device_name = filename;
++	
++	/* Open the device, read in the MBR */
++	FILE *dev = fopen(filename, "r");
++	if(dev == 0)
++	{
++		printf("Could not open device \"%s\"\n", filename);
++		return -1;
++	}
++	fread(MBR, 1, 512, dev);
++	
++	/* Check signature */
++	if(*(uint16_t*)(&MBR[BOOT_SIGNATURE_POS]) != BOOT_SIGNATURE)
++	{
++		printf("Invalid boot signature!\nfdisk will create a new empty partition table."
++			" Keep this in mind when writing to disk.\n");
++		createNewMBRPartitionTable();
++	}
++	
++	/* Extract the partition table and copy the data into the internal structures */
++	int i;
++	for(i=0;i<4;i++)
++	{
++		memcpy(&MBR_Partitions[i].data, &MBR[PARTITION_TABLE_START+i*PARTITION_ENTRY_SIZE], PARTITION_ENTRY_SIZE);
++		if(MBR_Partitions[i].data.type)			/* We check wether a partition exists by checking its type byte */
++		{
++			MBR_Partitions[i].number = i+1;
++			MBR_Partitions[i].exists = 1;
++			
++			/* Is it an extended partition? */
++			if(MBR_Partitions[i].data.type == TYPE_EXTENDED_PARTITION_1 || MBR_Partitions[i].data.type == TYPE_EXTENDED_PARTITION_2 ||
++				MBR_Partitions[i].data.type == TYPE_EXTENDED_PARTITION_3)
++			{
++				/* It is, so start reading in the extended and logical partition data */
++				MBR_Partitions[i].type = PARTITION_TYPE_EXTENDED;
++				printf("Extended/Logical partitions are not yet supported!\n");
++			} else {
++				MBR_Partitions[i].type = PARTITION_TYPE_PRIMARY;
++			}
++		} else {
++			MBR_Partitions[i].number = 0;
++			MBR_Partitions[i].exists = 0;
++			MBR_Partitions[i].type = PARTITION_TYPE_PRIMARY;
++		}
++	}
++	
++	/* Close the device */
++	fclose(dev);
++	
++	return 0;
++}
++
++void createPartition(struct partition_t *p, unsigned int number, unsigned int start_cyl, unsigned int start_head, unsigned int start_sec, unsigned int start_lba,
++			unsigned int end_cyl, unsigned int end_head, unsigned int end_sec, unsigned int end_lba)
++{
++	/* TODO: Extended and logical partition support */
++	
++	/* Generate the chs start/end data */
++	uint8_t start_chs[3];
++	compressCHS(start_chs, start_cyl, start_head, start_sec);
++	uint8_t end_chs[3];
++	compressCHS(end_chs, end_cyl, end_head, end_sec);
++	
++	/* Edit the internal partition information */
++	p->exists = 1;
++	p->number = number;
++	p->type = PARTITION_TYPE_PRIMARY;
++	p->data.bootable = DEFAULT_BOOTABLE_FLAG;
++	p->data.start[0] = start_chs[0];
++	p->data.start[1] = start_chs[1];
++	p->data.start[2] = start_chs[2];
++	p->data.type = DEFAULT_PARTITION_TYPE;
++	p->data.end[0] = end_chs[0];
++	p->data.end[1] = end_chs[1];
++	p->data.end[2] = end_chs[2];
++	p->data.start_sector = start_lba;
++	p->data.num_sectors = end_lba - start_lba + 1;
++}
+
+Eigenschaftsänderungen: fdisk/partition.c
+___________________________________________________________________
+Name: svn:eol-style
+   + native
+

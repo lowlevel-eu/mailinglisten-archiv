@@ -1,0 +1,1445 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 08/11] libc: LIOv2-Server im Userspace
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%2008/11%5D%20libc%3A%20LIOv2-Server%20im%20Userspace&In-Reply-To=%3C1388708813-23390-9-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002453.html">
+   <LINK REL="Next"  HREF="002455.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 08/11] libc: LIOv2-Server im Userspace</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%2008/11%5D%20libc%3A%20LIOv2-Server%20im%20Userspace&In-Reply-To=%3C1388708813-23390-9-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 08/11] libc: LIOv2-Server im Userspace">kevin at tyndur.org
+                  </A><BR>
+    <I>Fr Jan  3 01:26:50 CET 2014</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002453.html">[tyndur-devel] [PATCH 07/11] kernel2: pm_thread_block() mit	wartenden Threads
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002455.html">[tyndur-devel] [PATCH 09/11] kernel2: LIOv2-Server im Userspace
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2454">[ Datum ]</a>
+              <a href="thread.html#2454">[ Thema ]</a>
+              <a href="subject.html#2454">[ Betreff (Subject) ]</a>
+              <a href="author.html#2454">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ libc: Definitionen der Syscallnummern und Datenstrukturen, die für
+  LIOv2-Userspace-Services benutzt werden. Der Kernel kommuniziert dabei
+  zum Service, indem er Befehle in einen Ringpuffer schreibt, während
+  der Service sich dem Kernel über Syscalls mitteilt. Die Kommunikation
+  geht (bis auf die Service-Registrierung) dabei immer vom Kernel aus.
+
++ libc: Bibliothek mit Hilfsfunktionen zur Implemenierung von Userspace-
+  Services. Damit muss ein Service nur noch eine struct (hauptsächlich)
+  mit Funktionspointern befüllen und sich damit registrieren.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/include/syscall_structs.h         |  353 +++++++++++++++++++++++
+ src/include/syscallno.h               |   13 +-
+ src/modules/include/lostio.h          |  150 ++++++++++
+ src/modules/include/syscall.h         |   74 +++++
+ src/modules/lib/lostio/lio_server.c   |  499 +++++++++++++++++++++++++++++++++
+ src/modules/lib/syscalls/lio_server.c |  204 ++++++++++++++
+ 6 files changed, 1286 insertions(+), 7 deletions(-)
+ create mode 100644 src/modules/lib/lostio/lio_server.c
+ create mode 100644 src/modules/lib/syscalls/lio_server.c
+
+diff --git a/src/include/syscall_structs.h b/src/include/syscall_structs.h
+index 90eec14..060d82e 100644
+--- a/src/include/syscall_structs.h
++++ b/src/include/syscall_structs.h
+@@ -75,6 +75,7 @@ typedef struct
+ } vm86_regs_t;
+ 
+ // LIO2
++#define LIO_OFFSET_SPARSE (-1ULL)
+ 
+ /** ID eines LostIO-Streams */
+ typedef int64_t lio_usp_stream_t;
+@@ -204,4 +205,356 @@ struct lio_usp_dir_entry {
+     struct lio_stat    stat;
+ } __attribute__((packed));
+ 
++/// Opcodes fuer Server-Operationen
++enum lio_opcode {
++    /**
++     * Diese Operation ist ungueltig (und somit existieren auch keine weiteren)
++     */
++    LIO_OP_INVALID = 0,
++
++    /**
++     * NOP, kann fuer Padding im Ringpuffer benutzt werden
++     */
++    LIO_OP_NOP = 1,
++
++    /**
++     * Root-Ressource eines Dateisystems laden
++     */
++    LIO_OP_LOAD_ROOT = 2,
++
++    /**
++     * Kind-Ressourcen einer Ressource laden
++     */
++    LIO_OP_LOAD_CHILDREN = 3,
++
++    /**
++     * Datenbloecke von Ressource lesen
++     */
++    LIO_OP_READ = 4,
++
++    /**
++     * Datenbloecke in Ressource schreiben
++     */
++    LIO_OP_WRITE = 5,
++
++    /**
++     * Neue Datei erstellen
++     */
++    LIO_OP_MAKE_FILE = 6,
++
++    /**
++     * Neues Verzeichnis erstellen
++     */
++    LIO_OP_MAKE_DIR = 7,
++
++    /**
++     * Dateigroesse setzen
++     */
++    LIO_OP_TRUNCATE = 8,
++
++    /**
++     * Verzeichniseintrag loeschen
++     */
++    LIO_OP_UNLINK = 9,
++
++    /**
++     * Pipe erstellen
++     */
++    LIO_OP_PIPE = 10,
++
++    /**
++     * Symlink erstellen
++     */
++    LIO_OP_MAKE_SYMLINK = 11,
++
++    /**
++     * Blockbereich allozieren
++     */
++    LIO_OP_ALLOCATE = 12,
++
++    /**
++     * Ggf. vorhandene Caches zurückschreiben
++     */
++    LIO_OP_SYNC = 13,
++
++    /**
++     * Uebersetzungstabelle befuellen
++     */
++    LIO_OP_MAP = 14,
++};
++
++/// Flags fuer Operationen
++enum lio_op_flags {
++    /**
++     * Die Operation gehoert dem Userspace, sobald sie fertig abgearbeitet ist,
++     * muss das Flag geloescht werden. Nachdem es geloescht worden ist, darf die
++     * Operation nicht mehr veraendert werden vom Userspace
++     */
++    LIO_OPFL_USP = 1,
++
++    /**
++     * Dieses Flag soll gesetzt werden, wenn beim abarbeiten der Operation ein
++     * Fehler aufgetreten ist.
++     */
++    LIO_OPFL_ERROR = 2,
++
++    /**
++     * Die Operation wird momentan benutzt. Sobald dieses Flag geloescht wird,
++     * darf die Operation wieder neu benutzt werden.
++     */
++    LIO_OPFL_USED = 4,
++};
++
++struct lio_op {
++    /// Opcode dieser Operation
++    int opcode;
++
++    /**
++     * Flags
++     * @see enum lio_op_flags
++     */
++    volatile uint32_t flags;
++} __attribute__((packed));
++
++struct lio_op_load_root {
++    struct lio_op op;
++
++    /// Quellhandle fuer Dateisystem oder -1 wenn keins vorhanden
++    lio_usp_stream_t source;
++
++    lio_usp_tree_t tree;
++
++    /// Ressourcennummer der Root-Ressource (rueckgabe)
++    lio_usp_resource_t result;
++} __attribute__((packed));
++
++struct lio_op_load_children {
++    struct lio_op op;
++
++    /// Nummer der Ressource deren Kindressourcen geladen werden sollen
++    lio_usp_resource_t resource;
++
++    /// Wert des Opaque-Felds der betreffenden Ressource
++    void* opaque;
++} __attribute__((packed));
++
++struct lio_op_read {
++    struct lio_op op;
++
++    /// Nummer der Ressource deren Datenbloecke eingelesen werden sollen
++    lio_usp_resource_t resource;
++
++    /// Wert des Opaque-Felds der betreffenden Ressource
++    void* opaque;
++
++    /// Offset von dem an gelesen werden soll
++    uint64_t offset;
++
++    /// Anzahl der zu lesenden Bytes
++    size_t size;
++
++    /// Userspace-Puffer, in den gelesen werden soll
++    void* buf;
++} __attribute__((packed));
++
++struct lio_op_write {
++    struct lio_op op;
++
++    /// Nummer der Ressource in die Datenblocke geschrieben werden sollen
++    lio_usp_resource_t resource;
++
++    /// Groesse der Ressource
++    uint64_t res_size;
++
++    /// Wert des Opaque-Felds der betreffenden Ressource
++    void* opaque;
++
++    /// Offset an den geschrieben werden soll
++    uint64_t offset;
++
++    /// Anzahl der zu schreibenden Bytes
++    size_t size;
++    //
++    /// Userspace-Puffer, der geschrieben werden soll
++    void* buf;
++} __attribute__((packed));
++
++struct lio_op_make_file {
++    struct lio_op op;
++
++    /// Nummer der Elternressource
++    lio_usp_resource_t parent;
++
++    /// Wert des Opaque-Feldes der Elternressource
++    void* opaque;
++
++    /// Ressourcennummer der neu erstellten ressource
++    lio_usp_resource_t result;
++
++    /// Name der Datei (garantiert \0 terminiert)
++    char name[];
++} __attribute__((packed));
++
++struct lio_op_make_dir {
++    struct lio_op op;
++
++    /// Nummer der Elternressource
++    lio_usp_resource_t parent;
++
++    /// Wert des Opaque-Feldes der Elternressource
++    void* opaque;
++
++    /// Ressourcennummer der neu erstellten ressource
++    lio_usp_resource_t result;
++
++    /// Name der Datei (garantiert \0 terminiert)
++    char name[];
++} __attribute__((packed));
++
++struct lio_op_make_symlink {
++    struct lio_op op;
++
++    /// Nummer der Elternressource
++    lio_usp_resource_t parent;
++
++    /// Wert des Opaque-Feldes der Elternressource
++    void* opaque;
++
++    /// Laenge des gewuenschten Namens inklusive 0-Byte
++    size_t name_len;
++
++    /// Ressourcennummer der neu erstellten ressource
++    lio_usp_resource_t result;
++
++    /// Name des Symlinks und bei strings + name_len das target
++    char strings[];
++} __attribute__((packed));
++
++
++struct lio_op_truncate {
++    struct lio_op op;
++
++    /// Nummer der Ressource deren Kindressourcen geladen werden sollen
++    lio_usp_resource_t resource;
++
++    /// Wert des Opaque-Felds der betreffenden Ressource
++    void* opaque;
++
++    /// Neue Dateigroesse
++    uint64_t size;
++} __attribute__((packed));
++
++struct lio_op_map {
++    struct lio_op op;
++
++    /// Nummer der Ressource deren Uebersetzungstabelle befuellt werden soll
++    lio_usp_resource_t resource;
++
++    /// Wert des Opaque-Felds der betreffenden Ressource
++    void* opaque;
++
++    /// Start des Bereichs
++    uint64_t offset;
++
++    /// Groesse des Bereichs
++    uint64_t size;
++} __attribute__((packed));
++
++struct lio_op_allocate {
++    struct lio_op op;
++
++    /// Nummer der Ressource deren Blocks alloziert werden sollen
++    lio_usp_resource_t resource;
++
++    /// Wert des Opaque-Felds der betreffenden Ressource
++    void* opaque;
++
++    /// Start des Bereichs
++    uint64_t offset;
++
++    /// Groesse des Bereichs
++    uint64_t size;
++} __attribute__((packed));
++
++struct lio_op_unlink {
++    struct lio_op op;
++
++    /// Nummer der Elternressource
++    lio_usp_resource_t parent;
++
++    /// Wert des Opaque-Feldes der Elternressource
++    void* opaque;
++
++    /// Name der Datei (garantiert \0 terminiert)
++    char name[];
++} __attribute__((packed));
++
++struct lio_op_pipe {
++    struct lio_op op;
++
++    /// Nummer der Ressource, die geoeffnet wurde
++    lio_usp_resource_t res;
++
++    /// Wert des Opaque-Felds der betreffenden Ressource
++    void* opaque;
++
++    /// Stream fuer den Serverseitigen Zugriff auf die Pipe
++    lio_usp_stream_t pipe_end;
++
++    /// Flags des Streams
++    int flags;
++} __attribute__((packed));
++
++struct lio_op_sync {
++    struct lio_op op;
++
++    /// Nummer der Ressource, die geoeffnet wurde
++    lio_usp_resource_t res;
++
++    /// Wert des Opaque-Felds der betreffenden Ressource
++    void* opaque;
++} __attribute__((packed));
++
++
++/// Flags fuer Server-Ressourcen
++enum lio_server_flags {
++    LIO_SRV_READABLE = 1,
++    LIO_SRV_WRITABLE = 2,
++    LIO_SRV_SEEKABLE = 4,
++    LIO_SRV_MOREDATA = 8,
++    LIO_SRV_BROWSABLE = 16,
++    LIO_SRV_CHANGEABLE = 32,
++    LIO_SRV_RESOLVABLE = 64,
++    LIO_SRV_RETARGETABLE = 128,
++    LIO_SRV_PIPE = 256,
++    LIO_SRV_TRANSLATED = 512,
++};
++
++
++struct lio_server_resource {
++    /// Groesse der Ressource (als Datei/Symlink)
++    uint64_t size;
++
++    /// Blockgroesse
++    uint32_t blocksize;
++
++    /**
++     * Flags
++     * @see enum lio_server_flags
++     */
++    uint32_t flags;
++
++    /// Ressourcennummer (wird vom Kernel vergeben)
++    lio_usp_resource_t id;
++
++    /// Tree-ID
++    lio_usp_tree_t tree;
++
++    /**
++     * Private Daten des Services zu dieser Ressource, dieser Wert wird bei den
++     * Operationen jeweils mit angegeben.
++     */
++    void* opaque;
++} __attribute__((packed));
++
+ #endif
+diff --git a/src/include/syscallno.h b/src/include/syscallno.h
+index 2a2f909..ad25dc3 100644
+--- a/src/include/syscallno.h
++++ b/src/include/syscallno.h
+@@ -109,14 +109,13 @@
+ #define SYSCALL_LIO_SYNC_ALL    99
+ 
+ #define SYSCALL_LIO_SRV_SERVICE_REGISTER            110
+-#define SYSCALL_LIO_SRV_RES_UPLOAD                  111
+-#define SYSCALL_LIO_SRV_NODE_ADD                    112
+-#define SYSCALL_LIO_SRV_OP_DONE                     113
+-#define SYSCALL_LIO_SRV_WAIT                        114
+-#define SYSCALL_LIO_SRV_REQUEST_CACHE_BLOCKS        115
++#define SYSCALL_LIO_SRV_TREE_SET_RING               111
++#define SYSCALL_LIO_SRV_RES_UPLOAD                  112
++#define SYSCALL_LIO_SRV_NODE_ADD                    113
++#define SYSCALL_LIO_SRV_OP_DONE                     114
++#define SYSCALL_LIO_SRV_WAIT                        115
+ #define SYSCALL_LIO_SRV_REQUEST_TRANSLATED_BLOCKS   116
+-#define SYSCALL_LIO_SRV_UNBLOCK_CACHE_BLOCKS        117
+-#define SYSCALL_LIO_SRV_NODE_REMOVE                 118
++#define SYSCALL_LIO_SRV_NODE_REMOVE                 117
+ 
+ //ACHTUNG: Muss eine Zahl groesser als die Groesste Syscall-Nummer sein
+ #define SYSCALL_MAX 125
+diff --git a/src/modules/include/lostio.h b/src/modules/include/lostio.h
+index 066b666..1357ca3 100644
+--- a/src/modules/include/lostio.h
++++ b/src/modules/include/lostio.h
+@@ -239,6 +239,156 @@ int lio_compat_eof(io_resource_t* io_res);
+ /// Stream-Position setzen
+ bool lio_compat_seek(io_resource_t* io_res, uint64_t offset, int origin);
+ 
++
++/******************************************************************************
++ * LIO2-Server                                                                *
++ ******************************************************************************/
++
++/**
++ * LIO-Operationen durchfuehren, falls pendente vorhanden sind.
++ */
++void lio_dispatch(void);
++
++struct lio_tree;
++struct lio_driver {
++    /// Root-Ressource eines Baums laden
++    struct lio_resource* (*load_root)(struct lio_tree* tree);
++
++    /// Kindressoucren einer Ressource laden
++    int (*load_children)(struct lio_resource* res);
++
++    /// Daten aus einer Ressource in den Cache laden
++    int (*read)(struct lio_resource* res, uint64_t offset,
++        size_t bytes, void* buf);
++
++    /// Daten aus dem Cache in eine Ressource zurückschreiben
++    int (*write)(struct lio_resource* res, uint64_t offset,
++        size_t bytes, void* buf);
++
++    /// Groesse einer Ressource aendern
++    int (*resize)(struct lio_resource* res, uint64_t size);
++
++    /// Neue Datei erstellen
++    struct lio_resource* (*make_file)(struct lio_resource* parent,
++        const char* name);
++
++    /// Neues Verzeichnis erstellen
++    struct lio_resource* (*make_dir)(struct lio_resource* parent,
++        const char* name);
++
++    /// Neuen Symlink erstellen
++    struct lio_resource* (*make_symlink)(struct lio_resource* parent,
++        const char* name, const char* target);
++
++    /// Blocktabelle einlesen
++    int (*map)(struct lio_resource* res, uint64_t offset, uint64_t size);
++
++    /// Sparse-Blocks allozieren
++    int (*allocate)(struct lio_resource* res, uint64_t offset, uint64_t size);
++
++    /// Verzeichniseintrag loeschen
++    int (*unlink)(struct lio_resource* parent, const char* name);
++
++    /// Neue Pipe erstellen
++    int (*pipe)(struct lio_resource* res, lio_stream_t pipe_end, int flags);
++
++    /// Caches zurückschreiben
++    int (*sync)(struct lio_resource* res);
++};
++
++struct lio_service {
++    const char*         name;
++    struct lio_driver   lio_ops;
++    void*               opaque;
++
++    // Intern
++    struct shared_ring* ring;
++};
++
++struct lio_node;
++struct lio_tree {
++    struct lio_node*    root;
++    struct lio_service* service;
++    lio_stream_t        source;
++    void*               opaque;
++
++    // Intern
++    lio_usp_tree_t      id;
++    tid_t               service_thread;
++    struct shared_ring* ring;
++};
++
++struct lio_resource {
++    list_t* children;
++    uint64_t size;
++    uint32_t blocksize;
++
++    bool readable;
++    bool writable;
++    bool seekable;
++    bool moredata;
++    bool browsable;
++    bool changeable;
++    bool resolvable;
++    bool retargetable;
++    bool ispipe;
++    bool translated;
++
++    struct lio_tree* tree;
++    void* opaque;
++
++    // Intern
++    struct lio_server_resource server;
++};
++
++struct lio_node {
++    struct lio_resource* res;
++    char* name;
++};
++
++/**
++ * Neuen Service registrieren
++ */
++int lio_add_service(struct lio_service* service);
++
++
++/**
++ * Neue Ressource anlegen
++ */
++struct lio_resource* lio_resource_create(struct lio_tree* tree);
++
++/**
++ * Aenderungen an der Ressource publizieren
++ */
++void lio_resource_modified(struct lio_resource* res);
++
++/**
++ * Kindknoten einer Ressource suchen
++ */
++struct lio_node* lio_resource_get_child(struct lio_resource* parent,
++    const char* name);
++
++/**
++ * Kindknoten einer Ressource entfernen
++ */
++void lio_resource_remove_child(struct lio_resource* parent,
++    struct lio_node* child);
++
++/**
++ * Neuen Knoten anlegen und bei Elternressource als Kind eintragen. Wird NULL
++ * als Elternressource uebergeben, dann wird die Ressource als root in den Tree
++ * eingetragen.
++ */
++void lio_node_create(struct lio_resource* parent, struct lio_resource* res,
++    const char* name);
++
++/**
++ * Uebersetzte Cache-Blocks anfordern
++ */
++int lio_request_translated_blocks(struct lio_resource* res, uint64_t offset,
++    size_t num, uint64_t* translation_table);
++
++
+ /** @}  */
+ 
+ #endif
+diff --git a/src/modules/include/syscall.h b/src/modules/include/syscall.h
+index 0679631..298e737 100644
+--- a/src/modules/include/syscall.h
++++ b/src/modules/include/syscall.h
+@@ -112,6 +112,7 @@ tid_t get_tid(void);
+ 
+ typedef lio_usp_stream_t lio_stream_t;
+ typedef lio_usp_resource_t lio_resource_t;
++typedef lio_usp_tree_t lio_tree_t;
+ 
+ /* FIXME Duplikat von lio_usp_dir_entry in syscall_structs.h */
+ struct lio_dir_entry {
+@@ -323,4 +324,77 @@ int lio_unlink(lio_resource_t parent, const char* name);
+  */
+ int lio_sync_all(void);
+ 
++// LIO2-Server
++
++/**
++ * Neuen LIO-Service registrieren.
++ *
++ * @param name   Service-Name
++ * @param buffer Zeiger auf den zu benutzenden Ringpuffer fuer die Operationen.
++ *               Dieser sollte mit sinnvollen Werten initialisiert sein (z.B
++ *               memset(buffer, 0, buffer_size)
++ * @param size   Groesse des Puffers
++ *
++ * @return 0 bei Erfolg, &lt; 0  im Fehlerfall
++ */
++int lio_srv_service_register(const char* name, void* buffer, size_t size);
++
++/**
++ * LIO-Befehlsring für einen gegebenen Tree einrichten
++ *
++ * @param tree   ID des Trees
++ * @param tid    TID des Threads, der den Ring abarbeitet
++ * @param buffer Zeiger auf den zu benutzenden Ringpuffer fuer die Operationen.
++ *               Dieser sollte mit sinnvollen Werten initialisiert sein (z.B
++ *               memset(buffer, 0, buffer_size)
++ * @param size   Groesse des Puffers
++ *
++ * @return 0 bei Erfolg, &lt; 0  im Fehlerfall
++ */
++int lio_srv_tree_set_ring(lio_usp_tree_t tree, tid_t tid,
++                          void* buffer, size_t size);
++
++/**
++ * Ressource fuer Kernel bereitstellen, dabei wird der id-Member eingefuellt.
++ *
++ * @return 0 bei Erfolg, &lt; 0 im Fehlerfall
++ */
++int lio_srv_res_upload(struct lio_server_resource* resource);
++
++/**
++ * Neuen Knoten erstellen.
++ *
++ * @param parent   Elternressource in der der Knoten angelegt werden soll
++ * @param resource Ressource auf die der Knoten verweisen soll
++ * @param name     Namen des neuen Knoten
++ */
++int lio_srv_node_add(lio_usp_resource_t parent, lio_usp_resource_t resource,
++    const char* name);
++
++/**
++ * Knoten loeschen.
++ *
++ * @param parent Elternressource in der der Kindknoten geloescht werden soll
++ * @param name   Name des zu loeschenden Knotens
++ *
++ * @return 0 bei Erfolg, &lt; 0 im Fehlerfall
++ */
++int lio_srv_node_remove(lio_usp_resource_t parent, const char* name);
++
++/**
++ * Kernel ueber abgearbeitete Operation informieren. Das USP-Bit in der
++ * Operation muss geloescht sein.
++ *
++ * @param op Fertig abgearbeitete Operation
++ * @param status 0 im Erfolg, -errno im Fehlerfall
++ * @param result Operationsabhaengig ein Rueckgabewert (z.B. Ressourcen-ID)
++ */
++void lio_srv_op_done(struct lio_op* op, int status, uint64_t result);
++
++/**
++ * Auf LIO-Operationen fuer diesen Prozess warten. Solange noch unbearbeitete
++ * Operationen existieren, kehrt der Aufruf sofort zurueck.
++ */
++void lio_srv_wait(void);
++
+ #endif
+diff --git a/src/modules/lib/lostio/lio_server.c b/src/modules/lib/lostio/lio_server.c
+new file mode 100644
+index 0000000..e1b919a
+--- /dev/null
++++ b/src/modules/lib/lostio/lio_server.c
+@@ -0,0 +1,499 @@
++/*
++ * Copyright (c) 2010 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Antoine Kaufmann.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the tyndur Project
++ *     and its contributors.
++ * 4. Neither the name of the tyndur Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include &lt;stdio.h&gt;
++#include &lt;string.h&gt;
++#include &lt;stdlib.h&gt;
++#include &lt;stddef.h&gt;
++#include &lt;errno.h&gt;
++
++#include &lt;collections.h&gt;
++#include &lt;syscall.h&gt;
++#include &lt;lostio.h&gt;
++
++/** Ausstehende Operationen dieses Trees abarbeiten. */
++static void tree_dispatch(struct lio_tree* tree);
++
++/** Operation verarbeiten */
++static void process_op(struct lio_service* service, struct lio_op* op);
++
++// Operationen
++static void op_load_root(struct lio_service* service, struct lio_op* op);
++static void op_load_children(struct lio_service* service, struct lio_op* op);
++static void op_read(struct lio_service* service, struct lio_op* op);
++static void op_write(struct lio_service* service, struct lio_op* op);
++static void op_make_file(struct lio_service* service, struct lio_op* op);
++static void op_make_dir(struct lio_service* service, struct lio_op* op);
++static void op_make_symlink(struct lio_service* service, struct lio_op* op);
++static void op_truncate(struct lio_service* service, struct lio_op* op);
++static void op_map(struct lio_service* service, struct lio_op* op);
++static void op_allocate(struct lio_service* service, struct lio_op* op);
++static void op_unlink(struct lio_service* service, struct lio_op* op);
++static void op_pipe(struct lio_service* service, struct lio_op* op);
++static void op_sync(struct lio_service* service, struct lio_op* op);
++
++
++static list_t* services = NULL;
++
++void lio_dispatch(void)
++{
++    struct lio_service* s;
++    int i;
++
++    for (i = 0; (s = list_get_element_at(services, i)); i++) {
++        void* buf;
++        struct lio_op* op;
++        ssize_t size;
++
++        while (1) {
++            size = ring_read_ptr(s-&gt;ring, &amp;buf);
++            if (size &lt;= 0) {
++                break;
++            }
++
++            op = buf;
++            switch (op-&gt;opcode) {
++                case LIO_OP_NOP:
++                    lio_srv_op_done(op, 0, 0);
++                    break;
++
++                case LIO_OP_LOAD_ROOT:
++                    op_load_root(s, op);
++                    break;
++
++                default:
++                    printf(&quot;lio_dispatch: Fehler, unerwarteter Opcode 0x%x\n&quot;,
++                        op-&gt;opcode);
++                    op-&gt;flags |= LIO_OPFL_ERROR;
++                    break;
++            }
++
++            ring_read_complete(s-&gt;ring);
++        }
++    }
++}
++
++/**
++ * Ausstehende Operationen dieses Trees abarbeiten.
++ */
++static void tree_dispatch(struct lio_tree* tree)
++{
++    void* buf;
++    struct lio_op* op;
++    ssize_t size;
++
++    while (1) {
++        while (1) {
++            size = ring_read_ptr(tree-&gt;ring, &amp;buf);
++            if (size &lt;= 0) {
++                break;
++            }
++
++            op = buf;
++            process_op(tree-&gt;service, op);
++
++            ring_read_complete(tree-&gt;ring);
++        }
++        lio_srv_wait();
++    }
++}
++
++/**
++ * Operation verarbeiten
++ */
++static void process_op(struct lio_service* service, struct lio_op* op)
++{
++    switch (op-&gt;opcode) {
++        case LIO_OP_NOP:
++            lio_srv_op_done(op, 0, 0);
++            break;
++
++        case LIO_OP_LOAD_CHILDREN:
++            op_load_children(service, op);
++            break;
++
++        case LIO_OP_READ:
++            op_read(service, op);
++            break;
++
++        case LIO_OP_WRITE:
++            op_write(service, op);
++            break;
++
++        case LIO_OP_MAKE_FILE:
++            op_make_file(service, op);
++            break;
++
++        case LIO_OP_MAKE_DIR:
++            op_make_dir(service, op);
++            break;
++
++        case LIO_OP_MAKE_SYMLINK:
++            op_make_symlink(service, op);
++            break;
++
++        case LIO_OP_TRUNCATE:
++            op_truncate(service, op);
++            break;
++
++        case LIO_OP_MAP:
++            op_map(service, op);
++            break;
++
++        case LIO_OP_ALLOCATE:
++            op_allocate(service, op);
++            break;
++
++        case LIO_OP_UNLINK:
++            op_unlink(service, op);
++            break;
++
++        case LIO_OP_PIPE:
++            op_pipe(service, op);
++            break;
++
++        case LIO_OP_SYNC:
++            op_sync(service, op);
++            break;
++
++        default:
++            printf(&quot;process_op: Fehler, unerwarteter Opcode 0x%x\n&quot;,
++                op-&gt;opcode);
++            op-&gt;flags |= LIO_OPFL_ERROR;
++            break;
++    }
++
++    op-&gt;flags &amp;= ~LIO_OPFL_USP;
++}
++
++static void op_load_root(struct lio_service* service, struct lio_op* op)
++{
++    struct lio_op_load_root* olr = (struct lio_op_load_root*) op;
++    struct lio_resource* res;
++    struct lio_tree* tree;
++
++    tree = calloc(sizeof(*tree), 1);
++    tree-&gt;service = service;
++    tree-&gt;source = olr-&gt;source;
++    tree-&gt;id = olr-&gt;tree;
++
++    res = service-&gt;lio_ops.load_root(tree);
++
++    if (res) {
++        void* buf;
++        size_t buf_size = 4096;
++
++        buf = mem_allocate(buf_size, 0);
++        memset(buf, 0, buf_size);
++        tree-&gt;ring = ring_init_reader(buf, buf_size);
++
++        // FIXME: Den richtigen Namen des Root-Knotens brauchen wir hier noch
++        // vom Kernel
++        lio_node_create(NULL, res, &quot;/&quot;);
++        tree-&gt;service_thread = create_thread((uint32_t) tree_dispatch, tree);
++
++        lio_srv_tree_set_ring(tree-&gt;id, tree-&gt;service_thread, buf, buf_size);
++        lio_srv_op_done(op, 0, res-&gt;server.id);
++    } else {
++        free(tree);
++        lio_srv_op_done(op, -EIO, 0);
++    }
++}
++
++static void op_load_children(struct lio_service* service, struct lio_op* op)
++{
++    struct lio_op_load_children* olc = (struct lio_op_load_children*) op;
++    struct lio_resource* res = (struct lio_resource*) olc-&gt;opaque;
++    int ret;
++
++    ret = service-&gt;lio_ops.load_children(res);
++    lio_srv_op_done(op, ret, 0);
++}
++
++static void op_read(struct lio_service* service, struct lio_op* op)
++{
++    struct lio_op_read* or = (struct lio_op_read*) op;
++    struct lio_resource* res = (struct lio_resource*) or-&gt;opaque;
++    int ret;
++
++    ret = service-&gt;lio_ops.read(res, or-&gt;offset, or-&gt;size, or-&gt;buf);
++    lio_srv_op_done(op, ret, 0);
++}
++
++static void op_write(struct lio_service* service, struct lio_op* op)
++{
++    struct lio_op_write* ow = (struct lio_op_write*) op;
++    struct lio_resource* res = (struct lio_resource*) ow-&gt;opaque;
++    int ret;
++
++    if (res-&gt;size != ow-&gt;res_size) {
++        service-&gt;lio_ops.resize(res, ow-&gt;res_size);
++    }
++
++    ret = service-&gt;lio_ops.write(res, ow-&gt;offset, ow-&gt;size, ow-&gt;buf);
++    lio_srv_op_done(op, ret, 0);
++}
++
++static void op_make_file(struct lio_service* service, struct lio_op* op)
++{
++    struct lio_op_make_file* omf = (struct lio_op_make_file*) op;
++    struct lio_resource* parent = (struct lio_resource*) omf-&gt;opaque;
++    struct lio_resource* res;
++
++    res = service-&gt;lio_ops.make_file(parent, omf-&gt;name);
++
++    if (res == NULL) {
++        lio_srv_op_done(op, -EIO, 0);
++    } else {
++        lio_srv_op_done(op, 0, res-&gt;server.id);
++    }
++}
++
++static void op_make_dir(struct lio_service* service, struct lio_op* op)
++{
++    struct lio_op_make_dir* omd = (struct lio_op_make_dir*) op;
++    struct lio_resource* parent = (struct lio_resource*) omd-&gt;opaque;
++    struct lio_resource* res;
++
++    res = service-&gt;lio_ops.make_dir(parent, omd-&gt;name);
++
++    if (res == NULL) {
++        lio_srv_op_done(op, -EIO, 0);
++    } else {
++        lio_srv_op_done(op, 0, res-&gt;server.id);
++    }
++}
++
++static void op_make_symlink(struct lio_service* service, struct lio_op* op)
++{
++    struct lio_op_make_symlink* oms = (struct lio_op_make_symlink*) op;
++    struct lio_resource* parent = (struct lio_resource*) oms-&gt;opaque;
++    struct lio_resource* res;
++
++    res = service-&gt;lio_ops.make_symlink(parent, oms-&gt;strings,
++        oms-&gt;strings + oms-&gt;name_len);
++
++    if (res == NULL) {
++        lio_srv_op_done(op, -EIO, 0);
++    } else {
++        lio_srv_op_done(op, 0, res-&gt;server.id);
++    }
++}
++
++static void op_truncate(struct lio_service* service, struct lio_op* op)
++{
++    struct lio_op_truncate* ot = (struct lio_op_truncate*) op;
++    struct lio_resource* res = (struct lio_resource*) ot-&gt;opaque;
++    int ret;
++
++    if (service-&gt;lio_ops.resize) {
++        ret = service-&gt;lio_ops.resize(res, ot-&gt;size);
++    } else {
++        ret = -EINVAL;
++    }
++
++    lio_srv_op_done(op, ret, 0);
++}
++
++static void op_map(struct lio_service* service, struct lio_op* op)
++{
++    struct lio_op_map* om = (struct lio_op_map*) op;
++    struct lio_resource* res = (struct lio_resource*) om-&gt;opaque;
++    int ret;
++
++    if (service-&gt;lio_ops.map) {
++        ret = service-&gt;lio_ops.map(res, om-&gt;offset, om-&gt;size);
++    } else {
++        ret = -EINVAL;
++    }
++
++    lio_srv_op_done(op, ret, 0);
++}
++
++static void op_allocate(struct lio_service* service, struct lio_op* op)
++{
++    struct lio_op_allocate* oa = (struct lio_op_allocate*) op;
++    struct lio_resource* res = (struct lio_resource*) oa-&gt;opaque;
++    int ret;
++
++    if (service-&gt;lio_ops.allocate) {
++        ret = service-&gt;lio_ops.allocate(res, oa-&gt;offset, oa-&gt;size);
++    } else {
++        ret = -EINVAL;
++    }
++
++    lio_srv_op_done(op, ret, 0);
++}
++
++static void op_unlink(struct lio_service* service, struct lio_op* op)
++{
++    struct lio_op_unlink* oul = (struct lio_op_unlink*) op;
++    struct lio_resource* parent = (struct lio_resource*) oul-&gt;opaque;
++    int ret;
++
++    ret = service-&gt;lio_ops.unlink(parent, oul-&gt;name);
++    lio_srv_op_done(op, ret, 0);
++}
++
++static void op_pipe(struct lio_service* service, struct lio_op* op)
++{
++    struct lio_op_pipe* opi = (struct lio_op_pipe*) op;
++    struct lio_resource* res = (struct lio_resource*) opi-&gt;opaque;
++    int ret;
++
++    ret = service-&gt;lio_ops.pipe(res, opi-&gt;pipe_end, opi-&gt;flags);
++    lio_srv_op_done(op, ret, 0);
++}
++
++static void op_sync(struct lio_service* service, struct lio_op* op)
++{
++    struct lio_op_sync* ops = (struct lio_op_sync*) op;
++    struct lio_resource* res = (struct lio_resource*) ops-&gt;opaque;
++    int ret = 0;
++
++    if (service-&gt;lio_ops.sync) {
++        ret = service-&gt;lio_ops.sync(res);
++    }
++    lio_srv_op_done(op, ret, 0);
++}
++
++/**
++ * Neuen Service registrieren
++ */
++int lio_add_service(struct lio_service* service)
++{
++    void* buf;
++    size_t buf_size = 4096;
++
++    if (!services) {
++        services = list_create();
++    }
++
++    buf = mem_allocate(buf_size, 0);
++    memset(buf, 0, buf_size);
++    service-&gt;ring = ring_init_reader(buf, buf_size);
++
++    list_push(services, service);
++
++    return lio_srv_service_register(service-&gt;name, buf, buf_size);
++}
++
++/**
++ * Neue Ressource anlegen
++ */
++struct lio_resource* lio_resource_create(struct lio_tree* tree)
++{
++    struct lio_resource* res = calloc(sizeof(*res), 1);
++    res-&gt;tree = tree;
++    return res;
++}
++
++/**
++ * Aenderungen an der Ressource publizieren
++ */
++void lio_resource_modified(struct lio_resource* res)
++{
++    res-&gt;server.size = res-&gt;size;
++    res-&gt;server.blocksize = res-&gt;blocksize;
++    res-&gt;server.flags =
++        (res-&gt;readable ? LIO_SRV_READABLE : 0) |
++        (res-&gt;writable ? LIO_SRV_WRITABLE : 0) |
++        (res-&gt;seekable ? LIO_SRV_SEEKABLE : 0) |
++        (res-&gt;moredata ? LIO_SRV_MOREDATA : 0) |
++        (res-&gt;browsable ? LIO_SRV_BROWSABLE : 0) |
++        (res-&gt;changeable ? LIO_SRV_CHANGEABLE : 0) |
++        (res-&gt;resolvable ? LIO_SRV_RESOLVABLE : 0) |
++        (res-&gt;retargetable ? LIO_SRV_RETARGETABLE : 0) |
++        (res-&gt;ispipe ? LIO_SRV_PIPE : 0) |
++        (res-&gt;translated ? LIO_SRV_TRANSLATED : 0);
++    res-&gt;server.tree = res-&gt;tree-&gt;id;
++    res-&gt;server.opaque = res;
++
++    lio_srv_res_upload(&amp;res-&gt;server);
++}
++
++/**
++ * Neuen Knoten anlegen und bei Elternressource als Kind eintragen. Wird NULL
++ * als Elternressource uebergeben, dann wird die Ressource als root in den Tree
++ * eingetragen.
++ */
++void lio_node_create(struct lio_resource* parent, struct lio_resource* res,
++    const char* name)
++{
++    struct lio_node* node;
++
++    node = malloc(sizeof(*node));
++    node-&gt;res = res;
++    node-&gt;name = strdup(name);
++
++    if (!parent) {
++        res-&gt;tree-&gt;root = node;
++    } else {
++        if (!parent-&gt;children) {
++            parent-&gt;children = list_create();
++        }
++        list_push(parent-&gt;children, node);
++
++        lio_srv_node_add(parent-&gt;server.id, res-&gt;server.id, name);
++    }
++
++}
++
++/**
++ * Kindknoten einer Ressource suchen
++ */
++struct lio_node* lio_resource_get_child(struct lio_resource* parent,
++    const char* name)
++{
++    struct lio_node* node;
++    size_t i;
++
++    for (i = 0; (node = list_get_element_at(parent-&gt;children, i)); i++) {
++        if (!strcmp(node-&gt;name, name)) {
++            return node;
++        }
++    }
++
++    return NULL;
++}
++
++/**
++ * Kindknoten einer Ressource entfernen
++ */
++void lio_resource_remove_child(struct lio_resource* parent,
++    struct lio_node* child)
++{
++    lio_srv_node_remove(parent-&gt;server.id, child-&gt;name);
++}
+diff --git a/src/modules/lib/syscalls/lio_server.c b/src/modules/lib/syscalls/lio_server.c
+new file mode 100644
+index 0000000..6079f53
+--- /dev/null
++++ b/src/modules/lib/syscalls/lio_server.c
+@@ -0,0 +1,204 @@
++/*
++ * Copyright (c) 2010 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Antoine Kaufmann.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include &lt;string.h&gt;
++#include &lt;syscall.h&gt;
++
++/**
++ * Neuen LIO-Service registrieren.
++ *
++ * @param name   Service-Name
++ * @param buffer Zeiger auf den zu benutzenden Ringpuffer fuer die Operationen.
++ *               Dieser sollte mit sinnvollen Werten initialisiert sein (z.B
++ *               memset(buffer, 0, buffer_size)
++ * @param size   Groesse des Puffers
++ *
++ * @return 0 bei Erfolg, &lt; 0  im Fehlerfall
++ */
++int lio_srv_service_register(const char* name, void* buffer, size_t size)
++{
++    int result;
++    size_t name_len;
++
++    name_len = strlen(name);
++    asm volatile(
++        &quot;pushl %5;&quot;
++        &quot;pushl %4;&quot;
++        &quot;pushl %3;&quot;
++        &quot;pushl %2;&quot;
++        &quot;mov %1, %%eax;&quot;
++        &quot;int $0x30;&quot;
++        &quot;add $0x10, %%esp;&quot;
++        : &quot;=a&quot; (result)
++        : &quot;i&quot; (SYSCALL_LIO_SRV_SERVICE_REGISTER), &quot;r&quot; (name), &quot;r&quot; (name_len),
++          &quot;r&quot; (buffer), &quot;r&quot; (size));
++
++    return result;
++}
++
++/**
++ * LIO-Befehlsring für einen gegebenen Tree einrichten
++ *
++ * @param tree   ID des Trees
++ * @param tid    TID des Threads, der den Ring abarbeitet
++ * @param buffer Zeiger auf den zu benutzenden Ringpuffer fuer die Operationen.
++ *               Dieser sollte mit sinnvollen Werten initialisiert sein (z.B
++ *               memset(buffer, 0, buffer_size)
++ * @param size   Groesse des Puffers
++ *
++ * @return 0 bei Erfolg, &lt; 0  im Fehlerfall
++ */
++int lio_srv_tree_set_ring(lio_usp_tree_t tree, tid_t tid,
++                          void* buffer, size_t size)
++{
++    int result;
++
++    asm volatile(
++        &quot;pushl %5;&quot;
++        &quot;pushl %4;&quot;
++        &quot;pushl %3;&quot;
++        &quot;pushl %2;&quot;
++        &quot;mov %1, %%eax;&quot;
++        &quot;int $0x30;&quot;
++        &quot;add $0x10, %%esp;&quot;
++        : &quot;=a&quot; (result)
++        : &quot;i&quot; (SYSCALL_LIO_SRV_TREE_SET_RING), &quot;r&quot; (&amp;tree),
++          &quot;r&quot; (tid), &quot;r&quot; (buffer), &quot;r&quot; (size) : &quot;memory&quot;);
++
++    return result;
++}
++
++/**
++ * Ressource fuer Kernel bereitstellen, dabei wird der id-Member eingefuellt.
++ *
++ * @return 0 bei Erfolg, &lt; 0 im Fehlerfall
++ */
++int lio_srv_res_upload(struct lio_server_resource* resource)
++{
++    int result;
++
++    asm volatile(
++        &quot;pushl %2;&quot;
++        &quot;mov %1, %%eax;&quot;
++        &quot;int $0x30;&quot;
++        &quot;add $0x4, %%esp;&quot;
++        : &quot;=a&quot; (result)
++        : &quot;i&quot; (SYSCALL_LIO_SRV_RES_UPLOAD), &quot;r&quot; (resource));
++
++    return result;
++}
++
++/**
++ * Neuen Knoten erstellen.
++ *
++ * @param parent   Elternressource in der der Knoten angelegt werden soll
++ * @param resource Ressource auf die der Knoten verweisen soll
++ * @param name     Namen des neuen Knoten
++ */
++int lio_srv_node_add(lio_usp_resource_t parent, lio_usp_resource_t resource,
++    const char* name)
++{
++    int result;
++    size_t name_len;
++
++    name_len = strlen(name);
++    asm volatile(
++        &quot;pushl %5;&quot;
++        &quot;pushl %4;&quot;
++        &quot;pushl %3;&quot;
++        &quot;pushl %2;&quot;
++        &quot;mov %1, %%eax;&quot;
++        &quot;int $0x30;&quot;
++        &quot;add $0x10, %%esp;&quot;
++        : &quot;=a&quot; (result)
++        : &quot;i&quot; (SYSCALL_LIO_SRV_NODE_ADD), &quot;r&quot; (&amp;parent), &quot;r&quot; (&amp;resource),
++          &quot;r&quot; (name), &quot;r&quot; (name_len) : &quot;memory&quot;);
++
++    return result;
++}
++
++/**
++ * Knoten loeschen.
++ *
++ * @param parent Elternressource in der der Kindknoten geloescht werden soll
++ * @param name   Name des zu loeschenden Knotens
++ *
++ * @return 0 bei Erfolg, &lt; 0 im Fehlerfall
++ */
++int lio_srv_node_remove(lio_usp_resource_t parent, const char* name)
++{
++    int result;
++    size_t name_len;
++
++    name_len = strlen(name);
++    asm volatile(
++        &quot;pushl %4;&quot;
++        &quot;pushl %3;&quot;
++        &quot;pushl %2;&quot;
++        &quot;mov %1, %%eax;&quot;
++        &quot;int $0x30;&quot;
++        &quot;add $0xc, %%esp;&quot;
++        : &quot;=a&quot; (result)
++        : &quot;i&quot; (SYSCALL_LIO_SRV_NODE_REMOVE), &quot;r&quot; (&amp;parent), &quot;r&quot; (name),
++          &quot;r&quot; (name_len) : &quot;memory&quot;);
++
++    return result;
++
++}
++
++/**
++ * Kernel ueber abgearbeitete Operation informieren. Das USP-Bit in der
++ * Operation muss geloescht sein.
++ *
++ * @param op Fertig abgearbeitete Operation
++ */
++void lio_srv_op_done(struct lio_op* op, int status, uint64_t result)
++{
++    asm volatile(
++        &quot;pushl %3;&quot;
++        &quot;pushl %2;&quot;
++        &quot;pushl %1;&quot;
++        &quot;mov %0, %%eax;&quot;
++        &quot;int $0x30;&quot;
++        &quot;add $0x0c, %%esp;&quot;
++        : : &quot;i&quot; (SYSCALL_LIO_SRV_OP_DONE),
++            &quot;r&quot; (op), &quot;r&quot; (status), &quot;r&quot; (&amp;result)
++        : &quot;memory&quot;);
++}
++
++/**
++ * Auf LIO-Operationen fuer diesen Prozess warten. Solange noch unbearbeitete
++ * Operationen existieren, kehrt der Aufruf sofort zurueck.
++ */
++void lio_srv_wait(void)
++{
++    asm volatile(
++        &quot;mov %0, %%eax;&quot;
++        &quot;int $0x30;&quot;
++        :: &quot;i&quot; (SYSCALL_LIO_SRV_WAIT));
++}
+-- 
+1.7.7
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002453.html">[tyndur-devel] [PATCH 07/11] kernel2: pm_thread_block() mit	wartenden Threads
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002455.html">[tyndur-devel] [PATCH 09/11] kernel2: LIOv2-Server im Userspace
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2454">[ Datum ]</a>
+              <a href="thread.html#2454">[ Thema ]</a>
+              <a href="subject.html#2454">[ Betreff (Subject)]</a>
+              <a href="author.html#2454">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

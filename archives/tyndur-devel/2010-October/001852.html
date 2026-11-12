@@ -1,0 +1,136 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 1/2] kernel2: cpu_prepare_current_task
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%201/2%5D%20kernel2%3A%20cpu_prepare_current_task&In-Reply-To=%3C1288552193-936-2-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001854.html">
+   <LINK REL="Next"  HREF="001855.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 1/2] kernel2: cpu_prepare_current_task</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%201/2%5D%20kernel2%3A%20cpu_prepare_current_task&In-Reply-To=%3C1288552193-936-2-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 1/2] kernel2: cpu_prepare_current_task">kevin at tyndur.org
+                  </A><BR>
+    <I>So Okt 31 20:09:52 CET 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001854.html">[tyndur-devel] [PATCH 2/2] kernel2: I/O-Bitmap benutzen
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001855.html">[tyndur-devel] [PATCH] kernel2: Bei einer Exception nur den Prozess	beenden
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1852">[ Datum ]</a>
+              <a href="thread.html#1852">[ Thema ]</a>
+              <a href="subject.html#1852">[ Betreff (Subject) ]</a>
+              <a href="author.html#1852">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* kernel2: Architekturspezifischen Teil des Taskwechsels
+  (TSS-Manipulationen) in eine eigene Funktion ausgelagert
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/kernel2/include/arch/i386/cpu.h |    5 +++++
+ src/kernel2/src/arch/i386/cpu.c     |   19 +++++++++++++++++++
+ src/kernel2/src/interrupts/im.c     |   12 +-----------
+ 3 files changed, 25 insertions(+), 11 deletions(-)
+
+diff --git a/src/kernel2/include/arch/i386/cpu.h b/src/kernel2/include/arch/i386/cpu.h
+index bbc01b9..23c673b 100644
+--- a/src/kernel2/include/arch/i386/cpu.h
++++ b/src/kernel2/include/arch/i386/cpu.h
+@@ -137,5 +137,10 @@ uint64_t cpu_read_msr(uint32_t reg);
+ cpu_t* cpu_get_current(void);
+ void cpu_dump(machine_state_t* machine_state);
+ 
++/**
++ * Wird aufgerufen, nachdem zu einem neuen Task gewechselt wurde
++ */
++void cpu_prepare_current_task(void);
++
+ #endif //ifndef _CPU_H_
+ 
+diff --git a/src/kernel2/src/arch/i386/cpu.c b/src/kernel2/src/arch/i386/cpu.c
+index 194b13a..c170755 100644
+--- a/src/kernel2/src/arch/i386/cpu.c
++++ b/src/kernel2/src/arch/i386/cpu.c
+@@ -153,3 +153,22 @@ void cpu_dump(machine_state_t* machine_state)
+         machine_state-&gt;fs, machine_state-&gt;gs, machine_state-&gt;ss);
+ }
+ 
++/**
++ * Wird aufgerufen, nachdem zu einem neuen Task gewechselt wurde
++ */
++void cpu_prepare_current_task(void)
++{
++    pm_thread_t* thread = current_thread;
++    interrupt_stack_frame_t* isf = thread-&gt;kernel_stack;
++
++    cpu_get_current()-&gt;tss.ss0 = 2 &lt;&lt; 3;
++    if (isf-&gt;eflags &amp; 0x20000) {
++        cpu_get_current()-&gt;tss.esp0 =
++            (uintptr_t) thread-&gt;user_isf
++            + sizeof(struct vm86_isf);
++    } else {
++        cpu_get_current()-&gt;tss.esp0 =
++            (uintptr_t) thread-&gt;user_isf
++            + sizeof(interrupt_stack_frame_t);
++    }
++}
+diff --git a/src/kernel2/src/interrupts/im.c b/src/kernel2/src/interrupts/im.c
+index 425d7bc..4472947 100644
+--- a/src/kernel2/src/interrupts/im.c
++++ b/src/kernel2/src/interrupts/im.c
+@@ -216,18 +216,8 @@ interrupt_stack_frame_t* im_prepare_current_thread(void)
+     pm_thread_t* thread = current_thread;
+     interrupt_stack_frame_t* isf = thread-&gt;kernel_stack;
+ 
+-    cpu_get_current()-&gt;tss.ss0 = 2 &lt;&lt; 3;
+-    if (isf-&gt;eflags &amp; 0x20000) {
+-        cpu_get_current()-&gt;tss.esp0 =
+-            (uintptr_t) thread-&gt;user_isf
+-            + sizeof(struct vm86_isf);
+-    } else {
+-        cpu_get_current()-&gt;tss.esp0 =
+-            (uintptr_t) thread-&gt;user_isf
+-            + sizeof(interrupt_stack_frame_t);
+-    }
+-
+     mmc_activate(&amp;thread-&gt;process-&gt;context);
++    cpu_prepare_current_task();
+ 
+     return isf;
+ }
+-- 
+1.6.0.2
+
+</PRE>
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001854.html">[tyndur-devel] [PATCH 2/2] kernel2: I/O-Bitmap benutzen
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001855.html">[tyndur-devel] [PATCH] kernel2: Bei einer Exception nur den Prozess	beenden
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1852">[ Datum ]</a>
+              <a href="thread.html#1852">[ Thema ]</a>
+              <a href="subject.html#1852">[ Betreff (Subject)]</a>
+              <a href="author.html#1852">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

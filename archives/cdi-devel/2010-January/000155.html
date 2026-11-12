@@ -1,0 +1,139 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [RFC PATCH] mem.h: Handling memory areas
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BRFC%20PATCH%5D%20mem.h%3A%20Handling%20memory%20areas&In-Reply-To=%3C20100126215452.GA7676%40silvanus%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000154.html">
+   <LINK REL="Next"  HREF="000156.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [RFC PATCH] mem.h: Handling memory areas</H1>
+    <B>Kevin Wolf</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BRFC%20PATCH%5D%20mem.h%3A%20Handling%20memory%20areas&In-Reply-To=%3C20100126215452.GA7676%40silvanus%3E"
+       TITLE="[cdi-devel] [RFC PATCH] mem.h: Handling memory areas">kevin at tyndur.org
+       </A><BR>
+    <I>Tue Jan 26 22:54:54 CET 2010</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000154.html">[cdi-devel] [RFC PATCH] mem.h: Handling memory areas
+</A></li>
+        <LI>Next message: <A HREF="000156.html">[cdi-devel] [RFC PATCH] mem.h: Handling memory areas
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#155">[ date ]</a>
+              <a href="thread.html#155">[ thread ]</a>
+              <a href="subject.html#155">[ subject ]</a>
+              <a href="author.html#155">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>On Wed, Jan 27, 2010 at 06:54:06AM +1000, Matthew Iselin wrote:
+&gt;<i> On Mon, Jan 25, 2010 at 7:37 AM, Kevin Wolf &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">kevin at tyndur.org</A>&gt; wrote:
+</I>&gt;<i> &gt; &lt;snip&gt;
+</I>&gt;<i> &gt;
+</I>&gt;<i> &gt; To explain the use of the other functions, consider the following.
+</I>&gt;<i> &gt; Let's take a disk driver as an example. Instead of buffer/size its
+</I>&gt;<i> &gt; write function will directly get a memory area from the OS. The OS might
+</I>&gt;<i> &gt; already have allocated the memory physically contiguous, but it doesn't
+</I>&gt;<i> &gt; need to do so. The driver calls cdi_mem_require_flags which copies the
+</I>&gt;<i> &gt; data into a suited buffer - but if the OS already did the right thing,
+</I>&gt;<i> &gt; it's a no-op.
+</I>&gt;<i> 
+</I>&gt;<i> Hmm, I don't actually like the sounds of that. I'd prefer that when
+</I>&gt;<i> the driver gets memory from the OS it specifies the flags it requires
+</I>&gt;<i> for the memory area rather than get the memory then change flags on
+</I>&gt;<i> the area (potentially requiring a full reallocation of the buffer
+</I>&gt;<i> itself) later.
+</I>
+I'm not sure if we're talking about the same thing here. There are
+basically two different scenarios to consider and you could mean any of
+them:
+
+1) The driver needs some memory internally. This one is easy, it simply
+calls cdi_mem_alloc with the right flags and gets what it requested.
+
+2) The driver doesn't explicitly allocate memory but gets it from the OS
+as a parameter to a function like the buffer for send_packet. This is
+more tricky. The data usually comes from a userspace program in this
+case, so the memory can only have the flag it happens to fulfill when the
+memory is passed to the kernel (assuming a monolithic model).
+
+At this point, we have two possibilities: The kernel can just pass the
+unchanged memory area down and the driver needs to make it fit its
+requrements (this is what I was trying to achieve with
+cdi_mem_require_flags). The only alternative that I see is to specify
+the required flags for each memory area parameter of any callback
+function in the driver struct. I personally consider this really awkward.
+
+But maybe you have another idea how this could be solved.
+
+&gt;<i> I also don't think cdi_mem_require_flags should perform
+</I>&gt;<i> a copy: semantics like that are not intuitive. I may have
+</I>&gt;<i> mis-interpreted of course.
+</I>
+Not sure what it should do instead?
+
+&gt;<i> &gt; cdi_mem_copy is for the other way round. Now the disk driver wants to
+</I>&gt;<i> &gt; read something from its disk. It gets a memory area from the OS and uses
+</I>&gt;<i> &gt; cdi_mem_require_flags to get something usable for DMA, which may or may
+</I>&gt;<i> &gt; not involve a copy. When the disk has transferred all the data, the
+</I>&gt;<i> &gt; driver uses cdi_mem_copy to make sure that the read data ends up in the
+</I>&gt;<i> &gt; buffer it was passed - and again, if the buffer had already the right
+</I>&gt;<i> &gt; flags this will be a no-op.
+</I>&gt;<i> 
+</I>&gt;<i> Again, cdi_mem_require_flags probably shouldn't perform a copy.
+</I>&gt;<i> 
+</I>&gt;<i> It just sounds like the interface could be cleaned up a bit, and
+</I>&gt;<i> especially could be modified to reduce the amount of copying that the
+</I>&gt;<i> CDI implementation might have to do. Drivers at least should know what
+</I>&gt;<i> they need from the very beginning.
+</I>
+The whole thing was made to avoid copies in the first place. But there
+are cases where you just need to copy data. So what I tried is to
+introduce functions which transparently do the copy or are a no-op when
+no copy is needed.
+
+Obviously I failed with either designing or explaining them. ;-)
+
+&gt;<i> Apart from these nitpicks I like where you're going with the interface.
+</I>
+This is not nitpicks. It's important questions on the interface and I'm
+happy that you're asking them. I feel much more comfortable with
+committing some code after a discussion because I know that people have
+really thought about it. I'd like to hear your suggestions for the
+memory interface.
+
+By the way, one more thing that I wasn't sure about is if it's really
+helpful to restrict the whole thing to a page granularity. Maybe this
+should just be a flag CDI_MEM_PAGE_ALIGN which could be used by drivers
+whenever it's helpful to use complete pages. Or maybe leave it
+completely to the OS.
+
+Kevin
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000154.html">[cdi-devel] [RFC PATCH] mem.h: Handling memory areas
+</A></li>
+	<LI>Next message: <A HREF="000156.html">[cdi-devel] [RFC PATCH] mem.h: Handling memory areas
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#155">[ date ]</a>
+              <a href="thread.html#155">[ thread ]</a>
+              <a href="subject.html#155">[ subject ]</a>
+              <a href="author.html#155">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

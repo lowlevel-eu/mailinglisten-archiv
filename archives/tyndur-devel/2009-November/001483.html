@@ -1,0 +1,328 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] + dns requests geben nun mehrere ip adresen	zurueck
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20%2B%20dns%20requests%20geben%20nun%20mehrere%20ip%20adresen%0A%09zurueck&In-Reply-To=%3C1259095915-15820-1-git-send-email-fmnssun%40gmail.com%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001482.html">
+   <LINK REL="Next"  HREF="001484.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] + dns requests geben nun mehrere ip adresen	zurueck</H1>
+    <B>Roman Muentener</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20%2B%20dns%20requests%20geben%20nun%20mehrere%20ip%20adresen%0A%09zurueck&In-Reply-To=%3C1259095915-15820-1-git-send-email-fmnssun%40gmail.com%3E"
+           TITLE="[tyndur-devel] [PATCH] + dns requests geben nun mehrere ip adresen	zurueck">fmnssun at gmail.com
+                  </A><BR>
+    <I>Di Nov 24 21:51:55 CET 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001482.html">[tyndur-devel] [PATCH] * geandert wegen codestil.txt
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001484.html">[tyndur-devel] [PATCH] ! memleaks gestopft. + dns_free_result.
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1483">[ Datum ]</a>
+              <a href="thread.html#1483">[ Thema ]</a>
+              <a href="subject.html#1483">[ Betreff (Subject) ]</a>
+              <a href="author.html#1483">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>---
+ src/modules/c/getip/main.c      |   14 ++++++++-
+ src/modules/tcpip/dns.c         |   56 ++++++++++++++++++++++++++------------
+ src/modules/tcpip/include/dns.h |    7 ++++-
+ src/modules/tcpip/lostio_if.c   |   21 +++++++++++---
+ 4 files changed, 72 insertions(+), 26 deletions(-)
+
+diff --git a/src/modules/c/getip/main.c b/src/modules/c/getip/main.c
+index 865e586..163407e 100644
+--- a/src/modules/c/getip/main.c
++++ b/src/modules/c/getip/main.c
+@@ -39,7 +39,8 @@
+ #include &quot;netdb.h&quot;
+ #include &quot;stdio.h&quot;
+ #include &quot;arpa/inet.h&quot;
+-
++#include &quot;errno.h&quot;
++#include &quot;network.h&quot;
+ 
+ 
+ int main(int argc, char* argv[])
+@@ -52,16 +53,25 @@ int main(int argc, char* argv[])
+         return 0;
+     }
+ 
++    
++
+     struct in_addr addr;
+ 
+     struct hostent* info;
+     info = gethostbyname(argv[1]);
++
++
++    if(info == NULL) {
++        printf(&quot;ERROR: %s\n&quot;,hstrerror(h_errno));
++        return 2;
++    }
++
+     int i = 0;
+     while (info-&gt;h_addr_list[i] != 0) {
+         addr.s_addr = *(unsigned long *)info-&gt;h_addr_list[i++];
+ 
+         printf(&quot;IP Address: %s\n&quot; , inet_ntoa(addr));
+     }
+-
++    
+     return 0;
+ }
+diff --git a/src/modules/tcpip/dns.c b/src/modules/tcpip/dns.c
+index 0f6e18d..72ff33c 100644
+--- a/src/modules/tcpip/dns.c
++++ b/src/modules/tcpip/dns.c
+@@ -66,7 +66,7 @@
+ 
+ struct dns_cache_entry {
+     char*   name;
+-    dword   ip;
++    struct dns_request_result* result;
+ };
+ 
+ static list_t* dns_cache = NULL;
+@@ -77,7 +77,7 @@ static list_t* dns_cache = NULL;
+  * @return Zum gegebenen Domainnamen passende IP-Adresse oder 0, wenn die
+  * Domain nicht im Cache ist.
+  */
+-static dword dns_cache_get(char* domain)
++static struct dns_request_result* dns_cache_get(char* domain)
+ {
+     struct dns_cache_entry* entry;
+     int i;
+@@ -87,12 +87,12 @@ static dword dns_cache_get(char* domain)
+     for (i = 0; (entry = list_get_element_at(dns_cache, i)); i++) {
+         if (strcmp(domain, entry-&gt;name) == 0) {
+             DEBUG_MSG1(&quot; -- %s: Treffer\n&quot;, entry-&gt;name);
+-            return entry-&gt;ip;
++            return entry-&gt;result;
+         }
+         DEBUG_MSG1(&quot; -- %s: Treffer\n&quot;, entry-&gt;name);
+     }
+-
+-    return 0;
++    DEBUG_MSG1(&quot; -- %s: Keine Treffer\n&quot;,domain);
++    return NULL;
+ }
+ 
+ /**
+@@ -100,17 +100,17 @@ static dword dns_cache_get(char* domain)
+  * ein alter Eintrag geloescht, um den Cache auf einer ertraeglichen Groesse zu
+  * halten.
+  */
+-static void dns_cache_add(char* domain, dword ip)
++static void dns_cache_add(char* domain, struct dns_request_result* result)
+ {
+     struct dns_cache_entry* entry = malloc(sizeof(*entry));
+     size_t domain_len = strlen(domain);
+ 
+-    entry-&gt;ip = ip;
++    entry-&gt;result = result;
+     entry-&gt;name = malloc(domain_len + 1);
+     strncpy(entry-&gt;name, domain, domain_len);
+     entry-&gt;name[domain_len] = '\0';
+ 
+-    DEBUG_MSG2(&quot;dns: cache_add: %s =&gt; %08x\n&quot;, entry-&gt;name, entry-&gt;ip);
++    DEBUG_MSG1(&quot;dns: cache_add: %s\n&quot;, entry-&gt;name);
+ 
+     list_push(dns_cache, entry);
+ 
+@@ -120,24 +120,31 @@ static void dns_cache_add(char* domain, dword ip)
+ }
+ 
+ /**
+- * Loest einen Domainnamen in eine IP-Adresse auf.
++ * Loest einen Domainnamen in eine IP-Adressen auf.
+  * 
+  * @param domain Der aufzuloesende Domainname als nullterminierter String,
+  * wobei die Labels durch Punkte getrennt sind
+  */
+-dword dns_request(char* domain)
++
++struct dns_request_result* dns_request(char* domain)
+ {
++    // Resultat
++    struct dns_request_result* dns_result = dns_cache_get(domain);
++    dword result;
++
+     // Cache anlegen, falls noch keiner da ist
+     if (dns_cache == NULL) {
++        DEBUG_MSG(&quot;DNS: Erzeuge Cache\n&quot;);
+         dns_cache = list_create();
+     }
+ 
+-    // Wenn es im Cache ist, daraus nehmen
+-    dword result = dns_cache_get(domain);
+-    if (result) {
+-        return result;
++    
++    if(dns_cache_get(domain) != NULL) {
++      return dns_result;
+     }
+ 
++    dns_result = (struct dns_request_result*)malloc(sizeof(struct dns_request_result));
++
+     // Ansonsten brauchen wir eine Verbindung zum DNS-Server
+     dword dns_ip = options.nameserver;
+ 
+@@ -145,7 +152,7 @@ dword dns_request(char* domain)
+     struct tcp_connection* conn = tcp_open_connection(dns_ip, DNS_PORT);
+     if (conn == NULL) {
+         DEBUG_MSG(&quot;DNS: Konnte Verbindung nicht aufbauen.\n&quot;);
+-        return 0;
++        return NULL;
+     }
+ 
+     // Puffer fuer die Nachricht reservieren:
+@@ -219,6 +226,8 @@ dword dns_request(char* domain)
+     // Auf Antwort warten
+     DEBUG_MSG(&quot;DNS: Warte auf Antwort\n&quot;);
+     struct tcp_in_buffer* in_buffer;
++    // Index fuer dns_result
++    int dns_result_index = 0;
+     while(1) {
+         if ((in_buffer = list_pop(conn-&gt;to_lostio))) {
+             void* reply = in_buffer-&gt;data;
+@@ -233,6 +242,11 @@ dword dns_request(char* domain)
+                 big_endian_word(((struct dns_header*) reply)-&gt;an_count);
+             reply += sizeof(struct dns_header);
+ 
++            // Speicher fuer die IPs holen
++            dns_result-&gt;ip_address = (dword*)malloc(sizeof(dword) * an_count);
++            // Menge speichern
++            dns_result-&gt;ip_count = an_count;
++
+             // Question Section ignorieren
+             for (i = 0; i &lt; qd_count; i++) {                
+                 // QNAMEs
+@@ -272,13 +286,17 @@ dword dns_request(char* domain)
+ 
+                 if (*((word*) reply) == 0x100) {
+                     result = *((dword*) (reply + 10));
+-                    dns_cache_add(domain, result);
++                    
+                     
+                     // TODO Verbindung schliessen
+-                    return result;
++                    reply += answer_len;
+                 } else {
++                    result = 0;
+                     reply += answer_len;
+                 }
++
++                dns_result-&gt;ip_address[dns_result_index] = result;
++                dns_result_index++;
+             }
+             
+             break;
+@@ -288,5 +306,7 @@ dword dns_request(char* domain)
+ 
+     // TODO Verbindung schliessen
+ 
+-    return 0;
++    dns_cache_add(domain,dns_result);
++
++    return dns_result;
+ }
+diff --git a/src/modules/tcpip/include/dns.h b/src/modules/tcpip/include/dns.h
+index cc4281f..e9b6368 100644
+--- a/src/modules/tcpip/include/dns.h
++++ b/src/modules/tcpip/include/dns.h
+@@ -49,6 +49,11 @@ struct dns_header {
+     uint16_t    ar_count;
+ } __attribute__((packed));
+ 
++struct dns_request_result {
++    dword* ip_address;
++    dword ip_count;
++};
++
+ 
+ // Konstanten für die Header-Flags
+ 
+@@ -96,6 +101,6 @@ static inline void dns_set_opcode(struct dns_header* header, uint8_t opcode)
+ #define QTYPE_A big_endian_word(1)
+ #define QCLASS_IN big_endian_word(1)
+ 
+-dword dns_request(char* domain);
++struct dns_request_result* dns_request(char* domain);
+ 
+ #endif
+diff --git a/src/modules/tcpip/lostio_if.c b/src/modules/tcpip/lostio_if.c
+index a849f18..f48953f 100644
+--- a/src/modules/tcpip/lostio_if.c
++++ b/src/modules/tcpip/lostio_if.c
+@@ -164,12 +164,18 @@ void lostio_add_device(struct device *device)
+ bool lostio_tcp_not_found(char** path, byte flags, pid_t pid, io_resource_t* ps)
+ {
+     DEBUG_MSG(&quot;Knoten anlegen&quot;);
+-    
++   
+     if (strncmp(*path, &quot;/dns/&quot;, 5) == 0) {
+-        dword ip = dns_request(strrchr(*path, '/') + 1);
+-        if (ip == 0)
++        struct dns_request_result* result = dns_request(strrchr(*path, '/') + 1);
++        if (result == NULL)
+             return FALSE;
+-        char* data = ip_to_string(ip);
++        char* data = calloc(16 * result-&gt;ip_count,sizeof(char));
++        
++        int i=0;
++        for(;i &lt; result-&gt;ip_count;i++) {
++            strcat(data,ip_to_string(result-&gt;ip_address[i]));
++        }
++
+         return vfstree_create_node(*path, LOSTIO_TYPES_RAMFILE, strlen(data), data, 0);
+     } else {
+         return vfstree_create_node(*path, LOSTIO_TYPES_TCPPORT, 0, NULL, 0);
+@@ -195,7 +201,12 @@ bool lostio_tcp_pre_open(char** path, byte flags, pid_t pid, io_resource_t* ps)
+     *delim = '\0';
+     dword ip = string_to_ip(*path + 1);
+     if (!ip) {
+-        ip = dns_request(*path + 1);
++        struct dns_request_result* result = dns_request(*path + 1);
++        if(result != NULL) {
++            if(result-&gt;ip_count &gt; 0) {
++              ip = result-&gt;ip_address[0];
++            }
++        }
+     }
+ 
+     if (!ip) {
+-- 
+1.6.0.4
+
+</PRE>
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001482.html">[tyndur-devel] [PATCH] * geandert wegen codestil.txt
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001484.html">[tyndur-devel] [PATCH] ! memleaks gestopft. + dns_free_result.
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1483">[ Datum ]</a>
+              <a href="thread.html#1483">[ Thema ]</a>
+              <a href="subject.html#1483">[ Betreff (Subject)]</a>
+              <a href="author.html#1483">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

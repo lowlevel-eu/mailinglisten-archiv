@@ -1,0 +1,114 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH v2 3/7] kernel2: Fuer Syscalls keinen	Userspacestack benutzen
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%203/7%5D%20kernel2%3A%20Fuer%20Syscalls%20keinen%0A%09Userspacestack%20benutzen&In-Reply-To=%3C1262534601-14194-4-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001625.html">
+   <LINK REL="Next"  HREF="001626.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH v2 3/7] kernel2: Fuer Syscalls keinen	Userspacestack benutzen</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%203/7%5D%20kernel2%3A%20Fuer%20Syscalls%20keinen%0A%09Userspacestack%20benutzen&In-Reply-To=%3C1262534601-14194-4-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH v2 3/7] kernel2: Fuer Syscalls keinen	Userspacestack benutzen">kevin at tyndur.org
+                  </A><BR>
+    <I>So Jan  3 17:03:17 CET 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001625.html">[tyndur-devel] [PATCH v2 2/7] kernel2: SHM beim Prozessende schliessen
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001626.html">[tyndur-devel] [PATCH v2 3/7] kernel2: Fuer Syscalls keinen Userspacestack benutzen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1618">[ Datum ]</a>
+              <a href="thread.html#1618">[ Thema ]</a>
+              <a href="subject.html#1618">[ Betreff (Subject) ]</a>
+              <a href="author.html#1618">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>! kernel2: Auf dem Userspacestack zu arbeiten hat einen Haufen negative
+  Konsequenzen. Und wenn man den Task grad zerstoert hat, hat man sich
+  seinen eigenen Stack unter den Fuessen weggezogen. Lieber kopieren
+  statt direkt benutzen.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/kernel2/src/arch/i386/syscall.c |   30 ++++++++++--------------------
+ 1 files changed, 10 insertions(+), 20 deletions(-)
+
+diff --git a/src/kernel2/src/arch/i386/syscall.c b/src/kernel2/src/arch/i386/syscall.c
+index e8d71dc..7d5724e 100644
+--- a/src/kernel2/src/arch/i386/syscall.c
++++ b/src/kernel2/src/arch/i386/syscall.c
+@@ -97,28 +97,18 @@ void syscall_arch(machine_state_t* isf)
+ 
+     } else {
+         uint32_t eax, edx;
+-        dword stack_backup;
+ 
+-
+-        // 512 Bytes Sicherheitsabstand auf dem Stack, denn wenn der Kernel
+-        // hier einen Stack Overflow produziert, haben wir ein Problem.
+-        if ((void*) (isf-&gt;esp - 0x200) &lt; current_thread-&gt;user_stack_bottom) {
+-            increase_user_stack_size(current_thread, 1);
+-        }
+-
+-         // Die Syscallhandler werden mit dem Userspace-Stack aufgerufen, damit
+-        // keine Parameter kopiert werden muessen.
+-        asm(&quot;pusha;&quot;
+-            // Den original-Stackpointer retten
+-            &quot;movl %%esp, %3;&quot;
+-            // Stack wechseln
+-            &quot;movl %2, %%esp;&quot;
++        asm volatile(
++            &quot;sub %%ecx, %%esp;&quot;
++            &quot;shr $0x2, %%ecx;&quot;
++            &quot;mov %%esp, %%edi;&quot;
++            &quot;rep movsd;&quot;
+             &quot;call *%4;&quot;
+-            &quot;movl %%eax, %0;&quot;
+-            &quot;movl %%edx, %1;&quot;
+-            &quot;movl %3, %%esp;&quot;
+-            &quot;popa;&quot;
+-            : &quot;=m&quot; (eax), &quot;=m&quot; (edx) : &quot;r&quot; (stack), &quot;m&quot; (stack_backup), &quot;r&quot; (handler));
++            &quot;shl $0x2, %%ecx;&quot;
++            &quot;add %%ecx, %%esp;&quot;
++            : &quot;=a&quot; (eax), &quot;=d&quot; (edx), &quot;=S&quot; (stack)
++            : &quot;S&quot; (stack), &quot;r&quot; (handler), &quot;c&quot; (syscalls[number].arg_count * 4)
++            : &quot;edi&quot;);
+ 
+         isf-&gt;eax = eax;
+         if (handler == syscall_get_tick_count) {
+-- 
+1.6.0.2
+
+</PRE>
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001625.html">[tyndur-devel] [PATCH v2 2/7] kernel2: SHM beim Prozessende schliessen
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001626.html">[tyndur-devel] [PATCH v2 3/7] kernel2: Fuer Syscalls keinen Userspacestack benutzen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1618">[ Datum ]</a>
+              <a href="thread.html#1618">[ Thema ]</a>
+              <a href="subject.html#1618">[ Betreff (Subject)]</a>
+              <a href="author.html#1618">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

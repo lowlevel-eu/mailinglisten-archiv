@@ -1,0 +1,148 @@
+From kevin at tyndur.org  Sun Nov  6 00:29:05 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  6 Nov 2016 00:29:05 +0100
+Subject: [cdi-devel] [PATCH 0/2] ext2: Duplicate filename fixes
+Message-ID: <1478388547-26191-1-git-send-email-kevin@tyndur.org>
+
+The OS should really prevent this from even reaching the driver, but the driver
+was crashing and you can always get corrupted filesystems from elsewhere, so
+it's probably worth fixing herer, too.
+
+Kevin Wolf (2):
+  ext2: Handle duplicate dir entries gracefully in unlink
+  ext2: Prevent creating second dir entry with same name
+
+ ext2/libext2/directory.c         | 13 ++++++++++---
+ ext2/libext2/include/directory.h |  2 +-
+ ext2/res.c                       |  2 +-
+ 3 files changed, 12 insertions(+), 5 deletions(-)
+
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Sun Nov  6 00:29:06 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  6 Nov 2016 00:29:06 +0100
+Subject: [cdi-devel] [PATCH 1/2] ext2: Handle duplicate dir entries
+	gracefully in unlink
+In-Reply-To: <1478388547-26191-1-git-send-email-kevin@tyndur.org>
+References: <1478388547-26191-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1478388547-26191-2-git-send-email-kevin@tyndur.org>
+
+It shouldn't normally happen that there are two directory entries with
+the same name, but in order to avoid crashes on inconsistent file
+systems, let's make sure to free the right resource instead of just one
+with the same name.
+
+Also, remove only one directory entry so that another unlink() request
+can succeed and fully remove the second entry.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ ext2/libext2/directory.c | 2 +-
+ ext2/res.c               | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/ext2/libext2/directory.c b/ext2/libext2/directory.c
+index 54ffffa..f9ffb42 100644
+--- a/ext2/libext2/directory.c
++++ b/ext2/libext2/directory.c
+@@ -241,7 +241,7 @@ int ext2_dir_unlink(ext2_inode_t* dir, const char* name)
+     uint32_t bgnum;
+ 
+     ext2_inode_readdata(dir, 0, dir->raw->size, buf);
+-    while (pos < dir->raw->size) {
++    while (!ret && pos < dir->raw->size) {
+         entry = (ext2_dirent_t*) &buf[pos];
+ 
+         // Eintrag als unbenutzt markieren
+diff --git a/ext2/res.c b/ext2/res.c
+index 9511098..a127450 100644
+--- a/ext2/res.c
++++ b/ext2/res.c
+@@ -383,7 +383,7 @@ int ext2_fs_res_remove(struct cdi_fs_stream* stream)
+     for (i = 0; parent_res->res.children &&
+         (child_res = cdi_list_get(parent_res->res.children, i)); i++)
+     {
+-        if (!strcmp(child_res->res.name, res->res.name)) {
++        if (child_res == res) {
+             cdi_list_remove(parent_res->res.children, i);
+             break;
+         }
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Sun Nov  6 00:29:07 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  6 Nov 2016 00:29:07 +0100
+Subject: [cdi-devel] [PATCH 2/2] ext2: Prevent creating second dir entry
+	with same name
+In-Reply-To: <1478388547-26191-1-git-send-email-kevin@tyndur.org>
+References: <1478388547-26191-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1478388547-26191-3-git-send-email-kevin@tyndur.org>
+
+A directory isn't supposed to contain multiple entries with the same
+name. Error out when someone tries to create a new directory entry with
+the same name as an existing entry uses.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ ext2/libext2/directory.c         | 11 +++++++++--
+ ext2/libext2/include/directory.h |  2 +-
+ 2 files changed, 10 insertions(+), 3 deletions(-)
+
+diff --git a/ext2/libext2/directory.c b/ext2/libext2/directory.c
+index f9ffb42..374a1dd 100644
+--- a/ext2/libext2/directory.c
++++ b/ext2/libext2/directory.c
+@@ -38,7 +38,7 @@
+ #include <stdio.h>
+ 
+ struct private_dir_get {
+-    char* name;
++    const char* name;
+     size_t name_len;
+     ext2_dirent_t* result;
+     int found;
+@@ -88,7 +88,7 @@ static int dir_get_handler(ext2_dirent_t* dirent, void* prv)
+     return 0;
+ }
+ 
+-ext2_dirent_t* ext2_dir_get(ext2_inode_t* inode, char* name)
++ext2_dirent_t* ext2_dir_get(ext2_inode_t* inode, const char* name)
+ {
+     struct private_dir_get prv = {
+         .name = name,
+@@ -173,6 +173,13 @@ int ext2_dir_link(ext2_inode_t* dir, ext2_inode_t* inode, const char* name)
+         type = ext2_inode_type(inode);
+     }
+ 
++    /* Don't create a second dir entry with the same name */
++    entry = ext2_dir_get(dir, name);
++    if (entry != NULL) {
++        free(entry);
++        return 0;
++    }
++
+     if (dir->raw->size) {
+     ext2_inode_readdata(dir, 0, dir->raw->size, buf);
+     while (dir->raw->size && (pos < dir->raw->size)) {
+diff --git a/ext2/libext2/include/directory.h b/ext2/libext2/include/directory.h
+index ee19a56..5732922 100644
+--- a/ext2/libext2/include/directory.h
++++ b/ext2/libext2/include/directory.h
+@@ -82,7 +82,7 @@ void ext2_dir_foreach(ext2_inode_t* inode,
+  * @return      Pointer auf den gefundenen Verzeichniseintrag. Muss mit free
+  *              freigegeben.
+  */
+-ext2_dirent_t* ext2_dir_get(ext2_inode_t* inode, char* name);
++ext2_dirent_t* ext2_dir_get(ext2_inode_t* inode, const char* name);
+ 
+ /**
+  * Sucht einen Inode nach dem Pfad
+-- 
+2.1.4
+
+

@@ -1,0 +1,1644 @@
+From particleflux at gmail.com  Wed Mar 20 18:23:36 2013
+From: particleflux at gmail.com (Stefan Linke)
+Date: Wed, 20 Mar 2013 18:23:36 +0100
+Subject: [tyndur-devel] [PATCH] ! fixed crossdev script gcc patch (warum
+	auch immer der alte nicht ging...)
+Message-ID: <1363800216-29801-1-git-send-email-particleflux@googlemail.com>
+
+From: livinskull <livinskull at gmail.com>
+
+Signed-off-by: livinskull <livinskull at gmail.com>
+---
+ patches/gcc/4.5.2/gcc-4.5.2.patch | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/patches/gcc/4.5.2/gcc-4.5.2.patch b/patches/gcc/4.5.2/gcc-4.5.2.patch
+index 5053246..d7482ab 100644
+--- a/patches/gcc/4.5.2/gcc-4.5.2.patch
++++ b/patches/gcc/4.5.2/gcc-4.5.2.patch
+@@ -451,7 +451,7 @@ diff -urN ../gcc-4.5.2/libiberty/pex-tyndur.c ./libiberty/pex-tyndur.c
+ +
+ diff -urN ../gcc-4.5.2/libgcc/config.host ../gcc-4.5.2/libgcc/config.host.new
+ --- ../gcc-4.5.2/libgcc/config.host  2011-01-07 18:58:35.599648002 +0100
+-+++ ../gcc-4.5.2/libgcc/config.host  2011-01-07 18:58:43.229648001 +0100
+++++ ./libgcc/config.host  2011-01-07 18:58:43.229648001 +0100
+ @@ -292,6 +292,8 @@
+  	;;
+  i[34567]86-*-openbsd*)
+-- 
+1.8.1.5
+
+
+From kevin at tyndur.org  Wed Mar 20 23:58:21 2013
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Wed, 20 Mar 2013 23:58:21 +0100
+Subject: [tyndur-devel] [PATCH 0/4] Ein bisschen Userspace-Multithreading
+Message-ID: <1363820305-17864-1-git-send-email-kevin@tyndur.org>
+
+Ein paar Kaputtheiten von SHyx0rmZ, verschlimmbessert von meiner
+Wenigkeit. So ein bisschen tut das, und zurechtfixen kann man es
+später ja immer noch.
+
+Kevin Wolf (2):
+  kernel2: Erst Threads, dann Prozess zerstören
+  tests: Ein einfacher Threadtest
+
+Patrick Pokatilo (2):
+  kernel/libc: Multithreading-Syscalls
+  libc: pthread
+
+ src/include/syscallno.h                  |    6 ++-
+ src/include/types.h                      |    1 +
+ src/kernel2/include/syscall.h            |   10 +++
+ src/kernel2/include/tasks.h              |    6 ++
+ src/kernel2/src/syscall.c                |    4 +
+ src/kernel2/src/syscalls/pm.c            |   74 ++++++++++++++++++++
+ src/kernel2/src/tasks/pm.c               |   16 ++--
+ src/kernel2/src/tasks/thread.c           |   25 ++++++-
+ src/modules/c/pthreads/Makefile.all      |    9 +++
+ src/modules/c/pthreads/main.c            |   85 ++++++++++++++++++++++
+ src/modules/include/pthread.h            |   42 +++++++++++
+ src/modules/include/sys/types.h          |    3 +
+ src/modules/include/syscall.h            |    3 +
+ src/modules/include/unistd.h             |    3 +
+ src/modules/lib/posix/getpid.c           |   10 +++-
+ src/modules/lib/posix/pthread.c          |  112 ++++++++++++++++++++++++++++++
+ src/modules/lib/syscalls/create_thread.c |  110 +++++++++++++++++++++++++++++
+ tests/libc/Makefile                      |    5 +-
+ tests/libc/main_thread.c                 |   92 ++++++++++++++++++++++++
+ tests/libc/run_test.sh                   |    2 +
+ 20 files changed, 603 insertions(+), 15 deletions(-)
+ create mode 100644 src/modules/c/pthreads/Makefile.all
+ create mode 100644 src/modules/c/pthreads/main.c
+ create mode 100644 src/modules/include/pthread.h
+ create mode 100644 src/modules/lib/posix/pthread.c
+ create mode 100644 src/modules/lib/syscalls/create_thread.c
+ create mode 100644 tests/libc/main_thread.c
+
+-- 
+1.7.7
+
+
+From kevin at tyndur.org  Wed Mar 20 23:58:22 2013
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Wed, 20 Mar 2013 23:58:22 +0100
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH_1/4=5D_kernel2=3A_Erst_Threads?=
+	=?utf-8?q?=2C_dann_Prozess_zerst=C3=B6ren?=
+In-Reply-To: <1363820305-17864-1-git-send-email-kevin@tyndur.org>
+References: <1363820305-17864-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1363820305-17864-2-git-send-email-kevin@tyndur.org>
+
+! kernel2: pm_thread_destroy() braucht den Prozess noch, also muss die
+  Reihenfolge umgekehrt sein. Ist auch logischer, weil umgekehrte Reihenfolge
+  der Initialisierung.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/src/tasks/pm.c |   16 ++++++++--------
+ 1 files changed, 8 insertions(+), 8 deletions(-)
+
+diff --git a/src/kernel2/src/tasks/pm.c b/src/kernel2/src/tasks/pm.c
+index e3085c5..8219022 100644
+--- a/src/kernel2/src/tasks/pm.c
++++ b/src/kernel2/src/tasks/pm.c
+@@ -215,6 +215,7 @@ void pm_prepare_destroy(pm_process_t* process)
+ void pm_destroy(pm_process_t* process)
+ {
+     struct on_destroy_info* info;
++    int i;
+ 
+     // Der aktuelle Speicherkontext darf nicht zum zu zerstoerenden Task
+     // gehoeren, sonst kriegen wir Probleme beim freigeben des Page Directory
+@@ -222,6 +223,12 @@ void pm_destroy(pm_process_t* process)
+         mmc_activate(&init_process.context);
+     }
+ 
++    // Alle Threads loeschen
++    pm_thread_t* thread;
++    while ((thread = list_get_element_at(process->threads, 0))) {
++        pm_thread_destroy(thread);
++    }
++
+     // Eventhandler ausfuehren
+     while ((info = list_pop(process->on_destroy))) {
+         info->handler(process, info->prv);
+@@ -245,7 +252,7 @@ void pm_destroy(pm_process_t* process)
+ 
+     // Den Prozess aus der Liste entfernen
+     pm_process_t* _proc;
+-    int i = 0;
++    i = 0;
+     while ((_proc = list_get_element_at(process_list, i))) {
+         // Wenn der Prozess gefunden wurde, wird er jetzt aus der Liste
+         // gelöscht.
+@@ -257,13 +264,6 @@ void pm_destroy(pm_process_t* process)
+         i++;
+     }
+ 
+-    // Alle Threads loeschen
+-    i = 0;
+-    pm_thread_t* thread;
+-    while ((thread = list_get_element_at(process->threads, i++))) {
+-        pm_thread_destroy(thread);
+-    }
+-
+     // Kommandozeile freigeben
+     free(process->cmdline);
+     
+-- 
+1.7.7
+
+
+From kevin at tyndur.org  Wed Mar 20 23:58:23 2013
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Wed, 20 Mar 2013 23:58:23 +0100
+Subject: [tyndur-devel] [PATCH 2/4] kernel/libc: Multithreading-Syscalls
+In-Reply-To: <1363820305-17864-1-git-send-email-kevin@tyndur.org>
+References: <1363820305-17864-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1363820305-17864-3-git-send-email-kevin@tyndur.org>
+
+From: Patrick Pokatilo <shyxormz at asxsoft.de>
+
++ kernel/libc: Native tyndur-Thread-API hinzugefügt
+
+Signed-off-by: Patrick Pokatilo <shyxormz at asxsoft.de>
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/include/syscallno.h                  |    6 ++-
+ src/include/types.h                      |    1 +
+ src/kernel2/include/syscall.h            |   10 +++
+ src/kernel2/include/tasks.h              |    6 ++
+ src/kernel2/src/syscall.c                |    4 +
+ src/kernel2/src/syscalls/pm.c            |   74 ++++++++++++++++++++
+ src/kernel2/src/tasks/thread.c           |   25 ++++++-
+ src/modules/include/syscall.h            |    3 +
+ src/modules/include/unistd.h             |    3 +
+ src/modules/lib/posix/getpid.c           |   10 +++-
+ src/modules/lib/syscalls/create_thread.c |  110 ++++++++++++++++++++++++++++++
+ 11 files changed, 246 insertions(+), 6 deletions(-)
+ create mode 100644 src/modules/lib/syscalls/create_thread.c
+
+diff --git a/src/include/syscallno.h b/src/include/syscallno.h
+index ec43668..12779e0 100644
+--- a/src/include/syscallno.h
++++ b/src/include/syscallno.h
+@@ -68,6 +68,10 @@
+ 
+ #define SYSCALL_PM_WAIT_FOR_RPC 17
+ 
++#define SYSCALL_PM_GET_TID 119
++#define SYSCALL_PM_CREATE_THREAD 120
++#define SYSCALL_PM_EXIT_THREAD 121
++
+ #define SYSCALL_GET_TICK_COUNT 40
+ 
+ #define SYSCALL_FORTY_TWO 42
+@@ -112,6 +116,6 @@
+ #define SYSCALL_LIO_SRV_NODE_REMOVE                 118
+ 
+ //ACHTUNG: Muss eine Zahl groesser als die Groesste Syscall-Nummer sein
+-#define SYSCALL_MAX 119
++#define SYSCALL_MAX 122
+ 
+ #endif
+diff --git a/src/include/types.h b/src/include/types.h
+index 22bf560..0352b09 100644
+--- a/src/include/types.h
++++ b/src/include/types.h
+@@ -39,6 +39,7 @@ typedef void * vaddr_t;
+ typedef int pid_t;
+ typedef unsigned int uid_t;
+ typedef unsigned int gid_t;
++typedef unsigned int tid_t;
+ 
+ #endif
+ 
+diff --git a/src/kernel2/include/syscall.h b/src/kernel2/include/syscall.h
+index 2eb93b0..c49051a 100644
+--- a/src/kernel2/include/syscall.h
++++ b/src/kernel2/include/syscall.h
+@@ -125,6 +125,16 @@ void syscall_pm_exit_process(void);
+ void* syscall_pm_enumerate_tasks(void);
+ 
+ 
++/// Thread erstellen
++tid_t syscall_pm_create_thread(vaddr_t start, void *arg);
++
++/// ID des aktuellen Threads abfragen
++tid_t syscall_pm_get_tid(void);
++
++/// Thread beenden
++void syscall_pm_exit_thread(void);
++
++
+ /// Speicher an einen anderen Prozess uebergeben
+ void syscall_init_child_page(pid_t pid, vaddr_t src, vaddr_t dest,
+     size_t size);
+diff --git a/src/kernel2/include/tasks.h b/src/kernel2/include/tasks.h
+index 1b719d7..f31b4b6 100644
+--- a/src/kernel2/include/tasks.h
++++ b/src/kernel2/include/tasks.h
+@@ -140,6 +140,12 @@ typedef struct {
+ 
+     /// Gesetzt, wenn der Thread ein VM86-Thread mit allem Drum und Dran ist
+     bool vm86;
++
++    /// Eindeutige Threadnummer
++    tid_t tid;
++
++    /// Gesetzt, wenn der Thread beim Beenden den gesamten Prozess beendet
++    bool is_main_thread;
+ } pm_thread_t;
+ 
+ typedef void (*pm_process_destroy_handler)(pm_process_t* process, void* prv);
+diff --git a/src/kernel2/src/syscall.c b/src/kernel2/src/syscall.c
+index 1871739..bd41275 100644
+--- a/src/kernel2/src/syscall.c
++++ b/src/kernel2/src/syscall.c
+@@ -76,6 +76,10 @@ void syscall_init()
+     syscall_register(SYSCALL_PM_ENUMERATE_TASKS,
+         &syscall_pm_enumerate_tasks, 0);
+ 
++    syscall_register(SYSCALL_PM_CREATE_THREAD, &syscall_pm_create_thread, 2);
++    syscall_register(SYSCALL_PM_GET_TID, &syscall_pm_get_tid, 0);
++    syscall_register(SYSCALL_PM_EXIT_THREAD, &syscall_pm_exit_thread, 0);
++
+     syscall_register(SYSCALL_SET_RPC_HANDLER, &syscall_set_rpc_handler, 1);
+ #if CONFIG_ARCH == ARCH_I386
+     syscall_register(SYSCALL_FASTRPC, &syscall_fastrpc, 5);
+diff --git a/src/kernel2/src/syscalls/pm.c b/src/kernel2/src/syscalls/pm.c
+index 948b577..6ab13d2 100644
+--- a/src/kernel2/src/syscalls/pm.c
++++ b/src/kernel2/src/syscalls/pm.c
+@@ -351,3 +351,77 @@ void* syscall_pm_enumerate_tasks(void)
+ 
+     return task_info;
+ }
++
++/**
++ * TID des aktuellen Threads ausfindig machen
++ *
++ * @return TID des aktuellen Threads
++ */
++tid_t syscall_pm_get_tid()
++{
++    int i = 0;
++
++    pm_thread_t *thread;
++
++    while ((thread = list_get_element_at(current_process->threads, i))) {
++        if (thread->status == PM_STATUS_RUNNING) {
++            return thread->tid;
++        }
++    }
++
++    return -1;
++}
++
++/**
++ * Neuen Thread in einem Prozess erstellen. Der neue Task wird blockiert, bis
++ * er vom Ersteller entblockt wird.
++ *
++ * @param start Start-Adresse
++ * @param arg Argument für den Thread
++ *
++ * @return TID des neuen Tasks
++ */
++tid_t syscall_pm_create_thread(vaddr_t start, void *arg)
++{
++    pm_thread_t *thread;
++
++    thread = pm_thread_create(current_process, start);
++    if (thread == NULL) {
++        return -1;
++    }
++
++    while (pm_thread_block(thread) == false);
++
++    interrupt_stack_frame_t *isf = (interrupt_stack_frame_t *)thread->user_isf;
++
++    *((void **)(isf->esp)) = arg;
++
++    isf->esp -= sizeof(void *);
++
++    while (pm_thread_unblock(thread) == true);
++
++    return thread->tid;
++}
++
++void syscall_pm_exit_thread(void)
++{
++    pm_thread_t *thread;
++    tid_t tid;
++    int i = 0;
++
++    tid = syscall_pm_get_tid();
++
++    if (tid == -1) {
++        // TODO Kann das wirklich passieren?
++        return;
++    }
++
++    while ((thread = list_get_element_at(current_process->threads, i))) {
++        if (thread->tid == tid) {
++            pm_scheduler_push(thread);
++            pm_thread_block(thread);
++            pm_thread_destroy(thread);
++            break;
++        }
++    }
++}
+diff --git a/src/kernel2/src/tasks/thread.c b/src/kernel2/src/tasks/thread.c
+index 639d2c9..961fe31 100644
+--- a/src/kernel2/src/tasks/thread.c
++++ b/src/kernel2/src/tasks/thread.c
+@@ -44,6 +44,18 @@
+ #include "lock.h"
+ #include "cpu.h"
+ 
++static tid_t next_tid = 1;
++
++static tid_t generate_tid(void)
++{
++    static lock_t tid_lock = LOCK_UNLOCKED;
++    lock(&tid_lock);
++    tid_t tid = next_tid++;
++    unlock(&tid_lock);
++
++    return tid;
++}
++
+ /**
+  * Neuen Thread erstellen
+  *
+@@ -60,6 +72,11 @@ pm_thread_t* pm_thread_create(pm_process_t* process, vaddr_t entry)
+     if (thread == NULL) {
+         return NULL;
+     }
++
++    thread->is_main_thread = (process != current_process);
++
++    // Dem Thread eine ID zuordnen
++    thread->tid = generate_tid();
+     
+     // Ein Pointer auf den Prozess im Thread hinterlegen
+     thread->process = process;
+@@ -139,6 +156,8 @@ pm_thread_t* pm_thread_create(pm_process_t* process, vaddr_t entry)
+  */
+ void pm_thread_destroy(pm_thread_t* thread)
+ {
++    // TODO Andere Threads beenden, falls thread->is_main_thread
++
+     // Zuerst muss der Thread angehalten werden
+     while (pm_thread_block(thread) == false);
+     
+@@ -232,12 +251,10 @@ bool pm_thread_unblock(pm_thread_t* thread)
+ 
+     // Der Thread wird nur entsperrt, wenn er auch wirklich blockiert ist
+     if (thread->status == PM_STATUS_BLOCKED) {
+-        lock(&thread->lock);
+-        unlock(&thread->lock);
+-        return true;
++        thread->status = PM_STATUS_READY;
++        result = true;
+     }
+ 
+     unlock(&thread->lock);
+     return result;
+ }
+-
+diff --git a/src/modules/include/syscall.h b/src/modules/include/syscall.h
+index d89449d..0679631 100644
+--- a/src/modules/include/syscall.h
++++ b/src/modules/include/syscall.h
+@@ -104,6 +104,9 @@ void syscall_timer(uint32_t timer_id, uint32_t usec);
+ 
+ void syscall_debug_stacktrace(pid_t pid);
+ 
++tid_t create_thread(uint32_t start, void *arg);
++void exit_thread(void);
++tid_t get_tid(void);
+ 
+ // LIO2
+ 
+diff --git a/src/modules/include/unistd.h b/src/modules/include/unistd.h
+index d101135..95e9f18 100644
+--- a/src/modules/include/unistd.h
++++ b/src/modules/include/unistd.h
+@@ -62,6 +62,9 @@ pid_t getpid(void);
+ /// PID des Elternprozesses auslesen
+ pid_t getppid(void);
+ 
++/// TID des aktuellen Threads auslesen
++tid_t gettid(void);
++
+ /// Hardlink erstellen
+ int link(const char* oldpath, const char* newpath);
+ 
+diff --git a/src/modules/lib/posix/getpid.c b/src/modules/lib/posix/getpid.c
+index 1ab55de..40faded 100644
+--- a/src/modules/lib/posix/getpid.c
++++ b/src/modules/lib/posix/getpid.c
+@@ -50,4 +50,12 @@ pid_t getppid()
+     return get_parent_pid(0);
+ }
+ 
+-
++/**
++ * ID des aktuellen Threads auslesen
++ *
++ * @return Thread-ID
++ */
++tid_t gettid()
++{
++    return get_tid();
++}
+diff --git a/src/modules/lib/syscalls/create_thread.c b/src/modules/lib/syscalls/create_thread.c
+new file mode 100644
+index 0000000..5789df5
+--- /dev/null
++++ b/src/modules/lib/syscalls/create_thread.c
+@@ -0,0 +1,110 @@
++/*
++ * Copyright (c) 2012 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Patrick Pokatilo.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <stdint.h>
++#include <stdlib.h>
++#include "syscall.h"
++
++/**
++ * ID des aktuellen Threads abfragen.
++ *
++ * @return ID
++ */
++tid_t get_tid(void)
++{
++    tid_t pid;
++
++    asm(
++        "mov %1, %%eax;"
++        "int $0x30;"
++        : "=a" (pid) : "i" (SYSCALL_PM_GET_TID));
++
++    return pid;
++}
++
++/**
++ * Neuen Prozess erstellen. Dieser ist solange blockiert, bis er mit
++ * unblock_task erloest wird. Waerend dieser Zeit kann der Elternprozess Mit
++ * Hilfe von init_child_page Einzelne Seiten in den Adressraum des neuen
++ * Prozesses mappen.
++ *
++ * @param initial_eip Der Einsprungspunkt an dem der Prozess seine Arbeit
++ *                      beginnen soll.
++ * @param uid Die Benutzernummer unter der der Neue Prozess laufen soll (FIXME:
++ *              Sollte vom Elternprozess geerbt werden)
++ * @param args Pointer auf die Kommandozeilen-Parameter
++ * @param parent Prozessnummer des Elternprozesses, dem der neue Task
++ *          untergeordenet werden soll, oder 0 fuer den aktuellen Prozess.
++ *
++ * @return Prozessnummer
++ */
++typedef struct
++{
++    void *(*func)(void *);
++    void *arg;
++} ct_parameter_t;
++
++void *ct_start(ct_parameter_t *p)
++{
++    void *result = p->func(p->arg);
++
++    free(p);
++
++    exit_thread();
++
++    return result;
++}
++
++tid_t create_thread(uint32_t start, void *arg)
++{
++    tid_t tid;
++
++    ct_parameter_t *ct_arg = malloc(sizeof(ct_parameter_t));
++
++    ct_arg->func = (void *(*)(void *))start;
++    ct_arg->arg = arg;
++
++    asm(
++        "pushl %3;"
++        "pushl %2;"
++        "mov %1, %%eax;"
++        "int $0x30;"
++        "add $0x08, %%esp;"
++        : "=a" (tid)
++        : "i" (SYSCALL_PM_CREATE_THREAD), "r" (ct_start), "r" (ct_arg));
++
++    return tid;
++}
++
++void exit_thread(void)
++{
++    asm(
++        "mov %0, %%eax;"
++        "int $0x30;"
++        : : "i" (SYSCALL_PM_EXIT_THREAD));
++}
+-- 
+1.7.7
+
+
+From kevin at tyndur.org  Wed Mar 20 23:58:24 2013
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Wed, 20 Mar 2013 23:58:24 +0100
+Subject: [tyndur-devel] [PATCH 3/4] tests: Ein einfacher Threadtest
+In-Reply-To: <1363820305-17864-1-git-send-email-kevin@tyndur.org>
+References: <1363820305-17864-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1363820305-17864-4-git-send-email-kevin@tyndur.org>
+
++ tests: Thread starten, Parameterübergabe prüfen, TIDs vergleichen
+  (alles direkt mit Syscalls, kein pthread)
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ tests/libc/Makefile      |    5 ++-
+ tests/libc/main_thread.c |   92 ++++++++++++++++++++++++++++++++++++++++++++++
+ tests/libc/run_test.sh   |    2 +
+ 3 files changed, 98 insertions(+), 1 deletions(-)
+ create mode 100644 tests/libc/main_thread.c
+
+diff --git a/tests/libc/Makefile b/tests/libc/Makefile
+index fb07cf2..e1beb12 100644
+--- a/tests/libc/Makefile
++++ b/tests/libc/Makefile
+@@ -11,12 +11,15 @@ LDFLAGS=-T ../../src/modules/user-i386.ld --start-group ../../src/lib/library.a
+ 
+ export QEMU
+ 
+-qemu: main
++qemu: main main_thread
+ 	@./run_test.sh
+ 
+ main: main.o qsort.o bsearch.o sprintf.o stdio.o ../lib/testlib.o
+ 	@$(LD) $^ $(LDFLAGS) -o $@
+ 
++main_thread: main_thread.o ../lib/testlib.o
++	@$(LD) $^ $(LDFLAGS) -o $@
++
+ %.o: %.c
+ 	@$(CC) $(CFLAGS) -o $@ $^
+ 
+diff --git a/tests/libc/main_thread.c b/tests/libc/main_thread.c
+new file mode 100644
+index 0000000..6d841f0
+--- /dev/null
++++ b/tests/libc/main_thread.c
+@@ -0,0 +1,92 @@
++/*
++ * Copyright (c) 2013 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <stdbool.h>
++#include <syscall.h>
++
++#include "testlib.h"
++
++const char* test_name;
++
++struct test1_data {
++    int a;
++    tid_t ctid;
++};
++
++static void test1_t1(void* arg)
++{
++    struct test1_data* data = arg;
++    test_assert(data->a == 42);
++    data->a = 43;
++    data->ctid = get_tid();
++    exit_thread();
++    test_assert(false);
++}
++
++static void test1(void)
++{
++    tid_t tid, ctid;
++    struct test1_data data = {
++        .a = 42,
++    };
++
++    test_name = "sys_threads";
++    tid = get_tid();
++
++    ctid = create_thread((uint32_t) &test1_t1, &data);
++    while (data.a == 42) {
++        yield();
++    }
++
++    test_assert(data.a == 43);
++    test_assert(data.ctid == ctid);
++    test_assert(get_tid() == tid);
++
++    printf("* PASS %s\n", test_name);
++}
++
++int main(int argc, char* argv[])
++{
++    if (argc < 2) {
++        printf("* ERROR Zu wenige Parameter\n");
++        quit_qemu();
++    }
++
++    switch (atoi(argv[1])) {
++        case 1:
++            test1();
++            break;
++        default:
++            printf("* ERROR Unbekannter Testfall\n");
++            break;
++    }
++
++    quit_qemu();
++}
+diff --git a/tests/libc/run_test.sh b/tests/libc/run_test.sh
+index 2842dae..c6c05dc 100755
+--- a/tests/libc/run_test.sh
++++ b/tests/libc/run_test.sh
+@@ -32,3 +32,5 @@ run_test main 1
+ run_test main 2
+ run_test main 3
+ run_test main 4
++
++run_test main_thread 1
+-- 
+1.7.7
+
+
+From kevin at tyndur.org  Wed Mar 20 23:58:25 2013
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Wed, 20 Mar 2013 23:58:25 +0100
+Subject: [tyndur-devel] [PATCH 4/4] libc: pthread
+In-Reply-To: <1363820305-17864-1-git-send-email-kevin@tyndur.org>
+References: <1363820305-17864-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1363820305-17864-5-git-send-email-kevin@tyndur.org>
+
+From: Patrick Pokatilo <shyxormz at asxsoft.de>
+
++ libc: pthread-Wrapper um die nativen Syscalls von tyndur
+
+Signed-off-by: Patrick Pokatilo <shyxormz at asxsoft.de>
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/c/pthreads/Makefile.all |    9 +++
+ src/modules/c/pthreads/main.c       |   85 ++++++++++++++++++++++++++
+ src/modules/include/pthread.h       |   42 +++++++++++++
+ src/modules/include/sys/types.h     |    3 +
+ src/modules/lib/posix/pthread.c     |  112 +++++++++++++++++++++++++++++++++++
+ 5 files changed, 251 insertions(+), 0 deletions(-)
+ create mode 100644 src/modules/c/pthreads/Makefile.all
+ create mode 100644 src/modules/c/pthreads/main.c
+ create mode 100644 src/modules/include/pthread.h
+ create mode 100644 src/modules/lib/posix/pthread.c
+
+diff --git a/src/modules/c/pthreads/Makefile.all b/src/modules/c/pthreads/Makefile.all
+new file mode 100644
+index 0000000..d7579e0
+--- /dev/null
++++ b/src/modules/c/pthreads/Makefile.all
+@@ -0,0 +1,9 @@
++shopt -s extglob
++source $LOST_BUILDMK_ROOT/config.sh
++
++echo "LD   $1/apps/pthreads"
++
++$LOST_TOOLS_LD -opthreads $LDSCRIPT *.o --start-group $2 --end-group
++
++
++mv pthreads $1/apps/
+diff --git a/src/modules/c/pthreads/main.c b/src/modules/c/pthreads/main.c
+new file mode 100644
+index 0000000..4433bbf
+--- /dev/null
++++ b/src/modules/c/pthreads/main.c
+@@ -0,0 +1,85 @@
++/*
++ * Copyright (c) 2012 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Patrick Pokatilo.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <pthread.h>
++#include <stdio.h>
++#include <stdbool.h>
++
++#include "sleep.h"
++
++struct param {
++    int a;
++    void* b;
++};
++
++void *test_a(void *p)
++{
++    while (true) {
++        printf("%d\n", ((struct param *)p)->a);
++    }
++
++    return p;
++}
++
++void *test_b(void *p)
++{
++    while (true) {
++        printf("%p\n", ((struct param *)p)->b);
++    }
++
++    return ((struct param *)p)->b;
++}
++
++void *test_c(void *p)
++{
++    while (true) {
++        printf("Hallo, Welt\n");
++    }
++
++    return p;
++}
++
++int main(int argc, char *argv[])
++{
++    pthread_t a, b, c;
++
++    struct param data = {
++        .a = 1337,
++        .b = (void *) 0xdeadc0de,
++    };
++
++    pthread_create(&a, NULL, test_a, &data);
++    pthread_create(&b, NULL, test_b, &data);
++    pthread_create(&c, NULL, test_c, &data);
++
++    msleep(1000);
++
++    printf("%d, %d, %d\n", a, b, c);
++
++    return 0;
++}
+diff --git a/src/modules/include/pthread.h b/src/modules/include/pthread.h
+new file mode 100644
+index 0000000..45c0acb
+--- /dev/null
++++ b/src/modules/include/pthread.h
+@@ -0,0 +1,42 @@
++/*
++ * Copyright (c) 2012 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Patrick Pokatilo.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef _PTHREAD_H_
++#define _PTHREAD_H_
++
++#include <sys/types.h>
++
++#define PTHREAD_THREADS_MAX 8192
++
++int pthread_create(pthread_t *thread,
++    __attribute__((unused)) const pthread_attr_t *attr,
++    void *(*start_routine)(void *), void *arg);
++
++pthread_t pthread_self(void);
++
++#endif
+diff --git a/src/modules/include/sys/types.h b/src/modules/include/sys/types.h
+index dcf0103..003da63 100644
+--- a/src/modules/include/sys/types.h
++++ b/src/modules/include/sys/types.h
+@@ -56,4 +56,7 @@ typedef uint64_t u_int64_t;
+ 
+ typedef unsigned int u_int;
+ typedef unsigned long u_long;
++
++typedef unsigned int pthread_t;
++typedef unsigned int pthread_attr_t;
+ #endif //ifndef _SYS_TYPES_H_
+diff --git a/src/modules/lib/posix/pthread.c b/src/modules/lib/posix/pthread.c
+new file mode 100644
+index 0000000..9a3f84b
+--- /dev/null
++++ b/src/modules/lib/posix/pthread.c
+@@ -0,0 +1,112 @@
++/*
++ * Copyright (c) 2012 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Patrick Pokatilo.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <pthread.h>
++#include <lock.h>
++#include <errno.h>
++#include <collections.h>
++#include <unistd.h>
++#include <syscall.h>
++#include <stdlib.h>
++
++typedef struct
++{
++    pid_t process;
++    tid_t thread;
++    pthread_t name;
++} __pthread_name_binding_t;
++
++list_t __pthread_name_bindings = { NULL, 0 };
++unsigned int __pthread_ids[PTHREAD_THREADS_MAX / 32];
++lock_t __pthread_ids_lock = LOCK_UNLOCKED;
++
++pthread_t pthread_self()
++{
++    pid_t pid = getpid();
++    tid_t tid = gettid();
++
++    if (tid == -1) {
++        return 0;
++    }
++
++    int i = 0;
++    __pthread_name_binding_t *binding = 0;
++
++    while ((binding = list_get_element_at(&__pthread_name_bindings, i))) {
++        if ((binding->process == pid) && (binding->thread == tid)) {
++            return binding->name;
++        }
++    }
++
++    return 0;
++}
++
++int pthread_create(pthread_t *thread,
++    __attribute__((unused)) const pthread_attr_t *attr,
++    void *(*start_routine)(void *), void *arg)
++{
++    lock(&__pthread_ids_lock);
++
++    unsigned int name = 0;
++    int i, j;
++
++    for (i = 0; i < PTHREAD_THREADS_MAX / 32; i++)
++    {
++        if (__pthread_ids[i] != 0xffffffff) {
++            for (j = 0; j < 32; j++) {
++                if ((__pthread_ids[i] & (1 << j)) == 0) {
++                    __pthread_ids[i] |= 1 << j;
++                    name = i * 32 + j;
++                    goto found;
++                }
++            }
++        }
++    }
++    unlock(&__pthread_ids_lock);
++    return -EAGAIN;
++
++found:
++    unlock(&__pthread_ids_lock);
++
++    tid_t tid = create_thread((uint32_t)start_routine, arg);
++    if (tid == -1) {
++        return -EAGAIN;
++    }
++
++    __pthread_name_binding_t *binding = malloc(sizeof(__pthread_name_binding_t));
++
++    binding->process = getpid();
++    binding->thread = tid;
++    binding->name = name;
++
++    list_push(&__pthread_name_bindings, binding);
++
++    *thread = name;
++
++    return 0;
++}
+-- 
+1.7.7
+
+
+From particleflux at gmail.com  Fri Mar 22 18:30:13 2013
+From: particleflux at gmail.com (Stefan Linke)
+Date: Fri, 22 Mar 2013 18:30:13 +0100
+Subject: [tyndur-devel] [PATCH] new less lbuild
+Message-ID: <1363973413-16654-1-git-send-email-particleflux@gmail.com>
+
+---
+ lbuilds/less/451/less-451.lbuild | 34 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 34 insertions(+)
+ create mode 100644 lbuilds/less/451/less-451.lbuild
+
+diff --git a/lbuilds/less/451/less-451.lbuild b/lbuilds/less/451/less-451.lbuild
+new file mode 100644
+index 0000000..afdfec9
+--- /dev/null
++++ b/lbuilds/less/451/less-451.lbuild
+@@ -0,0 +1,34 @@
++include lutils
++include toolchain
++
++DESCRIPTION=""
++HOMEPAGE="http://lowlevel.brainsware.org/wiki/index.php/LOST/Pakete/less"
++SRC_URI="http://www.greenwoodsoftware.com/less/less-451.tar.gz"
++
++LICENSE="GPL"
++
++RUN_DEPEND=""
++BUILD_DEPEND="=ncurses-5.6"
++
++MY_S="${S}/${P}"
++
++src_configure() {
++    cd ${MY_S}
++
++    chmod +w *
++
++    autoconf || die "autoconf ist fehlgeschlagen"
++    ./configure \
++        CC=`tc-cc` \
++        --build=`tc-build` \
++        --target=`tc-host` \
++        --host=`tc-host` \
++        --prefix="${R}" \
++        --with-secure \
++        || die "configure failed"
++}
++
++src_install() {
++    cd ${MY_S}
++    lmake DESTDIR="${D}" install || die "make install failed"
++}
+-- 
+1.8.1.5
+
+
+From particleflux at gmail.com  Sun Mar 24 18:52:04 2013
+From: particleflux at gmail.com (Stefan Linke)
+Date: Sun, 24 Mar 2013 18:52:04 +0100
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH=5D_kbc=3A_f=C3=BCr_langsame_Tas?=
+	=?utf-8?q?taturen_angepasst?=
+Message-ID: <1364147524-2946-1-git-send-email-particleflux@gmail.com>
+
+! der Tastaturtreiber tut hier nun auch mit meinem Steinzeit-DIN Tastaturen :)
+
+Signed-off-by: Stefan Linke <particleflux at gmail.com>
+---
+ src/modules/kbc/keyboard.c | 34 ++++++++++++++++++++--------------
+ 1 file changed, 20 insertions(+), 14 deletions(-)
+
+diff --git a/src/modules/kbc/keyboard.c b/src/modules/kbc/keyboard.c
+index 4fdaadc..af2106f 100644
+--- a/src/modules/kbc/keyboard.c
++++ b/src/modules/kbc/keyboard.c
+@@ -44,6 +44,7 @@
+ #include <ports.h>
+ #include <collections.h>
+ #include <kbd.h>
++#include <sleep.h>
+ 
+ #include "keyboard.h"
+ #include "mouse.h"
+@@ -67,7 +68,7 @@ static void rpc_register_callback(pid_t pid, uint32_t cid, size_t data_size,
+ 
+ 
+ /**
+- * IRQ-Hander
++ * IRQ-Handler
+  */
+ static void kbd_irq_handler(uint8_t irq);
+ 
+@@ -86,10 +87,13 @@ static void send_key_event(uint8_t keycode, bool release);
+ static void send_kbd_command(uint8_t command)
+ {
+     do {
+-	while (inb(0x64) & 0x2) {
+-	    yield();
+-	}
+-	outb(0x60, command);
++        while (inb(0x64) & 0x2) {
++            yield();
++        }
++        outb(0x60, command);
++        
++        /* bisschen warten fuer langsamere Tastaturen ;) */
++        msleep(500);
+     } while (inb(0x60) == 0xfe);
+ }
+ 
+@@ -114,19 +118,21 @@ void keyboard_init(void)
+ 
+     // Leds alle ausloeschen
+     send_kbd_command(0xED);
+-    outb(0x60, 0);
++    send_kbd_command(0);
++
+ 
+     // Schnellste Wiederholrate
+     send_kbd_command(0xF3);
+-    outb(0x60, 0);
+-
++    send_kbd_command(0);
++    
+     // Tastatur aktivieren
+-    send_kbd_command(0xF4);
++    send_kbd_command(0xF4);    
++    
+     init_done = true;
+ }
+ 
+ /**
+- * IRQ-Hander
++ * IRQ-Handler
+  */
+ void kbd_irq_handler(uint8_t irq) {
+     uint8_t scancode;
+@@ -139,14 +145,14 @@ void kbd_irq_handler(uint8_t irq) {
+     // Datenbyte gelesen wurde
+     static int      e1_code = 0;
+     static uint16_t  e1_prev = 0;
+-
+-    scancode = inb(0x60);
+-
++    
+     // Abbrechen wenn die Initialisierung noch nicht abgeschlossen wurde
+     if (!init_done) {
+         return;
+     }
+-
++    
++    scancode = inb(0x60);
++    
+     // Um einen Breakcode handelt es sich, wenn das oberste Bit gesetzt ist und
+     // es kein e0 oder e1 fuer einen Extended-scancode ist
+     if ((scancode & 0x80) &&
+-- 
+1.8.1.5
+
+
+From particleflux at gmail.com  Wed Mar 27 22:46:57 2013
+From: particleflux at gmail.com (Stefan Linke)
+Date: Wed, 27 Mar 2013 22:46:57 +0100
+Subject: [tyndur-devel] [PATCH] neuer shell-Befehl: killall
+Message-ID: <1364420817-15812-1-git-send-email-particleflux@gmail.com>
+
++ Neuen Shell-Befehl killall implementiert, der alle Prozesse mit gegebenem Namen killt.
+
+Signed-off-by: Stefan Linke <particleflux at gmail.com>
+---
+ src/modules/c/shell/cmds/killall.c | 118 +++++++++++++++++++++++++++++++++++++
+ src/modules/c/shell/lang/lang_en.c |  14 +++++
+ src/modules/c/shell/lang/resstr.h  |   5 ++
+ src/modules/c/shell/shell.c        |   1 +
+ src/modules/c/shell/shell.h        |   1 +
+ 5 files changed, 139 insertions(+)
+ create mode 100644 src/modules/c/shell/cmds/killall.c
+
+diff --git a/src/modules/c/shell/cmds/killall.c b/src/modules/c/shell/cmds/killall.c
+new file mode 100644
+index 0000000..48eec14
+--- /dev/null
++++ b/src/modules/c/shell/cmds/killall.c
+@@ -0,0 +1,118 @@
++/*
++ * Copyright (c) 2009 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the tyndur Project
++ *     and its contributors.
++ * 4. Neither the name of the tyndur Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <stdlib.h>
++#include <stdio.h>
++#include <string.h>
++#include <syscall.h>
++#include <lost/config.h>
++
++#include <errno.h>
++#include <signal.h>
++#include <tms.h>
++
++static void killall_display_usage(void);
++
++#ifdef CONFIG_SHELL_BUILTIN_ONLY
++    int shell_command_killall(int argc, char* argv[], const char* args)
++#else
++    int main(int argc, char* argv[])
++#endif
++{
++    int ret=0,i=0,fail=0,matches=0;
++    task_info_t *task_info = NULL;
++    char *process;
++    char copied_cmdline[255];
++
++    if (argc < 2) {
++        killall_display_usage();
++        return -1;
++    }
++
++    task_info = enumerate_tasks();
++
++    if (task_info == NULL) {
++        return EXIT_FAILURE;
++    }
++
++
++    for (i = 0; i < task_info->task_count; ++i) {
++        strncpy(copied_cmdline, task_info->tasks[i].cmdline, 255);
++
++        process = strtok((char *) task_info->tasks[i].cmdline, " ");
++        process = process == NULL
++                ? strrchr(task_info->tasks[i].cmdline, '/')
++                : strrchr(process, '/');
++        ++process;
++
++        if (strcmp(argv[1], process) == 0) {
++            ++matches;
++            ret = kill(task_info->tasks[i].pid, SIGTERM);
++
++            if (ret < 0) {
++                printf(TMS(killall_cant_kill, 
++                        "Konnte pid %d - %s nicht beenden: %s (%s)\n"),
++                        task_info->tasks[i].pid, errno, strerror(errno));
++
++                if (!fail) {
++                    fail = 1;
++                }
++            } else {
++                printf(TMS(killall_killed, "pid %d beendet\n"), 
++                       task_info->tasks[i].pid);
++            }
++        }
++
++        process = NULL;
++    }
++
++    mem_free(task_info, task_info->info_size);
++
++    if (matches == 0) {
++        printf(TMS(killall_not_found, "Kein passender Prozess gefunden\n"));
++    }
++
++    if (fail) {
++        return EXIT_FAILURE;
++    }
++
++    return EXIT_SUCCESS;
++}
++
++static void killall_display_usage()
++{
++    printf(TMS(killall_usage, "Aufruf: killall <name>\n"));
++}
++
+diff --git a/src/modules/c/shell/lang/lang_en.c b/src/modules/c/shell/lang/lang_en.c
+index 3366190..c16abcf 100644
+--- a/src/modules/c/shell/lang/lang_en.c
++++ b/src/modules/c/shell/lang/lang_en.c
+@@ -250,6 +250,20 @@ static const struct tms_strings dict[] = {
+ 
+ 
+ 
++    &__tms_killall_usage,
++    "usage: killall <name>\n",
++
++    &__tms_killall_not_found,
++    "no matching process found\n",
++
++    &__tms_killall_killed,
++    "pid %d killed\n",
++
++    &__tms_killall_cant_kill,
++    "couldn't kill pid %d - %s: %s (%s)\n",
++
++
++
+     &__tms_ln_usage,
+     "\nUsage: ln <target> <link-path>\n\n"
+     "Create hardlink to file/directory <target> at <link-path>.\n",
+diff --git a/src/modules/c/shell/lang/resstr.h b/src/modules/c/shell/lang/resstr.h
+index 5a11d64..fdff7b9 100644
+--- a/src/modules/c/shell/lang/resstr.h
++++ b/src/modules/c/shell/lang/resstr.h
+@@ -85,6 +85,11 @@ extern void* __tms_kill_usage;
+ extern void* __tms_kill_not_found;
+ extern void* __tms_kill_error;
+ 
++extern void* __tms_killall_usage;
++extern void* __tms_killall_not_found;
++extern void* __tms_killall_cant_kill;
++extern void* __tms_killall_killed;
++
+ extern void* __tms_ln_usage;
+ extern void* __tms_ln_error;
+ 
+diff --git a/src/modules/c/shell/shell.c b/src/modules/c/shell/shell.c
+index 55a3f3b..cdca2f1 100644
+--- a/src/modules/c/shell/shell.c
++++ b/src/modules/c/shell/shell.c
+@@ -87,6 +87,7 @@ shell_command_t shell_commands[] = {
+     {"echo",        &shell_command_echo},
+     {"free",        &shell_command_free},
+     {"kill",        &shell_command_kill},
++    {"killall",     &shell_command_killall},
+     {"ls",          &shell_command_ls},
+     {"mkdir",       &shell_command_mkdir},
+     {"pipe",        &shell_command_pipe},
+diff --git a/src/modules/c/shell/shell.h b/src/modules/c/shell/shell.h
+index 40f91c9..8e94409 100644
+--- a/src/modules/c/shell/shell.h
++++ b/src/modules/c/shell/shell.h
+@@ -68,6 +68,7 @@ int shell_command_clear(int argc, char* argv[], const char* args);
+     int shell_command_echo(int argc, char* argv[], const char* args);
+     int shell_command_free(int argc, char* argv[], const char* args);
+     int shell_command_kill(int argc, char* argv[], const char* args);
++    int shell_command_killall(int argc, char* argv[], const char* args);
+     int shell_command_ls(int argc, char* argv[], const char* args);
+     int shell_command_mkdir(int argc, char* argv[], const char* args);
+     int shell_command_pipe(int argc, char* argv[], const char* args);
+-- 
+1.8.1.5
+
+
+From hartmut at tyndur.org  Fri Mar 29 20:52:44 2013
+From: hartmut at tyndur.org (Alexander Kluth)
+Date: Fri, 29 Mar 2013 20:52:44 +0100
+Subject: [tyndur-devel] [PATCH] neuer shell-Befehl: killall
+In-Reply-To: <1364420817-15812-1-git-send-email-particleflux@gmail.com>
+References: <1364420817-15812-1-git-send-email-particleflux@gmail.com>
+Message-ID: <20130329195244.GA9939@niwohlos>
+
+An und für sich schön, nur sendet killall standardmäßig (unter *nix)
+TERM, dein killall killt die Prozesse aber einfach gnadenlos - sollte
+man vielleicht noch einmal überdenken/überarbeiten, sodass auch
+vielleicht
+andere Signale möglich sind.
+
+Und der Copyright-Header ist falsch, das Jahr stimmt nicht und du bist
+glaube ich nicht Kevin ;-)
+
+On Wed, Mar 27, 2013 at 10:46:57PM +0100, Stefan Linke wrote:
+> + Neuen Shell-Befehl killall implementiert, der alle Prozesse mit gegebenem Namen killt.
+> 
+> Signed-off-by: Stefan Linke <particleflux at gmail.com>
+> ---
+>  src/modules/c/shell/cmds/killall.c | 118 +++++++++++++++++++++++++++++++++++++
+>  src/modules/c/shell/lang/lang_en.c |  14 +++++
+>  src/modules/c/shell/lang/resstr.h  |   5 ++
+>  src/modules/c/shell/shell.c        |   1 +
+>  src/modules/c/shell/shell.h        |   1 +
+>  5 files changed, 139 insertions(+)
+>  create mode 100644 src/modules/c/shell/cmds/killall.c
+> 
+> diff --git a/src/modules/c/shell/cmds/killall.c b/src/modules/c/shell/cmds/killall.c
+> new file mode 100644
+> index 0000000..48eec14
+> --- /dev/null
+> +++ b/src/modules/c/shell/cmds/killall.c
+> @@ -0,0 +1,118 @@
+> +/*
+> + * Copyright (c) 2009 The tyndur Project. All rights reserved.
+> + *
+> + * This code is derived from software contributed to the tyndur Project
+> + * by Kevin Wolf
+> + *
+> + * Redistribution and use in source and binary forms, with or without
+> + * modification, are permitted provided that the following conditions
+> + * are met:
+> + * 1. Redistributions of source code must retain the above copyright
+> + *    notice, this list of conditions and the following disclaimer.
+> + * 2. Redistributions in binary form must reproduce the above copyright
+> + *    notice, this list of conditions and the following disclaimer in the
+> + *    documentation and/or other materials provided with the distribution.
+> + * 3. All advertising materials mentioning features or use of this software
+> + *    must display the following acknowledgement:
+> + *     This product includes software developed by the tyndur Project
+> + *     and its contributors.
+> + * 4. Neither the name of the tyndur Project nor the names of its
+> + *    contributors may be used to endorse or promote products derived
+> + *    from this software without specific prior written permission.
+> + *
+> + * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+> + * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+> + * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+> + * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
+> + * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+> + * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+> + * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+> + * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+> + * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+> + * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+> + * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+> + */
+> +
+> +#include <stdlib.h>
+> +#include <stdio.h>
+> +#include <string.h>
+> +#include <syscall.h>
+> +#include <lost/config.h>
+> +
+> +#include <errno.h>
+> +#include <signal.h>
+> +#include <tms.h>
+> +
+> +static void killall_display_usage(void);
+> +
+> +#ifdef CONFIG_SHELL_BUILTIN_ONLY
+> +    int shell_command_killall(int argc, char* argv[], const char* args)
+> +#else
+> +    int main(int argc, char* argv[])
+> +#endif
+> +{
+> +    int ret=0,i=0,fail=0,matches=0;
+> +    task_info_t *task_info = NULL;
+> +    char *process;
+> +    char copied_cmdline[255];
+> +
+> +    if (argc < 2) {
+> +        killall_display_usage();
+> +        return -1;
+> +    }
+> +
+> +    task_info = enumerate_tasks();
+> +
+> +    if (task_info == NULL) {
+> +        return EXIT_FAILURE;
+> +    }
+> +
+> +
+> +    for (i = 0; i < task_info->task_count; ++i) {
+> +        strncpy(copied_cmdline, task_info->tasks[i].cmdline, 255);
+> +
+> +        process = strtok((char *) task_info->tasks[i].cmdline, " ");
+> +        process = process == NULL
+> +                ? strrchr(task_info->tasks[i].cmdline, '/')
+> +                : strrchr(process, '/');
+> +        ++process;
+> +
+> +        if (strcmp(argv[1], process) == 0) {
+> +            ++matches;
+> +            ret = kill(task_info->tasks[i].pid, SIGTERM);
+> +
+> +            if (ret < 0) {
+> +                printf(TMS(killall_cant_kill, 
+> +                        "Konnte pid %d - %s nicht beenden: %s (%s)\n"),
+> +                        task_info->tasks[i].pid, errno, strerror(errno));
+> +
+> +                if (!fail) {
+> +                    fail = 1;
+> +                }
+> +            } else {
+> +                printf(TMS(killall_killed, "pid %d beendet\n"), 
+> +                       task_info->tasks[i].pid);
+> +            }
+> +        }
+> +
+> +        process = NULL;
+> +    }
+> +
+> +    mem_free(task_info, task_info->info_size);
+> +
+> +    if (matches == 0) {
+> +        printf(TMS(killall_not_found, "Kein passender Prozess gefunden\n"));
+> +    }
+> +
+> +    if (fail) {
+> +        return EXIT_FAILURE;
+> +    }
+> +
+> +    return EXIT_SUCCESS;
+> +}
+> +
+> +static void killall_display_usage()
+> +{
+> +    printf(TMS(killall_usage, "Aufruf: killall <name>\n"));
+> +}
+> +
+> diff --git a/src/modules/c/shell/lang/lang_en.c b/src/modules/c/shell/lang/lang_en.c
+> index 3366190..c16abcf 100644
+> --- a/src/modules/c/shell/lang/lang_en.c
+> +++ b/src/modules/c/shell/lang/lang_en.c
+> @@ -250,6 +250,20 @@ static const struct tms_strings dict[] = {
+>  
+>  
+>  
+> +    &__tms_killall_usage,
+> +    "usage: killall <name>\n",
+> +
+> +    &__tms_killall_not_found,
+> +    "no matching process found\n",
+> +
+> +    &__tms_killall_killed,
+> +    "pid %d killed\n",
+> +
+> +    &__tms_killall_cant_kill,
+> +    "couldn't kill pid %d - %s: %s (%s)\n",
+> +
+> +
+> +
+>      &__tms_ln_usage,
+>      "\nUsage: ln <target> <link-path>\n\n"
+>      "Create hardlink to file/directory <target> at <link-path>.\n",
+> diff --git a/src/modules/c/shell/lang/resstr.h b/src/modules/c/shell/lang/resstr.h
+> index 5a11d64..fdff7b9 100644
+> --- a/src/modules/c/shell/lang/resstr.h
+> +++ b/src/modules/c/shell/lang/resstr.h
+> @@ -85,6 +85,11 @@ extern void* __tms_kill_usage;
+>  extern void* __tms_kill_not_found;
+>  extern void* __tms_kill_error;
+>  
+> +extern void* __tms_killall_usage;
+> +extern void* __tms_killall_not_found;
+> +extern void* __tms_killall_cant_kill;
+> +extern void* __tms_killall_killed;
+> +
+>  extern void* __tms_ln_usage;
+>  extern void* __tms_ln_error;
+>  
+> diff --git a/src/modules/c/shell/shell.c b/src/modules/c/shell/shell.c
+> index 55a3f3b..cdca2f1 100644
+> --- a/src/modules/c/shell/shell.c
+> +++ b/src/modules/c/shell/shell.c
+> @@ -87,6 +87,7 @@ shell_command_t shell_commands[] = {
+>      {"echo",        &shell_command_echo},
+>      {"free",        &shell_command_free},
+>      {"kill",        &shell_command_kill},
+> +    {"killall",     &shell_command_killall},
+>      {"ls",          &shell_command_ls},
+>      {"mkdir",       &shell_command_mkdir},
+>      {"pipe",        &shell_command_pipe},
+> diff --git a/src/modules/c/shell/shell.h b/src/modules/c/shell/shell.h
+> index 40f91c9..8e94409 100644
+> --- a/src/modules/c/shell/shell.h
+> +++ b/src/modules/c/shell/shell.h
+> @@ -68,6 +68,7 @@ int shell_command_clear(int argc, char* argv[], const char* args);
+>      int shell_command_echo(int argc, char* argv[], const char* args);
+>      int shell_command_free(int argc, char* argv[], const char* args);
+>      int shell_command_kill(int argc, char* argv[], const char* args);
+> +    int shell_command_killall(int argc, char* argv[], const char* args);
+>      int shell_command_ls(int argc, char* argv[], const char* args);
+>      int shell_command_mkdir(int argc, char* argv[], const char* args);
+>      int shell_command_pipe(int argc, char* argv[], const char* args);
+> -- 
+> 1.8.1.5
+> 
+> _______________________________________________
+> tyndur-devel mailing list
+> tyndur-devel at tyndur.org
+> http://list.tyndur.org/mailman/listinfo/tyndur-devel
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 836 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20130329/72bc3b0d/attachment.pgp>
+

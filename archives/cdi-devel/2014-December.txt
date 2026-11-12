@@ -1,0 +1,2650 @@
+From kevin at tyndur.org  Sat Dec 27 00:42:21 2014
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 27 Dec 2014 00:42:21 +0100
+Subject: [cdi-devel] [PATCH 0/3] AHCI driver
+Message-ID: <1419637344-17894-1-git-send-email-kevin@tyndur.org>
+
+This series adds an AHCI driver for hard disks. CD-ROMs aren't
+supported yet. Tested in qemu and VirtualBox, additional tests (and of
+course code reviews) are welcome.
+
+Kevin Wolf (3):
+  cdi/misc.h: Add CDI_BUILD_BUG_ON() macro
+  cdi.h: Add cdi_provide_device_internal_drv()
+  ahci: New driver
+
+ ahci/ahci.h        |  314 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ ahci/disk.c        |  318 ++++++++++++++++++++++++++++++++++++++++++++++++++++
+ ahci/main.c        |  228 +++++++++++++++++++++++++++++++++++++
+ include/cdi.h      |   45 ++++++++
+ include/cdi/misc.h |    6 +
+ include/cdi/pci.h  |    3 +
+ 6 files changed, 914 insertions(+), 0 deletions(-)
+ create mode 100644 ahci/ahci.h
+ create mode 100644 ahci/disk.c
+ create mode 100644 ahci/main.c
+
+-- 
+1.7.7
+
+
+From kevin at tyndur.org  Sat Dec 27 00:42:22 2014
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 27 Dec 2014 00:42:22 +0100
+Subject: [cdi-devel] [PATCH 1/3] cdi/misc.h: Add CDI_BUILD_BUG_ON() macro
+In-Reply-To: <1419637344-17894-1-git-send-email-kevin@tyndur.org>
+References: <1419637344-17894-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1419637344-17894-2-git-send-email-kevin@tyndur.org>
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ include/cdi/misc.h |    6 ++++++
+ 1 files changed, 6 insertions(+), 0 deletions(-)
+
+diff --git a/include/cdi/misc.h b/include/cdi/misc.h
+index a9f60b9..07967ec 100644
+--- a/include/cdi/misc.h
++++ b/include/cdi/misc.h
+@@ -15,6 +15,12 @@
+ 
+ #include <cdi.h>
+ 
++#define CDI_GLUE(x,y) x ## y
++#define CDI_BUILD_ASSERT(cnt) CDI_GLUE(__cdi_build_assert, cnt)
++#define CDI_BUILD_BUG_ON(x) \
++    struct CDI_BUILD_ASSERT(__COUNTER__) { int assertion[(x) ? -1 : 1];  };
++
++
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
+-- 
+1.7.7
+
+
+From kevin at tyndur.org  Sat Dec 27 00:42:23 2014
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 27 Dec 2014 00:42:23 +0100
+Subject: [cdi-devel] =?utf-8?q?=5BPATCH_2/3=5D_cdi=2Eh=3A_Add_cdi=5Fprovid?=
+	=?utf-8?b?ZV9kZXZpY2VfaW50ZXJuYWxfZHJ2KCk=?=
+In-Reply-To: <1419637344-17894-1-git-send-email-kevin@tyndur.org>
+References: <1419637344-17894-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1419637344-17894-3-git-send-email-kevin@tyndur.org>
+
+cdi_provide_device() hasn't been implemented so far because it raises
+questions of inter-driver communication in microkernel environments that
+aren't trivial to answer.
+
+This patch adds an interface to provide a device that is guaranteed
+to be handled by a CDI driver in the same binary, i.e. when passing
+pointers works.
+
+This is not meant as a general solution, but only to be used as a means
+for the internal organisation of complex drivers where some kind of an
+internal bus exists that can neither be exposed by a different driver
+nor can its children be handled by a different driver.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ include/cdi.h |   44 ++++++++++++++++++++++++++++++++++++++++++++
+ 1 files changed, 44 insertions(+), 0 deletions(-)
+
+diff --git a/include/cdi.h b/include/cdi.h
+index 851bb6a..a8617ad 100644
+--- a/include/cdi.h
++++ b/include/cdi.h
+@@ -346,6 +346,50 @@ void cdi_driver_register(struct cdi_driver* driver);
+  */
+ int cdi_provide_device(struct cdi_bus_data* device);
+ 
++/**
++ * \german
++ * Informiert das Betriebssystem, dass ein neues Ger?t angeschlossen wurde und
++ * von einem internen Treiber (d.h. einem Treiber, der in dieselbe Binary
++ * gelinkt ist) angesteuert werden muss.
++ *
++ * Diese Funktion kann benutzt werden, um Treibern mit mehreren Komponenten
++ * eine klarere Struktur zu geben (z.B. SATA-Platten als vom AHCI-Controller
++ * getrennte CDI-Ger?te zu modellieren).
++ *
++ * Vorsicht: Sie sollte nur benutzt werden, wenn eine enge Kopplung zwischen
++ * Ger?t und Unterger?te unvermeidlich ist, da sie voraussetzt, dass beide
++ * Treiber in dieselbe Binary gelinkt sind. Dies mag f?r monolithische Kernel
++ * kein Problem darstellen, aber CDI wird auch in Betriebssystemen mit anderem
++ * Design benutzt.
++ *
++ * @param device Adressinformation f?r den Treiber, um das Ger?t zu finden
++ * @param driver Treiber, der f?r das Ger?t benutzt werden soll
++ *
++ * @return 0 bei Erfolg, -1 im Fehlerfall
++ * \endgerman
++ * \english
++ * Informs the operating system that a new device has become available and
++ * is to be handled by an internal driver (i.e. a driver linked into the same
++ * binary).
++ *
++ * This function can be used to give drivers for devices with multiple
++ * components a clearer structure (e.g. model SATA disks as CDI devices
++ * separate from the AHCI controller).
++ *
++ * Be careful though: It should only be used if a tight coupling between device
++ * and subdevice is unvoidable, as it requires linking the code of both drivers
++ * into the same binary. This might not be a problem for monolithic kernels,
++ * but CDI is used in OSes of different designs.
++ *
++ * @param device Addressing information for the driver to find the device
++ * @param driver Driver that must be used for this device
++ *
++ * @return 0 on success or -1 if an error was encountered.
++ * \endenglish
++ */
++int cdi_provide_device_internal_drv(struct cdi_bus_data* device,
++                                    struct cdi_driver* driver);
++
+ #endif
+ 
+ /*\@}*/
+-- 
+1.7.7
+
+
+From kevin at tyndur.org  Sat Dec 27 00:42:24 2014
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 27 Dec 2014 00:42:24 +0100
+Subject: [cdi-devel] [PATCH 3/3] ahci: New driver
+In-Reply-To: <1419637344-17894-1-git-send-email-kevin@tyndur.org>
+References: <1419637344-17894-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1419637344-17894-4-git-send-email-kevin@tyndur.org>
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ ahci/ahci.h       |  314 ++++++++++++++++++++++++++++++++++++++++++++++++++++
+ ahci/disk.c       |  318 +++++++++++++++++++++++++++++++++++++++++++++++++++++
+ ahci/main.c       |  228 ++++++++++++++++++++++++++++++++++++++
+ include/cdi.h     |    1 +
+ include/cdi/pci.h |    3 +
+ 5 files changed, 864 insertions(+), 0 deletions(-)
+ create mode 100644 ahci/ahci.h
+ create mode 100644 ahci/disk.c
+ create mode 100644 ahci/main.c
+
+diff --git a/ahci/ahci.h b/ahci/ahci.h
+new file mode 100644
+index 0000000..71dae05
+--- /dev/null
++++ b/ahci/ahci.h
+@@ -0,0 +1,314 @@
++/*
++ * Copyright (c) 2013-2014 Kevin Wolf
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef AHCI_H
++#define AHCI_H
++
++#include <stdint.h>
++
++#include "cdi/storage.h"
++#include "cdi/mem.h"
++
++#define BIT(x) (1 << x)
++
++#define MAX_PORTS 32
++#define FIS_BYTES 256
++#define CMD_LIST_BYTES 1024
++#define CMD_TABLE_BYTES (sizeof(struct cmd_table) * sizeof(struct ahci_prd))
++
++#define AHCI_IRQ_TIMEOUT 5000 /* ms */
++
++enum {
++    ATA_CMD_READ_DMA            = 0xc8,
++    ATA_CMD_READ_DMA_EXT        = 0x25,
++    ATA_CMD_WRITE_DMA           = 0xca,
++    ATA_CMD_WRITE_DMA_EXT       = 0x35,
++    ATA_CMD_IDENTIFY_DEVICE     = 0xec,
++};
++
++enum {
++    REG_CAP     = 0x00, /* Host Capabilities */
++    REG_GHC     = 0x04, /* Global Host Control */
++    REG_IS      = 0x08, /* Interrupt Status */
++    REG_PI      = 0x0c, /* Ports Implemented */
++
++    REG_PORTS   = 0x100,
++
++    PORTSIZE    = 0x80,
++    REG_PxCLB   = 0x00, /* Command List Base Address */
++    REG_PxCLBU  = 0x04, /* Command List Base Address Upper */
++    REG_PxFB    = 0x08, /* FIS Base Address */
++    REG_PxFBU   = 0x0c, /* FIS Base Address Upper */
++    REG_PxIS    = 0x10, /* Interrupt Status */
++    REG_PxIE    = 0x14, /* Interrupt Enable */
++    REG_PxCMD   = 0x18, /* Command and status */
++    REG_PxTFD   = 0x20, /* Task File Data*/
++    REG_PxSIG   = 0x24, /* Signature */
++    REG_PxSSTS  = 0x28, /* Serial ATA Status */
++    REG_PxSERR  = 0x30, /* Serial ATA Error */
++    REG_PxCI    = 0x38, /* Command Issue */
++};
++
++enum {
++    CAP_NCS_SHIFT   = 8,
++    CAP_NCS_MASK    = (0x1f << CAP_NCS_SHIFT),
++};
++
++enum {
++    GHC_HR      = (1 <<  0), /* HBA Reset */
++    GHC_IE      = (1 <<  1), /* Interrupt Enable */
++    GHC_AE      = (1 << 31), /* AHCI Enable */
++};
++
++enum {
++    PxIS_TFES   = (1 << 30), /* Task File Error Status */
++};
++
++enum {
++    PxCMD_ST    = (1 <<  0), /* Start */
++    PxCMD_FRE   = (1 <<  4), /* FIS Receive Enable */
++    PxCMD_FR    = (1 << 14), /* FIS Receive Running */
++    PxCMD_CR    = (1 << 15), /* Command List Running */
++};
++
++enum {
++    PxSSTS_DET_MASK     = (0xf << 0),
++    PxSSTS_IPM_MASK     = (0xf << 8),
++
++    PxSSTS_DET_PRESENT  = (0x3 << 0),
++    PxSSTS_IPM_ACTIVE   = (0x1 << 8),
++};
++
++struct ahci_port {
++    struct cdi_mem_area*        fis;
++    uint64_t                    fis_phys;
++
++    struct cmd_header*          cmd_list;
++    struct cdi_mem_area*        cmd_list_mem;
++    uint64_t                    cmd_list_phys;
++
++    /* TODO More than one command with one PRDT entry */
++    struct cmd_table*           cmd_table;
++    struct cdi_mem_area*        cmd_table_mem;
++    uint64_t                    cmd_table_phys;
++
++    uint32_t                    last_is;
++};
++
++struct ahci_device {
++    struct cdi_device           dev;
++    struct cdi_mem_area*        mmio;
++    int                         irq;
++
++    uint32_t                    ports;
++    uint32_t                    cmd_slots;
++
++    struct ahci_port            port[MAX_PORTS];
++};
++
++struct ahci_bus_data {
++    struct cdi_bus_data         cdi;
++    struct ahci_device*         ahci;
++    int                         port;
++};
++
++struct ahci_disk {
++    struct cdi_storage_device   storage;
++    struct ahci_device*         ahci;
++    int                         port;
++
++    bool                        lba48;
++};
++
++enum {
++    FIS_TYPE_H2D            = 0x27,
++    FIS_TYPE_D2H            = 0x34,
++    FIS_TYPE_DMA_ACTIVATE   = 0x39,
++    FIS_TYPE_DMA_SETUP      = 0x41,
++    FIS_TYPE_DATA           = 0x46,
++    FIS_TYPE_BIST_ACTIVATE  = 0x58,
++    FIS_TYPE_PIO_SETUP      = 0x5f,
++    FIS_TYPE_SET_DEV_BITS   = 0xa1,
++};
++
++struct received_fis {
++    /* DMA Setup FIS */
++    struct dsfis {
++        uint8_t     type;
++        uint8_t     flags;
++        uint16_t    reserved;
++        uint32_t    dma_buf_low;
++        uint32_t    dma_buf_high;
++        uint32_t    reserved_2;
++        uint32_t    dma_buf_offset;
++        uint32_t    dma_count;
++        uint32_t    reserved_3;
++    } dsfis;
++    uint32_t padding_1;
++
++    /* PIO Setup FIS */
++    struct psfis {
++        uint8_t     type;
++        uint8_t     flags;
++        uint8_t     status;
++        uint8_t     error;
++        uint8_t     lba_low;
++        uint8_t     lba_mid;
++        uint8_t     lba_high;
++        uint8_t     device;
++        uint8_t     lba_low_exp;
++        uint8_t     lba_mid_exp;
++        uint8_t     lba_high_exp;
++        uint8_t     reserved;
++        uint16_t    sector_count;
++        uint8_t     reserved_2;
++        uint8_t     e_status;
++        uint16_t    xfer_count;
++        uint16_t    reserved_3;
++    } psfis;
++    uint32_t padding_2[3];
++
++    /* D2H Register FIS */
++    struct rfis {
++        uint8_t     type;
++        uint8_t     flags;
++        uint8_t     status;
++        uint8_t     error;
++        uint8_t     lba_low;
++        uint8_t     lba_mid;
++        uint8_t     lba_high;
++        uint8_t     device;
++        uint8_t     lba_low_exp;
++        uint8_t     lba_mid_exp;
++        uint8_t     lba_high_exp;
++        uint8_t     reserved;
++        uint16_t    sector_count;
++        uint16_t    reserved_2[3];
++    } rfis;
++    uint32_t padding_3;
++
++    /* Set Device Bits FIS */
++    struct sdbfis {
++        uint8_t     type;
++        uint8_t     flags;
++        uint8_t     status;
++        uint8_t     error;
++        uint32_t    reserved;
++    } sdbfis;
++
++    /* Unknown FIS */
++    uint8_t ufis[64];
++} __attribute__((packed));
++CDI_BUILD_BUG_ON(sizeof(struct received_fis) != 0xa0);
++
++enum {
++    H2D_FIS_F_COMMAND = 0x80,
++};
++
++struct h2d_fis {
++    uint8_t     type;
++    uint8_t     flags;
++    uint8_t     command;
++    uint8_t     features;
++    uint8_t     lba_low;
++    uint8_t     lba_mid;
++    uint8_t     lba_high;
++    uint8_t     device;
++    uint8_t     lba_low_exp;
++    uint8_t     lba_mid_exp;
++    uint8_t     lba_high_exp;
++    uint8_t     features_exp;
++    uint16_t    sector_count;
++    uint8_t     reserved;
++    uint8_t     control;
++    uint32_t    reserved_2;
++} __attribute__((packed));
++
++struct ahci_prd {
++    uint32_t    dba;        /* Data Base Address */
++    uint32_t    dbau;       /* Data Base Address Upper */
++    uint32_t    reserved;
++    uint32_t    dbc;        /* Data Byte Count */
++} __attribute__((packed));
++
++enum {
++    CMD_HEADER_F_FIS_LENGTH_5_DW    = (5 << 0),
++    CMD_HEADER_F_WRITE              = (1 << 6),
++};
++
++struct cmd_header {
++    uint16_t    flags;
++    uint16_t    prdtl;      /* PRDT Length (in entries) */
++    uint32_t    prdbc;      /* PRD Byte Count */
++    uint32_t    ctba0;      /* Command Table Base Address */
++    uint32_t    ctba_u0;    /* Command Table Base Address (Upper 32 Bits) */
++    uint64_t    reserved1;
++    uint64_t    reserved2;
++} __attribute__((packed));
++
++struct cmd_table {
++    struct h2d_fis  cfis;
++    uint8_t         padding[0x40 - sizeof(struct h2d_fis)];
++    uint8_t         acmd[0x10];         /* ATAPI command */
++    uint8_t         reserved[0x30];
++    struct ahci_prd prdt[];
++} __attribute__((packed));
++
++/* Register access functions */
++
++static inline void reg_outl(struct ahci_device* ahci, int reg, uint32_t value)
++{
++    volatile uint32_t* mmio = (uint32_t*) ((uint8_t*) ahci->mmio->vaddr + reg);
++    *mmio = value;
++}
++
++static inline uint32_t reg_inl(struct ahci_device* ahci, int reg)
++{
++    volatile uint32_t* mmio = (uint32_t*) ((uint8_t*) ahci->mmio->vaddr + reg);
++    return *mmio;
++}
++
++
++static inline void pxreg_outl(struct ahci_device* ahci, int port, int reg,
++                              uint32_t value)
++{
++    volatile uint32_t* mmio = (uint32_t*) ((uint8_t*) ahci->mmio->vaddr +
++        REG_PORTS + port * PORTSIZE + reg);
++    *mmio = value;
++}
++
++static inline uint32_t pxreg_inl(struct ahci_device* ahci, int port, int reg)
++{
++    volatile uint32_t* mmio = (uint32_t*) ((uint8_t*) ahci->mmio->vaddr +
++        REG_PORTS + port * PORTSIZE + reg);
++    return *mmio;
++}
++
++
++/* ahci/disk.c */
++extern struct cdi_storage_driver ahci_disk_driver;
++
++
++#endif
+diff --git a/ahci/disk.c b/ahci/disk.c
+new file mode 100644
+index 0000000..91204e7
+--- /dev/null
++++ b/ahci/disk.c
+@@ -0,0 +1,318 @@
++/*
++ * Copyright (c) 2013-2014 Kevin Wolf
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <stdlib.h>
++#include <stdio.h>
++#include <string.h>
++
++#include "cdi.h"
++#include "cdi/misc.h"
++
++#include "ahci.h"
++
++#define DISK_DRIVER_NAME "ahci-disk"
++
++static int ahci_request(struct ahci_disk* disk, int cmd, uint64_t lba,
++                        uint64_t bytes, struct cdi_mem_area* buf)
++{
++    struct ahci_port *port = &disk->ahci->port[disk->port];
++    int flags;
++
++    if (buf->paddr.num != 1) {
++        return -1;
++    }
++
++    port->cmd_table->cfis = (struct h2d_fis) {
++        .type           = FIS_TYPE_H2D,
++        .flags          = H2D_FIS_F_COMMAND,
++        .command        = cmd,
++        .lba_low        = lba & 0xff,
++        .lba_mid        = (lba >> 8) & 0xff,
++        .lba_high       = (lba >> 16) & 0xff,
++        .lba_low_exp    = (lba >> 24) & 0xff,
++        .lba_mid_exp    = (lba >> 32) & 0xff,
++        .lba_high_exp   = (lba >> 40) & 0xff,
++        .device         = 0x40,
++        .sector_count   = bytes / disk->storage.block_size,
++    };
++    port->cmd_table->prdt[0] = (struct ahci_prd) {
++        .dba        = buf->paddr.items[0].start,
++        .dbc        = bytes - 1,
++    };
++
++    flags = CMD_HEADER_F_FIS_LENGTH_5_DW;
++    if (cmd == ATA_CMD_WRITE_DMA || cmd == ATA_CMD_WRITE_DMA_EXT) {
++        flags |= CMD_HEADER_F_WRITE;
++    }
++
++    port->cmd_list[0] = (struct cmd_header) {
++        .flags      = flags,
++        .prdtl      = 1,
++        .prdbc      = buf->size,
++        .ctba0      = port->cmd_table_phys,
++    };
++
++    cdi_reset_wait_irq(disk->ahci->irq);
++    pxreg_outl(disk->ahci, disk->port, REG_PxCI, 0x1);
++
++    do {
++        cdi_wait_irq(disk->ahci->irq, AHCI_IRQ_TIMEOUT);
++        cdi_reset_wait_irq(disk->ahci->irq);
++    } while (pxreg_inl(disk->ahci, disk->port, REG_PxCI) & 0x1);
++
++    if (port->last_is & PxIS_TFES) {
++        return -1;
++    }
++
++    return 0;
++}
++
++static int ahci_identify(struct ahci_disk* disk)
++{
++    struct cdi_mem_area* buf;
++    uint16_t* words;
++    int ret;
++
++    buf = cdi_mem_alloc(512, CDI_MEM_PHYS_CONTIGUOUS | CDI_MEM_DMA_4G);
++    if (buf == NULL) {
++        return -1;
++    }
++
++    ret = ahci_request(disk, ATA_CMD_IDENTIFY_DEVICE, 0, 512, buf);
++    if (ret == 0) {
++        words = buf->vaddr;
++        disk->lba48 = !!(words[86] & (1 << 10));
++
++        if (disk->lba48) {
++            disk->storage.block_count = *(uint64_t*) &words[100];
++        } else {
++            disk->storage.block_count = *(uint32_t*) &words[60];
++        }
++    }
++
++    cdi_mem_free(buf);
++
++    return ret;
++}
++
++static int ahci_rw_blocks(struct cdi_storage_device* device, uint64_t start,
++                          uint64_t count, void* buffer, bool read)
++{
++    struct ahci_disk* disk = (struct ahci_disk*) device;
++    uint64_t bs = disk->storage.block_size;
++    struct cdi_mem_area* buf;
++    int cmd;
++    int ret;
++
++    buf = cdi_mem_alloc(count * bs,
++                        CDI_MEM_PHYS_CONTIGUOUS | CDI_MEM_DMA_4G | 1);
++    if (buf == NULL) {
++        return -1;
++    }
++
++    if (read) {
++        cmd = disk->lba48 ? ATA_CMD_READ_DMA_EXT : ATA_CMD_READ_DMA;
++    } else {
++        cmd = disk->lba48 ? ATA_CMD_WRITE_DMA_EXT : ATA_CMD_WRITE_DMA;
++        memcpy(buf->vaddr, buffer, bs * count);
++    }
++
++    ret = ahci_request(disk, cmd, start, bs * count, buf);
++
++    if (ret == 0 && read) {
++        memcpy(buffer, buf->vaddr, bs * count);
++    }
++
++    cdi_mem_free(buf);
++    return ret;
++}
++
++static int ahci_read_blocks(struct cdi_storage_device* device, uint64_t start,
++                            uint64_t count, void* buffer)
++{
++    return ahci_rw_blocks(device, start, count, buffer, true);
++}
++
++static int ahci_write_blocks(struct cdi_storage_device* device, uint64_t start,
++                             uint64_t count, void* buffer)
++{
++    return ahci_rw_blocks(device, start, count, buffer, false);
++}
++
++
++/* AHCI 1.3: "10.1.2 System Software Specific Initialization" */
++/* See ahci_init_hardware() for first part of the initialisation */
++static int ahci_disk_init(struct ahci_disk* disk)
++{
++    struct ahci_device* ahci = disk->ahci;
++    int port = disk->port;
++    struct ahci_port* p = &ahci->port[port];
++    uint32_t cmd;
++
++    /* The FIS must be 256-byte aligned */
++    p->fis = cdi_mem_alloc(FIS_BYTES,
++                           CDI_MEM_PHYS_CONTIGUOUS | CDI_MEM_DMA_4G | 8);
++    if (p->fis == NULL) {
++        printf("ahci: Could not allocate FIS\n");
++        goto fail;
++    }
++
++    memset(p->fis->vaddr, 0, FIS_BYTES);
++
++    p->fis_phys = p->fis->paddr.items[0].start;
++    pxreg_outl(ahci, port, REG_PxFB, p->fis_phys);
++    pxreg_outl(ahci, port, REG_PxFBU, 0); /* TODO Support 64 bit */
++
++    /* The Command List must be 1k aligned */
++    p->cmd_list_mem =
++        cdi_mem_alloc(CMD_LIST_BYTES,
++                      CDI_MEM_PHYS_CONTIGUOUS | CDI_MEM_DMA_4G | 10);
++    if (p->cmd_list_mem == NULL) {
++        printf("ahci: Could not allocate Command List\n");
++        goto fail;
++    }
++
++    p->cmd_list = p->cmd_list_mem->vaddr;
++    p->cmd_list_phys = p->cmd_list_mem->paddr.items[0].start;
++
++    memset(p->cmd_list, 0, CMD_LIST_BYTES);
++
++    pxreg_outl(ahci, port, REG_PxCLB, p->cmd_list_phys);
++    pxreg_outl(ahci, port, REG_PxCLBU, 0); /* TODO Support 64 bit */
++
++    /* Command tables must be 128-byte aligned */
++    p->cmd_table_mem =
++        cdi_mem_alloc(CMD_TABLE_BYTES,
++                      CDI_MEM_PHYS_CONTIGUOUS | CDI_MEM_DMA_4G | 7);
++    if (p->cmd_table_mem == NULL) {
++        printf("ahci: Could not allocate Command Table\n");
++        goto fail;
++    }
++
++    p->cmd_table = p->cmd_table_mem->vaddr;
++    p->cmd_table_phys = p->cmd_table_mem->paddr.items[0].start;
++
++    /* Enable FIS Receive and start processing command list */
++    cmd = pxreg_inl(ahci, port, REG_PxCMD);
++    pxreg_outl(ahci, port, REG_PxCMD, cmd | PxCMD_FRE | PxCMD_ST);
++
++    /* Clear Serial ATA Error register*/
++    pxreg_outl(ahci, port, REG_PxSERR, 0xffffffff);
++
++    /* Set PxIE for interrupts */
++    pxreg_outl(ahci, port, REG_PxIE, 0xffffffff);
++
++    return 0;
++
++fail:
++    if (p->fis) {
++        cdi_mem_free(p->fis);
++        p->fis = NULL;
++    }
++    if (p->cmd_list) {
++        cdi_mem_free(p->cmd_list_mem);
++        p->cmd_list_mem = NULL;
++    }
++    if (p->cmd_table_mem) {
++        cdi_mem_free(p->cmd_table_mem);
++        p->cmd_table_mem = NULL;
++    }
++    return -1;
++}
++
++static struct cdi_device* disk_init_device(struct cdi_bus_data* bus_data)
++{
++    struct ahci_bus_data* ahci_bus_data = (struct ahci_bus_data*) bus_data;
++    struct ahci_disk* disk;
++
++    if (bus_data->bus_type != CDI_AHCI) {
++        return NULL;
++    }
++
++    disk = calloc(1, sizeof(*disk));
++    disk->ahci = ahci_bus_data->ahci;
++    disk->port = ahci_bus_data->port;
++    disk->storage.block_size = 512;
++    disk->storage.dev.driver = &ahci_disk_driver.drv;
++    asprintf((char**) &disk->storage.dev.name, "ahci%d", disk->port);
++
++    if (ahci_disk_init(disk) < 0) {
++        goto fail;
++    }
++
++    if (ahci_identify(disk) < 0) {
++        goto fail;
++    }
++
++    cdi_storage_device_init(&disk->storage);
++
++    return &disk->storage.dev;
++
++fail:
++    free(disk);
++    return NULL;
++}
++
++static void disk_remove_device(struct cdi_device* device)
++{
++    /* TODO */
++}
++
++/**
++ * Initialises the AHCI disk driver
++ */
++static int ahci_disk_driver_init(void)
++{
++    return 0;
++}
++
++/**
++ * Deinitialises the AHCI disk driver
++ */
++static int ahci_disk_driver_destroy(void)
++{
++    cdi_storage_driver_destroy(&ahci_disk_driver);
++
++    /* TODO Deinitialise all devices */
++
++    return 0;
++}
++
++
++struct cdi_storage_driver ahci_disk_driver = {
++    .drv = {
++        .type           = CDI_STORAGE,
++        .bus            = CDI_AHCI,
++        .name           = DISK_DRIVER_NAME,
++        .init           = ahci_disk_driver_init,
++        .destroy        = ahci_disk_driver_destroy,
++        .init_device    = disk_init_device,
++        .remove_device  = disk_remove_device,
++    },
++    .read_blocks        = ahci_read_blocks,
++    .write_blocks       = ahci_write_blocks,
++};
++
++CDI_DRIVER(DRIVER_NAME, ahci_disk_driver)
+diff --git a/ahci/main.c b/ahci/main.c
+new file mode 100644
+index 0000000..da936ec
+--- /dev/null
++++ b/ahci/main.c
+@@ -0,0 +1,228 @@
++/*
++ * Copyright (c) 2013-2014 Kevin Wolf
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <stdint.h>
++#include <stdlib.h>
++#include <stdio.h>
++#include <string.h>
++
++#include "cdi/lists.h"
++#include "cdi/pci.h"
++#include "cdi/misc.h"
++#include "cdi.h"
++
++#include "ahci.h"
++
++#define AHCI_DRIVER_NAME "ahci"
++
++static struct cdi_storage_driver ahci_driver;
++
++
++/* AHCI 1.3: "10.1.2 System Software Specific Initialization" */
++/* See ahci_disk_init() for second part of the initialisation */
++static int ahci_init_hardware(struct ahci_device* ahci)
++{
++    int port;
++    bool all_idle;
++    uint32_t cmd, ssts;
++    int retries;
++
++    /* HBA reset (see AHCI 1.3, chapter 10.4.3) */
++    reg_outl(ahci, REG_GHC, GHC_AE);
++    reg_outl(ahci, REG_GHC, GHC_AE | GHC_HR);
++
++    while (reg_inl(ahci, REG_GHC) & GHC_HR) {
++        /* wait for reset to complete */
++    }
++
++    reg_outl(ahci, REG_GHC, GHC_AE | GHC_IE);
++
++    /* Determine implemented ports */
++    ahci->ports = reg_inl(ahci, REG_PI);
++
++    /* Ensure that all ports are idle */
++    retries = 10;
++    do {
++        all_idle = true;
++        for (port = 0; port < MAX_PORTS; port++) {
++            if (!(ahci->ports & BIT(port))) {
++                continue;
++            }
++            cmd = pxreg_inl(ahci, port, REG_PxCMD);
++            if (cmd & (PxCMD_ST | PxCMD_CR | PxCMD_FR | PxCMD_FRE)) {
++                all_idle = false;
++                cmd &= ~(PxCMD_ST | PxCMD_FR);
++                pxreg_outl(ahci, port, REG_PxCMD, cmd);
++            }
++        }
++        if (!all_idle) {
++            cdi_sleep_ms(100);
++        }
++    } while (!all_idle && --retries);
++
++    if (!all_idle) {
++        printf("ahci: Couldn't place ports into idle state\n");
++    }
++
++    /* Determine number of command slots */
++    ahci->cmd_slots = (reg_inl(ahci, REG_CAP) & CAP_NCS_MASK) >> CAP_NCS_SHIFT;
++
++    /* Allocate Command List and FIS for each port */
++    for (port = 0; port < MAX_PORTS; port++) {
++        if (!(ahci->ports & BIT(port))) {
++            continue;
++        }
++
++        /* If there is a device attached, register it */
++        ssts = pxreg_inl(ahci, port, REG_PxSSTS);
++
++        if ((ssts & PxSSTS_DET_MASK) == PxSSTS_DET_PRESENT &&
++            (ssts & PxSSTS_IPM_MASK) == PxSSTS_IPM_ACTIVE)
++        {
++            struct ahci_bus_data bus_data = {
++                .cdi = {
++                    .bus_type   = CDI_AHCI,
++                },
++                .ahci = ahci,
++                .port = port,
++            };
++            cdi_provide_device_internal_drv(&bus_data.cdi,
++                                            &ahci_disk_driver.drv);
++        }
++    }
++
++    return 0;
++}
++
++static void irq_handler(struct cdi_device* dev)
++{
++    struct ahci_device* ahci = (struct ahci_device*) dev;
++    uint32_t is;
++    int port;
++
++    is = reg_inl(ahci, REG_IS);
++
++    for (port = 0; port < MAX_PORTS; port++) {
++        struct ahci_port* p = &ahci->port[port];
++        uint32_t port_is;
++
++        if (!(is & ahci->ports & BIT(port))) {
++            continue;
++        }
++
++        port_is = pxreg_inl(ahci, port, REG_PxIS);
++        pxreg_outl(ahci, port, REG_PxIS, port_is);
++        p->last_is = port_is;
++    }
++
++    /* For the actual interrupt handling, we use cdi_wait_irq(). */
++    reg_outl(ahci, REG_IS, is);
++}
++
++static struct cdi_device* ahci_init_device(struct cdi_bus_data* bus_data)
++{
++    struct cdi_pci_device* pci = (struct cdi_pci_device*) bus_data;
++    struct ahci_device* ahci;
++    int i, ret;
++
++    /* Check PCI class/subclass */
++    if (pci->class_id != PCI_CLASS_STORAGE ||
++        pci->subclass_id != PCI_SUBCLASS_ST_SATA ||
++        pci->interface_id != 1)
++    {
++        return NULL;
++    }
++
++    ahci = calloc(1, sizeof(*ahci));
++
++    /* Map AHCI BAR */
++    struct cdi_pci_resource* res;
++    cdi_list_t reslist = pci->resources;
++
++    for (i = 0; (res = cdi_list_get(reslist, i)); i++) {
++        if (res->index == 5 && res->type == CDI_PCI_MEMORY) {
++            ahci->mmio = cdi_mem_map(res->start, res->length);
++        }
++    }
++
++    if (ahci->mmio == NULL) {
++        printf("ahci: Could not find MMIO area\n");
++        goto fail;
++    }
++
++    ahci->irq = pci->irq;
++    cdi_register_irq(ahci->irq, irq_handler, &ahci->dev);
++
++    /* The actual hardware initialisation as described in the spec */
++    ret = ahci_init_hardware(ahci);
++    if (ret < 0) {
++        goto fail;
++    }
++
++    return &ahci->dev;
++
++fail:
++    free(ahci);
++    return NULL;
++}
++
++static void ahci_remove_device(struct cdi_device* device)
++{
++    /* TODO */
++}
++
++/**
++ * Initialises the AHCI controller driver
++ */
++static int ahci_driver_init(void)
++{
++    return 0;
++}
++
++/**
++ * Deinitialises the AHCI controller driver
++ */
++static int ahci_driver_destroy(void)
++{
++    cdi_storage_driver_destroy(&ahci_driver);
++
++    /* TODO Deinitialise all devices */
++
++    return 0;
++}
++
++static struct cdi_storage_driver ahci_driver = {
++    .drv = {
++        .type           = CDI_AHCI,
++        .bus            = CDI_PCI,
++        .name           = AHCI_DRIVER_NAME,
++        .init           = ahci_driver_init,
++        .destroy        = ahci_driver_destroy,
++        .init_device    = ahci_init_device,
++        .remove_device  = ahci_remove_device,
++    },
++};
++
++CDI_DRIVER(DRIVER_NAME, ahci_driver)
+diff --git a/include/cdi.h b/include/cdi.h
+index a8617ad..bc2f9b4 100644
+--- a/include/cdi.h
++++ b/include/cdi.h
+@@ -117,6 +117,7 @@ typedef enum {
+     CDI_USB             = 8,
+     CDI_FILESYSTEM      = 9,
+     CDI_PCI             = 10,
++    CDI_AHCI            = 11,
+ } cdi_device_type_t;
+ 
+ struct cdi_driver;
+diff --git a/include/cdi/pci.h b/include/cdi/pci.h
+index d60a105..39c92cb 100644
+--- a/include/cdi/pci.h
++++ b/include/cdi/pci.h
+@@ -17,6 +17,9 @@
+ #include <cdi-osdep.h>
+ #include <cdi/lists.h>
+ 
++#define PCI_CLASS_STORAGE         0x01
++#define PCI_SUBCLASS_ST_SATA      0x06
++
+ #define PCI_CLASS_MULTIMEDIA      0x04
+ #define PCI_SUBCLASS_MM_HDAUDIO   0x03
+ 
+-- 
+1.7.7
+
+
+From kevin at tyndur.org  Sun Dec 28 19:54:22 2014
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 28 Dec 2014 19:54:22 +0100
+Subject: [cdi-devel] [PATCH v2 1/5] cdi/misc.h: Add CDI_BUILD_BUG_ON() macro
+In-Reply-To: <1419792866-11944-1-git-send-email-kevin@tyndur.org>
+References: <1419792866-11944-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1419792866-11944-2-git-send-email-kevin@tyndur.org>
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ include/cdi/misc.h |    6 ++++++
+ 1 files changed, 6 insertions(+), 0 deletions(-)
+
+diff --git a/include/cdi/misc.h b/include/cdi/misc.h
+index a9f60b9..07967ec 100644
+--- a/include/cdi/misc.h
++++ b/include/cdi/misc.h
+@@ -15,6 +15,12 @@
+ 
+ #include <cdi.h>
+ 
++#define CDI_GLUE(x,y) x ## y
++#define CDI_BUILD_ASSERT(cnt) CDI_GLUE(__cdi_build_assert, cnt)
++#define CDI_BUILD_BUG_ON(x) \
++    struct CDI_BUILD_ASSERT(__COUNTER__) { int assertion[(x) ? -1 : 1];  };
++
++
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
+-- 
+1.7.7
+
+
+From kevin at tyndur.org  Sun Dec 28 19:54:21 2014
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 28 Dec 2014 19:54:21 +0100
+Subject: [cdi-devel] [PATCH v2 0/5] AHCI driver
+Message-ID: <1419792866-11944-1-git-send-email-kevin@tyndur.org>
+
+This series adds an AHCI driver. Tested in qemu and VirtualBox, additional
+tests (and of course code reviews) are welcome.
+
+Unlike v1, I'm not planning to prepare another version of this series with more
+features/cleanup/whatever, except to address review comments if necessary.
+Without comments, I would consider it ready to be merged now.
+
+v2:
+- Added CD-ROM support
+- Added a little more serious error handling
+- Improved the spec for cdi_provide_device_internal_drv() so that it
+  initialises yet uninitialised drivers
+- A few little bugs here and there fixed
+
+Kevin Wolf (5):
+  cdi/misc.h: Add CDI_BUILD_BUG_ON() macro
+  cdi.h: Add cdi_driver.initialised
+  cdi.h: Add cdi_provide_device_internal_drv()
+  ahci: Controller and hard disk support
+  ahci: Add CD-ROM support
+
+ ahci/ahci.h        |  346 ++++++++++++++++++++++++++++++++++++++
+ ahci/disk.c        |  470 ++++++++++++++++++++++++++++++++++++++++++++++++++++
+ ahci/main.c        |  270 ++++++++++++++++++++++++++++++
+ include/cdi.h      |   63 +++++++
+ include/cdi/misc.h |    6 +
+ include/cdi/pci.h  |    3 +
+ 6 files changed, 1158 insertions(+), 0 deletions(-)
+ create mode 100644 ahci/ahci.h
+ create mode 100644 ahci/disk.c
+ create mode 100644 ahci/main.c
+
+-- 
+1.7.7
+
+
+From kevin at tyndur.org  Sun Dec 28 19:54:23 2014
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 28 Dec 2014 19:54:23 +0100
+Subject: [cdi-devel] =?utf-8?q?=5BPATCH_v2_2/5=5D_cdi=2Eh=3A_Add_cdi=5Fdri?=
+	=?utf-8?q?ver=2Einitialised?=
+In-Reply-To: <1419792866-11944-1-git-send-email-kevin@tyndur.org>
+References: <1419792866-11944-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1419792866-11944-3-git-send-email-kevin@tyndur.org>
+
+Every complete implementation will need to store the information whether
+a driver is already initialised somewhere, so just put it into struct
+cdi_driver.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ include/cdi.h |   12 ++++++++++++
+ 1 files changed, 12 insertions(+), 0 deletions(-)
+
+diff --git a/include/cdi.h b/include/cdi.h
+index 851bb6a..cb87786 100644
+--- a/include/cdi.h
++++ b/include/cdi.h
+@@ -101,6 +101,7 @@
+ #define _CDI_H_
+ 
+ #include <stdint.h>
++#include <stdbool.h>
+ 
+ #include <cdi-osdep.h>
+ #include <cdi/lists.h>
+@@ -196,6 +197,17 @@ struct cdi_driver {
+ 
+     /**
+      * \german
++     * Wird von der CDI-Implementierung auf true gesetzt, sobald .init()
++     * aufgerufen wurde.
++     * \endgerman
++     * \english
++     * Set by the CDI implementation to true as soon as .init() was called.
++     * \endenglish
++     */
++    bool                initialised;
++
++    /**
++     * \german
+      * Enth?lt alle Ger?te (cdi_device), die den Treiber benutzen
+      * \endgerman
+      * \english
+-- 
+1.7.7
+
+
+From kevin at tyndur.org  Sun Dec 28 19:54:24 2014
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 28 Dec 2014 19:54:24 +0100
+Subject: [cdi-devel] =?utf-8?q?=5BPATCH_v2_3/5=5D_cdi=2Eh=3A_Add_cdi=5Fpro?=
+	=?utf-8?q?vide=5Fdevice=5Finternal=5Fdrv=28=29?=
+In-Reply-To: <1419792866-11944-1-git-send-email-kevin@tyndur.org>
+References: <1419792866-11944-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1419792866-11944-4-git-send-email-kevin@tyndur.org>
+
+cdi_provide_device() hasn't been implemented so far because it raises
+questions of inter-driver communication in microkernel environments that
+aren't trivial to answer.
+
+This patch adds an interface to provide a device that is guaranteed
+to be handled by a CDI driver in the same binary, i.e. when passing
+pointers works.
+
+This is not meant as a general solution, but only to be used as a means
+for the internal organisation of complex drivers where some kind of an
+internal bus exists that can neither be exposed by a different driver
+nor can its children be handled by a different driver.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ include/cdi.h |   50 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 files changed, 50 insertions(+), 0 deletions(-)
+
+diff --git a/include/cdi.h b/include/cdi.h
+index cb87786..7c21836 100644
+--- a/include/cdi.h
++++ b/include/cdi.h
+@@ -358,6 +358,56 @@ void cdi_driver_register(struct cdi_driver* driver);
+  */
+ int cdi_provide_device(struct cdi_bus_data* device);
+ 
++/**
++ * \german
++ * Informiert das Betriebssystem, dass ein neues Ger?t angeschlossen wurde und
++ * von einem internen Treiber (d.h. einem Treiber, der in dieselbe Binary
++ * gelinkt ist) angesteuert werden muss.
++ *
++ * Diese Funktion kann benutzt werden, um Treibern mit mehreren Komponenten
++ * eine klarere Struktur zu geben (z.B. SATA-Platten als vom AHCI-Controller
++ * getrennte CDI-Ger?te zu modellieren).
++ *
++ * Vorsicht: Sie sollte nur benutzt werden, wenn eine enge Kopplung zwischen
++ * Ger?t und Unterger?te unvermeidlich ist, da sie voraussetzt, dass beide
++ * Treiber in dieselbe Binary gelinkt sind. Dies mag f?r monolithische Kernel
++ * kein Problem darstellen, aber CDI wird auch in Betriebssystemen mit anderem
++ * Design benutzt.
++ *
++ * Falls der Treiber noch nicht initialisiert ist, wird er initialisiert, bevor
++ * das neue Ger?t erstellt wird.
++ *
++ * @param device Adressinformation f?r den Treiber, um das Ger?t zu finden
++ * @param driver Treiber, der f?r das Ger?t benutzt werden soll
++ *
++ * @return 0 bei Erfolg, -1 im Fehlerfall
++ * \endgerman
++ * \english
++ * Informs the operating system that a new device has become available and
++ * is to be handled by an internal driver (i.e. a driver linked into the same
++ * binary).
++ *
++ * This function can be used to give drivers for devices with multiple
++ * components a clearer structure (e.g. model SATA disks as CDI devices
++ * separate from the AHCI controller).
++ *
++ * Be careful though: It should only be used if a tight coupling between device
++ * and subdevice is unvoidable, as it requires linking the code of both drivers
++ * into the same binary. This might not be a problem for monolithic kernels,
++ * but CDI is used in OSes of different designs.
++ *
++ * If the driver isn't initialised yet, it is initialised before creating the
++ * new device.
++ *
++ * @param device Addressing information for the driver to find the device
++ * @param driver Driver that must be used for this device
++ *
++ * @return 0 on success or -1 if an error was encountered.
++ * \endenglish
++ */
++int cdi_provide_device_internal_drv(struct cdi_bus_data* device,
++                                    struct cdi_driver* driver);
++
+ #endif
+ 
+ /*\@}*/
+-- 
+1.7.7
+
+
+From kevin at tyndur.org  Sun Dec 28 19:54:25 2014
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 28 Dec 2014 19:54:25 +0100
+Subject: [cdi-devel] [PATCH v2 4/5] ahci: Controller and hard disk support
+In-Reply-To: <1419792866-11944-1-git-send-email-kevin@tyndur.org>
+References: <1419792866-11944-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1419792866-11944-5-git-send-email-kevin@tyndur.org>
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ ahci/ahci.h       |  336 ++++++++++++++++++++++++++++++++++++++++++++++++
+ ahci/disk.c       |  366 +++++++++++++++++++++++++++++++++++++++++++++++++++++
+ ahci/main.c       |  257 +++++++++++++++++++++++++++++++++++++
+ include/cdi.h     |    1 +
+ include/cdi/pci.h |    3 +
+ 5 files changed, 963 insertions(+), 0 deletions(-)
+ create mode 100644 ahci/ahci.h
+ create mode 100644 ahci/disk.c
+ create mode 100644 ahci/main.c
+
+diff --git a/ahci/ahci.h b/ahci/ahci.h
+new file mode 100644
+index 0000000..46e8fd5
+--- /dev/null
++++ b/ahci/ahci.h
+@@ -0,0 +1,336 @@
++/*
++ * Copyright (c) 2013-2014 Kevin Wolf
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef AHCI_H
++#define AHCI_H
++
++#include <stdint.h>
++
++#include "cdi/storage.h"
++#include "cdi/mem.h"
++
++#define BIT(x) (1 << x)
++
++#define MAX_PORTS 32
++#define FIS_BYTES 256
++#define CMD_LIST_BYTES 1024
++#define CMD_TABLE_BYTES (sizeof(struct cmd_table) * sizeof(struct ahci_prd))
++
++#define AHCI_IRQ_TIMEOUT 5000 /* ms */
++
++enum {
++    ATA_CMD_READ_DMA            = 0xc8,
++    ATA_CMD_READ_DMA_EXT        = 0x25,
++    ATA_CMD_WRITE_DMA           = 0xca,
++    ATA_CMD_WRITE_DMA_EXT       = 0x35,
++    ATA_CMD_IDENTIFY_DEVICE     = 0xec,
++};
++
++enum {
++    REG_CAP     = 0x00, /* Host Capabilities */
++    REG_GHC     = 0x04, /* Global Host Control */
++    REG_IS      = 0x08, /* Interrupt Status */
++    REG_PI      = 0x0c, /* Ports Implemented */
++
++    REG_PORTS   = 0x100,
++
++    PORTSIZE    = 0x80,
++    REG_PxCLB   = 0x00, /* Command List Base Address */
++    REG_PxCLBU  = 0x04, /* Command List Base Address Upper */
++    REG_PxFB    = 0x08, /* FIS Base Address */
++    REG_PxFBU   = 0x0c, /* FIS Base Address Upper */
++    REG_PxIS    = 0x10, /* Interrupt Status */
++    REG_PxIE    = 0x14, /* Interrupt Enable */
++    REG_PxCMD   = 0x18, /* Command and status */
++    REG_PxTFD   = 0x20, /* Task File Data*/
++    REG_PxSIG   = 0x24, /* Signature */
++    REG_PxSSTS  = 0x28, /* Serial ATA Status */
++    REG_PxSCTL  = 0x2c, /* Serial ATA Control */
++    REG_PxSERR  = 0x30, /* Serial ATA Error */
++    REG_PxCI    = 0x38, /* Command Issue */
++};
++
++enum {
++    CAP_NCS_SHIFT   = 8,
++    CAP_NCS_MASK    = (0x1f << CAP_NCS_SHIFT),
++};
++
++enum {
++    GHC_HR      = (1 <<  0), /* HBA Reset */
++    GHC_IE      = (1 <<  1), /* Interrupt Enable */
++    GHC_AE      = (1 << 31), /* AHCI Enable */
++};
++
++enum {
++    PxIS_IFS    = (1 << 27), /* Interface Fatal Error Status */
++    PxIS_HBDS   = (1 << 28), /* Host Bus Data Error Status */
++    PxIS_HBFS   = (1 << 29), /* Host Bus Fatal Error Status */
++    PxIS_TFES   = (1 << 30), /* Task File Error Status */
++};
++
++enum {
++    PxCMD_ST    = (1 <<  0), /* Start */
++    PxCMD_FRE   = (1 <<  4), /* FIS Receive Enable */
++    PxCMD_FR    = (1 << 14), /* FIS Receive Running */
++    PxCMD_CR    = (1 << 15), /* Command List Running */
++};
++
++enum {
++    PxTFD_BSY   = (1 << 7), /* Interface is busy */
++    PxTFD_DRQ   = (1 << 3), /* Data transfer is requested */
++    PxTFD_ERR   = (1 << 0), /* Error during transfer */
++};
++
++enum {
++    PxSSTS_DET_MASK     = (0xf << 0),
++    PxSSTS_IPM_MASK     = (0xf << 8),
++
++    PxSSTS_DET_PRESENT  = (0x3 << 0),
++    PxSSTS_IPM_ACTIVE   = (0x1 << 8),
++};
++
++enum {
++    PxSCTL_DET_MASK     = (0xf << 0),
++};
++
++/* SATA 2.6: "11.3 Software reset protocol" */
++enum {
++    SATA_SIG_DISK       = 0x00000101,
++    SATA_SIG_PACKET     = 0xeb140101,
++};
++
++struct ahci_port {
++    struct cdi_mem_area*        fis;
++    uint64_t                    fis_phys;
++
++    struct cmd_header*          cmd_list;
++    struct cdi_mem_area*        cmd_list_mem;
++    uint64_t                    cmd_list_phys;
++
++    /* TODO More than one command with one PRDT entry */
++    struct cmd_table*           cmd_table;
++    struct cdi_mem_area*        cmd_table_mem;
++    uint64_t                    cmd_table_phys;
++
++    uint32_t                    last_is;
++};
++
++struct ahci_device {
++    struct cdi_device           dev;
++    struct cdi_mem_area*        mmio;
++    int                         irq;
++
++    uint32_t                    ports;
++    uint32_t                    cmd_slots;
++
++    struct ahci_port            port[MAX_PORTS];
++};
++
++struct ahci_bus_data {
++    struct cdi_bus_data         cdi;
++    struct ahci_device*         ahci;
++    int                         port;
++};
++
++struct ahci_disk {
++    struct cdi_storage_device   storage;
++    struct ahci_device*         ahci;
++    int                         port;
++
++    bool                        lba48;
++};
++
++enum {
++    FIS_TYPE_H2D            = 0x27,
++    FIS_TYPE_D2H            = 0x34,
++    FIS_TYPE_DMA_ACTIVATE   = 0x39,
++    FIS_TYPE_DMA_SETUP      = 0x41,
++    FIS_TYPE_DATA           = 0x46,
++    FIS_TYPE_BIST_ACTIVATE  = 0x58,
++    FIS_TYPE_PIO_SETUP      = 0x5f,
++    FIS_TYPE_SET_DEV_BITS   = 0xa1,
++};
++
++struct received_fis {
++    /* DMA Setup FIS */
++    struct dsfis {
++        uint8_t     type;
++        uint8_t     flags;
++        uint16_t    reserved;
++        uint32_t    dma_buf_low;
++        uint32_t    dma_buf_high;
++        uint32_t    reserved_2;
++        uint32_t    dma_buf_offset;
++        uint32_t    dma_count;
++        uint32_t    reserved_3;
++    } dsfis;
++    uint32_t padding_1;
++
++    /* PIO Setup FIS */
++    struct psfis {
++        uint8_t     type;
++        uint8_t     flags;
++        uint8_t     status;
++        uint8_t     error;
++        uint8_t     lba_low;
++        uint8_t     lba_mid;
++        uint8_t     lba_high;
++        uint8_t     device;
++        uint8_t     lba_low_exp;
++        uint8_t     lba_mid_exp;
++        uint8_t     lba_high_exp;
++        uint8_t     reserved;
++        uint16_t    sector_count;
++        uint8_t     reserved_2;
++        uint8_t     e_status;
++        uint16_t    xfer_count;
++        uint16_t    reserved_3;
++    } psfis;
++    uint32_t padding_2[3];
++
++    /* D2H Register FIS */
++    struct rfis {
++        uint8_t     type;
++        uint8_t     flags;
++        uint8_t     status;
++        uint8_t     error;
++        uint8_t     lba_low;
++        uint8_t     lba_mid;
++        uint8_t     lba_high;
++        uint8_t     device;
++        uint8_t     lba_low_exp;
++        uint8_t     lba_mid_exp;
++        uint8_t     lba_high_exp;
++        uint8_t     reserved;
++        uint16_t    sector_count;
++        uint16_t    reserved_2[3];
++    } rfis;
++    uint32_t padding_3;
++
++    /* Set Device Bits FIS */
++    struct sdbfis {
++        uint8_t     type;
++        uint8_t     flags;
++        uint8_t     status;
++        uint8_t     error;
++        uint32_t    reserved;
++    } sdbfis;
++
++    /* Unknown FIS */
++    uint8_t ufis[64];
++} __attribute__((packed));
++CDI_BUILD_BUG_ON(sizeof(struct received_fis) != 0xa0);
++
++enum {
++    H2D_FIS_F_COMMAND = 0x80,
++};
++
++struct h2d_fis {
++    uint8_t     type;
++    uint8_t     flags;
++    uint8_t     command;
++    uint8_t     features;
++    uint8_t     lba_low;
++    uint8_t     lba_mid;
++    uint8_t     lba_high;
++    uint8_t     device;
++    uint8_t     lba_low_exp;
++    uint8_t     lba_mid_exp;
++    uint8_t     lba_high_exp;
++    uint8_t     features_exp;
++    uint16_t    sector_count;
++    uint8_t     reserved;
++    uint8_t     control;
++    uint32_t    reserved_2;
++} __attribute__((packed));
++
++struct ahci_prd {
++    uint32_t    dba;        /* Data Base Address */
++    uint32_t    dbau;       /* Data Base Address Upper */
++    uint32_t    reserved;
++    uint32_t    dbc;        /* Data Byte Count */
++} __attribute__((packed));
++
++enum {
++    CMD_HEADER_F_FIS_LENGTH_5_DW    = (5 << 0),
++    CMD_HEADER_F_WRITE              = (1 << 6),
++};
++
++struct cmd_header {
++    uint16_t    flags;
++    uint16_t    prdtl;      /* PRDT Length (in entries) */
++    uint32_t    prdbc;      /* PRD Byte Count */
++    uint32_t    ctba0;      /* Command Table Base Address */
++    uint32_t    ctba_u0;    /* Command Table Base Address (Upper 32 Bits) */
++    uint64_t    reserved1;
++    uint64_t    reserved2;
++} __attribute__((packed));
++
++struct cmd_table {
++    struct h2d_fis  cfis;
++    uint8_t         padding[0x40 - sizeof(struct h2d_fis)];
++    uint8_t         acmd[0x10];         /* ATAPI command */
++    uint8_t         reserved[0x30];
++    struct ahci_prd prdt[];
++} __attribute__((packed));
++
++/* Register access functions */
++
++static inline void reg_outl(struct ahci_device* ahci, int reg, uint32_t value)
++{
++    volatile uint32_t* mmio = (uint32_t*) ((uint8_t*) ahci->mmio->vaddr + reg);
++    *mmio = value;
++}
++
++static inline uint32_t reg_inl(struct ahci_device* ahci, int reg)
++{
++    volatile uint32_t* mmio = (uint32_t*) ((uint8_t*) ahci->mmio->vaddr + reg);
++    return *mmio;
++}
++
++
++static inline void pxreg_outl(struct ahci_device* ahci, int port, int reg,
++                              uint32_t value)
++{
++    volatile uint32_t* mmio = (uint32_t*) ((uint8_t*) ahci->mmio->vaddr +
++        REG_PORTS + port * PORTSIZE + reg);
++    *mmio = value;
++}
++
++static inline uint32_t pxreg_inl(struct ahci_device* ahci, int port, int reg)
++{
++    volatile uint32_t* mmio = (uint32_t*) ((uint8_t*) ahci->mmio->vaddr +
++        REG_PORTS + port * PORTSIZE + reg);
++    return *mmio;
++}
++
++/* ahci/main.c */
++void ahci_port_comreset(struct ahci_device* ahci, int port);
++
++/* ahci/disk.c */
++extern struct cdi_storage_driver ahci_disk_driver;
++
++
++#endif
+diff --git a/ahci/disk.c b/ahci/disk.c
+new file mode 100644
+index 0000000..0879f20
+--- /dev/null
++++ b/ahci/disk.c
+@@ -0,0 +1,366 @@
++/*
++ * Copyright (c) 2013-2014 Kevin Wolf
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <stdlib.h>
++#include <stdio.h>
++#include <string.h>
++
++#include "cdi.h"
++#include "cdi/misc.h"
++
++#include "ahci.h"
++
++#define DISK_DRIVER_NAME "ahci-disk"
++
++/**
++ * This function is called for any requests (even succeeding ones). Its job is
++ * to recover from any failures and decide whether a request must return
++ * failues.
++ *
++ * @return 0 if the command can still be completed successfully, -1 if failure
++ * should be returned.
++ */
++static int ahci_request_handle_error(struct ahci_disk* disk, uint32_t is)
++{
++    /* AHCI 1.3: "6.2.2 Software Error Recovery" */
++    if (is & (PxIS_HBFS | PxIS_HBDS | PxIS_IFS | PxIS_TFES)) {
++        /* Fatal errors. Restart the port and return failure. */
++        uint32_t cmd, tfd;
++
++        /* Stor processing of the command queue */
++        cmd = pxreg_inl(disk->ahci, disk->port, REG_PxCMD);
++        pxreg_outl(disk->ahci, disk->port, REG_PxCMD, cmd & ~PxCMD_ST);
++        while (pxreg_inl(disk->ahci, disk->port, REG_PxCMD) & PxCMD_CR);
++
++        /* Reset SATA error register */
++        pxreg_outl(disk->ahci, disk->port, REG_PxSERR, 0xffffffff);
++
++        /* COMRESET if PxTFD.STS.(BSY|DRQ) == 1 */
++        tfd = pxreg_inl(disk->ahci, disk->port, REG_PxTFD);
++        if (tfd & (PxTFD_BSY | PxTFD_DRQ)) {
++            ahci_port_comreset(disk->ahci, disk->port);
++        }
++
++        /* Restart port */
++        pxreg_outl(disk->ahci, disk->port, REG_PxCMD, cmd | PxCMD_ST);
++        return -1;
++    }
++
++    return 0;
++}
++
++static int ahci_request(struct ahci_disk* disk, int cmd, uint64_t lba,
++                        uint64_t bytes, struct cdi_mem_area* buf)
++{
++    struct ahci_port *port = &disk->ahci->port[disk->port];
++    uint32_t flags, device;
++
++    if (buf->paddr.num != 1) {
++        return -1;
++    }
++
++    device = 0;
++    if (cmd == ATA_CMD_READ_DMA || cmd == ATA_CMD_READ_DMA_EXT ||
++        cmd == ATA_CMD_WRITE_DMA || cmd == ATA_CMD_WRITE_DMA_EXT)
++    {
++        device |= 0x40;
++    }
++
++    port->cmd_table->cfis = (struct h2d_fis) {
++        .type           = FIS_TYPE_H2D,
++        .flags          = H2D_FIS_F_COMMAND,
++        .command        = cmd,
++        .lba_low        = lba & 0xff,
++        .lba_mid        = (lba >> 8) & 0xff,
++        .lba_high       = (lba >> 16) & 0xff,
++        .lba_low_exp    = (lba >> 24) & 0xff,
++        .lba_mid_exp    = (lba >> 32) & 0xff,
++        .lba_high_exp   = (lba >> 40) & 0xff,
++        .device         = device,
++        .sector_count   = bytes / disk->storage.block_size,
++    };
++    port->cmd_table->prdt[0] = (struct ahci_prd) {
++        .dba        = buf->paddr.items[0].start,
++        .dbc        = bytes - 1,
++    };
++
++    flags = CMD_HEADER_F_FIS_LENGTH_5_DW;
++    if (cmd == ATA_CMD_WRITE_DMA || cmd == ATA_CMD_WRITE_DMA_EXT) {
++        flags |= CMD_HEADER_F_WRITE;
++    }
++
++    port->cmd_list[0] = (struct cmd_header) {
++        .flags      = flags,
++        .prdtl      = 1,
++        .prdbc      = buf->size,
++        .ctba0      = port->cmd_table_phys,
++    };
++
++    cdi_reset_wait_irq(disk->ahci->irq);
++    pxreg_outl(disk->ahci, disk->port, REG_PxCI, 0x1);
++
++    do {
++        cdi_wait_irq(disk->ahci->irq, AHCI_IRQ_TIMEOUT);
++        if (ahci_request_handle_error(disk, port->last_is) < 0) {
++            return -1;
++        }
++        cdi_reset_wait_irq(disk->ahci->irq);
++    } while (pxreg_inl(disk->ahci, disk->port, REG_PxCI) & 0x1);
++
++    if (ahci_request_handle_error(disk, port->last_is) < 0) {
++        return -1;
++    }
++
++    return 0;
++}
++
++static int ahci_identify(struct ahci_disk* disk)
++{
++    struct cdi_mem_area* buf;
++    uint16_t* words;
++    int ret;
++
++    buf = cdi_mem_alloc(512, CDI_MEM_PHYS_CONTIGUOUS | CDI_MEM_DMA_4G);
++    if (buf == NULL) {
++        return -1;
++    }
++
++    ret = ahci_request(disk, ATA_CMD_IDENTIFY_DEVICE, 0, 512, buf);
++    if (ret == 0) {
++        words = buf->vaddr;
++        disk->lba48 = !!(words[86] & (1 << 10));
++
++        if (disk->lba48) {
++            disk->storage.block_count = *(uint64_t*) &words[100];
++        } else {
++            disk->storage.block_count = *(uint32_t*) &words[60];
++        }
++    }
++
++    cdi_mem_free(buf);
++
++    return ret;
++}
++
++static int ahci_rw_blocks(struct cdi_storage_device* device, uint64_t start,
++                          uint64_t count, void* buffer, bool read)
++{
++    struct ahci_disk* disk = (struct ahci_disk*) device;
++    uint64_t bs = disk->storage.block_size;
++    struct cdi_mem_area* buf;
++    int cmd;
++    int ret;
++
++    buf = cdi_mem_alloc(count * bs,
++                        CDI_MEM_PHYS_CONTIGUOUS | CDI_MEM_DMA_4G | 1);
++    if (buf == NULL) {
++        return -1;
++    }
++
++    if (read) {
++        cmd = disk->lba48 ? ATA_CMD_READ_DMA_EXT : ATA_CMD_READ_DMA;
++    } else {
++        cmd = disk->lba48 ? ATA_CMD_WRITE_DMA_EXT : ATA_CMD_WRITE_DMA;
++        memcpy(buf->vaddr, buffer, bs * count);
++    }
++
++    ret = ahci_request(disk, cmd, start, bs * count, buf);
++
++    if (ret == 0 && read) {
++        memcpy(buffer, buf->vaddr, bs * count);
++    }
++
++    cdi_mem_free(buf);
++    return ret;
++}
++
++static int ahci_read_blocks(struct cdi_storage_device* device, uint64_t start,
++                            uint64_t count, void* buffer)
++{
++    return ahci_rw_blocks(device, start, count, buffer, true);
++}
++
++static int ahci_write_blocks(struct cdi_storage_device* device, uint64_t start,
++                             uint64_t count, void* buffer)
++{
++    return ahci_rw_blocks(device, start, count, buffer, false);
++}
++
++
++/* AHCI 1.3: "10.1.2 System Software Specific Initialization" */
++/* See ahci_init_hardware() for first part of the initialisation */
++static int ahci_disk_init(struct ahci_disk* disk)
++{
++    struct ahci_device* ahci = disk->ahci;
++    int port = disk->port;
++    struct ahci_port* p = &ahci->port[port];
++    uint32_t cmd;
++
++    /* The FIS must be 256-byte aligned */
++    p->fis = cdi_mem_alloc(FIS_BYTES,
++                           CDI_MEM_PHYS_CONTIGUOUS | CDI_MEM_DMA_4G | 8);
++    if (p->fis == NULL) {
++        printf("ahci: Could not allocate FIS\n");
++        goto fail;
++    }
++
++    memset(p->fis->vaddr, 0, FIS_BYTES);
++
++    p->fis_phys = p->fis->paddr.items[0].start;
++    pxreg_outl(ahci, port, REG_PxFB, p->fis_phys);
++    pxreg_outl(ahci, port, REG_PxFBU, 0); /* TODO Support 64 bit */
++
++    /* The Command List must be 1k aligned */
++    p->cmd_list_mem =
++        cdi_mem_alloc(CMD_LIST_BYTES,
++                      CDI_MEM_PHYS_CONTIGUOUS | CDI_MEM_DMA_4G | 10);
++    if (p->cmd_list_mem == NULL) {
++        printf("ahci: Could not allocate Command List\n");
++        goto fail;
++    }
++
++    p->cmd_list = p->cmd_list_mem->vaddr;
++    p->cmd_list_phys = p->cmd_list_mem->paddr.items[0].start;
++
++    memset(p->cmd_list, 0, CMD_LIST_BYTES);
++
++    pxreg_outl(ahci, port, REG_PxCLB, p->cmd_list_phys);
++    pxreg_outl(ahci, port, REG_PxCLBU, 0); /* TODO Support 64 bit */
++
++    /* Command tables must be 128-byte aligned */
++    p->cmd_table_mem =
++        cdi_mem_alloc(CMD_TABLE_BYTES,
++                      CDI_MEM_PHYS_CONTIGUOUS | CDI_MEM_DMA_4G | 7);
++    if (p->cmd_table_mem == NULL) {
++        printf("ahci: Could not allocate Command Table\n");
++        goto fail;
++    }
++
++    p->cmd_table = p->cmd_table_mem->vaddr;
++    p->cmd_table_phys = p->cmd_table_mem->paddr.items[0].start;
++
++    /* Enable FIS Receive and start processing command list */
++    cmd = pxreg_inl(ahci, port, REG_PxCMD);
++    pxreg_outl(ahci, port, REG_PxCMD, cmd | PxCMD_FRE | PxCMD_ST);
++
++    /* Clear Serial ATA Error register*/
++    pxreg_outl(ahci, port, REG_PxSERR, 0xffffffff);
++
++    /* Set PxIE for interrupts */
++    pxreg_outl(ahci, port, REG_PxIE, 0xffffffff);
++
++    return 0;
++
++fail:
++    if (p->fis) {
++        cdi_mem_free(p->fis);
++        p->fis = NULL;
++    }
++    if (p->cmd_list) {
++        cdi_mem_free(p->cmd_list_mem);
++        p->cmd_list_mem = NULL;
++    }
++    if (p->cmd_table_mem) {
++        cdi_mem_free(p->cmd_table_mem);
++        p->cmd_table_mem = NULL;
++    }
++    return -1;
++}
++
++static struct cdi_device* disk_init_device(struct cdi_bus_data* bus_data)
++{
++    struct ahci_bus_data* ahci_bus_data = (struct ahci_bus_data*) bus_data;
++    struct ahci_disk* disk;
++
++    if (bus_data->bus_type != CDI_AHCI) {
++        return NULL;
++    }
++
++    disk = calloc(1, sizeof(*disk));
++    disk->ahci = ahci_bus_data->ahci;
++    disk->port = ahci_bus_data->port;
++    disk->storage.block_size = 512;
++    disk->storage.dev.driver = &ahci_disk_driver.drv;
++    asprintf((char**) &disk->storage.dev.name, "ahci%d", disk->port);
++
++    if (ahci_disk_init(disk) < 0) {
++        goto fail;
++    }
++
++    if (ahci_identify(disk) < 0) {
++        goto fail;
++    }
++
++    cdi_storage_device_init(&disk->storage);
++
++    return &disk->storage.dev;
++
++fail:
++    free(disk);
++    return NULL;
++}
++
++static void disk_remove_device(struct cdi_device* device)
++{
++    /* TODO */
++}
++
++/**
++ * Initialises the AHCI disk driver
++ */
++static int ahci_disk_driver_init(void)
++{
++    cdi_storage_driver_init(&ahci_disk_driver);
++    return 0;
++}
++
++/**
++ * Deinitialises the AHCI disk driver
++ */
++static int ahci_disk_driver_destroy(void)
++{
++    cdi_storage_driver_destroy(&ahci_disk_driver);
++
++    /* TODO Deinitialise all devices */
++
++    return 0;
++}
++
++
++struct cdi_storage_driver ahci_disk_driver = {
++    .drv = {
++        .type           = CDI_STORAGE,
++        .bus            = CDI_AHCI,
++        .name           = DISK_DRIVER_NAME,
++        .init           = ahci_disk_driver_init,
++        .destroy        = ahci_disk_driver_destroy,
++        .init_device    = disk_init_device,
++        .remove_device  = disk_remove_device,
++    },
++    .read_blocks        = ahci_read_blocks,
++    .write_blocks       = ahci_write_blocks,
++};
++
++CDI_DRIVER(DISK_DRIVER_NAME, ahci_disk_driver)
+diff --git a/ahci/main.c b/ahci/main.c
+new file mode 100644
+index 0000000..6a69775
+--- /dev/null
++++ b/ahci/main.c
+@@ -0,0 +1,257 @@
++/*
++ * Copyright (c) 2013-2014 Kevin Wolf
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <stdint.h>
++#include <stdlib.h>
++#include <stdio.h>
++#include <string.h>
++
++#include "cdi/lists.h"
++#include "cdi/pci.h"
++#include "cdi/misc.h"
++#include "cdi.h"
++
++#include "ahci.h"
++
++#define DRIVER_NAME "ahci"
++
++static struct cdi_storage_driver ahci_driver;
++
++
++/* AHCI 1.3: "10.1.2 System Software Specific Initialization" */
++/* See ahci_disk_init() for second part of the initialisation */
++static int ahci_init_hardware(struct ahci_device* ahci)
++{
++    int port;
++    bool all_idle;
++    uint32_t cmd, ssts, sig;
++    int retries;
++
++    /* HBA reset (see AHCI 1.3, chapter 10.4.3) */
++    reg_outl(ahci, REG_GHC, GHC_AE);
++    reg_outl(ahci, REG_GHC, GHC_AE | GHC_HR);
++
++    while (reg_inl(ahci, REG_GHC) & GHC_HR) {
++        /* wait for reset to complete */
++    }
++
++    reg_outl(ahci, REG_GHC, GHC_AE | GHC_IE);
++
++    /* Determine implemented ports */
++    ahci->ports = reg_inl(ahci, REG_PI);
++
++    /* Ensure that all ports are idle */
++    retries = 10;
++    do {
++        all_idle = true;
++        for (port = 0; port < MAX_PORTS; port++) {
++            if (!(ahci->ports & BIT(port))) {
++                continue;
++            }
++            cmd = pxreg_inl(ahci, port, REG_PxCMD);
++            if (cmd & (PxCMD_ST | PxCMD_CR | PxCMD_FR | PxCMD_FRE)) {
++                all_idle = false;
++                cmd &= ~(PxCMD_ST | PxCMD_FR);
++                pxreg_outl(ahci, port, REG_PxCMD, cmd);
++            }
++        }
++        if (!all_idle) {
++            cdi_sleep_ms(100);
++        }
++    } while (!all_idle && --retries);
++
++    if (!all_idle) {
++        printf("ahci: Couldn't place ports into idle state\n");
++    }
++
++    /* Determine number of command slots */
++    ahci->cmd_slots = (reg_inl(ahci, REG_CAP) & CAP_NCS_MASK) >> CAP_NCS_SHIFT;
++
++    /* Allocate Command List and FIS for each port */
++    for (port = 0; port < MAX_PORTS; port++) {
++        if (!(ahci->ports & BIT(port))) {
++            continue;
++        }
++
++        /* If there is a device attached, register it */
++        ssts = pxreg_inl(ahci, port, REG_PxSSTS);
++
++        if ((ssts & PxSSTS_DET_MASK) != PxSSTS_DET_PRESENT ||
++            (ssts & PxSSTS_IPM_MASK) != PxSSTS_IPM_ACTIVE)
++        {
++            continue;
++        }
++
++        /* Create a device with the right driver */
++        sig = pxreg_inl(ahci, port, REG_PxSIG);
++
++        switch (sig) {
++            case SATA_SIG_DISK: {
++                struct ahci_bus_data bus_data = {
++                    .cdi = {
++                        .bus_type   = CDI_AHCI,
++                    },
++                    .ahci = ahci,
++                    .port = port,
++                };
++                cdi_provide_device_internal_drv(&bus_data.cdi,
++                                                &ahci_disk_driver.drv);
++                break;
++            }
++            default:
++                printf("ahci: Can't handle device with signature %x", sig);
++                break;
++        }
++    }
++
++    return 0;
++}
++
++void ahci_port_comreset(struct ahci_device* ahci, int port)
++{
++    uint32_t sctl = pxreg_inl(ahci, port, REG_PxSCTL);
++
++    sctl &= ~PxSCTL_DET_MASK;
++    sctl |= 0x1;
++    pxreg_outl(ahci, port, REG_PxSCTL, sctl);
++
++    cdi_sleep_ms(1);
++
++    sctl &= ~PxSCTL_DET_MASK;
++    pxreg_outl(ahci, port, REG_PxSCTL, sctl);
++}
++
++static void irq_handler(struct cdi_device* dev)
++{
++    struct ahci_device* ahci = (struct ahci_device*) dev;
++    uint32_t is;
++    int port;
++
++    is = reg_inl(ahci, REG_IS);
++
++    for (port = 0; port < MAX_PORTS; port++) {
++        struct ahci_port* p = &ahci->port[port];
++        uint32_t port_is;
++
++        if (!(is & ahci->ports & BIT(port))) {
++            continue;
++        }
++
++        port_is = pxreg_inl(ahci, port, REG_PxIS);
++        pxreg_outl(ahci, port, REG_PxIS, port_is);
++        p->last_is = port_is;
++    }
++
++    /* For the actual interrupt handling, we use cdi_wait_irq(). */
++    reg_outl(ahci, REG_IS, is);
++}
++
++static struct cdi_device* ahci_init_device(struct cdi_bus_data* bus_data)
++{
++    struct cdi_pci_device* pci = (struct cdi_pci_device*) bus_data;
++    struct ahci_device* ahci;
++    int i, ret;
++
++    /* Check PCI class/subclass */
++    if (pci->class_id != PCI_CLASS_STORAGE ||
++        pci->subclass_id != PCI_SUBCLASS_ST_SATA ||
++        pci->interface_id != 1)
++    {
++        return NULL;
++    }
++
++    ahci = calloc(1, sizeof(*ahci));
++
++    /* Map AHCI BAR */
++    struct cdi_pci_resource* res;
++    cdi_list_t reslist = pci->resources;
++
++    for (i = 0; (res = cdi_list_get(reslist, i)); i++) {
++        if (res->index == 5 && res->type == CDI_PCI_MEMORY) {
++            ahci->mmio = cdi_mem_map(res->start, res->length);
++        }
++    }
++
++    if (ahci->mmio == NULL) {
++        printf("ahci: Could not find MMIO area\n");
++        goto fail;
++    }
++
++    ahci->irq = pci->irq;
++    cdi_register_irq(ahci->irq, irq_handler, &ahci->dev);
++
++    /* The actual hardware initialisation as described in the spec */
++    ret = ahci_init_hardware(ahci);
++    if (ret < 0) {
++        goto fail;
++    }
++
++    return &ahci->dev;
++
++fail:
++    free(ahci);
++    return NULL;
++}
++
++static void ahci_remove_device(struct cdi_device* device)
++{
++    /* TODO */
++}
++
++/**
++ * Initialises the AHCI controller driver
++ */
++static int ahci_driver_init(void)
++{
++    cdi_storage_driver_init(&ahci_driver);
++
++    return 0;
++}
++
++/**
++ * Deinitialises the AHCI controller driver
++ */
++static int ahci_driver_destroy(void)
++{
++    cdi_storage_driver_destroy(&ahci_driver);
++
++    /* TODO Deinitialise all devices */
++
++    return 0;
++}
++
++static struct cdi_storage_driver ahci_driver = {
++    .drv = {
++        .type           = CDI_AHCI,
++        .bus            = CDI_PCI,
++        .name           = DRIVER_NAME,
++        .init           = ahci_driver_init,
++        .destroy        = ahci_driver_destroy,
++        .init_device    = ahci_init_device,
++        .remove_device  = ahci_remove_device,
++    },
++};
++
++CDI_DRIVER(DRIVER_NAME, ahci_driver)
+diff --git a/include/cdi.h b/include/cdi.h
+index 7c21836..a9207db 100644
+--- a/include/cdi.h
++++ b/include/cdi.h
+@@ -118,6 +118,7 @@ typedef enum {
+     CDI_USB             = 8,
+     CDI_FILESYSTEM      = 9,
+     CDI_PCI             = 10,
++    CDI_AHCI            = 11,
+ } cdi_device_type_t;
+ 
+ struct cdi_driver;
+diff --git a/include/cdi/pci.h b/include/cdi/pci.h
+index d60a105..39c92cb 100644
+--- a/include/cdi/pci.h
++++ b/include/cdi/pci.h
+@@ -17,6 +17,9 @@
+ #include <cdi-osdep.h>
+ #include <cdi/lists.h>
+ 
++#define PCI_CLASS_STORAGE         0x01
++#define PCI_SUBCLASS_ST_SATA      0x06
++
+ #define PCI_CLASS_MULTIMEDIA      0x04
+ #define PCI_SUBCLASS_MM_HDAUDIO   0x03
+ 
+-- 
+1.7.7
+
+
+From kevin at tyndur.org  Sun Dec 28 19:54:26 2014
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 28 Dec 2014 19:54:26 +0100
+Subject: [cdi-devel] [PATCH v2 5/5] ahci: Add CD-ROM support
+In-Reply-To: <1419792866-11944-1-git-send-email-kevin@tyndur.org>
+References: <1419792866-11944-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1419792866-11944-6-git-send-email-kevin@tyndur.org>
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ ahci/ahci.h |   10 +++++
+ ahci/disk.c |  110 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++--
+ ahci/main.c |   13 +++++++
+ 3 files changed, 130 insertions(+), 3 deletions(-)
+
+diff --git a/ahci/ahci.h b/ahci/ahci.h
+index 46e8fd5..24a830b 100644
+--- a/ahci/ahci.h
++++ b/ahci/ahci.h
+@@ -29,6 +29,7 @@
+ #include <stdint.h>
+ 
+ #include "cdi/storage.h"
++#include "cdi/scsi.h"
+ #include "cdi/mem.h"
+ 
+ #define BIT(x) (1 << x)
+@@ -45,6 +46,7 @@ enum {
+     ATA_CMD_READ_DMA_EXT        = 0x25,
+     ATA_CMD_WRITE_DMA           = 0xca,
+     ATA_CMD_WRITE_DMA_EXT       = 0x35,
++    ATA_CMD_PACKET              = 0xa0,
+     ATA_CMD_IDENTIFY_DEVICE     = 0xec,
+ };
+ 
+@@ -119,6 +121,7 @@ enum {
+ enum {
+     SATA_SIG_DISK       = 0x00000101,
+     SATA_SIG_PACKET     = 0xeb140101,
++    SATA_SIG_QEMU_CD    = 0xeb140000, /* Broken value in qemu < 2.2 */
+ };
+ 
+ struct ahci_port {
+@@ -162,6 +165,11 @@ struct ahci_disk {
+     bool                        lba48;
+ };
+ 
++struct ahci_atapi {
++    struct cdi_scsi_device      scsi;
++    struct ahci_disk            disk;
++};
++
+ enum {
+     FIS_TYPE_H2D            = 0x27,
+     FIS_TYPE_D2H            = 0x34,
+@@ -276,6 +284,7 @@ struct ahci_prd {
+ enum {
+     CMD_HEADER_F_FIS_LENGTH_5_DW    = (5 << 0),
+     CMD_HEADER_F_WRITE              = (1 << 6),
++    CMD_HEADER_F_ATAPI              = (1 << 5),
+ };
+ 
+ struct cmd_header {
+@@ -331,6 +340,7 @@ void ahci_port_comreset(struct ahci_device* ahci, int port);
+ 
+ /* ahci/disk.c */
+ extern struct cdi_storage_driver ahci_disk_driver;
++extern struct cdi_scsi_driver ahci_atapi_driver;
+ 
+ 
+ #endif
+diff --git a/ahci/disk.c b/ahci/disk.c
+index 0879f20..aeeb65a 100644
+--- a/ahci/disk.c
++++ b/ahci/disk.c
+@@ -33,6 +33,7 @@
+ #include "ahci.h"
+ 
+ #define DISK_DRIVER_NAME "ahci-disk"
++#define ATAPI_DRIVER_NAME "ahci-cd"
+ 
+ /**
+  * This function is called for any requests (even succeeding ones). Its job is
+@@ -72,7 +73,7 @@ static int ahci_request_handle_error(struct ahci_disk* disk, uint32_t is)
+ }
+ 
+ static int ahci_request(struct ahci_disk* disk, int cmd, uint64_t lba,
+-                        uint64_t bytes, struct cdi_mem_area* buf)
++                        uint64_t bytes, struct cdi_mem_area* buf, void* acmd)
+ {
+     struct ahci_port *port = &disk->ahci->port[disk->port];
+     uint32_t flags, device;
+@@ -106,10 +107,17 @@ static int ahci_request(struct ahci_disk* disk, int cmd, uint64_t lba,
+         .dbc        = bytes - 1,
+     };
+ 
++    if (acmd != NULL) {
++        memcpy(port->cmd_table->acmd, acmd, 16);
++    }
++
+     flags = CMD_HEADER_F_FIS_LENGTH_5_DW;
+     if (cmd == ATA_CMD_WRITE_DMA || cmd == ATA_CMD_WRITE_DMA_EXT) {
+         flags |= CMD_HEADER_F_WRITE;
+     }
++    if (cmd == ATA_CMD_PACKET) {
++        flags |= CMD_HEADER_F_ATAPI;
++    }
+ 
+     port->cmd_list[0] = (struct cmd_header) {
+         .flags      = flags,
+@@ -147,7 +155,7 @@ static int ahci_identify(struct ahci_disk* disk)
+         return -1;
+     }
+ 
+-    ret = ahci_request(disk, ATA_CMD_IDENTIFY_DEVICE, 0, 512, buf);
++    ret = ahci_request(disk, ATA_CMD_IDENTIFY_DEVICE, 0, 512, buf, NULL);
+     if (ret == 0) {
+         words = buf->vaddr;
+         disk->lba48 = !!(words[86] & (1 << 10));
+@@ -186,7 +194,7 @@ static int ahci_rw_blocks(struct cdi_storage_device* device, uint64_t start,
+         memcpy(buf->vaddr, buffer, bs * count);
+     }
+ 
+-    ret = ahci_request(disk, cmd, start, bs * count, buf);
++    ret = ahci_request(disk, cmd, start, bs * count, buf, NULL);
+ 
+     if (ret == 0 && read) {
+         memcpy(buffer, buf->vaddr, bs * count);
+@@ -348,6 +356,88 @@ static int ahci_disk_driver_destroy(void)
+     return 0;
+ }
+ 
++static struct cdi_device* atapi_init_device(struct cdi_bus_data* bus_data)
++{
++    struct ahci_bus_data* ahci_bus_data = (struct ahci_bus_data*) bus_data;
++    struct ahci_atapi* atapi;
++    struct ahci_disk* disk;
++
++    if (bus_data->bus_type != CDI_AHCI) {
++        return NULL;
++    }
++
++    atapi = calloc(1, sizeof(*atapi));
++    disk = &atapi->disk;
++    disk->ahci = ahci_bus_data->ahci;
++    disk->port = ahci_bus_data->port;
++    disk->storage.block_size = 2048;
++
++    if (ahci_disk_init(disk) < 0) {
++        goto fail;
++    }
++
++    atapi->scsi.type = CDI_STORAGE;
++    atapi->scsi.dev.driver = &ahci_atapi_driver.drv;
++    asprintf((char**) &atapi->scsi.dev.name, "atapi%d", disk->port);
++
++    cdi_scsi_device_init(&atapi->scsi);
++
++    return &atapi->scsi.dev;
++
++fail:
++    free(atapi);
++    return NULL;
++}
++
++static void atapi_remove_device(struct cdi_device* device)
++{
++    /* TODO */
++}
++
++/**
++ * Initialises the AHCI ATAPI driver
++ */
++static int ahci_atapi_driver_init(void)
++{
++    cdi_scsi_driver_init(&ahci_atapi_driver);
++    return 0;
++}
++
++/**
++ * Deinitialises the AHCI ATAPI driver
++ */
++static int ahci_atapi_driver_destroy(void)
++{
++    cdi_scsi_driver_destroy(&ahci_atapi_driver);
++
++    /* TODO Deinitialise all devices */
++
++    return 0;
++}
++
++int ahci_scsi_request(struct cdi_scsi_device* scsi,
++                      struct cdi_scsi_packet* packet)
++{
++    struct ahci_atapi* atapi = (struct ahci_atapi*) scsi;
++    struct ahci_disk* disk = &atapi->disk;
++    struct cdi_mem_area* buf;
++    int ret;
++
++    buf = cdi_mem_alloc(packet->bufsize,
++                        CDI_MEM_PHYS_CONTIGUOUS | CDI_MEM_DMA_4G | 1);
++    if (buf == NULL) {
++        return -1;
++    }
++
++    memcpy(buf->vaddr, packet->buffer, packet->bufsize);
++    ret = ahci_request(disk, ATA_CMD_PACKET, 0, packet->bufsize, buf,
++                       packet->command);
++    memcpy(packet->buffer, buf->vaddr, packet->bufsize);
++
++    cdi_mem_free(buf);
++    return ret;
++}
++
+ 
+ struct cdi_storage_driver ahci_disk_driver = {
+     .drv = {
+@@ -363,4 +453,18 @@ struct cdi_storage_driver ahci_disk_driver = {
+     .write_blocks       = ahci_write_blocks,
+ };
+ 
++struct cdi_scsi_driver ahci_atapi_driver = {
++    .drv = {
++        .type           = CDI_SCSI,
++        .bus            = CDI_AHCI,
++        .name           = ATAPI_DRIVER_NAME,
++        .init           = ahci_atapi_driver_init,
++        .destroy        = ahci_atapi_driver_destroy,
++        .init_device    = atapi_init_device,
++        .remove_device  = atapi_remove_device,
++    },
++    .request            = ahci_scsi_request,
++};
++
+ CDI_DRIVER(DISK_DRIVER_NAME, ahci_disk_driver)
++CDI_DRIVER(ATAPI_DRIVER_NAME, ahci_atapi_driver)
+diff --git a/ahci/main.c b/ahci/main.c
+index 6a69775..1afc03c 100644
+--- a/ahci/main.c
++++ b/ahci/main.c
+@@ -120,6 +120,19 @@ static int ahci_init_hardware(struct ahci_device* ahci)
+                                                 &ahci_disk_driver.drv);
+                 break;
+             }
++            case SATA_SIG_QEMU_CD:
++            case SATA_SIG_PACKET: {
++                struct ahci_bus_data bus_data = {
++                    .cdi = {
++                        .bus_type   = CDI_AHCI,
++                    },
++                    .ahci = ahci,
++                    .port = port,
++                };
++                cdi_provide_device_internal_drv(&bus_data.cdi,
++                                                &ahci_atapi_driver.drv);
++                break;
++            }
+             default:
+                 printf("ahci: Can't handle device with signature %x", sig);
+                 break;
+-- 
+1.7.7
+
+
+From kevin at tyndur.org  Mon Dec 29 18:08:32 2014
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Mon, 29 Dec 2014 18:08:32 +0100
+Subject: [cdi-devel] [PATCH] iso9660: Fix resource flags
+Message-ID: <1419872912-22046-1-git-send-email-kevin@tyndur.org>
+
+It's not a very good idea to flag every resource as readable, browsable
+and symlink-readable at the same time. This fixes the flags to actually
+match the assigned class.
+
+The iso9660 driver knows symlinks as it reads them from a Rockridge
+image, however it doesn't implement the .read_link callback, so using
+the respective flag doesn't make sense. Treat symlinks as regular files
+for now.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ iso9660/res.c |   26 ++++++++++++++++++++------
+ 1 files changed, 20 insertions(+), 6 deletions(-)
+
+diff --git a/iso9660/res.c b/iso9660/res.c
+index 1763db1..7180eed 100644
+--- a/iso9660/res.c
++++ b/iso9660/res.c
+@@ -45,12 +45,26 @@ struct iso9660_fs_res *iso9660_fs_res_create(const char *name,struct iso9660_fs_
+   res->res.parent = (struct cdi_fs_res*)parent;
+   res->class = class;
+   res->res.type = type;
+-  if (class==CDI_FS_CLASS_DIR) res->res.dir = &iso9660_fs_res_dir;
+-  else res->res.file = &iso9660_fs_res_file;
+-  res->res.flags.read = 1;
+-  res->res.flags.execute = 1;
+-  res->res.flags.browse = 1;
+-  res->res.flags.read_link = 1;
++
++    switch (class) {
++        case CDI_FS_CLASS_DIR:
++            res->res.dir = &iso9660_fs_res_dir;
++            res->res.flags.browse = 1;
++            break;
++#if 0
++        case CDI_FS_CLASS_LINK:
++            res->res.link = &iso9660_fs_res_link;
++            res->res.flags.read_link = 1;
++            break;
++#endif
++        case CDI_FS_CLASS_FILE:
++        case CDI_FS_CLASS_SPECIAL:
++        default:
++            res->res.file = &iso9660_fs_res_file;
++            res->res.flags.read = 1;
++            res->res.flags.execute = 1;
++            break;
++    }
+ 
+   if (parent!=NULL) {
+     res->voldesc = parent->voldesc;
+-- 
+1.7.7
+
+

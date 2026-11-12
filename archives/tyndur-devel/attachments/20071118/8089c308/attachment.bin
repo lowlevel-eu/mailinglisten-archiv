@@ -1,0 +1,169 @@
+Index: src/modules/include/signal.h
+===================================================================
+--- src/modules/include/signal.h	(Revision 631)
++++ src/modules/include/signal.h	(Arbeitskopie)
+@@ -93,9 +93,14 @@
+ 
+ // Hier sollte noch viel mehr kommen
+ 
++/// Nur fuer interne Verwendung. Muss immer 1 groesser sein als die groesste
++/// Signalnummer und teilbar durch 8
++#define _SIGNO_MAX 64
+ 
+ 
+ 
++
++
+ // Gehoert nach Spezifikation da nicht rein.
+ void _signal_default_handler(int signal);
+ 
+@@ -122,5 +127,31 @@
+ /// Ein Signal an einen anderen Prozess senden
+ int kill(pid_t pid, int signal);
+ 
++
++
++
++// Verwaltung von sigsets
++
++/// Typ fuer eine Sammlung von Signalen
++typedef struct {
++    byte bitmask[_SIGNO_MAX/8];
++} sigset_t;
++
++/// Sigset leeren
++int sigemptyset(sigset_t *sigset);
++
++/// Alle Signale ins sigset packen
++int sigfillset(sigset_t *sigset);
++
++/// Einzelnes Signal zu sigset hinzufuegen
++int sigaddset(sigset_t *sigset, int signal);
++
++/// Einzelnes Signal aus sigset loeschen
++int sigdelset(sigset_t *sigset, int signal);
++
++/// Pruefen ob ein Signal im sigset enthalten ist
++int sigismember(const sigset_t *sigset, int signal);
++
++
+ #endif // ifndef _SIGNAL_H_
+ 
+Index: src/modules/lib/posix/signal.c
+===================================================================
+--- src/modules/lib/posix/signal.c	(Revision 631)
++++ src/modules/lib/posix/signal.c	(Arbeitskopie)
+@@ -42,10 +42,6 @@
+ #include <unistd.h>
+ #include <errno.h>
+ 
+-/// Nur fuer interne Verwendung. Muss immer 1 groesser sein als die groesste
+-/// Signalnummer und teilbar durch 8
+-#define _SIGNO_MAX 64
+-
+ /// Array mit Pointern auf die Signal-Handler
+ static sighandler_t signal_handlers [_SIGNO_MAX];
+ bool initialized = FALSE;
+@@ -167,3 +163,102 @@
+ 
+     return old_handler;
+ }
++
++
++/**
++ * Sigset initialisieren und/oder leeren.
++ *
++ * @param sigset Pointer auf sigset
++ * 
++ * @return 0 bei Erfolg, -1 im Fehlerfall
++ */
++int sigemptyset(sigset_t* sigset)
++{
++    memset(sigset->bitmask, 0, _SIGNO_MAX/8);
++    return 0;
++}
++
++/**
++ * Einem sigset alle Signale hinzufuegen
++ *
++ * @param sigset Pointer auf sigset
++ *
++ * @return 0 bei Erfolg, -1 im Fehlerfall
++ */
++int sigfillset(sigset_t* sigset)
++{
++    memset(sigset->bitmask, 0xFF, _SIGNO_MAX/8);
++    return 0;
++}
++
++/**
++ * Einzelnes Signal zu einem sigset hinzufuegen
++ *
++ * @param sigset Pointer auf sigset
++ * @param signum Signalnummer
++ *
++ * @return 0 bei Erfolg, -1 im Fehlerfall
++ */
++int sigaddset(sigset_t* sigset, int signum)
++{
++    // Signale groesser als die groesste moegliche Signalnummer werden hier
++    // abgefangen.
++    if (signum >= _SIGNO_MAX) {
++        errno = EINVAL;
++        return -1;
++    }
++    
++    // Entsprechendes Bit in der Bitmaske setzen
++    sigset->bitmask[signum / 8] |= 1 << (signum % 8);
++
++    return 0;
++}
++
++/**
++ * Einzelnes Signal aus einem sigset loeschen
++ *
++ * @param sigset Pointer auf sigset
++ * @param signum Signalnummer
++ *
++ * @return 0 bei Erfolg, -1 im Fehlerfall
++ */
++ int sigdelset(sigset_t* sigset, int signum)
++{
++    // Signale groesser als die groesste moegliche Signalnummer werden hier
++    // abgefangen.
++    if (signum >= _SIGNO_MAX) {
++        errno = EINVAL;
++        return -1;
++    }
++    
++    // Entsprechendes Bit in der Bitmaske loeschen
++    sigset->bitmask[signum / 8] &= ~(1 << (signum % 8));
++
++    return 0;
++}
++
++/**
++ * Pruefen ob ein Signal im sigset enthalten ist
++ *
++ * @param sigset Pointer auf sigset
++ * @param signum Signalnummer
++ *
++ * @return 0 bei Erfolg, -1 im Fehlerfall
++ */
++int sigismember(const sigset_t *sigset, int signum)
++{
++    // Signale groesser als die groesste moegliche Signalnummer werden hier
++    // abgefangen.
++    if (signum >= _SIGNO_MAX) {
++        errno = EINVAL;
++        return -1;
++    }
++    
++    // Pruefen ob das entsprechende Bit in der Bitmaske gesetzt ist.
++    if ((sigset->bitmask[signum / 8] & (1 <<(signum % 8))) == 0) {
++        return 0;
++    } else {
++        return 1;
++    }
++}
++

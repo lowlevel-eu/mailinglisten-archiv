@@ -1,0 +1,680 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 6/6] vterm: Nach LostIOv2 konvertiert
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%206/6%5D%20vterm%3A%20Nach%20LostIOv2%20konvertiert&In-Reply-To=%3C1421098871-25847-7-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002482.html">
+   <LINK REL="Next"  HREF="002477.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 6/6] vterm: Nach LostIOv2 konvertiert</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%206/6%5D%20vterm%3A%20Nach%20LostIOv2%20konvertiert&In-Reply-To=%3C1421098871-25847-7-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 6/6] vterm: Nach LostIOv2 konvertiert">kevin at tyndur.org
+                  </A><BR>
+    <I>Mo Jan 12 22:41:11 CET 2015</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002482.html">[tyndur-devel] [PATCH 5/6] kernel2: EOF-Handling in pread überarbeitet
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002477.html">[tyndur-devel] [PATCH 1/6] kernel2: Refcounting für lio_stream
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2483">[ Datum ]</a>
+              <a href="thread.html#2483">[ Thema ]</a>
+              <a href="subject.html#2483">[ Betreff (Subject) ]</a>
+              <a href="author.html#2483">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* vterm: Der Stand nach diesem Commit ist, dass hoffentlich alles noch
+  genausoo funktioniert wie davor. Spannend wird die Konvertierung dann,
+  wenn der Kernel lernt, was blockierende Reads sind. Dann dürften wir
+  nämlich die 100% CPU fürs Pollen des Terminals endlich los werden.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/vterm/include/keymap.h |  11 +-
+ src/modules/vterm/keymap.c         |  39 ++---
+ src/modules/vterm/lostio.c         | 318 +++++++++++++++++++++++++++----------
+ src/modules/vterm/term.c           |  30 +---
+ src/modules/vterm/vterm.c          |   8 +-
+ src/modules/vterm/vterm.h          |  27 ++++
+ 6 files changed, 285 insertions(+), 148 deletions(-)
+
+diff --git a/src/modules/vterm/include/keymap.h b/src/modules/vterm/include/keymap.h
+index 604080d..9c6ff9f 100644
+--- a/src/modules/vterm/include/keymap.h
++++ b/src/modules/vterm/include/keymap.h
+@@ -61,21 +61,14 @@ extern keymap_entry_t keymap[128];
+ keymap_entry_t* keymap_get(uint8_t keycode);
+ 
+ /**
+- * Legt die vterm:/keymap im Verzeichnisbaum an
+- */
+-void keymap_init(void);
+-
+-/**
+  * LostIO-Handller um die Tastaturbelegung zu lesen
+  */
+-size_t keymap_read(lostio_filehandle_t* file, void* buf,
+-    size_t blocksize, size_t blockcount);
++int keymap_read(uint64_t offset, size_t bytes, void* buf);
+ 
+ /**
+  * LostIO-Handler um die Tastaturbelegung zu aendern
+  */
+-size_t keymap_write(lostio_filehandle_t* file, size_t blocksize,
+-    size_t blockcount, void* data);
++int keymap_write(uint64_t offset, size_t bytes, void* buf);
+ 
+ #endif // ifndef _KEYMAP_H_
+ 
+diff --git a/src/modules/vterm/keymap.c b/src/modules/vterm/keymap.c
+index 72715e6..28b4905 100644
+--- a/src/modules/vterm/keymap.c
++++ b/src/modules/vterm/keymap.c
+@@ -35,6 +35,7 @@
+ 
+ #include &lt;io.h&gt;
+ #include &lt;string.h&gt;
++#include &lt;errno.h&gt;
+ 
+ #include &quot;vterm.h&quot;
+ #include &quot;keymap.h&quot;
+@@ -50,47 +51,29 @@ keymap_entry_t* keymap_get(uint8_t keycode)
+ }
+ 
+ /**
+- * Legt die vterm:/keymap im Verzeichnisbaum an
+- */
+-void keymap_init(void)
+-{
+-    vfstree_create_node(&quot;/keymap&quot;, LOSTIO_TYPES_KEYMAP, 0, NULL, 0);
+-}
+-
+-/**
+  * LostIO-Handller um die Tastaturbelegung zu lesen
+  */
+-size_t keymap_read(lostio_filehandle_t* file, void* buf,
+-    size_t blocksize, size_t blockcount)
++int keymap_read(uint64_t offset, size_t bytes, void* buf)
+ {
+-    size_t size = blocksize * blockcount;
+-
+-    if (file-&gt;pos + size &gt;= sizeof(keymap)) {
+-        size = sizeof(keymap) - file-&gt;pos;
+-        file-&gt;flags |= LOSTIO_FLAG_EOF;
++    if (offset &gt; sizeof(keymap) || bytes &gt; sizeof(keymap) - offset) {
++        return -EINVAL;
+     }
+ 
+-    memcpy(buf, ((uint8_t*) keymap) + file-&gt;pos, size);
+-    file-&gt;pos += size;
++    memcpy(buf, ((uint8_t*) keymap) + offset, bytes);
+ 
+-    return size;
++    return 0;
+ }
+ 
+ /**
+  * LostIO-Handler um die Tastaturbelegung zu aendern
+  */
+-size_t keymap_write(lostio_filehandle_t* file, size_t blocksize,
+-    size_t blockcount, void* buf)
++int keymap_write(uint64_t offset, size_t bytes, void* buf)
+ {
+-    size_t size = blocksize * blockcount;
+-
+-    if (file-&gt;pos + size &gt;= sizeof(keymap)) {
+-        size = sizeof(keymap) - file-&gt;pos;
+-        file-&gt;flags |= LOSTIO_FLAG_EOF;
++    if (offset &gt; sizeof(keymap) || bytes &gt; sizeof(keymap) - offset) {
++        return -ENOSPC;
+     }
+ 
+-    memcpy(((uint8_t*) keymap) + file-&gt;pos, buf, size);
+-    file-&gt;pos += size;
++    memcpy(((uint8_t*) keymap) + offset, buf, bytes);
+ 
+-    return size;
++    return 0;
+ }
+diff --git a/src/modules/vterm/lostio.c b/src/modules/vterm/lostio.c
+index 7bd1c30..4905f8a 100644
+--- a/src/modules/vterm/lostio.c
++++ b/src/modules/vterm/lostio.c
+@@ -37,129 +37,283 @@
+ #include &lt;stdlib.h&gt;
+ #include &lt;syscall.h&gt;
+ #include &lt;string.h&gt;
++#include &lt;errno.h&gt;
+ 
+ #include &quot;vterm.h&quot;
+ #include &quot;lostio.h&quot;
+ #include &quot;keymap.h&quot;
+ 
+-/// Handler fuer Lesen aus in
+-size_t terminal_read(lostio_filehandle_t* handle, void* buf,
+-    size_t blocksize, size_t blockcount);
++static struct lio_resource* root;
+ 
+-/// Handler fuer schreiben in out
+-size_t terminal_write(lostio_filehandle_t* handle, size_t blocksize,
+-    size_t blockcount, void* data);
++static void lio_add_vterm_dir(vterminal_t* vterm)
++{
++    struct lio_tree* tree = root-&gt;tree;
+ 
+-/// Handler fuer close auf in
+-static int lio_in_close(lostio_filehandle_t* fh);
++    struct lio_resource* dir;
++    struct lio_resource* in_node;
++    struct lio_resource* out_node;
+ 
++    struct lio_vterm* lv;
+ 
+-/**
+- * LostIO-Interface vorbereiten, ueber das die Prozesse mit vterm kommunizieren
+- * werden.
+- */
+-void init_lostio_interface()
++    // Verzeichnis
++    dir = lio_resource_create(tree);
++    dir-&gt;browsable = 1;
++    dir-&gt;blocksize = 1;
++    lio_resource_modified(dir);
++    lio_node_create(root, dir, vterm-&gt;name);
++
++    // In-Node
++    lv = malloc(sizeof(*lv));
++    *lv = (struct lio_vterm) {
++        .type   = LOSTIO_TYPES_IN,
++        .vterm  = vterm,
++    };
++
++    in_node = lio_resource_create(tree);
++    in_node-&gt;readable = 1;
++    in_node-&gt;blocksize = 1;
++    in_node-&gt;moredata = 1;
++    in_node-&gt;opaque = lv;
++    lio_resource_modified(in_node);
++    lio_node_create(dir, in_node, &quot;in&quot;);
++
++    vterm-&gt;lio_in_res = in_node;
++
++    // Out-Node
++    lv = malloc(sizeof(*lv));
++    *lv = (struct lio_vterm) {
++        .type   = LOSTIO_TYPES_OUT,
++        .vterm  = vterm,
++    };
++
++    out_node = lio_resource_create(tree);
++    out_node-&gt;writable = 1;
++    out_node-&gt;blocksize = 1;
++    out_node-&gt;opaque = lv;
++    lio_resource_modified(out_node);
++    lio_node_create(dir, out_node, &quot;out&quot;);
++}
++
++struct lio_resource* vterm_load_root(struct lio_tree* tree)
+ {
+-    lostio_init();
+-    lostio_type_directory_use();
+-
+-    // Typehandle fuer Ausgabekanaele
+-    typehandle_t* typehandle = malloc(sizeof(typehandle_t));
+-    typehandle-&gt;id          = LOSTIO_TYPES_OUT;
+-    typehandle-&gt;not_found   = NULL;
+-    typehandle-&gt;pre_open    = NULL;
+-    typehandle-&gt;post_open   = NULL;
+-    typehandle-&gt;read        = NULL;
+-    typehandle-&gt;write       = &amp;terminal_write;
+-    typehandle-&gt;seek        = NULL;
+-    typehandle-&gt;close       = NULL;
+-    lostio_register_typehandle(typehandle);
+-
+-    // Typehandle fuer Eingabekanaele
+-    typehandle = malloc(sizeof(typehandle_t));
+-    typehandle-&gt;id          = LOSTIO_TYPES_IN;
+-    typehandle-&gt;not_found   = NULL;
+-    typehandle-&gt;pre_open    = NULL;
+-    typehandle-&gt;post_open   = NULL;
+-    typehandle-&gt;read        = &amp;terminal_read;
+-    typehandle-&gt;write       = NULL;
+-    typehandle-&gt;seek        = NULL;
+-    typehandle-&gt;close       = lio_in_close;
+-    typehandle-&gt;link        = NULL;
+-    typehandle-&gt;unlink      = NULL;
+-    lostio_register_typehandle(typehandle);
+-
+-    // Typehandle fuer Keymaps
+-    typehandle = calloc(1, sizeof(typehandle_t));
+-    typehandle-&gt;id          = LOSTIO_TYPES_KEYMAP;
+-    typehandle-&gt;read        = &amp;keymap_read;
+-    typehandle-&gt;write       = &amp;keymap_write;
+-    lostio_register_typehandle(typehandle);
++    vterminal_t *vterm;
++    struct lio_resource* keymap_node;
++    struct lio_vterm* lv;
++    int i;
++
++    if (tree-&gt;source != -1) {
++        return NULL;
++    }
++
++    // Wurzelknoten
++    root = lio_resource_create(tree);
++    root-&gt;browsable = 1;
++    root-&gt;blocksize = 1;
++    lio_resource_modified(root);
++    lio_node_create(NULL, root, &quot;&quot;);
++
++    // keymap
++    lv = malloc(sizeof(*lv));
++    *lv = (struct lio_vterm) {
++        .type   = LOSTIO_TYPES_KEYMAP,
++        .vterm  = NULL,
++    };
++
++    keymap_node = lio_resource_create(tree);
++    keymap_node-&gt;readable = 1;
++    keymap_node-&gt;writable = 1;
++    keymap_node-&gt;blocksize = 1;
++    keymap_node-&gt;opaque = lv;
++    lio_resource_modified(keymap_node);
++    lio_node_create(root, keymap_node, &quot;keymap&quot;);
++
++    // Terminals
++    for (i = 0; (vterm = list_get_element_at(vterm_list, i)); i++) {
++        lio_add_vterm_dir(vterm);
++    }
++
++    return root;
++}
++
++void lio_add_vterm(vterminal_t* vterm)
++{
++    if (root) {
++        lio_add_vterm_dir(vterm);
++    }
+ }
+ 
+ /**
+  * LostIO-Handler um in den Ausgabekanal zu schreiben
+  */
+-size_t terminal_write(lostio_filehandle_t* file, size_t blocksize,
+-    size_t blockcount, void* data)
++int term_write(struct lio_resource* res, uint64_t offset, size_t bytes,
++               void* buf)
+ {
++    struct lio_vterm *lv = res-&gt;opaque;
++
++    //printf(&quot;term_write: %s: %d -&gt; %p\n&quot;, lv-&gt;vterm-&gt;name, bytes, buf);
++
+     p();
+-    vterm_process_output((vterminal_t*) file-&gt;node-&gt;data, data, blocksize *
+-        blockcount);
++    vterm_process_output(lv-&gt;vterm, buf, bytes);
+     v();
+-    return blocksize * blockcount;
++
++    return 0;
+ }
+ 
+ /**
+  * LostIO-Handller um aus dem Eingabekanal zu lesen
+  */
+-size_t terminal_read(lostio_filehandle_t* file, void* buf,
+-    size_t blocksize, size_t blockcount)
++int term_read(struct lio_resource* res, uint64_t offset, size_t bytes,
++               void* buf)
+ {
++    struct lio_vterm *lv = res-&gt;opaque;
++
+     p();
+-    size_t size = blocksize * blockcount;
+-    vterminal_t* vterm = (vterminal_t*) file-&gt;node-&gt;data;
++    vterminal_t* vterm = lv-&gt;vterm;
++
++    /*printf(&quot;vterm_read: offset %llx + %d bytes [buf %d; res %d; seteof %d; &quot;
++           &quot;moredata %d]\n&quot;, offset, bytes,
++           vterm-&gt;in_buffer_size, res-&gt;size, vterm-&gt;set_eof, res-&gt;moredata);*/
+ 
++    // FIXME Erstmal die vorherigen Daten rausgeben
+     if (vterm-&gt;set_eof) {
+         vterm-&gt;set_eof = false;
+-        file-&gt;flags |= LOSTIO_FLAG_EOF;
++        res-&gt;moredata = false;
++        lio_resource_modified(res);
+         v();
+-        return 0;
++        return -EAGAIN;
++    } else if (res-&gt;moredata == false) {
++        res-&gt;moredata = true;
++        lio_resource_modified(res);
+     }
+ 
+-    if (vterm-&gt;in_buffer_size == 0) {
++    // Erst einmal alles wegwerfen, was nicht mehr gebraucht wird, weil schon
++    // von einem höheren Offset gelesen wurde
++    if (offset &gt; vterm-&gt;in_buffer_offset) {
++        size_t drop;
++
++        drop = offset - vterm-&gt;in_buffer_offset;
++        if (drop &gt; vterm-&gt;in_buffer_size) {
++            drop = vterm-&gt;in_buffer_size;
++        }
++        vterm-&gt;in_buffer_size -= drop;
++
++        if (vterm-&gt;in_buffer_size != 0) {
++            memmove(vterm-&gt;in_buffer, vterm-&gt;in_buffer + drop,
++                    vterm-&gt;in_buffer_size);
++        } else {
++            free(vterm-&gt;in_buffer);
++            vterm-&gt;in_buffer = NULL;
++        }
++
++        vterm-&gt;in_buffer_offset = offset;
++    }
++
++    if (vterm-&gt;in_buffer_size &lt; bytes) {
+         v();
+-        return 0;
++        return -EAGAIN;
++    }
++
++/*printf(&quot;vterm_read: memcpy %p &lt;- %p + %x [buf %x]\n&quot;,
++    buf, vterm-&gt;in_buffer, bytes, vterm-&gt;in_buffer_size);*/
++    memcpy(buf, vterm-&gt;in_buffer, bytes);
++
++    v();
++    return 0;
++}
++
++void lio_update_in_file_size(vterminal_t* vterm, size_t length)
++{
++    struct lio_resource* res = vterm-&gt;lio_in_res;
++
++    if (res) {
++        res-&gt;size += length;
++        lio_resource_modified(res);
+     }
+-    
+-    if (vterm-&gt;in_buffer_size &lt; size) {
+-        size = vterm-&gt;in_buffer_size;
++}
++
++void lio_set_eof(vterminal_t* vterm)
++{
++    struct lio_resource* res = vterm-&gt;lio_in_res;
++
++    if (res) {
++        res-&gt;moredata = false;
++        lio_resource_modified(res);
+     }
++}
+ 
+-    memcpy(buf, vterm-&gt;in_buffer, size);
+-    
+-    vterm-&gt;in_buffer_size -= size;
+-    // Die uebrigen Daten am ende des Buffers an den Anfang schieben
+-    if (vterm-&gt;in_buffer_size != 0) {
+-        memmove(vterm-&gt;in_buffer, vterm-&gt;in_buffer + size,
+-            vterm-&gt;in_buffer_size);
+-    } else {
+-        free(vterm-&gt;in_buffer);
+-        vterm-&gt;in_buffer = NULL;
++int vterm_read(struct lio_resource* res, uint64_t offset, size_t bytes,
++                void* buf)
++{
++    struct lio_vterm *lv = res-&gt;opaque;
++
++    switch (lv-&gt;type) {
++        case LOSTIO_TYPES_IN:       return term_read(res, offset, bytes, buf);
++        case LOSTIO_TYPES_OUT:      return -EBADF;
++        case LOSTIO_TYPES_KEYMAP:   return keymap_read(offset, bytes, buf);
+     }
+ 
+-    v();
+-    return size;
++    return -EBADF;
+ }
+ 
++int vterm_write(struct lio_resource* res, uint64_t offset, size_t bytes,
++                void* buf)
++{
++    struct lio_vterm *lv = res-&gt;opaque;
++
++    switch (lv-&gt;type) {
++        case LOSTIO_TYPES_IN:       return -EBADF;
++        case LOSTIO_TYPES_OUT:      return term_write(res, offset, bytes, buf);
++        case LOSTIO_TYPES_KEYMAP:   return keymap_write(offset, bytes, buf);
++    }
++
++    return -EBADF;
++}
++
++int vterm_resize(struct lio_resource* res, uint64_t size)
++{
++    struct lio_vterm *lv = res-&gt;opaque;
++
++    switch (lv-&gt;type) {
++        case LOSTIO_TYPES_IN:       return 0;
++        case LOSTIO_TYPES_OUT:      return 0;
++        case LOSTIO_TYPES_KEYMAP:   return 0; /* TODO -EINVAL; */
++    }
++
++    return -EBADF;
++}
++
++void vterm_close(struct lio_resource* res)
++{
++    struct lio_vterm *lv = res-&gt;opaque;
++
++    if (lv-&gt;type == LOSTIO_TYPES_IN) {
++        lv-&gt;vterm-&gt;in_buffer_offset = 0;
++        res-&gt;size = lv-&gt;vterm-&gt;in_buffer_size = 0;
++        lio_resource_modified(res);
++    }
++}
++
++static struct lio_service service = {
++    .name               = &quot;vterm&quot;,
++    .lio_ops = {
++        .load_root      = vterm_load_root,
++        .close          = vterm_close,
++        .read           = vterm_read,
++        .write          = vterm_write,
++        .resize         = vterm_resize,
++    },
++};
++
+ /**
+- * LostIO-Handler der einen allenfalls allozierten Buffer im Filehandle freigibt
++ * LostIO-Interface vorbereiten, ueber das die Prozesse mit vterm kommunizieren
++ * werden.
+  */
+-static int lio_in_close(lostio_filehandle_t* fh)
++void init_lostio_interface()
+ {
+-    if (fh-&gt;data) {
+-        free(fh-&gt;data);
+-    }
++    // TODO Entfernen, wenn niemand mehr versucht, LIOv1 zu benutzen
++    // Im Moment brauchen wir das noch, damit RPCs beantwortet werden und der
++    // Aufrufer nicht hängt
++    lostio_init();
+ 
+-    return 0;
++    lio_add_service(&amp;service);
+ }
+diff --git a/src/modules/vterm/term.c b/src/modules/vterm/term.c
+index ccf4e6a..5a61ac7 100644
+--- a/src/modules/vterm/term.c
++++ b/src/modules/vterm/term.c
+@@ -51,7 +51,7 @@ char* strnstr(const char* s, const char* find, size_t slen);
+ vterminal_t* current_vterm = NULL;
+ 
+ /// Liste in der alle virtuellen Terminals gespeichert werden
+-static list_t* vterm_list;
++list_t* vterm_list;
+ 
+ /// Virtuelles Terminal erstellen
+ vterminal_t* vterm_create(char shortcut);
+@@ -94,28 +94,9 @@ vterminal_t* vterm_create(char shortcut)
+     
+     static int next_vterm_id = 0;
+     asprintf(&amp;vterm-&gt;name, &quot;vterm%d&quot;, next_vterm_id++);
+-    
+-    // Knoten fuer LostIO-Schnittstelle erstellen
+-    size_t name_len = strlen(vterm-&gt;name);
+-    char path[name_len + 7];
+-    path[0] = '/';
+-    memcpy(path + 1, vterm-&gt;name, name_len + 1);
+-    
+-    // Verzeichnis
+-    vfstree_create_node(path, LOSTIO_TYPES_DIRECTORY, 0, NULL,
+-        LOSTIO_FLAG_BROWSABLE);
+-    // In-Node
+-    memcpy(path + name_len + 1, &quot;/in&quot;, 4);
+-    vfstree_create_node(path, LOSTIO_TYPES_IN, 0, vterm,
+-        LOSTIO_FLAG_NOAUTOEOF);
+-    vterm-&gt;in_node = vfstree_get_node_by_path(path);
+-    // Sonst setzt LIO das EOF
+-    vterm-&gt;in_node-&gt;size = 1;
+-
+-    // Out-Node
+-    memcpy(path + name_len + 1, &quot;/out&quot;, 5);
+-    vfstree_create_node(path, LOSTIO_TYPES_OUT, 0, vterm, 0);
+-    vterm-&gt;out_node = vfstree_get_node_by_path(path);
++
++    // LostIO-Knoten erstellen
++    lio_add_vterm(vterm);
+     
+     // Shortcut zuweisen
+     vterm-&gt;shortcut = shortcut;
+@@ -172,6 +153,8 @@ void vterm_process_input(char* data, size_t length)
+     for (i = 0; i &lt; length; i++) {
+         input_buffer_append(current_vterm, data[i]);
+     }
++
++    lio_update_in_file_size(current_vterm, length);
+ }
+ 
+ /**
+@@ -243,6 +226,7 @@ bool vterm_process_raw_input(uint8_t keycode, struct modifiers* modifiers)
+     } else if (modifiers-&gt;control &amp;&amp; (keycode == 32)) {
+         // Strg + D = EOF
+         current_vterm-&gt;set_eof = true;
++        lio_set_eof(current_vterm);
+         return true;
+     } else if (keycode == KEYCODE_SCROLL_LOCK) {
+         current_vterm-&gt;output.scroll_lock = !current_vterm-&gt;output.scroll_lock;
+diff --git a/src/modules/vterm/vterm.c b/src/modules/vterm/vterm.c
+index 0ff461f..5c9af8a 100644
+--- a/src/modules/vterm/vterm.c
++++ b/src/modules/vterm/vterm.c
+@@ -85,13 +85,9 @@ int main(int argc, char* argv[])
+         return -1;
+     }
+ 
+-    // Tastaturbelegung konfigurierbar machen
+-    keymap_init();
+-
+     // Auf Anfragen warten
+     while(true) {
+-        wait_for_rpc();
+-        lostio_dispatch();
++        lio_dispatch();
++        lio_srv_wait();
+ 	}
+ }
+-
+diff --git a/src/modules/vterm/vterm.h b/src/modules/vterm/vterm.h
+index a7b6ef7..491a028 100644
+--- a/src/modules/vterm/vterm.h
++++ b/src/modules/vterm/vterm.h
+@@ -145,6 +145,9 @@ typedef struct {
+     /// Groesse des Eingabepuffers
+     size_t in_buffer_size;
+ 
++    /// LIO-Offset, an dem der Eingabepuffer anfängt
++    uint64_t in_buffer_offset;
++
+     /// Pointer auf den Eingabenpuffer.
+     char* in_buffer;
+ 
+@@ -168,6 +171,9 @@ typedef struct {
+ 
+     /// Beim naechsten Lesen EOF setzen
+     bool set_eof;
++
++    /// LostIO-Ressource für Tastatureingaben
++    struct lio_resource* lio_in_res;
+ } vterminal_t;
+ 
+ /// Status der Modifiertasten
+@@ -178,7 +184,28 @@ struct modifiers {
+     bool alt;
+ };
+ 
++/// opaque-Struktur für LIO-Knoten
++struct lio_vterm {
++    /// LOSTIO_TYPES_*
++    int type;
++
++    /// Terminal, zu dem der Knoten gehört
++    vterminal_t* vterm;
++};
++
++/// Neues vterm bei LostIO registrieren
++void lio_add_vterm(vterminal_t* vterm);
++
++/// Informiert LostIO, dass es @length neue Zeichen zu lesen gibt
++void lio_update_in_file_size(vterminal_t* vterm, size_t length);
++
++/// Informiert LostIO, dass ein EOF gesendet werden soll
++void lio_set_eof(vterminal_t* vterm);
++
++
++
+ extern vterminal_t* current_vterm;
++extern list_t* vterm_list;
+ 
+ /// Virtuelle terminals einrichten
+ void init_vterminals(unsigned int count);
+-- 
+2.1.2
+
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002482.html">[tyndur-devel] [PATCH 5/6] kernel2: EOF-Handling in pread überarbeitet
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002477.html">[tyndur-devel] [PATCH 1/6] kernel2: Refcounting für lio_stream
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2483">[ Datum ]</a>
+              <a href="thread.html#2483">[ Thema ]</a>
+              <a href="subject.html#2483">[ Betreff (Subject)]</a>
+              <a href="author.html#2483">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

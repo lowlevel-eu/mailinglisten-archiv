@@ -1,0 +1,167 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH v2 2/7] kernel2: SHM beim Prozessende schliessen
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%202/7%5D%20kernel2%3A%20SHM%20beim%20Prozessende%0A%20schliessen&In-Reply-To=%3C20100103161844.GB31714%40neo.geekcave.lan%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001617.html">
+   <LINK REL="Next"  HREF="001618.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH v2 2/7] kernel2: SHM beim Prozessende schliessen</H1>
+    <B>Antoine Kaufmann</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%202/7%5D%20kernel2%3A%20SHM%20beim%20Prozessende%0A%20schliessen&In-Reply-To=%3C20100103161844.GB31714%40neo.geekcave.lan%3E"
+           TITLE="[tyndur-devel] [PATCH v2 2/7] kernel2: SHM beim Prozessende schliessen">toni at tyndur.org
+                  </A><BR>
+    <I>So Jan  3 17:18:44 CET 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001617.html">[tyndur-devel] [PATCH v2 2/7] kernel2: SHM beim Prozessende	schliessen
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001618.html">[tyndur-devel] [PATCH v2 3/7] kernel2: Fuer Syscalls keinen	Userspacestack benutzen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1625">[ Datum ]</a>
+              <a href="thread.html#1625">[ Thema ]</a>
+              <a href="subject.html#1625">[ Betreff (Subject) ]</a>
+              <a href="author.html#1625">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>On Sun, Jan 03 17:03, Kevin Wolf wrote:
+&gt;<i> ! kernel2: Alle geoeffneten SHM-Bereiche beim Prozessende schliessen
+</I>&gt;<i> 
+</I>&gt;<i> Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+</I>&gt;<i> ---
+</I>&gt;<i>  src/kernel2/include/tasks.h |    3 +++
+</I>&gt;<i>  src/kernel2/src/mm/shm.c    |   37 +++++++++++++++++++++++++++++++++++++
+</I>&gt;<i>  2 files changed, 40 insertions(+), 0 deletions(-)
+</I>&gt;<i> 
+</I>&gt;<i> diff --git a/src/kernel2/include/tasks.h b/src/kernel2/include/tasks.h
+</I>&gt;<i> index c8370f4..37d9714 100644
+</I>&gt;<i> --- a/src/kernel2/include/tasks.h
+</I>&gt;<i> +++ b/src/kernel2/include/tasks.h
+</I>&gt;<i> @@ -84,6 +84,9 @@ typedef struct pm_process {
+</I>&gt;<i>      /// Eine Liste von RPC-Backlinks
+</I>&gt;<i>      list_t* rpcs;
+</I>&gt;<i>  
+</I>&gt;<i> +    /// Eine Liste von geoeffneten SHM-Bereichen
+</I>&gt;<i> +    list_t* shm;
+</I>&gt;<i> +
+</I>&gt;<i>      /**
+</I>&gt;<i>       * Eine Liste von Eventhandlern, die beim Loeschen des Prozesses
+</I>&gt;<i>       * aufgerufen werden
+</I>&gt;<i> diff --git a/src/kernel2/src/mm/shm.c b/src/kernel2/src/mm/shm.c
+</I>&gt;<i> index d05de0e..b067d91 100644
+</I>&gt;<i> --- a/src/kernel2/src/mm/shm.c
+</I>&gt;<i> +++ b/src/kernel2/src/mm/shm.c
+</I>&gt;<i> @@ -51,6 +51,7 @@ struct shm_desc {
+</I>&gt;<i>  };
+</I>&gt;<i>  
+</I>&gt;<i>  struct shm_process {
+</I>&gt;<i> +    struct shm_desc*    shm;
+</I>&gt;<i>      pm_process_t*       process;
+</I>&gt;<i>      vaddr_t             vaddr;
+</I>&gt;<i>  };
+</I>&gt;<i> @@ -58,6 +59,8 @@ struct shm_process {
+</I>&gt;<i>  static tree_t* shms = NULL;
+</I>&gt;<i>  static uint32_t shm_last_id = 0;
+</I>&gt;<i>  
+</I>&gt;<i> +static void shm_destroy_task(pm_process_t* process, void* prv);
+</I>&gt;<i> +
+</I>&gt;<i>  /**
+</I>&gt;<i>   * Initialisiert die SHM-Verwaltung
+</I>&gt;<i>   */
+</I>&gt;<i> @@ -126,10 +129,17 @@ void* shm_attach(pm_process_t* process, uint32_t id)
+</I>&gt;<i>      }
+</I>&gt;<i>  
+</I>&gt;<i>      shm_proc = calloc(1, sizeof(*shm_proc));
+</I>&gt;<i> +    shm_proc-&gt;shm = shm;
+</I>&gt;<i>      shm_proc-&gt;process = process;
+</I>&gt;<i>      shm_proc-&gt;vaddr = ret;
+</I>&gt;<i>      list_push(shm-&gt;processes, shm_proc);
+</I>&gt;<i>  
+</I>&gt;<i> +    if (process-&gt;shm == NULL) {
+</I>&gt;<i> +        process-&gt;shm = list_create();
+</I>&gt;<i> +        pm_register_on_destroy(process, shm_destroy_task, NULL);
+</I>&gt;<i> +    }
+</I>&gt;<i> +    list_push(process-&gt;shm, shm_proc);
+</I>&gt;<i> +
+</I>&gt;<i>      return ret;
+</I>&gt;<i>  }
+</I>&gt;<i>  
+</I>&gt;<i> @@ -150,6 +160,15 @@ void shm_detach(pm_process_t* process, uint32_t id)
+</I>&gt;<i>          return;
+</I>&gt;<i>      }
+</I>&gt;<i>  
+</I>&gt;<i> +    // Aus der SHM-Liste des Prozesses austragen
+</I>&gt;<i> +    for (i = 0; (shm_proc = list_get_element_at(process-&gt;shm, i)); i++) {
+</I>&gt;<i> +        if (shm_proc-&gt;shm == shm) {
+</I>&gt;<i> +            list_remove(process-&gt;shm, i);
+</I>&gt;<i> +            break;
+</I>&gt;<i> +        }
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    // Aus der Prozessliste des SHM austragen
+</I>&gt;<i>      for (i = 0; (shm_proc = list_get_element_at(shm-&gt;processes, i)); i++) {
+</I>&gt;<i>          if (shm_proc-&gt;process == process) {
+</I>&gt;<i>              list_remove(shm-&gt;processes, i);
+</I>&gt;<i> @@ -184,3 +203,21 @@ found:
+</I>&gt;<i>  
+</I>&gt;<i>      return;
+</I>&gt;<i>  }
+</I>&gt;<i> +
+</I>&gt;<i> +/**
+</I>&gt;<i> + * Schliesst alle SHM-Bereiche eines Prozesses
+</I>&gt;<i> + */
+</I>&gt;<i> +static void shm_destroy_task(pm_process_t* process, void* prv)
+</I>&gt;<i> +{
+</I>&gt;<i> +    struct shm_process* shm_proc;
+</I>&gt;<i> +
+</I>&gt;<i> +    if (process-&gt;shm == NULL) {
+</I>&gt;<i> +        return;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    while ((shm_proc = list_get_element_at(process-&gt;shm, 0))) {
+</I>&gt;<i> +        shm_detach(process, shm_proc-&gt;shm-&gt;id);
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    list_destroy(process-&gt;shm);
+</I>&gt;<i> +}
+</I>
+Acked-by: Antoine Kaufmann &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">toni at tyndur.org</A>&gt;
+
+-- 
+Antoine Kaufmann
+&lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">toni at famkaufmann.info</A>&gt;
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : &lt;<A HREF="http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100103/e5927180/attachment.pgp">http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100103/e5927180/attachment.pgp</A>&gt;
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001617.html">[tyndur-devel] [PATCH v2 2/7] kernel2: SHM beim Prozessende	schliessen
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001618.html">[tyndur-devel] [PATCH v2 3/7] kernel2: Fuer Syscalls keinen	Userspacestack benutzen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1625">[ Datum ]</a>
+              <a href="thread.html#1625">[ Thema ]</a>
+              <a href="subject.html#1625">[ Betreff (Subject)]</a>
+              <a href="author.html#1625">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

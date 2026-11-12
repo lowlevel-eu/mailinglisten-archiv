@@ -1,0 +1,183 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [Lost] [PATCH] lpt: Ein bisschen mehr Fehlerbehandlung
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5BLost%5D%20%5BPATCH%5D%20lpt%3A%20Ein%20bisschen%20mehr%20Fehlerbehandlung&In-Reply-To=%3C1225558843-12435-1-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   
+   <LINK REL="Next"  HREF="000587.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[Lost] [PATCH] lpt: Ein bisschen mehr Fehlerbehandlung</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5BLost%5D%20%5BPATCH%5D%20lpt%3A%20Ein%20bisschen%20mehr%20Fehlerbehandlung&In-Reply-To=%3C1225558843-12435-1-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[Lost] [PATCH] lpt: Ein bisschen mehr Fehlerbehandlung">kevin at tyndur.org
+                  </A><BR>
+    <I>Sa Nov  1 18:00:43 CET 2008</I>
+    <P><UL>
+        
+        <LI>Nächste Nachricht: <A HREF="000587.html">[Lost] [PATCH] lpt: Ein bisschen mehr Fehlerbehandlung
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#586">[ Datum ]</a>
+              <a href="thread.html#586">[ Thema ]</a>
+              <a href="subject.html#586">[ Betreff (Subject) ]</a>
+              <a href="author.html#586">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ lpt: Verstaendliche Fehlermeldung statt Unhandled Exception, wenn
+  Abhaengigkeiten nicht aufgeloest werden koennen oder die Paketliste
+  nicht eingelesen werden kann.
+! lpt: Endlosschleife beseitigt, wenn eine pkglist.* zu einer Quelle
+  existiert, die in pkgsrc nicht aufgefuehrt wird.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/pas/lpt/lpt.pas |   75 +++++++++++++++++++++++++------------------
+ 1 files changed, 44 insertions(+), 31 deletions(-)
+
+diff --git a/src/modules/pas/lpt/lpt.pas b/src/modules/pas/lpt/lpt.pas
+index 56fe1d3..dec7a15 100644
+--- a/src/modules/pas/lpt/lpt.pas
++++ b/src/modules/pas/lpt/lpt.pas
+@@ -157,6 +157,37 @@ begin
+     Close(f);
+ end;
+ 
++procedure ReadPkglists(pkgset: TPackageSet);
++var
++    srec: SearchRec;
++    name: String;
++    repo: TRepository;
++begin
++    dos.FindFirst(configRoot + 'pkglist.*', 0, srec);
++    while DosError = 0 do begin
++        WriteLn('Lese Paketliste ein: ' + srec.name);
++
++        name := Copy(srec.name, length('pkglist.*'), length(srec.name));
++        repo := GetRepository(name);
++        if repo = nil then begin
++            TextColor(6);
++            WriteLn('Warnung: &quot;', name, '&quot; nicht in pkgsrc gefunden. Ueberspringe Quelle.');
++            TextColor(7);
++        end else begin
++            try
++                pkgset.ScanFile(configRoot + srec.name, repo.url);
++            except
++                on e: Exception do begin
++                    TextColor(12);
++                    WriteLn('Fehler beim Einlesen der Paketliste: ', e.message);
++                    TextColor(7);
++                end;
++            end;
++        end;
++        dos.FindNext(srec);
++    end;
++end;
++
+ procedure Get(pkgname: String);
+ 
+ 
+@@ -208,10 +239,8 @@ procedure Get(pkgname: String);
+     end;
+ 
+ var
+-    srec: SearchRec;
+     pkgset: TPackageSet;
+     section: String;
+-    repo: TRepository;
+ 
+     instset: TPackageSet;
+     pkg: TPackage;
+@@ -222,20 +251,7 @@ begin
+     ReadPkgsrc(configRoot + 'pkgsrc');
+     pkgset := TPackageSet.create;
+ 
+-    dos.FindFirst(configRoot + 'pkglist.*', 0, srec);
+-    while DosError = 0 do begin
+-        WriteLn('Lese Paketliste ein: ' + srec.name);
+-        
+-        repo := GetRepository(Copy(srec.name, length('pkglist.*'), length(srec.name)));
+-        if repo = nil then begin
+-            WriteLn('Fehler: Nicht in pkgsrc gefunden. Ueberspringe Quelle.');
+-            continue;
+-        end;
+-
+-        pkgset.ScanFile(configRoot + srec.name, repo.url);
+-        dos.FindNext(srec);
+-    end;
+-
++    ReadPkglists(pkgset);
+ 
+     section := 'bin';
+     version := pkgset.GetCurrentVersion(pkgname, section);
+@@ -249,7 +265,17 @@ begin
+     
+     instset := TPackageSet.create();
+     instset.AddVersion(version);
+-    instset.AddDependencies(pkgset);
++    try
++        instset.AddDependencies(pkgset);
++    except
++        on e: EDependency do begin
++            TextColor(12);
++            WriteLn('Konnte die Abhaengigkeiten des Pakets nicht aufloesen:');
++            WriteLn(e.message);
++            TextColor(7);
++            exit;
++        end;
++    end;
+ 
+     for i := 0 to instset.packages.count - 1 do begin
+         pkg := TPackage(instset.packages.items[i]);
+@@ -282,20 +308,7 @@ var
+ begin
+     ReadPkgsrc(configRoot + 'pkgsrc');
+     pkgset := TPackageSet.create;
+-
+-    dos.FindFirst(configRoot + 'pkglist.*', 0, srec);
+-    while DosError = 0 do begin
+-        WriteLn('Lese Paketliste ein: ' + srec.name);
+-
+-        repo := GetRepository(Copy(srec.name, length('pkglist.*'), length(srec.name)));
+-        if repo = nil then begin
+-            WriteLn('Fehler: Nicht in pkgsrc gefunden. Ueberspringe Quelle.');
+-            continue;
+-        end;
+-
+-        pkgset.ScanFile(configRoot + srec.name, repo.url);
+-        dos.FindNext(srec);
+-    end;
++    ReadPkglists(pkgset);
+ 
+     for i := 0 to pkgset.packages.count - 1 do begin
+         pkg := TPackage(pkgset.packages.items[i]);
+-- 
+1.5.4.5
+
+
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	
+	<LI>Nächste Nachricht: <A HREF="000587.html">[Lost] [PATCH] lpt: Ein bisschen mehr Fehlerbehandlung
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#586">[ Datum ]</a>
+              <a href="thread.html#586">[ Thema ]</a>
+              <a href="subject.html#586">[ Betreff (Subject)]</a>
+              <a href="author.html#586">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

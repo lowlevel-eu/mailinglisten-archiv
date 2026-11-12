@@ -1,0 +1,495 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH 1/2] CDI.audio
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%201/2%5D%20CDI.audio&In-Reply-To=%3C1292945516-28203-2-git-send-email-max%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000239.html">
+   <LINK REL="Next"  HREF="000242.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH 1/2] CDI.audio</H1>
+    <B>max at tyndur.org</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%201/2%5D%20CDI.audio&In-Reply-To=%3C1292945516-28203-2-git-send-email-max%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH 1/2] CDI.audio">max at tyndur.org
+       </A><BR>
+    <I>Tue Dec 21 16:31:55 CET 2010</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000239.html">[cdi-devel] [PATCH 0/2] CDI.audio
+</A></li>
+        <LI>Next message: <A HREF="000242.html">[cdi-devel] [PATCH 1/2] CDI.audio
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#240">[ date ]</a>
+              <a href="thread.html#240">[ thread ]</a>
+              <a href="subject.html#240">[ subject ]</a>
+              <a href="author.html#240">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>From: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+
+This adds the CDI.audio header for sound I/O drivers.
+
+Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+---
+ include/cdi/audio.h |  419 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 files changed, 419 insertions(+), 0 deletions(-)
+ create mode 100644 include/cdi/audio.h
+
+diff --git a/include/cdi/audio.h b/include/cdi/audio.h
+new file mode 100644
+index 0000000..c12d5d0
+--- /dev/null
++++ b/include/cdi/audio.h
+@@ -0,0 +1,419 @@
++/*
++ * Copyright (c) 2010 Max Reitz
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it
++ * and/or modify it under the terms of the Do What The Fuck You Want
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * <A HREF="http://sam.zoy.org/projects/COPYING.WTFPL">http://sam.zoy.org/projects/COPYING.WTFPL</A> for more details.
++ */
++
++/**
++ * \german
++ * Treiber f&#195;&#188;r Soundkarten
++ * \endgerman
++ * \english
++ * Sound card drivers
++ * \endenglish
++ * \defgroup audio
++ */
++/*\@{*/
++
++#ifndef _CDI_AUDIO_H_
++#define _CDI_AUDIO_H_
++
++#include &lt;stddef.h&gt;
++#include &lt;stdint.h&gt;
++
++#include &quot;cdi.h&quot;
++#include &quot;cdi/lists.h&quot;
++#include &quot;cdi/mem.h&quot;
++
++/**
++ * \german
++ * M&#195;&#182;gliche Sampleformate (also Integer vorzeichenbehaftet/vorzeichenlos,
++ * Gleitkommazahlen, Gr&#195;&#182;&#195;&#159;e eines Samples, ...).
++ * Wenn nicht anders gekennzeichnet, wird Little Endian verwendet.
++ * \endgerman
++ * \english
++ * Possible sample formats (i.e., signed/unsigned integer, floating point
++ * numbers, one sample's size, ...).
++ * Little endian is used, unless marked otherwise.
++ * \endenglish
++ */
++typedef enum {
++    // 16 bit signed integer
++    CDI_AUDIO_16SI = 0,
++    // 8 bit signed integer
++    CDI_AUDIO_8SI,
++    // 32 bit signed integer
++    CDI_AUDIO_32SI
++} cdi_audio_sample_format_t;
++
++/**
++ * \german
++ * Abspielposition eines Kanals. Enth&#195;&#164;lt den Index des aktuellen Puffers und
++ * des aktuell abgespielten Frames.
++ * \endgerman
++ * \english
++ * A stream's playback position. Contains the index of both the current buffer
++ * and the frame being played.
++ * \endenglish
++ */
++typedef struct cdi_audio_position {
++    size_t buffer;
++    size_t frame;
++} cdi_audio_position_t;
++
++/**
++ * \german
++ * Status eines Kanals.
++ * \endgerman
++ * \english
++ * A stream's status.
++ * \endenglish
++ */
++typedef enum {
++    /**
++     * \german
++     * Angehalten
++     * \endgerman
++     * \english
++     * Stopped
++     * \endenglish
++     */
++    CDI_AUDIO_STOP = 0,
++    /**
++     * \german
++     * Entweder abspielen oder aufnehmen, je nach Typ.
++     * \endgerman
++     * \english
++     * According to the device type either playing or recording.
++     * \endenglish
++     */
++    CDI_AUDIO_PLAY = 1
++} cdi_audio_status_t;
++
++/**
++ * \german
++ * Beschreibt ein CDI.audio-Ger&#195;&#164;t, also Tonabspiel- oder Aufnahmehardware.
++ * Bietet eine Soundkarte beide Funktionen an, so muss sie in zwei CDI.audio-
++ * Ger&#195;&#164;te aufgeteilt werden.
++ * \endgerman
++ * \english
++ * Describes a CDI.audio device, i.e. a playback or recording device. If a
++ * sound card provides both functions, the driver must register one CDI.audio
++ * device per function.
++ * \endenglish
++ */
++struct cdi_audio_device {
++    struct cdi_device dev;
++
++    /**
++     * \german
++     * Ist dieser Wert ungleich 0, so handelt es sich um ein Aufnahmeger&#195;&#164;t,
++     * es kann nur gelesen werden. Ist er 0, dann k&#195;&#182;nnen nur T&#195;&#182;ne abgespielt
++     * werden.
++     * \endgerman
++     * \english
++     * If this value is not 0, this device is a recording device, thus one can
++     * only read data. Otherwise, only play back is possible.
++     * \endenglish
++     */
++    int record;
++
++    /**
++     * \german
++     * Abspielger&#195;&#164;te k&#195;&#182;nnen mehrere logische Kan&#195;&#164;le anbieten, die vom Ger&#195;&#164;t
++     * zusammengemixt werden. Ist dem nicht der Fall oder handelt es sich um
++     * ein Aufnahmeger&#195;&#164;t, dann ist die Gr&#195;&#182;&#195;&#159;e dieser Liste genau 1. Sie enth&#195;&#164;lt
++     * Elemente des Typs struct cdi_audio_stream.
++     * \endgerman
++     * \english
++     * Play back devices may provide several logical streams which are mixed by
++     * the device. If this is either not true or it is a recording device, the
++     * list's size is exactly 1. It contains elements of type
++     * struct cdi_audio_stream.
++     * \endenglish
++     */
++    cdi_list_t streams;
++};
++
++/**
++ * \german
++ * Beschreibt einen Kanal eines CDI.audio-Ger&#195;&#164;ts.
++ * Jeder Kanal besteht aus einer Reihe von Puffern mit abzuspielenden Samples,
++ * die hintereinander und in einer Schleife abgespielt werden.
++ * \endgerman
++ * \english
++ * Describes a CDI.audio device's stream.
++ * Each stream consists of a set of buffers containing samples being played
++ * consecutively and as a loop.
++ * \endenglish
++ */
++struct cdi_audio_stream {
++    /**
++     * \german
++     * Ger&#195;&#164;t, zu dem dieser Kanal geh&#195;&#182;rt.
++     * \endgerman
++     * \english
++     * Device to which this stream belongs.
++     * \endenglish
++     */
++    struct cdi_audio_device* device;
++
++    /**
++     * \german
++     * Gibt die Anzahl der verf&#195;&#188;gbaren Datenpuffer an.
++     * \endgerman
++     * \english
++     * Contains the number of available data buffers.
++     * \endenglish
++     */
++    size_t num_buffers;
++
++    /**
++     * \german
++     * Gibt die Anzahl von Samples pro Datenpuffer an.
++     * \endgerman
++     * \english
++     * Contains the number of samples per buffer.
++     * \endenglish
++     */
++    size_t buffer_size;
++
++    /**
++     * \german
++     * Bei 0 kann die Samplerate eingestellt werden. Ansonsten kann sie nicht
++     * ver&#195;&#164;ndert werden und hat einen festen (hier angegebenen) Wert (in Hz).
++     * \endgerman
++     * \english
++     * If 0, the sample rate is adjustable. Otherwise, it isn't and is set to
++     * a fixed value in Hz (which is given here).
++     * \endenglish
++     */
++    int fixed_sample_rate;
++
++    /**
++     * \german
++     * Format der Samples in den Puffern.
++     * \endgerman
++     * \english
++     * Format of the samples contained in the buffers.
++     * \endenglish
++     */
++    cdi_audio_sample_format_t sample_format;
++};
++
++struct cdi_audio_driver {
++    struct cdi_driver drv;
++
++    /**
++     * \german
++     *
++     * &#195;&#156;bertr&#195;&#164;gt Daten von oder zu einem Puffer eines Ger&#195;&#164;ts (bei
++     * Aufnahmeger&#195;&#164;ten wird empfangen, sonst gesendet). Es werden so viele
++     * Bytes &#195;&#188;bertragen, wie in den Puffer passen (abh&#195;&#164;ngig von Sampleformat und
++     * Anzahl der Samples pro Puffer).
++     *
++     * @param stream Kanal, der angesprochen werden soll.
++     * @param buffer Der dort zu verwendende Puffer.
++     * @param memory Speicher, mit dem die Daten ausgetauscht werden sollen.
++     * @param offset Offset im Puffer (in Samples), an den die Daten kopiert
++     *               werden (es wird nur so viel kopiert, bis das Ende des
++     *               Puffers erreicht wird), wird bei Aufnahmeger&#195;&#164;ten ignoriert.
++     *
++     * @return 0 bei Erfolg, -1 im Fehlerfall.
++     *
++     * \endgerman
++     * \english
++     *
++     * Sends or receives data to/from a device's buffer (receives from recording
++     * devices, sends otherwise). The amount of data transmitted equals the
++     * buffer's size (depends on the sample format and the number of samples per
++     * buffer) reduced by the offset.
++     *
++     * @param stream Stream to be used.
++     * @param buffer Buffer to be used.
++     * @param memory Memory buffer being either source or destination.
++     * @param offset The content from memory is copied to the buffer respecting
++     *               this offset (in samples) in the buffer. Thus, the data is
++     *               copied to this offset until the end of the buffer has been
++     *               reached (recording devices ignore this).
++     *
++     * @return 0 on success, -1 on error.
++     *
++     * \endenglish
++     */
++    int (*transfer_data)(struct cdi_audio_stream* stream, size_t buffer,
++        struct cdi_mem_area* memory, size_t offset);
++
++    /**
++     * \german
++     *
++     * H&#195;&#164;lt ein CDI.audio-Ger&#195;&#164;t an oder l&#195;&#164;sst es aufnehmen bzw. abspielen. Wird
++     * es angehalten, so wird die Position automatisch auf den Anfang des ersten
++     * Puffers gesetzt.
++     *
++     * @param device Das Ger&#195;&#164;t
++     * @param status Zu setzender Status.
++     *
++     * @return Tats&#195;&#164;chlicher neuer Status.
++     *
++     * \endgerman
++     * \english
++     *
++     * Stops a CDI.audio device or makes it record or play, respectively. If it
++     * is stopped, its position is automatically set to the beginning of the
++     * first buffer.
++     *
++     * @param device The device
++     * @param status Status to be set.
++     *
++     * @return Actual new status.
++     *
++     * \endenglish
++     */
++    cdi_audio_status_t (*change_device_status)(struct cdi_audio_device* device,
++        cdi_audio_status_t status);
++
++    /**
++     * \german
++     *
++     * Setzt die Lautst&#195;&#164;rke eines Kanals.
++     *
++     * @param volume 0x00 ist stumm, 0xFF ist volle Lautst&#195;&#164;rke.
++     *
++     * \endgerman
++     * \english
++     *
++     * Sets a stream's volume.
++     *
++     * @param volume 0x00 is mute, 0xFF is full volume.
++     *
++     * \endenglish
++     */
++    void (*set_volume)(struct cdi_audio_stream* stream, uint8_t volume);
++
++    /**
++     * \german
++     *
++     * Ver&#195;&#164;ndert die Samplerate eines Kanals.
++     *
++     * @param stream Anzupassender Kanal.
++     * @param sample_rate Neue Samplerate, ist der Wert nichtpositiv, dann wird
++     *                    die aktuelle Samplerate nicht ver&#195;&#164;ndert.
++     *
++     * @return Gibt die tats&#195;&#164;chliche neue Samplerate zur&#195;&#188;ck (kann vom Parameter
++     *         abweichen und wird es bei nichtpositivem auch).
++     *
++     * \endgerman
++     * \english
++     *
++     * Changes a stream's sample rate.
++     *
++     * @param stream Stream to be adjusted.
++     * @param sample_rate New sample rate, if nonpositive, the current sample
++     *                    rate won't be changed.
++     *
++     * @return Returns the actual new sample rate (may differ from the parameter
++     *         and will, if the latter was nonpositive).
++     *
++     * \endenglish
++     */
++    int (*set_sample_rate)(struct cdi_audio_stream* stream, int sample_rate);
++
++    /**
++     * \german
++     *
++     * Gibt die aktuelle Abspiel-/Aufnahmeposition des Kanals zur&#195;&#188;ck.
++     *
++     * @param stream Abzufragender Kanal.
++     * @param position Zeiger zu einer Struktur, die den Index des aktuellen
++     *                 Puffers und des derzeit abgespielten Frames empf&#195;&#164;ngt.
++     *
++     * \endgerman
++     * \english
++     *
++     * Returns the stream's current playback/recording position.
++     *
++     * @param stream Stream to be queried.
++     * @param position Pointer to a structure receiving the index of both the
++     *                 current buffer and the frame played right now.
++     *
++     * \endenglish
++     */
++    void (*get_position)(struct cdi_audio_stream* stream,
++        cdi_audio_position_t* position);
++
++    /**
++     * \german
++     *
++     * Ver&#195;&#164;ndert die Anzahl der von einem CDI.audio-Ger&#195;&#164;t verwendeten Channel
++     * (da dies die Gr&#195;&#182;&#195;&#159;e der Frames ver&#195;&#164;ndert, kann auch die Anzahl der
++     * tats&#195;&#164;chlich verwendeten Samples in einem Puffer ver&#195;&#164;ndert werden:
++     * Betr&#195;&#164;gt diese Maximalzahl z. B. 0xFFFF, dann k&#195;&#182;nnen bei zwei Channeln
++     * nur 0xFFFE Samples verwendet werden (da es keine halben Frames gibt)).
++     *
++     * @param dev CDI.audio-Ger&#195;&#164;t
++     * @param channels Anzahl der zu verwendenden Channels (bei ung&#195;&#188;ltigem Wert
++     *                 wird am Ger&#195;&#164;t nichts ver&#195;&#164;ndert).
++     *
++     * @return Jetzt tats&#195;&#164;chlich benutzte Channelanzahl.
++     *
++     * \endgerman
++     * \english
++     *
++     * Changes the number of channels used by a CDI.audio device (this changes
++     * the frames' size, hence the number of actually used samples per buffer
++     * may be changed, too: If this size equals e.g. 0xFFFF, only 0xFFFE samples
++     * are used when working with two channels (because there is no half of a
++     * frame)).
++     *
++     * @param dev CDI.audio device
++     * @param channels Number of channels to be used (if invalid, nothing will
++     *                 be changed).
++     *
++     * @return Actually used number of channels now.
++     *
++     * \endenglish
++     */
++    int (*set_number_of_channels)(struct cdi_audio_device* dev, int channels);
++};
++
++
++#ifdef __cplusplus
++extern &quot;C&quot; {
++#endif
++
++/**
++ * \german
++ *
++ * Wird vom Treiber aufgerufen, wenn die Bearbeitung eines Puffers abgeschlossen
++ * wurde (komplett abgespielt oder aufgenommen). Darf auch aus einer ISR heraus
++ * aufgerufen werden.
++ *
++ * @param stream Kanal, den es betrifft.
++ * @param buffer Pufferindex, der bearbeitet wurde.
++ *
++ * \endgerman
++ * \english
++ *
++ * Is called by a driver when having completed a buffer (i.e., completely played
++ * or recorded). May be called by an ISR.
++ *
++ * @param stream Stream being concerned.
++ * @param buffer Index of the completed buffer.
++ *
++ * \endenglish
++ */
++void cdi_audio_buffer_completed(struct cdi_audio_stream* stream, size_t buffer);
++
++#ifdef __cplusplus
++}; // extern &quot;C&quot;
++#endif
++
++#endif
++
++/*\@}*/
++
+-- 
+1.7.1
+
+</PRE>
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000239.html">[cdi-devel] [PATCH 0/2] CDI.audio
+</A></li>
+	<LI>Next message: <A HREF="000242.html">[cdi-devel] [PATCH 1/2] CDI.audio
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#240">[ date ]</a>
+              <a href="thread.html#240">[ thread ]</a>
+              <a href="subject.html#240">[ subject ]</a>
+              <a href="author.html#240">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

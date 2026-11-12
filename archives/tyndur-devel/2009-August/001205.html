@@ -1,0 +1,172 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] kernel2: Syscall SYSCALL_MEM_INFO
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20kernel2%3A%20Syscall%20SYSCALL_MEM_INFO&In-Reply-To=%3C20090807180639.GF23863%40einstein.kaufmann.lan%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001186.html">
+   <LINK REL="Next"  HREF="001187.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] kernel2: Syscall SYSCALL_MEM_INFO</H1>
+    <B>Antoine Kaufmann</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20kernel2%3A%20Syscall%20SYSCALL_MEM_INFO&In-Reply-To=%3C20090807180639.GF23863%40einstein.kaufmann.lan%3E"
+           TITLE="[tyndur-devel] [PATCH] kernel2: Syscall SYSCALL_MEM_INFO">toni at tyndur.org
+                  </A><BR>
+    <I>Fr Aug  7 20:06:39 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001186.html">[tyndur-devel] [PATCH] kernel2: Syscall SYSCALL_MEM_INFO
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001187.html">[tyndur-devel] [PATCH 0/3] ip-Parameter nach tcpip verschieben
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1205">[ Datum ]</a>
+              <a href="thread.html#1205">[ Thema ]</a>
+              <a href="subject.html#1205">[ Betreff (Subject) ]</a>
+              <a href="author.html#1205">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>On Thu, Aug 06 23:41, Kevin Wolf wrote:
+&gt;<i> + kernel2: Syscall SYSCALL_MEM_INFO
+</I>&gt;<i> ! kernel2: pmm_count_pages() macht jetzt was sinnvolles anstatt eine
+</I>&gt;<i>   uninitialisierte Variable zurueckzugeben.
+</I>&gt;<i> 
+</I>&gt;<i> Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+</I>&gt;<i> ---
+</I>&gt;<i>  src/kernel2/include/syscall.h       |    4 ++++
+</I>&gt;<i>  src/kernel2/src/arch/i386/syscall.c |    4 ++++
+</I>&gt;<i>  src/kernel2/src/mm/phys.c           |    9 +--------
+</I>&gt;<i>  src/kernel2/src/syscall.c           |    1 +
+</I>&gt;<i>  src/kernel2/src/syscalls/mem.c      |   10 ++++++++++
+</I>&gt;<i>  5 files changed, 20 insertions(+), 8 deletions(-)
+</I>&gt;<i> 
+</I>&gt;<i> diff --git a/src/kernel2/include/syscall.h b/src/kernel2/include/syscall.h
+</I>&gt;<i> index b7ebfc9..ea182c4 100644
+</I>&gt;<i> --- a/src/kernel2/include/syscall.h
+</I>&gt;<i> +++ b/src/kernel2/include/syscall.h
+</I>&gt;<i> @@ -84,6 +84,10 @@ vaddr_t syscall_mem_allocate_physical(
+</I>&gt;<i>  /// Einen Speicherblock freigeben
+</I>&gt;<i>  void syscall_mem_free(vaddr_t start, size_t bytes);
+</I>&gt;<i>  
+</I>&gt;<i> +/// Freie Pages und Gesamtspeicher zurueckgeben
+</I>&gt;<i> +void syscall_mem_info(uint32_t* sum_pages, uint32_t* free_pages);
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i>  // Prozessverwaltung
+</I>&gt;<i>  /// PID des aktuellen Prozesses abfragen
+</I>&gt;<i>  pid_t syscall_pm_get_pid(void);
+</I>&gt;<i> diff --git a/src/kernel2/src/arch/i386/syscall.c b/src/kernel2/src/arch/i386/syscall.c
+</I>&gt;<i> index 268d4e4..e8d71dc 100644
+</I>&gt;<i> --- a/src/kernel2/src/arch/i386/syscall.c
+</I>&gt;<i> +++ b/src/kernel2/src/arch/i386/syscall.c
+</I>&gt;<i> @@ -91,6 +91,10 @@ void syscall_arch(machine_state_t* isf)
+</I>&gt;<i>  
+</I>&gt;<i>          syscall_fastrpc_ret();
+</I>&gt;<i>  
+</I>&gt;<i> +    } else if (handler == syscall_mem_info) {
+</I>&gt;<i> +
+</I>&gt;<i> +        syscall_mem_info(&amp;isf-&gt;eax, &amp;isf-&gt;edx);
+</I>&gt;<i> +
+</I>&gt;<i>      } else {
+</I>&gt;<i>          uint32_t eax, edx;
+</I>&gt;<i>          dword stack_backup;
+</I>&gt;<i> diff --git a/src/kernel2/src/mm/phys.c b/src/kernel2/src/mm/phys.c
+</I>&gt;<i> index 1d11478..e77bb3c 100644
+</I>&gt;<i> --- a/src/kernel2/src/mm/phys.c
+</I>&gt;<i> +++ b/src/kernel2/src/mm/phys.c
+</I>&gt;<i> @@ -65,13 +65,6 @@ static lock_t pmm_lock = 0;
+</I>&gt;<i>  static size_t pmm_bitmap_length;
+</I>&gt;<i>  
+</I>&gt;<i>  /**
+</I>&gt;<i> - * Anzahl der nutzbaren Seiten. Entspricht pmm_bitmap_size * 32 abz?glich
+</I>&gt;<i> - * der von der BIOS-Memory-Map als reserviert gekennzeichneten Bereiche.
+</I>&gt;<i> - */
+</I>&gt;<i> -static size_t pmm_bitmap_usable_pages;
+</I>&gt;<i> -
+</I>&gt;<i> -
+</I>&gt;<i> -/**
+</I>&gt;<i>   * Gibt die Startadresse der Bitmap zur?ck
+</I>&gt;<i>   */
+</I>&gt;<i>  void* pmm_get_bitmap_start()
+</I>&gt;<i> @@ -123,7 +116,7 @@ size_t pmm_count_free()
+</I>&gt;<i>   */
+</I>&gt;<i>  size_t pmm_count_pages()
+</I>&gt;<i>  {
+</I>&gt;<i> -    return pmm_bitmap_usable_pages;
+</I>&gt;<i> +    return 8 * pmm_get_bitmap_size();
+</I>&gt;<i>  }
+</I>&gt;<i>  
+</I>&gt;<i>  /**
+</I>&gt;<i> diff --git a/src/kernel2/src/syscall.c b/src/kernel2/src/syscall.c
+</I>&gt;<i> index fcb9f66..4292724 100644
+</I>&gt;<i> --- a/src/kernel2/src/syscall.c
+</I>&gt;<i> +++ b/src/kernel2/src/syscall.c
+</I>&gt;<i> @@ -52,6 +52,7 @@ void syscall_init()
+</I>&gt;<i>      syscall_register(SYSCALL_MEM_ALLOCATE_PHYSICAL,
+</I>&gt;<i>              &amp;syscall_mem_allocate_physical, 3);
+</I>&gt;<i>      syscall_register(SYSCALL_MEM_FREE, &amp;syscall_mem_free, 2);
+</I>&gt;<i> +    syscall_register(SYSCALL_MEM_INFO, &amp;syscall_mem_info, 0);
+</I>Hm diese 0 da ist irgendwie etwas irreführend, auch wenn sie nichts
+kapuutmachen dürfte... Ich hätte da eher eine 2 vorgeschlagen.
+
+&gt;<i>  
+</I>&gt;<i>      syscall_register(SYSCALL_PM_GET_PID, (void*) &amp;syscall_pm_get_pid, 0);
+</I>&gt;<i>      syscall_register(SYSCALL_PM_GET_PARENT_PID, (void*)
+</I>&gt;<i> diff --git a/src/kernel2/src/syscalls/mem.c b/src/kernel2/src/syscalls/mem.c
+</I>&gt;<i> index ff66fa0..20f9e73 100644
+</I>&gt;<i> --- a/src/kernel2/src/syscalls/mem.c
+</I>&gt;<i> +++ b/src/kernel2/src/syscalls/mem.c
+</I>&gt;<i> @@ -130,3 +130,13 @@ void syscall_mem_free(vaddr_t start, size_t bytes)
+</I>&gt;<i>          start = (vaddr_t) ((uintptr_t) start + PAGE_SIZE);
+</I>&gt;<i>      }
+</I>&gt;<i>  }
+</I>&gt;<i> +
+</I>&gt;<i> +/**
+</I>&gt;<i> + * Gibt zurueck, wie viele Byte Speicher dem System insgesamt zur Verfuegung
+</I>&gt;<i> + * stehen und wie viele davon frei sind.
+</I>&gt;<i> + */
+</I>&gt;<i> +void syscall_mem_info(uint32_t* sum_pages, uint32_t* free_pages)
+</I>&gt;<i> +{
+</I>&gt;<i> +    *sum_pages =  pmm_count_pages() * PAGE_SIZE;
+</I>&gt;<i> +    *free_pages = pmm_count_free() * PAGE_SIZE;
+</I>&gt;<i> +}
+</I>
+Sonst sieht das gut aus.
+Acked-By: Antoine Kaufmann &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">toni at tyndur.org</A>&gt;
+
+-- 
+Antoine Kaufmann
+&lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">toni at famkaufmann.info</A>&gt;
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : &lt;<A HREF="http://list.tyndur.org/pipermail/tyndur-devel/attachments/20090807/4b5a05d3/attachment.pgp">http://list.tyndur.org/pipermail/tyndur-devel/attachments/20090807/4b5a05d3/attachment.pgp</A>&gt;
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001186.html">[tyndur-devel] [PATCH] kernel2: Syscall SYSCALL_MEM_INFO
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001187.html">[tyndur-devel] [PATCH 0/3] ip-Parameter nach tcpip verschieben
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1205">[ Datum ]</a>
+              <a href="thread.html#1205">[ Thema ]</a>
+              <a href="subject.html#1205">[ Betreff (Subject)]</a>
+              <a href="author.html#1205">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

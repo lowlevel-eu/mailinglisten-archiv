@@ -1,0 +1,108 @@
+From felix at ib-queissner.de  Sat Jun 17 23:11:22 2017
+From: felix at ib-queissner.de (felix at ib-queissner.de)
+Date: Sat, 17 Jun 2017 23:11:22 +0200
+Subject: [tyndur-devel] [PATCH] Improves SDL input processing.
+Message-ID: <20170617211122.22787-1-felix@ib-queissner.de>
+
+From: Felix Queiﬂner <git at mq32.de>
+
+* keysym.scancode now contains the original tyndur keycode,
+* keysym.unicode now contains the translated keycode from vterm:/keymap when
+  SDL_EnableUNICODE is set.
+  Modifier priority is: AltGraph (or LAlt+LShift) > LCtrl > LShift.
+  RCtrl is not used.
+---
+ lbuilds/sdl/1.2.14/patches/tyndur-video.patch | 55 ++++++++++++++++++---------
+ 1 file changed, 38 insertions(+), 17 deletions(-)
+
+diff --git a/lbuilds/sdl/1.2.14/patches/tyndur-video.patch b/lbuilds/sdl/1.2.14/patches/tyndur-video.patch
+index f1af522..21f92f1 100644
+--- a/lbuilds/sdl/1.2.14/patches/tyndur-video.patch
++++ b/lbuilds/sdl/1.2.14/patches/tyndur-video.patch
+@@ -68,7 +68,7 @@ Index: src/SDL-1.2.14/src/video/tyndur/SDL_tyndurevents.c
+ ===================================================================
+ --- /dev/null
+ +++ src/SDL-1.2.14/src/video/tyndur/SDL_tyndurevents.c
+-@@ -0,0 +1,252 @@
++@@ -0,0 +1,273 @@
+ +/*
+ +    SDL - Simple DirectMedia Layer
+ +    Copyright (C) 1997-2009 Sam Lantinga
+@@ -108,21 +108,6 @@ Index: src/SDL-1.2.14/src/video/tyndur/SDL_tyndurevents.c
+ +#include <lostio.h>
+ +
+ +
+-+static SDL_keysym* get_keysym(int c)
+-+{
+-+    static SDL_keysym keysym;
+-+
+-+    keysym.scancode = c;
+-+    keysym.sym = c;
+-+    keysym.mod = KMOD_NONE;
+-+	keysym.unicode = 0;
+-+	if ( SDL_TranslateUNICODE ) {
+-+		/* Populate the unicode field with the ASCII value */
+-+		keysym.unicode = c;
+-+	}
+-+
+-+    return &keysym;
+-+}
+ +
+ +static pid_t kbc_pid;
+ +
+@@ -140,6 +125,42 @@ Index: src/SDL-1.2.14/src/video/tyndur/SDL_tyndurevents.c
+ +
+ +static struct keymap_entry keymap[128];
+ +
+++static SDL_keysym* get_keysym(int tyndurKey, int sdlKey, int release)
+++{
+++    static SDL_keysym keysym;
+++
+++    keysym.scancode = tyndurKey;
+++    keysym.sym = sdlKey;
+++    keysym.mod = KMOD_NONE;
+++		keysym.unicode = 0;
+++		if ( SDL_TranslateUNICODE && release == 0 ) {
+++				
+++				/* translate the tyndur keycode to a unicode value */
+++				if(tyndurKey >= 0 && tyndurKey < 128) {
+++					SDLMod modifiers = SDL_GetModState();
+++				
+++					// Right alt == AltGr
+++					if((modifiers & KMOD_RALT) ||
+++						 ((modifiers & KMOD_LALT) && (modifiers & KMOD_LSHIFT)))
+++					{
+++						// AltGraph or Shift+Alt kills them all
+++						keysym.unicode = keymap[tyndurKey].altgr;
+++					} else if(modifiers & KMOD_LCTRL) {
+++						// Control is better than shift, i think...
+++						keysym.unicode = keymap[tyndurKey].ctrl;
+++					} else if(modifiers & KMOD_LSHIFT) {
+++					  // When shift is pressed without alt, apply shift modifier
+++						keysym.unicode = keymap[tyndurKey].shift;
+++					} else {
+++						// Normal is "lowest" priority
+++						keysym.unicode = keymap[tyndurKey].normal;
+++					}
+++				}
+++    }
+++
+++    return &keysym;
+++}
+++
+ +static int get_sdl_keycode(uint8_t keycode)
+ +{
+ +    int c;
+@@ -227,7 +248,7 @@ Index: src/SDL-1.2.14/src/video/tyndur/SDL_tyndurevents.c
+ +    p();
+ +
+ +    keycode = get_sdl_keycode(kbd_data->keycode);
+-+    keysym = get_keysym(keycode);
+++    keysym = get_keysym(kbd_data->keycode, keycode, kbd_data->release);
+ +
+ +    if (kbd_data->release) {
+ +        SDL_PrivateKeyboard(SDL_RELEASED, keysym);
+-- 
+2.13.1
+
+

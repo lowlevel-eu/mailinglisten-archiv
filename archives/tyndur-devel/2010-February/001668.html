@@ -1,0 +1,196 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 3/5] pcnet: Initialisierungsblock in eigene	Funktion auslagern
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%203/5%5D%20pcnet%3A%20Initialisierungsblock%20in%20eigene%0A%09Funktion%20auslagern&In-Reply-To=%3C1266095541-6084-4-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001667.html">
+   <LINK REL="Next"  HREF="001669.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 3/5] pcnet: Initialisierungsblock in eigene	Funktion auslagern</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%203/5%5D%20pcnet%3A%20Initialisierungsblock%20in%20eigene%0A%09Funktion%20auslagern&In-Reply-To=%3C1266095541-6084-4-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 3/5] pcnet: Initialisierungsblock in eigene	Funktion auslagern">kevin at tyndur.org
+                  </A><BR>
+    <I>Sa Feb 13 22:12:19 CET 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001667.html">[tyndur-devel] [PATCH 2/5] cdi: mem.h implementiert
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001669.html">[tyndur-devel] [PATCH 4/5] cdi: cdi_alloc_phys_mem/addr ersetzen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1668">[ Datum ]</a>
+              <a href="thread.html#1668">[ Thema ]</a>
+              <a href="subject.html#1668">[ Betreff (Subject) ]</a>
+              <a href="author.html#1668">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* pcnet: Der Initialisierungsblock ist etwas temporaeres und gehoert
+  deswegen nicht in pcnet_device. Weil es aber trotzdem ein paar Zeilen
+  Code sind, wird dieser Code in eine eigene Funktion ausgelagert, um
+  einfacher durch cdi_mem_alloc/free ersetzbar zu werden.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/cdi/pcnet/include/pcnet.h |    3 -
+ src/modules/cdi/pcnet/pcnet.c         |   84 +++++++++++++++++++-------------
+ 2 files changed, 50 insertions(+), 37 deletions(-)
+
+diff --git a/src/modules/cdi/pcnet/include/pcnet.h b/src/modules/cdi/pcnet/include/pcnet.h
+index 000862c..6c29a56 100644
+--- a/src/modules/cdi/pcnet/include/pcnet.h
++++ b/src/modules/cdi/pcnet/include/pcnet.h
+@@ -115,9 +115,6 @@ struct pcnet_device {
+     void                        *phys_receive_descriptor;
+     void                        *phys_transmit_descriptor;
+ 
+-    struct initialization_block *initialization_block;
+-    void                        *phys_initialization_block;
+-
+     void                        *receive_buffer[8];
+     void                        *transmit_buffer[8];
+     int                         last_transmit_descriptor;
+diff --git a/src/modules/cdi/pcnet/pcnet.c b/src/modules/cdi/pcnet/pcnet.c
+index a157094..e4500dc 100644
+--- a/src/modules/cdi/pcnet/pcnet.c
++++ b/src/modules/cdi/pcnet/pcnet.c
+@@ -235,11 +235,58 @@ void pcnet_stop(struct pcnet_device *netcard)
+ {
+     pcnet_write_csr(netcard, CSR_STATUS, STATUS_STOP);
+ }
+-void pcnet_dev_init(struct pcnet_device *netcard, int promiscuous)
++
++static void pcnet_send_init_block(struct pcnet_device* netcard, int promisc)
+ {
+     struct cdi_pci_device* pci =
+         (struct cdi_pci_device*) netcard-&gt;net.dev.bus_data;
+ 
++    struct initialization_block* initialization_block;
++    void* phys_initialization_block;
++
++
++    // Fill the initialization block
++    // NOTE: Transmit and receive buffer contain 8 entries
++    cdi_alloc_phys_mem(sizeof(struct initialization_block),
++                       (void**) &amp;initialization_block,
++                       &amp;phys_initialization_block);
++    memset(initialization_block, 0, sizeof(struct initialization_block));
++    initialization_block-&gt;mode = promisc ? PROMISCUOUS_MODE : 0;
++    initialization_block-&gt;receive_length = 0x30;
++    initialization_block-&gt;transfer_length = 0x30;
++    initialization_block-&gt;receive_descriptor =
++        (uint32_t) netcard-&gt;phys_receive_descriptor;
++    initialization_block-&gt;transmit_descriptor =
++        (uint32_t) netcard-&gt;phys_transmit_descriptor;
++    initialization_block-&gt;physical_address = netcard-&gt;net.mac;
++
++    #ifdef DEBUG
++        printf(&quot;pcnet: initialization block at 0x%p virtual, 0x%p physical\n&quot;,
++               initialization_block,
++               phys_initialization_block);
++    #endif
++
++    // Set the address for the initialization block
++    pcnet_write_csr(netcard, 1, (uintptr_t) phys_initialization_block);
++    pcnet_write_csr(netcard, 2, (uintptr_t) phys_initialization_block &gt;&gt; 16);
++
++    // TODO BCR18.BREADE / BWRITE
++
++    // CSR0.INIT, Initialize
++    netcard-&gt;init_wait_for_irq = 1;
++    pcnet_write_csr(netcard, CSR_STATUS,
++        STATUS_INIT | STATUS_INTERRUPT_ENABLE);
++
++    // Wait until initialization completed, NOTE: see pcnet_handle_interrupt()
++    int irq = cdi_wait_irq(pci-&gt;irq, 1000);
++    if(irq &lt; 0 || netcard-&gt;init_wait_for_irq == 1)
++        printf(&quot;pcnet: waiting for IRQ failed: %d\n&quot;, irq);
++
++    // FIXME Free initialization block
++}
++
++void pcnet_dev_init(struct pcnet_device *netcard, int promiscuous)
++{
+     // Allocate the receive &amp; transmit descriptor buffer
+     void *virt_desc_region;
+     void *phys_desc_region;
+@@ -257,24 +304,6 @@ void pcnet_dev_init(struct pcnet_device *netcard, int promiscuous)
+     netcard-&gt;phys_receive_descriptor = phys_desc_region;
+     netcard-&gt;phys_transmit_descriptor = (void*) (((char*)phys_desc_region) + 2 * 1024);
+ 
+-    // Fill the initialization block
+-    // NOTE: Transmit and receive buffer contain 8 entries
+-    cdi_alloc_phys_mem(sizeof(struct initialization_block),
+-                       (void**) &amp;netcard-&gt;initialization_block,
+-                       &amp;netcard-&gt;phys_initialization_block);
+-    memset(netcard-&gt;initialization_block, 0, sizeof(struct initialization_block));
+-    netcard-&gt;initialization_block-&gt;mode = promiscuous ? PROMISCUOUS_MODE : 0;
+-    netcard-&gt;initialization_block-&gt;receive_length = 0x30;
+-    netcard-&gt;initialization_block-&gt;transfer_length = 0x30;
+-    netcard-&gt;initialization_block-&gt;receive_descriptor = (uint32_t) netcard-&gt;phys_receive_descriptor;
+-    netcard-&gt;initialization_block-&gt;transmit_descriptor = (uint32_t) netcard-&gt;phys_transmit_descriptor;
+-    netcard-&gt;initialization_block-&gt;physical_address = netcard-&gt;net.mac;
+-
+-    #ifdef DEBUG
+-        printf(&quot;pcnet: initialization block at 0x%p virtual and 0x%p physical\n&quot;,
+-               netcard-&gt;initialization_block,
+-               netcard-&gt;phys_initialization_block);
+-    #endif
+     
+     // Allocate the buffers
+     memset(netcard-&gt;transmit_descriptor, 0, 2048);
+@@ -310,21 +339,8 @@ void pcnet_dev_init(struct pcnet_device *netcard, int promiscuous)
+         netcard-&gt;transmit_descriptor[2 * i + 1].address = (uint32_t) phys_buffer + 2048;
+     }
+ 
+-    // Set the address for the initialization block
+-    pcnet_write_csr(netcard, 1, (uintptr_t) netcard-&gt;phys_initialization_block);
+-    pcnet_write_csr(netcard, 2, (uintptr_t) netcard-&gt;phys_initialization_block &gt;&gt; 16);
+-    
+-    // TODO BCR18.BREADE / BWRITE
+-    
+-    // CSR0.INIT, Initialize
+-    netcard-&gt;init_wait_for_irq = 1;
+-    pcnet_write_csr(netcard, CSR_STATUS, STATUS_INIT | STATUS_INTERRUPT_ENABLE);
+-    
+-    // Wait until initialization completed, NOTE: see pcnet_handle_interrupt()
+-    int irq = cdi_wait_irq(pci-&gt;irq, 1000);
+-    if(irq &lt; 0 || netcard-&gt;init_wait_for_irq == 1)
+-        printf(&quot;pcnet: waiting for IRQ failed: %d\n&quot;, irq);
+-    
++    pcnet_send_init_block(netcard, promiscuous);
++
+     // CSR4 Enable transmit auto-padding and receive automatic padding removal
+     // TODO DMAPLUS? 
+     uint16_t tmp = pcnet_read_csr(netcard, CSR_FEATURE);
+-- 
+1.6.0.2
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001667.html">[tyndur-devel] [PATCH 2/5] cdi: mem.h implementiert
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001669.html">[tyndur-devel] [PATCH 4/5] cdi: cdi_alloc_phys_mem/addr ersetzen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1668">[ Datum ]</a>
+              <a href="thread.html#1668">[ Thema ]</a>
+              <a href="subject.html#1668">[ Betreff (Subject)]</a>
+              <a href="author.html#1668">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

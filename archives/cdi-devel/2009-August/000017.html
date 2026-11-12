@@ -1,0 +1,409 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH] Double reset on enum, no toggle change on error
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%5D%20Double%20reset%20on%20enum%2C%20no%20toggle%20change%20on%20error&In-Reply-To=%3C1251023358-15569-1-git-send-email-max%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000016.html">
+   <LINK REL="Next"  HREF="000018.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH] Double reset on enum, no toggle change on error</H1>
+    <B>max at tyndur.org</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%5D%20Double%20reset%20on%20enum%2C%20no%20toggle%20change%20on%20error&In-Reply-To=%3C1251023358-15569-1-git-send-email-max%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH] Double reset on enum, no toggle change on error">max at tyndur.org
+       </A><BR>
+    <I>Sun Aug 23 12:29:18 CEST 2009</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000016.html">[cdi-devel] [PATCH] Correct DATA0/DATA1 treatment and packet size
+</A></li>
+        <LI>Next message: <A HREF="000018.html">[cdi-devel] [PATCH 2/2] [usb] No memory error, remove STALL
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#17">[ date ]</a>
+              <a href="thread.html#17">[ thread ]</a>
+              <a href="subject.html#17">[ subject ]</a>
+              <a href="author.html#17">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>From: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+
+* Reset is needed two times on device enumeration (before reading the
+  first eight bytes of the device descriptor and afterwards).
+* DATA0/DATA1 toggle bit may not be changed if an error occured.
+
+Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+---
+ usb/include/usb.h |    2 +
+ usb/main.c        |   37 ++++++++++++++++++++---------
+ usb/msd.c         |   66 +++++++++++++++++++++++++---------------------------
+ usb/uhci.c        |   17 ++++++++++++-
+ 4 files changed, 74 insertions(+), 48 deletions(-)
+
+diff --git a/usb/include/usb.h b/usb/include/usb.h
+index 0fc6567..9a94b2e 100644
+--- a/usb/include/usb.h
++++ b/usb/include/usb.h
+@@ -242,6 +242,7 @@ struct class_data {
+ 
+ struct usb_device {
+     struct hci* hci;
++    struct usb_device* hub;
+     int id;
+     int port;
+     int low_speed;
+@@ -254,6 +255,7 @@ struct usb_device {
+     int locked;
+     int expects;
+     int data_toggle;
++    void (* reset)(struct usb_device* device);
+ };
+ 
+ struct msclass_data {
+diff --git a/usb/main.c b/usb/main.c
+index abfb936..7250092 100644
+--- a/usb/main.c
++++ b/usb/main.c
+@@ -142,8 +142,12 @@ int usb_do_packet(struct usb_device* device, struct usb_packet* packet)
+                 cdi_sleep_ms(5);
+             }
+         }
+-        device-&gt;data_toggle ^= 1;
+-        send_packet.data += mps;
++        if (error != USB_NO_ERROR) {
++            i -= mps;
++        } else {
++            device-&gt;data_toggle ^= 1;
++            send_packet.data += mps;
++        }
+         if (error == USB_STALLED) {
+             printf(&quot;[usb] ENDPOINT %i DES GER&#195;&#132;TS %i STALLED!\n&quot;,
+                 packet-&gt;endpoint-&gt;endpoint_address,
+@@ -167,11 +171,9 @@ static void* do_control(struct usb_device* device, int direction, void* buffer,
+ 
+     no_data = direction &amp; NO_DATA;
+     direction &amp;= 0x80;
+-
+     if ((direction != HOST_TO_DEV) || !length || (buffer == NULL)) {
+         buffer = malloc(length);
+     }
+-
+     setup-&gt;request_type = direction | (rtype &amp; 0x60) | (recipient &amp; 0x1F);
+     setup-&gt;request = request;
+     setup-&gt;value = value;
+@@ -192,7 +194,7 @@ static void* do_control(struct usb_device* device, int direction, void* buffer,
+ 
+     if (no_data) {
+         rval = USB_NO_ERROR;
+-        buffer = (void*) 0xFFFFFFFF;      //Kein Fehler, aber auch keine Daten
++        buffer = (void*) 0xFFFFFFFF;    //Kein Fehler, aber auch keine Daten
+     } else {
+         struct usb_packet data_packet = {
+             .type         = (direction == DEV_TO_HOST ? PACKET_IN : PACKET_OUT),
+@@ -225,7 +227,7 @@ static void* do_control(struct usb_device* device, int direction, void* buffer,
+ 
+         rval = usb_do_packet(device, &amp;ack_packet);
+     }
+-    return (rval == USB_NO_ERROR) ? buffer: NULL;
++    return (rval == USB_NO_ERROR) ? buffer : NULL;
+ }
+ 
+ static void usb_init(void)
+@@ -325,6 +327,9 @@ static void enum_device(struct usb_device* usbdev)
+     usbdev-&gt;ep0-&gt;max_packet_size = 8;
+     usbdev-&gt;ep0-&gt;interval = 0;
+ 
++    //Resetten
++    usbdev-&gt;reset(usbdev);
++
+     //Erste acht Bytes des Device-Descriptors abrufen und die maximale Paketgr&#195;&#182;&#195;&#159;e von EP0 feststellen
+     dev_desc =
+         do_control(usbdev, DEV_TO_HOST, NULL, 8, STD_REQUEST, REC_DEVICE,
+@@ -336,12 +341,16 @@ static void enum_device(struct usb_device* usbdev)
+     }
+     usbdev-&gt;ep0-&gt;max_packet_size = dev_desc-&gt;max_packet_size0;
+ 
++    //Nochmals resetten
++    usbdev-&gt;reset(usbdev);
++
+     //USB-Adresse zuweisen
+     do_control(usbdev, HOST_TO_DEV | NO_DATA, NULL, 0, STD_REQUEST, REC_DEVICE,
+         SET_ADDRESS, (id = usb_dev_ids++),
+         0);
+     usbdev-&gt;id = id;
+ 
++    //Den ganzen Device-Descriptor einlesen
+     dev_desc =
+         do_control(usbdev, DEV_TO_HOST, NULL, sizeof(*dev_desc), STD_REQUEST,
+             REC_DEVICE, GET_DESCRIPTOR, DESC_DEVICE &lt;&lt; 8,
+@@ -454,6 +463,14 @@ static void enum_device(struct usb_device* usbdev)
+     }
+ }
+ 
++static void reset_hub_device(struct usb_device* usbdev)
++{
++    do_control(usbdev-&gt;hub, HOST_TO_DEV, NULL, 0, CLS_REQUEST, REC_OTHER,
++        SET_FEATURE, PORTF_RESET,
++        usbdev-&gt;port + 1);
++    cdi_sleep_ms(20);
++}
++
+ static void enumerate_hub(struct usb_device* usbdev)
+ {
+     struct hub_desc* hub_desc;
+@@ -481,17 +498,13 @@ static void enumerate_hub(struct usb_device* usbdev)
+             SET_FEATURE, PORTF_POWER,
+             i + 1);
+         cdi_sleep_ms(hub_desc-&gt;pwron2pwrgood * 2);
+-        //Resetten
+-        do_control(usbdev, HOST_TO_DEV, NULL, 0, CLS_REQUEST, REC_OTHER,
+-            SET_FEATURE, PORTF_RESET,
+-            i + 1);
+-        //Reset sollte jetzt eigtl. schon beendet sein
+-        //(do_control wartet ja 50 ms)
+         down = malloc(sizeof(struct usb_device));
+         down-&gt;hci = usbdev-&gt;hci;
++        down-&gt;hub = usbdev;
+         down-&gt;id = 0;
+         down-&gt;port = i;
+         down-&gt;low_speed = (port_status[0] &amp; PORT_LOWSPEED) &amp;&amp; 1;
++        down-&gt;reset = &amp;reset_hub_device;
+         enum_device(down);
+     }
+ }
+diff --git a/usb/msd.c b/usb/msd.c
+index 9d843bf..6fb8a42 100644
+--- a/usb/msd.c
++++ b/usb/msd.c
+@@ -367,10 +367,12 @@ static inline int tsl(volatile int* variable)
+ }
+ 
+ static uint32_t msd_read(struct usb_device* usbdev, uint32_t lba,
+-    uint16_t sectors, void* buffer, size_t length);
++    uint16_t sectors, void* buffer,
++    size_t length);
+ 
+ static int msd_cdi_read(struct cdi_storage_device* strgdev, uint64_t start,
+-    uint64_t count, void* buffer)
++    uint64_t count,
++    void* buffer)
+ {
+     int bs = strgdev-&gt;block_size, error;
+ #ifdef WAIT_FOR_MSD_READY
+@@ -394,7 +396,6 @@ static int msd_cdi_read(struct cdi_storage_device* strgdev, uint64_t start,
+     for (i = 0; !msd_ready(usbdev) &amp;&amp; (i &lt; 10); i++) {
+         cdi_sleep_ms(20);
+     }
+-
+ #endif
+     error = msd_read(usbdev, start, count, buffer, count * bs);
+     if (error != USB_NO_ERROR) {
+@@ -407,7 +408,8 @@ static int msd_cdi_read(struct cdi_storage_device* strgdev, uint64_t start,
+ }
+ 
+ static uint32_t msd_read(struct usb_device* usbdev, uint32_t lba,
+-    uint16_t sectors, void* buffer, size_t length)
++    uint16_t sectors, void* buffer,
++    size_t length)
+ {
+     struct msclass_data* msc;
+     struct command_block_wrapper _cbw;
+@@ -415,10 +417,9 @@ static uint32_t msd_read(struct usb_device* usbdev, uint32_t lba,
+     uint32_t expected_tag;
+     int error;
+ 
+-    if (!buffer || !length) {
++    if ((buffer == NULL) || !length) {
+         return USB_TRIVIAL_ERROR;
+     }
+-
+     msc = (struct msclass_data*) usbdev-&gt;classd;
+     memset(cbw, 0, 0x1F);
+     cbw-&gt;cbw_signature = CBW_SIGNATURE;
+@@ -463,57 +464,59 @@ static uint32_t msd_read(struct usb_device* usbdev, uint32_t lba,
+ }
+ 
+ static uint32_t msd_write(struct usb_device* usbdev, uint32_t lba,
+-    uint16_t sectors, void* buffer, size_t length);
++    uint16_t sectors, void* buffer,
++    size_t length);
+ 
+ static int msd_cdi_write(struct cdi_storage_device* strgdev, uint64_t start,
+-    uint64_t count, void* buffer)
++    uint64_t count,
++    void* buffer)
+ {
+     int bs = strgdev-&gt;block_size, error;
+ #ifdef WAIT_FOR_MSD_READY
+-    int j;
++    int i;
+ #endif
+-    uint32_t i;
+     struct usb_device* usbdev = ((struct cdi_msd*) strgdev)-&gt;usb_device;
+ 
+     fdprintf(&quot;write(%i, %i)\n&quot;, (int) start, (int) count);
+     start += ((struct cdi_msd*) strgdev)-&gt;offset;
+ 
++    if (!count) {
++        dprintf(&quot;Leere Schreibanfrage.\n&quot;);
++        return 0;
++    }
+     while (tsl(&amp;usbdev-&gt;locked)) {
+ #ifndef CDI_STANDALONE
+         __asm__ __volatile__ (&quot;hlt&quot;);
+ #endif
+     }
+-    for (i = 0; i &lt; count; i++) {
+ #ifdef WAIT_FOR_MSD_READY
+-        for (j = 0; !msd_ready(usbdev) &amp;&amp; (j &lt; 10); j++) {
+-            cdi_sleep_ms(20);
+-        }
+-
++    for (i = 0; !msd_ready(usbdev) &amp;&amp; (i &lt; 10); i++) {
++        cdi_sleep_ms(20);
++    }
+ #endif
+-        error = msd_write(usbdev, start + i, 1, buffer + i * bs, bs);
+-        if (error != USB_NO_ERROR) {
+-            dprintf(&quot;Schreibfehler 0x%X bei Block %i.\n&quot;, error, i);
+-            usbdev-&gt;locked = 0;
+-            return -1;
+-        }
++    error = msd_write(usbdev, start, count, buffer, count * bs);
++    if (error != USB_NO_ERROR) {
++        dprintf(&quot;Schreibfehler 0x%X bei Block %i.\n&quot;, error, start);
++        usbdev-&gt;locked = 0;
++        return -1;
+     }
+     usbdev-&gt;locked = 0;
+     return 0;
+ }
+ 
+ static uint32_t msd_write(struct usb_device* usbdev, uint32_t lba,
+-    uint16_t sectors, void* buffer, size_t length)
++    uint16_t sectors, void* buffer,
++    size_t length)
+ {
+     struct msclass_data* msc;
+     struct command_block_wrapper _cbw;
+     struct command_block_wrapper* cbw = &amp;_cbw;
+     uint32_t expected_tag;
+-    int error, i, ep_size;
++    int error;
+ 
+-    if (!buffer || !length) {
++    if ((buffer == NULL) || !length) {
+         return USB_TRIVIAL_ERROR;
+     }
+-
+     msc = (struct msclass_data*) usbdev-&gt;classd;
+     memset(cbw, 0, 0x1F);
+     cbw-&gt;cbw_signature = CBW_SIGNATURE;
+@@ -540,18 +543,13 @@ static uint32_t msd_write(struct usb_device* usbdev, uint32_t lba,
+         .type         = PACKET_OUT,
+         .endpoint     = msc-&gt;bulk_ep_out,
+         .data         = buffer,
+-        .length       = 0,
++        .length       = length,
+         .type_of_data = USB_TOD_DATA_OUT,
+     };
+ 
+-    ep_size = msc-&gt;bulk_ep_out-&gt;max_packet_size;
+-    for (i = 0; i &lt; length; i += ep_size) {
+-        out_packet.length = (length - i &gt; ep_size) ? ep_size : length - i;
+-        error = usb_do_packet(usbdev, &amp;out_packet);
+-        if (error != USB_NO_ERROR) {
+-            return error;
+-        }
+-        out_packet.data += ep_size;
++    error = usb_do_packet(usbdev, &amp;out_packet);
++    if (error != USB_NO_ERROR) {
++        return error;
+     }
+ 
+     error = read_status(usbdev, expected_tag);
+diff --git a/usb/uhci.c b/usb/uhci.c
+index 03ad4c6..d302364 100644
+--- a/usb/uhci.c
++++ b/usb/uhci.c
+@@ -59,6 +59,7 @@ static void activate_device(struct hci* gen_hci, struct usb_device* device);
+ static int get_current_frame(struct hci* gen_hci);
+ static void uhci_deinit(struct cdi_device* cdi_hci);
+ static void uhci_kill(struct cdi_driver* cdi_hcd);
++static void uhci_reset_device(struct usb_device* device);
+ 
+ 
+ struct cdi_driver* init_uhcd()
+@@ -184,19 +185,29 @@ static cdi_list_t get_devices(struct hci* gen_hci)
+         dev-&gt;port = i;
+         dev-&gt;low_speed =
+             (cdi_inw(uhci-&gt;pbase + UHCI_RPORTS + 2 * i) &amp; RPORT_LOSPD) &amp;&amp; 1;
++        dev-&gt;reset = &amp;uhci_reset_device;
+         cdi_list_push(dlist, dev);
+     }
+     _dprintf(&quot;\n&quot;);
+     return dlist;
+ }
+ 
++static void uhci_reset_device(struct usb_device* device)
++{
++    struct uhci* uhci = (struct uhci*) device-&gt;hci;
++
++    cdi_outw(uhci-&gt;pbase + UHCI_RPORTS + 2 * device-&gt;port,
++        RPORT_ENABLE | RPORT_RESET | RPORT_CSC);
++    cdi_sleep_ms(20);
++}
++
+ static void activate_device(struct hci* gen_hci, struct usb_device* device)
+ {
+     struct uhci* uhci = (struct uhci*) gen_hci;
+ 
+     dprintf(&quot;Ger&#195;&#164;t an Port %i wird aktiviert.\n&quot;, device-&gt;port);
+     cdi_outw(uhci-&gt;pbase + UHCI_RPORTS + 2 * device-&gt;port,
+-        RPORT_RESET | RPORT_ENABLE | RPORT_CSC);
++        RPORT_ENABLE | RPORT_CSC);
+     cdi_sleep_ms(20);
+ }
+ 
+@@ -243,7 +254,9 @@ static int uhci_do_packet(struct usb_device* usbdev, struct usb_packet* packet)
+         data = NULL;
+         phys_data = 0;
+     } else {
+-        if (cdi_alloc_phys_mem(packet-&gt;length, &amp;data, (void**) &amp;phys_data) == -1) {
++        if (cdi_alloc_phys_mem(packet-&gt;length, &amp;data,
++                (void**) &amp;phys_data) == -1)
++        {
+             return USB_TRIVIAL_ERROR;
+         }
+         if (packet-&gt;type != PACKET_IN) {
+-- 
+1.6.3.3
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000016.html">[cdi-devel] [PATCH] Correct DATA0/DATA1 treatment and packet size
+</A></li>
+	<LI>Next message: <A HREF="000018.html">[cdi-devel] [PATCH 2/2] [usb] No memory error, remove STALL
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#17">[ date ]</a>
+              <a href="thread.html#17">[ thread ]</a>
+              <a href="subject.html#17">[ subject ]</a>
+              <a href="author.html#17">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

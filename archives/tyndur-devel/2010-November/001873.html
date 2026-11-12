@@ -1,0 +1,207 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 2/3] tms: Implementierung für C
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_2/3%3D5D_tms%3D3A_Implementierung_f%3F%3D%0A%09%3D%3Futf-8%3Fb%3Fw7xyIEM%3D%3F%3D&In-Reply-To=%3C1289083326-22314-3-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001875.html">
+   <LINK REL="Next"  HREF="001876.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 2/3] tms: Implementierung für C</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_2/3%3D5D_tms%3D3A_Implementierung_f%3F%3D%0A%09%3D%3Futf-8%3Fb%3Fw7xyIEM%3D%3F%3D&In-Reply-To=%3C1289083326-22314-3-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 2/3] tms: Implementierung für C">kevin at tyndur.org
+                  </A><BR>
+    <I>Sa Nov  6 23:42:05 CET 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001875.html">[tyndur-devel] [PATCH 1/3] tms: In libc verschieben
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001876.html">[tyndur-devel] [PATCH 2/3] tms: Implementierung für C
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1873">[ Datum ]</a>
+              <a href="thread.html#1873">[ Thema ]</a>
+              <a href="subject.html#1873">[ Betreff (Subject) ]</a>
+              <a href="author.html#1873">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ tms: Einfache Implementierung für mehrsprachige Programme in C durch
+  Umbiegen von Pointern auf die jeweilige Übersetzung. Eine Umsetzung
+  von FormatNum in C fehlt noch.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/include/tms.h |   47 +++++++++++++++++++++++++++++
+ src/modules/lib/tms.c     |   73 +++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 120 insertions(+), 0 deletions(-)
+ create mode 100644 src/modules/lib/tms.c
+
+diff --git a/src/modules/include/tms.h b/src/modules/include/tms.h
+index c7a6823..357333b 100644
+--- a/src/modules/include/tms.h
++++ b/src/modules/include/tms.h
+@@ -45,4 +45,51 @@ struct tms_lang {
+ #define LANGUAGE(x) \
+     static const void* __attribute__((section(&quot;tmslang&quot;), used)) __lang = (x);
+ 
++#define tms_glue(x, y, z) x ## y ## ## z
++#define tms_xglue(x, y, z) tms_glue(x, y, z)
++#define tms_stringify(x) #x
++#define tms_xstringify(x) tms_stringify(x)
++
++/**
++ * Das Makro TMS_MODULE kann vor dem Einbinden dieses Headers optional gesetzt
++ * werden und enthält dann den Namen des einbindenden Moduls. Dieser Name wird
++ * in die Symbolnamen der Strings eingebaut.
++ */
++#ifndef TMS_MODULE
++#define TMS_XMODULE
++#else
++#define TMS_XMODULE tms_xglue(TMS_MODULE, _,)
++#endif
++
++#define TMS_NAME(sym) tms_xglue(__tms_, TMS_XMODULE, sym)
++#define TMS_SNAME(sym) tms_xstringify(TMS_NAME(sym))
++
++/**
++ * Definiert einen übersetzbaren String. Das Makro wird an Stelle eines
++ * Stringliterals verwendet (z.B. printf(TMS(hello, &quot;Hello World\n&quot;)))
++ *
++ * @param sym Eindeutiger Bezeichner für den String. Das Makro legt eine
++ * Variable der Form __tms_module_sym, wobei module für TMS_MODULE steht.
++ * @param string Der zu übersetzende String. Wenn keine Übersetzung
++ * verfügbar ist, wird dieser String benutzt
++ */
++#define TMS(sym, string) \
++    ({ \
++        asm volatile( \
++            &quot;.section tmsstring,\&quot;aw\&quot;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">, at progbits</A>\n&quot; \
++            &quot;.global &quot; TMS_SNAME(sym) &quot;\n&quot; \
++            TMS_SNAME(sym)&quot;:\n&quot;\
++            &quot;.int %P0\n&quot; \
++            &quot;.section .text&quot; : : &quot;i&quot; (string)); \
++        extern void* TMS_NAME(sym); \
++        TMS_NAME(sym); \
++    })
++
++
++/**
++ * Initialisiert ein mehrsprachiges Programm durch Aktivieren der
++ * Übersetzungen, die zur Sprache in der Umgebungsvariablen LANG passen.
++ */
++void tms_init(void);
++
+ #endif
+diff --git a/src/modules/lib/tms.c b/src/modules/lib/tms.c
+new file mode 100644
+index 0000000..30401d9
+--- /dev/null
++++ b/src/modules/lib/tms.c
+@@ -0,0 +1,73 @@
++/*
++ * Copyright (c) 2010 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include &lt;tms.h&gt;
++#include &lt;string.h&gt;
++#include &lt;env.h&gt;
++
++extern struct tms_lang* __start_tmslang;
++extern struct tms_lang* __stop_tmslang;
++
++/**
++ * Lädt die Übersetzungen einer bestimmten Sprache.
++ *
++ * @param lang Sprachcode der zu ladenden Sprache
++ */
++static void init_lang(const char* lang)
++{
++    struct tms_lang** plang;
++    const struct tms_strings* strings;
++
++    plang= &amp;__start_tmslang;
++    while (plang &lt; &amp;__stop_tmslang) {
++
++        if (!strcmp((*plang)-&gt;lang, lang)) {
++            strings = (*plang)-&gt;strings;
++            while (strings-&gt;resstr) {
++                *(const char**)strings-&gt;resstr = strings-&gt;translation;
++                strings++;
++            }
++            break;
++        }
++
++        plang++;
++    }
++}
++
++/**
++ * Initialisiert ein mehrsprachiges Programm durch Aktivieren der
++ * Übersetzungen, die zur Sprache in der Umgebungsvariablen LANG passen.
++ */
++void tms_init(void)
++{
++    const char* lang = getenv(&quot;LANG&quot;);
++
++    if (lang != NULL) {
++        init_lang(lang);
++    }
++}
+-- 
+1.6.0.2
+
+</PRE>
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001875.html">[tyndur-devel] [PATCH 1/3] tms: In libc verschieben
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001876.html">[tyndur-devel] [PATCH 2/3] tms: Implementierung für C
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1873">[ Datum ]</a>
+              <a href="thread.html#1873">[ Thema ]</a>
+              <a href="subject.html#1873">[ Betreff (Subject)]</a>
+              <a href="author.html#1873">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

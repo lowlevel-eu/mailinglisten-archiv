@@ -1,0 +1,396 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] libc: Ein Ring, sie zu knechten...
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20libc%3A%20Ein%20Ring%2C%20sie%20zu%20knechten...&In-Reply-To=%3C1292193733-21165-1-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001930.html">
+   <LINK REL="Next"  HREF="001932.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] libc: Ein Ring, sie zu knechten...</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20libc%3A%20Ein%20Ring%2C%20sie%20zu%20knechten...&In-Reply-To=%3C1292193733-21165-1-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH] libc: Ein Ring, sie zu knechten...">kevin at tyndur.org
+                  </A><BR>
+    <I>So Dez 12 23:42:13 CET 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001930.html">[tyndur-devel] [PATCH] Komplette Uebersetzung der Shell
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001932.html">[tyndur-devel] &#8222;Os-Dev&#8220; &#8212; Information &#252;ber ein Thema
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1931">[ Datum ]</a>
+              <a href="thread.html#1931">[ Thema ]</a>
+              <a href="subject.html#1931">[ Betreff (Subject) ]</a>
+              <a href="author.html#1931">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ libc: Ein Ring, sie zu knechten, die Requests zu finden,
+        ins Rote zu treiben und ewig zu binden.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/include/collections.h  |   43 +++++++
+ src/lib/collections/ring.c |  263 ++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 306 insertions(+), 0 deletions(-)
+ create mode 100644 src/lib/collections/ring.c
+
+diff --git a/src/include/collections.h b/src/include/collections.h
+index 387a1c1..d26de29 100644
+--- a/src/include/collections.h
++++ b/src/include/collections.h
+@@ -32,6 +32,7 @@
+ #include &lt;stdint.h&gt;
+ #include &lt;stdbool.h&gt;
+ #include &lt;stddef.h&gt;
++#include &lt;types.h&gt;
+ 
+ /* Listen **************************************/
+ 
+@@ -183,4 +184,46 @@ void* tree_prev(tree_t* tree, void* node);
+  */
+ void* tree_next(tree_t* tree, void* node);
+ 
++
++/* Ringpuffer **********************************/
++
++/**
++ * Verwaltet einen Ringpuffer in Shared Memory. Eine Seite schreibt dabei neue
++ * Daten in den Ring, die andere Seite liest.
++ */
++struct shared_ring;
++
++struct shared_ring* ring_init_writer(void* buf, size_t size);
++struct shared_ring* ring_init_reader(void* buf, size_t size);
++void ring_free(struct shared_ring* ring);
++
++/**
++ * Weist *buf einen Pointer auf den aktuellen Eintrag im Ring zu und gibt die
++ * Laenge des Ringeintrags zurueck. Wenn kein neuer Eintrag vorhanden ist, wird
++ * 0 zurueckgegeben.
++ */
++ssize_t ring_read_ptr(struct shared_ring* ring, void** buf);
++
++/**
++ * Schliesst eine Lesevorgang ab, d.h. passt die eigene Position an.
++ */
++int ring_read_complete(struct shared_ring* ring);
++
++/**
++ * Weist *buf einen Pointer auf einen neuen Ringeintrag zu, der Platz fuer size
++ * Bytes bietet. Wenn der Ring voll ist, wird -EBUSY zurueckgegeben.
++ */
++int ring_write_ptr(struct shared_ring* ring, void** buf, size_t size);
++
++/**
++ * Schliesst eine Schreibvorgang ab, d.h. passt die eigene Position an.
++ */
++int ring_write_complete(struct shared_ring* ring);
++
++/**
++ * Prueft, ob der Ring leer ist, d.h. der Ring keine Daten enthaelt, die noch
++ * nicht gelesen worden sind.
++ */
++bool ring_empty(struct shared_ring* ring);
++
+ #endif
+diff --git a/src/lib/collections/ring.c b/src/lib/collections/ring.c
+new file mode 100644
+index 0000000..d81d745
+--- /dev/null
++++ b/src/lib/collections/ring.c
+@@ -0,0 +1,263 @@
++/*
++ * Copyright (c) 2010 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include &lt;errno.h&gt;
++#include &lt;stdint.h&gt;
++#include &lt;stdbool.h&gt;
++#include &lt;stdlib.h&gt;
++#include &lt;string.h&gt;
++#include &lt;types.h&gt;
++
++/**
++ * Wenn reader_pos und writer_pos gleich sind, ist der Ring vollstaendig
++ * ausgelesen.
++ */
++struct ring_buffer {
++    volatile size_t         writer_pos;
++    volatile size_t         reader_pos;
++    uint8_t                 data[];
++};
++
++#define RING_WRAPAROUND ((size_t) -1)
++
++struct ring_entry {
++    size_t                  size;
++    uint8_t                 data[];
++};
++
++struct shared_ring {
++    bool                    is_writer;
++    size_t                  my_pos;
++    struct ring_buffer*     buf;
++    size_t                  buf_size;
++};
++
++/** Gibt den aktuellen Ringeintrag zurueck */
++static inline struct ring_entry* ring_get(struct shared_ring* ring)
++{
++    return (struct ring_entry*) &amp;ring-&gt;buf-&gt;data[ring-&gt;my_pos];
++}
++
++/**
++ * Weist *buf einen Pointer auf den aktuellen Eintrag im Ring zu und gibt die
++ * Laenge des Ringeintrags zurueck. Wenn kein neuer Eintrag vorhanden ist, wird
++ * 0 zurueckgegeben.
++ */
++ssize_t ring_read_ptr(struct shared_ring* ring, void** buf)
++{
++    struct ring_entry* ent;
++    size_t writer_pos = ring-&gt;buf-&gt;writer_pos;
++
++    if (ring-&gt;is_writer) {
++        return -EINVAL;
++    }
++
++    if (ring-&gt;my_pos &gt; ring-&gt;buf_size - (sizeof(size_t))) {
++        /*
++         * Von 0 lesen, aber nur, wenn der Schreiber dabei nicht ueberholt wird
++         */
++        if (writer_pos &lt; ring-&gt;my_pos) {
++            ring-&gt;my_pos = 0;
++            ring-&gt;buf-&gt;reader_pos = 0;
++        } else {
++            return 0;
++        }
++    }
++
++    if (writer_pos == ring-&gt;my_pos) {
++        return 0;
++    }
++
++    ent = ring_get(ring);
++    if (ent-&gt;size == RING_WRAPAROUND) {
++        ring-&gt;my_pos = 0;
++        ring-&gt;buf-&gt;reader_pos = 0;
++
++        if (writer_pos == ring-&gt;my_pos) {
++            return 0;
++        }
++
++        ent = ring_get(ring);
++    }
++
++    *buf = ent-&gt;data;
++
++    return ent-&gt;size;
++}
++
++/**
++ * Schliesst eine Lesevorgang ab, d.h. passt die eigene Position an.
++ */
++int ring_read_complete(struct shared_ring* ring)
++{
++    struct ring_entry* ent;
++
++    if (ring-&gt;is_writer) {
++        return -EINVAL;
++    }
++
++    if (ring-&gt;buf-&gt;writer_pos == ring-&gt;my_pos) {
++        return -EINVAL;
++    }
++
++    ent = ring_get(ring);
++
++    ring-&gt;my_pos += ent-&gt;size;
++    ring-&gt;buf-&gt;reader_pos = ring-&gt;my_pos;
++
++    return 0;
++}
++
++/**
++ * Weist *buf einen Pointer auf einen neuen Ringeintrag zu, der Platz fuer size
++ * Bytes bietet. Wenn der Ring voll ist, wird -EBUSY zurueckgegeben.
++ */
++int ring_write_ptr(struct shared_ring* ring, void** buf, size_t size)
++{
++    struct ring_entry* ent;
++    size_t reader_pos = ring-&gt;buf-&gt;reader_pos;
++    size_t free_bytes;
++
++    if (!ring-&gt;is_writer) {
++        return -EINVAL;
++    }
++
++    /* Der Header muss auch noch mit rein */
++    size += sizeof(size_t);
++
++    /*
++     * Falls der neue Eintrag nicht mehr in den Ring passt, muessen wir von
++     * vorne anfangen. Der Leser darf dabei nicht ueberholt werden.
++     */
++    if (ring-&gt;my_pos + size &gt;= ring-&gt;buf_size) {
++        if (reader_pos &gt; ring-&gt;my_pos || reader_pos == 0) {
++            return -EBUSY;
++        }
++
++        if (ring-&gt;my_pos &lt;= ring-&gt;buf_size - sizeof(size_t)) {
++            ent = ring_get(ring);
++            ent-&gt;size = RING_WRAPAROUND;
++        }
++
++        ring-&gt;my_pos = 0;
++        ring-&gt;buf-&gt;writer_pos = 0;
++    }
++
++    /* Pruefen, ob genug Platz im Ring ist */
++    if (ring-&gt;my_pos &lt; reader_pos) {
++        free_bytes = reader_pos - ring-&gt;my_pos - 1;
++    } else {
++        free_bytes = ring-&gt;buf_size - ring-&gt;my_pos - 1;
++    }
++
++    if (free_bytes &lt; size) {
++        return -EBUSY;
++    }
++
++    /* Eintrag anlegen */
++    ent = ring_get(ring);
++    ent-&gt;size = size;
++    *buf = ent-&gt;data;
++
++    return 0;
++}
++
++/**
++ * Schliesst eine Schreibvorgang ab, d.h. passt die eigene Position an.
++ */
++int ring_write_complete(struct shared_ring* ring)
++{
++    struct ring_entry* ent;
++
++    if (!ring-&gt;is_writer) {
++        return -EINVAL;
++    }
++
++    ent = ring_get(ring);
++
++    ring-&gt;my_pos += ent-&gt;size;
++    ring-&gt;buf-&gt;writer_pos = ring-&gt;my_pos;
++
++    return 0;
++}
++
++/**
++ * Prueft, ob der Ring leer ist, d.h. der Ring keine Daten enthaelt, die noch
++ * nicht gelesen worden sind.
++ */
++bool ring_empty(struct shared_ring* ring)
++{
++    return (ring-&gt;buf-&gt;writer_pos == ring-&gt;buf-&gt;reader_pos);
++}
++
++/**
++ * Erstellt die Verwaltungsstrukturen fuer einen gemeinsamen Ringpuffer in
++ * Shared Memory.
++ */
++static struct shared_ring* ring_init(void* buf, size_t size, bool is_writer)
++{
++    struct shared_ring* ring;
++
++    if (size &lt; sizeof(struct ring_buffer)) {
++        return NULL;
++    }
++
++    ring = malloc(sizeof(*ring));
++    if (ring == NULL) {
++        return NULL;
++    }
++
++    ring-&gt;is_writer = is_writer;
++    ring-&gt;my_pos    = 0;
++    ring-&gt;buf       = buf;
++    ring-&gt;buf_size  = size - sizeof(struct ring_buffer);
++
++    if (is_writer) {
++        memset(buf, 0, size);
++        ring-&gt;buf-&gt;writer_pos = ring-&gt;my_pos;
++    } else {
++        ring-&gt;buf-&gt;reader_pos = ring-&gt;my_pos;
++    }
++
++    return ring;
++}
++
++struct shared_ring* ring_init_writer(void* buf, size_t size)
++{
++    return ring_init(buf, size, true);
++}
++
++struct shared_ring* ring_init_reader(void* buf, size_t size)
++{
++    return ring_init(buf, size, false);
++}
++
++void ring_free(struct shared_ring* ring)
++{
++    free(ring);
++}
+-- 
+1.6.0.2
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001930.html">[tyndur-devel] [PATCH] Komplette Uebersetzung der Shell
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001932.html">[tyndur-devel] &#8222;Os-Dev&#8220; &#8212; Information &#252;ber ein Thema
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1931">[ Datum ]</a>
+              <a href="thread.html#1931">[ Thema ]</a>
+              <a href="subject.html#1931">[ Betreff (Subject)]</a>
+              <a href="author.html#1931">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

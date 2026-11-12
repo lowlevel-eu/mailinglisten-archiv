@@ -1,0 +1,484 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 1/4] libc: Verarbeitung der Tastenbefehle	in readline vereinheitlicht
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%201/4%5D%20libc%3A%20Verarbeitung%20der%20Tastenbefehle%0A%09in%20readline%20vereinheitlicht&In-Reply-To=%3C200905222033.01399%40kevin-wolf.de%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="000897.html">
+   <LINK REL="Next"  HREF="000989.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 1/4] libc: Verarbeitung der Tastenbefehle	in readline vereinheitlicht</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%201/4%5D%20libc%3A%20Verarbeitung%20der%20Tastenbefehle%0A%09in%20readline%20vereinheitlicht&In-Reply-To=%3C200905222033.01399%40kevin-wolf.de%3E"
+           TITLE="[tyndur-devel] [PATCH 1/4] libc: Verarbeitung der Tastenbefehle	in readline vereinheitlicht">mail at kevin-wolf.de
+                  </A><BR>
+    <I>Fr Mai 22 20:33:01 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="000897.html">[tyndur-devel] [PATCH 1/4] libc: Verarbeitung der Tastenbefehle in	readline vereinheitlicht
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="000989.html">[tyndur-devel] [PATCH] libc: Verarbeitung der Tastenbefehle in	readline vereinheitlicht
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#928">[ Datum ]</a>
+              <a href="thread.html#928">[ Thema ]</a>
+              <a href="subject.html#928">[ Betreff (Subject) ]</a>
+              <a href="author.html#928">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>Am Sonntag, 17. Mai 2009 18:19 schrieb Antoine Kaufmann:
+&gt;<i> * libc: Verarbeitung der Tastenbefehle in readline vereinheitlicht damit
+</I>&gt;<i>         einfacher Neue eingebaut werden koennen.
+</I>&gt;<i>
+</I>&gt;<i> Signed-off-by: Antoine Kaufmann &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">toni at tyndur.org</A>&gt;
+</I>&gt;<i> ---
+</I>&gt;<i>  src/modules/lib/readline.c |  301
+</I>&gt;<i> +++++++++++++++++++++++++++----------------- 1 files changed, 186
+</I>&gt;<i> insertions(+), 115 deletions(-)
+</I>&gt;<i>
+</I>&gt;<i> diff --git a/src/modules/lib/readline.c b/src/modules/lib/readline.c
+</I>&gt;<i> index 879b475..dac4305 100644
+</I>&gt;<i> --- a/src/modules/lib/readline.c
+</I>&gt;<i> +++ b/src/modules/lib/readline.c
+</I>&gt;<i> @@ -37,6 +37,69 @@
+</I>&gt;<i>
+</I>&gt;<i>  #define BUFFER_SIZE 255
+</I>&gt;<i>
+</I>&gt;<i> +
+</I>&gt;<i> +/** Typ mit allen Befehlen, die eingegeben werden koennen, fuer readline.
+</I>&gt;<i> */ +typedef enum {
+</I>&gt;<i> +    UNKNOWN_COMMAND = 0,
+</I>&gt;<i> +
+</I>&gt;<i> +    // Cursor Bewegen
+</I>&gt;<i> +    /// Cursor um ein Zeichen nach vorne bewegen
+</I>&gt;<i> +    FORWARD_CHAR,
+</I>&gt;<i> +    /// Cursor um ein Zeichen nach hinten bewegen
+</I>&gt;<i> +    BACKWARD_CHAR,
+</I>&gt;<i> +    /// Cursor an den Anfang der Zeile bewegen
+</I>&gt;<i> +    BEGINNING_OF_LINE,
+</I>&gt;<i> +    /// Cursor an das Ende der Zeile bewegen
+</I>&gt;<i> +    END_OF_LINE,
+</I>&gt;<i> +
+</I>&gt;<i> +    // Text editieren
+</I>&gt;<i> +    /// Zeile abschliessen
+</I>&gt;<i> +    ACCEPT_LINE,
+</I>&gt;<i> +    /// Zeichen unter dem Cursor loeschen
+</I>&gt;<i> +    DELETE_CHAR,
+</I>&gt;<i> +    /// Zeichen hinter dem Cursor loeschen
+</I>&gt;<i> +    BACKWARD_DELETE_CHAR,
+</I>&gt;<i> +    /// Vervollstaendigen
+</I>&gt;<i> +    COMPLETE,
+</I>&gt;<i> +
+</I>&gt;<i> +    // History
+</I>&gt;<i> +    /// Eine Zeile zurueck in der History
+</I>&gt;<i> +    PREVIOUS_HISTORY,
+</I>&gt;<i> +    /// Eine Zeile vorwaerts in der History
+</I>&gt;<i> +    NEXT_HISTORY,
+</I>&gt;<i> +} rl_command_t;
+</I>&gt;<i> +
+</I>&gt;<i> +/** Eingebaute Tastensequenzen fuer die Befehle */
+</I>&gt;<i> +static struct {
+</I>&gt;<i> +    wint_t*        seq;
+</I>&gt;<i> +    rl_command_t    cmd;
+</I>&gt;<i> +} builtin_commands [] = {
+</I>&gt;<i> +    /// Pfeil rechts
+</I>&gt;<i> +    { L&quot;\033[C&quot;, FORWARD_CHAR },
+</I>&gt;<i> +    /// Pfeil links
+</I>&gt;<i> +    { L&quot;\033[D&quot;, BACKWARD_CHAR },
+</I>&gt;<i> +    /// Pos1
+</I>&gt;<i> +    { L&quot;\033[H&quot;, BEGINNING_OF_LINE },
+</I>&gt;<i> +    /// Ende
+</I>&gt;<i> +    { L&quot;\033[F&quot;, END_OF_LINE },
+</I>&gt;<i> +
+</I>&gt;<i> +    /// Enter
+</I>&gt;<i> +    { L&quot;\n&quot;, ACCEPT_LINE },
+</I>&gt;<i> +    /// Del
+</I>&gt;<i> +    { L&quot;\033[3~&quot;, DELETE_CHAR },
+</I>&gt;<i> +    /// Ruecktaste
+</I>&gt;<i> +    { L&quot;\b&quot;, BACKWARD_DELETE_CHAR },
+</I>&gt;<i> +    /// Tab
+</I>&gt;<i> +    { L&quot;\t&quot;, COMPLETE },
+</I>&gt;<i> +
+</I>&gt;<i> +    /// Pfeil hoch
+</I>&gt;<i> +    { L&quot;\033[A&quot;, PREVIOUS_HISTORY },
+</I>&gt;<i> +    /// Pfeil runter
+</I>&gt;<i> +    { L&quot;\033[B&quot;, NEXT_HISTORY },
+</I>&gt;<i> +
+</I>&gt;<i> +    { NULL, UNKNOWN_COMMAND },
+</I>&gt;<i> +};
+</I>&gt;<i> +
+</I>&gt;<i>  static list_t* history = NULL;
+</I>&gt;<i>
+</I>&gt;<i>  /**
+</I>&gt;<i> @@ -284,6 +347,35 @@ static bool complete_word(char* buffer, int* pos, int*
+</I>&gt;<i> len) }
+</I>&gt;<i>
+</I>&gt;<i>  /**
+</I>&gt;<i> + * Im uebergebenen Puffer nach Befehlstasten suchen
+</I>&gt;<i> + */
+</I>&gt;<i> +static int find_command(const wchar_t* buf, size_t len, rl_command_t* cmd)
+</I>
+Die Funktion durchsucht den Puffer nicht, sondern vergleicht seinen Anfang mit 
+den möglichen Sequenzen. Und sie hat Rückgabewerte, die man spezifizieren 
+könnte. Was mit cmd passiert zu beschreiben würde auch nicht schaden.
+
+&gt;<i> +{
+</I>&gt;<i> +    int found_part = 0;
+</I>&gt;<i> +    size_t seq_len;
+</I>&gt;<i> +    size_t min_len;
+</I>&gt;<i> +    size_t i;
+</I>&gt;<i> +
+</I>&gt;<i> +    for (i = 0; builtin_commands[i].seq; i++) {
+</I>&gt;<i> +        seq_len = wcslen(builtin_commands[i].seq);
+</I>&gt;<i> +        min_len = (len &lt; seq_len ? len : seq_len);
+</I>&gt;<i> +
+</I>&gt;<i> +        if (!wcsncmp(buf, builtin_commands[i].seq, min_len)) {
+</I>&gt;<i> +            // Passt genau
+</I>&gt;<i> +            if (seq_len &lt;= len) {
+</I>&gt;<i> +                *cmd = builtin_commands[i].cmd;
+</I>&gt;<i> +                return seq_len;
+</I>&gt;<i> +            } else {
+</I>&gt;<i> +                // Es fehlt noch ein bisschen was, koennte aber noch
+</I>&gt;<i> werden +                found_part++;
+</I>&gt;<i> +            }
+</I>&gt;<i> +        }
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    return (found_part &gt; 0 ? 0 : -1);
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +/**
+</I>&gt;<i>   * Prompt anzeigen und Zeile von der Tastatur einlesen
+</I>&gt;<i>   */
+</I>&gt;<i>  char* readline(const char* prompt)
+</I>&gt;<i> @@ -293,10 +385,14 @@ char* readline(const char* prompt)
+</I>&gt;<i>      }
+</I>&gt;<i>
+</I>&gt;<i>      char* buffer = malloc(BUFFER_SIZE);
+</I>&gt;<i> -    int pos, size;
+</I>&gt;<i> +    int old_pos, pos, size;
+</I>&gt;<i>      bool enter = FALSE;
+</I>&gt;<i>      int history_pos = -1;
+</I>&gt;<i>
+</I>&gt;<i> +    rl_command_t command;
+</I>&gt;<i> +    wchar_t cmd_buf[8];
+</I>&gt;<i> +    size_t cmd_pos = 0;
+</I>&gt;<i> +
+</I>&gt;<i>      rl_line_buffer = buffer;
+</I>&gt;<i>
+</I>&gt;<i>      printf(&quot;%s&quot;, prompt);
+</I>&gt;<i> @@ -306,127 +402,108 @@ char* readline(const char* prompt)
+</I>&gt;<i>      pos = size = 0;
+</I>&gt;<i>      while (!enter)
+</I>&gt;<i>      {
+</I>&gt;<i> -        wint_t c = keyboard_read_char();
+</I>&gt;<i> +        int result;
+</I>&gt;<i> +
+</I>&gt;<i> +        command = UNKNOWN_COMMAND;
+</I>&gt;<i> +        old_pos = pos;
+</I>&gt;<i> +
+</I>&gt;<i> +        cmd_buf[cmd_pos++] = keyboard_read_char();
+</I>&gt;<i> +again:
+</I>&gt;<i> +        result = find_command(cmd_buf, cmd_pos, &amp;command);
+</I>&gt;<i> +        if (result &gt; 0) {
+</I>&gt;<i> +            int i;
+</I>&gt;<i> +            for (i = 0; i &lt; result; i++) {
+</I>&gt;<i> +                cmd_pos--;
+</I>&gt;<i> +                wmemmove(cmd_buf, cmd_buf + 1, cmd_pos);
+</I>&gt;<i> +            }
+</I>
+Ich muß zugeben, daß ich den Sinn dieser Schleife nicht ganz verstehe. Kann 
+man das nicht mit einem wmemmove abhandeln statt zeichenweise weiter nach 
+links zu rücken?
+
+&gt;<i> +        } else if (result &lt; 0) {
+</I>&gt;<i> +            inschar(buffer, &amp;pos, &amp;size, cmd_buf[0]);
+</I>&gt;<i> +            wmemmove(cmd_buf, cmd_buf + 1, cmd_pos);
+</I>&gt;<i> +            // Erstes Zeichen weg und erneut versuchen
+</I>&gt;<i> +            cmd_pos--;
+</I>&gt;<i> +            if (cmd_pos) {
+</I>&gt;<i> +                goto again;
+</I>&gt;<i> +            }
+</I>&gt;<i> +        }
+</I>&gt;<i>
+</I>&gt;<i> -        switch (c) {
+</I>&gt;<i> -            case WEOF:
+</I>&gt;<i> -            case '\0':
+</I>&gt;<i> -                c = keyboard_read_char();
+</I>&gt;<i> -                enter = TRUE;
+</I>
+Wohin ist das verschwunden? Oder brauchen wir das nicht mehr?
+
+&gt;<i> +        if (old_pos != pos) {
+</I>&gt;<i> +            printf(&quot;\033[K\033[s%s\033[u\033[1C&quot;, &amp;buffer[old_pos]);
+</I>&gt;<i> +            fflush(stdout);
+</I>&gt;<i> +        }
+</I>
+Äh, ja, genau. Kommentar?
+
+Und kann das nicht ins result &lt; 0, oder gibt es noch andere Fälle, wo man hier 
+reinkommt?
+
+&gt;<i>
+</I>&gt;<i> -                printf(&quot;\r\n&quot;);
+</I>&gt;<i> -                fflush(stdout);
+</I>&gt;<i> +        switch (command) {
+</I>&gt;<i> +            case BACKWARD_CHAR:
+</I>&gt;<i> +                if (pos &gt; 0) {
+</I>&gt;<i> +                    printf(&quot;\033[1D&quot;);
+</I>&gt;<i> +                    fflush(stdout);
+</I>&gt;<i> +                    move_cursor(buffer, &amp;pos, size, -1);
+</I>&gt;<i> +                }
+</I>&gt;<i>                  break;
+</I>&gt;<i>
+</I>&gt;<i> -            // Escapesequenzen fuer Kontrolltasten verarbeiten
+</I>&gt;<i> -            case '\033':
+</I>&gt;<i> -            {
+</I>&gt;<i> -                char buf[4];
+</I>&gt;<i> -                int i;
+</I>&gt;<i> -                memset(buf, 0, sizeof(buf));
+</I>&gt;<i> -
+</I>&gt;<i> -                if ((buf [0] = keyboard_read_char())!= '[') {
+</I>&gt;<i> -                    goto seq_nomatch;
+</I>&gt;<i> +            case FORWARD_CHAR:
+</I>&gt;<i> +                if (pos &lt; size) {
+</I>&gt;<i> +                    printf(&quot;\033[1C&quot;);
+</I>&gt;<i> +                    fflush(stdout);
+</I>&gt;<i> +                    move_cursor(buffer, &amp;pos, size, 1);
+</I>&gt;<i>                  }
+</I>&gt;<i> +                break;
+</I>&gt;<i>
+</I>&gt;<i> -                buf[1] = keyboard_read_char();
+</I>&gt;<i> -                switch (buf[1]) {
+</I>&gt;<i> -                    // Links
+</I>&gt;<i> -                    case 'D':
+</I>&gt;<i> -                        if (pos &gt; 0) {
+</I>&gt;<i> -                            printf(&quot;\033[1D&quot;);
+</I>&gt;<i> -                            fflush(stdout);
+</I>&gt;<i> -                            move_cursor(buffer, &amp;pos, size, -1);
+</I>&gt;<i> -                        }
+</I>&gt;<i> -                        break;
+</I>&gt;<i> -
+</I>&gt;<i> -                    // Rechts
+</I>&gt;<i> -                    case 'C':
+</I>&gt;<i> -                        if (pos &lt; size) {
+</I>&gt;<i> -                            printf(&quot;\033[1C&quot;);
+</I>&gt;<i> -                            fflush(stdout);
+</I>&gt;<i> -                            move_cursor(buffer, &amp;pos, size, 1);
+</I>&gt;<i> -                        }
+</I>&gt;<i> -                        break;
+</I>&gt;<i> -
+</I>&gt;<i> -                    // Hoch/Runter
+</I>&gt;<i> -                    case 'A':
+</I>&gt;<i> -                    case 'B':
+</I>&gt;<i> -                        if (buf[1] == 'A') {
+</I>&gt;<i> -                            if (history_pos &lt; (int) list_size(history) -
+</I>&gt;<i> 1) { -                                history_pos++;
+</I>&gt;<i> -                            } else {
+</I>&gt;<i> -                                break;
+</I>&gt;<i> -                            }
+</I>&gt;<i> -                        } else {
+</I>&gt;<i> -                            if (history_pos &gt; -1) {
+</I>&gt;<i> -                                history_pos--;
+</I>&gt;<i> -                            } else {
+</I>&gt;<i> -                                break;
+</I>&gt;<i> -                            }
+</I>&gt;<i> -                        }
+</I>&gt;<i> -
+</I>&gt;<i> -                        memset(buffer, 0, BUFFER_SIZE);
+</I>&gt;<i> -                        if (history_pos &gt; -1) {
+</I>&gt;<i> -                            strncpy(buffer,
+</I>&gt;<i> -                                list_get_element_at(history, history_pos),
+</I>&gt;<i> -                                BUFFER_SIZE - 1);
+</I>&gt;<i> -                        }
+</I>&gt;<i> +            case BEGINNING_OF_LINE:
+</I>&gt;<i> +                printf(&quot;\033[%dD&quot;, count_visible_chars(buffer, 0, pos));
+</I>&gt;<i> +                pos = 0;
+</I>&gt;<i> +                fflush(stdout);
+</I>&gt;<i> +                break;
+</I>&gt;<i>
+</I>&gt;<i> -                        char* format;
+</I>&gt;<i> -                        asprintf(&amp;format, &quot;\033[%dD&quot;, pos);
+</I>&gt;<i> -                        printf(&quot;%s\033[K%s&quot;, format, buffer);
+</I>&gt;<i> -                        free(format);
+</I>&gt;<i> -                        fflush(stdout);
+</I>&gt;<i> +            case END_OF_LINE:
+</I>&gt;<i> +                printf(&quot;\033[%dC&quot;,
+</I>&gt;<i> +                    count_visible_chars(buffer, pos, size));
+</I>&gt;<i> +                pos = strlen(buffer);
+</I>&gt;<i> +                fflush(stdout);
+</I>&gt;<i> +                break;
+</I>&gt;<i>
+</I>&gt;<i> -                        pos = size = strlen(buffer);
+</I>&gt;<i>
+</I>&gt;<i> +            case PREVIOUS_HISTORY:
+</I>&gt;<i> +            case NEXT_HISTORY:
+</I>&gt;<i> +                if (command == PREVIOUS_HISTORY) {
+</I>&gt;<i> +                    if (history_pos &lt; (int) list_size(history) - 1) {
+</I>&gt;<i> +                        history_pos++;
+</I>&gt;<i> +                    } else {
+</I>&gt;<i>                          break;
+</I>&gt;<i> -
+</I>&gt;<i> -                    // Entfernen
+</I>&gt;<i> -                    case '3':
+</I>&gt;<i> -                        // Der Entfernen-Taste muss noch eine Tilde folgen
+</I>&gt;<i> -                        if ((buf[2] = keyboard_read_char()) != '~') {
+</I>&gt;<i> -                            goto seq_nomatch;
+</I>&gt;<i> -                        }
+</I>&gt;<i> -
+</I>&gt;<i> -                        if (pos &lt; size) {
+</I>&gt;<i> -                            delchar(buffer, pos, &amp;size);
+</I>&gt;<i> -                            printf(&quot;\033[K\033[s%s\033[u&quot;, &amp;buffer[pos]);
+</I>&gt;<i> -                            fflush(stdout);
+</I>&gt;<i> -                        }
+</I>&gt;<i> +                    }
+</I>&gt;<i> +                } else {
+</I>&gt;<i> +                    if (history_pos &gt; -1) {
+</I>&gt;<i> +                        history_pos--;
+</I>&gt;<i> +                    } else {
+</I>&gt;<i>                          break;
+</I>&gt;<i> +                    }
+</I>&gt;<i> +                }
+</I>&gt;<i>
+</I>&gt;<i> +                memset(buffer, 0, BUFFER_SIZE);
+</I>&gt;<i> +                if (history_pos &gt; -1) {
+</I>&gt;<i> +                    strncpy(buffer,
+</I>&gt;<i> +                        list_get_element_at(history, history_pos),
+</I>&gt;<i> +                        BUFFER_SIZE - 1);
+</I>&gt;<i> +                }
+</I>&gt;<i>
+</I>&gt;<i> +                char* format;
+</I>&gt;<i> +                asprintf(&amp;format, &quot;\033[%dD&quot;, pos);
+</I>&gt;<i> +                printf(&quot;%s\033[K%s&quot;, format, buffer);
+</I>&gt;<i> +                free(format);
+</I>&gt;<i> +                fflush(stdout);
+</I>&gt;<i>
+</I>&gt;<i> -                    // Pos1
+</I>&gt;<i> -                    case 'H':
+</I>&gt;<i> -                        printf(&quot;\033[%dD&quot;, count_visible_chars(buffer, 0,
+</I>&gt;<i> pos)); -                        pos = 0;
+</I>&gt;<i> -                        fflush(stdout);
+</I>&gt;<i> -                        break;
+</I>&gt;<i> -
+</I>&gt;<i> -                    // Ende
+</I>&gt;<i> -                    case 'F':
+</I>&gt;<i> -                        printf(&quot;\033[%dC&quot;,
+</I>&gt;<i> -                            count_visible_chars(buffer, pos, size));
+</I>&gt;<i> -                        pos = strlen(buffer);
+</I>&gt;<i> -                        fflush(stdout);
+</I>&gt;<i> -                        break;
+</I>&gt;<i> +                pos = size = strlen(buffer);
+</I>&gt;<i> +                break;
+</I>&gt;<i>
+</I>&gt;<i> -                    default:
+</I>&gt;<i> -                        goto seq_nomatch;
+</I>&gt;<i> -                }
+</I>&gt;<i>
+</I>&gt;<i> -                break;
+</I>&gt;<i> -seq_nomatch:
+</I>&gt;<i> -                for (i = 0; (c = buf[i]); i++) {
+</I>&gt;<i> -                    ungetc(buf[i], stdin);
+</I>&gt;<i> +            case DELETE_CHAR:
+</I>&gt;<i> +                if (pos &lt; size) {
+</I>&gt;<i> +                    delchar(buffer, pos, &amp;size);
+</I>&gt;<i> +                    printf(&quot;\033[K\033[s%s\033[u&quot;, &amp;buffer[pos]);
+</I>&gt;<i> +                    fflush(stdout);
+</I>&gt;<i>                  }
+</I>&gt;<i>                  break;
+</I>&gt;<i> -            }
+</I>&gt;<i>
+</I>&gt;<i> -            case '\b':
+</I>&gt;<i> +            case BACKWARD_DELETE_CHAR:
+</I>&gt;<i>                  if (pos &gt; 0) {
+</I>&gt;<i>                      move_cursor(buffer, &amp;pos, size, -1);
+</I>&gt;<i>                      delchar(buffer, pos, &amp;size);
+</I>&gt;<i> @@ -435,15 +512,15 @@ seq_nomatch:
+</I>&gt;<i>                  }
+</I>&gt;<i>                  break;
+</I>&gt;<i>
+</I>&gt;<i> -            case '\n':
+</I>&gt;<i> -                enter = TRUE;
+</I>&gt;<i> -
+</I>&gt;<i> +
+</I>&gt;<i> +            case ACCEPT_LINE:
+</I>&gt;<i> +                enter = TRUE;
+</I>&gt;<i> +
+</I>&gt;<i>                  printf(&quot;\r\n&quot;);
+</I>&gt;<i>                  fflush(stdout);
+</I>&gt;<i>                  break;
+</I>&gt;<i> -
+</I>&gt;<i>
+</I>&gt;<i> -            case '\t':
+</I>&gt;<i> +            case COMPLETE:
+</I>&gt;<i>                  if (rl_attempted_completion_function != NULL) {
+</I>&gt;<i>                      int old_pos = pos;
+</I>&gt;<i>
+</I>&gt;<i> @@ -462,13 +539,7 @@ seq_nomatch:
+</I>&gt;<i>                  }
+</I>&gt;<i>                  break;
+</I>&gt;<i>
+</I>&gt;<i> -            default:
+</I>&gt;<i> -                if (pos &lt; BUFFER_SIZE - 1) {
+</I>&gt;<i> -                    int old_pos = pos;
+</I>&gt;<i> -                    inschar(buffer, &amp;pos, &amp;size, c);
+</I>&gt;<i> -                    printf(&quot;\033[K\033[s%s\033[u\033[1C&quot;,
+</I>&gt;<i> &amp;buffer[old_pos]); -                    fflush(stdout);
+</I>&gt;<i> -                }
+</I>&gt;<i> +            case UNKNOWN_COMMAND:
+</I>&gt;<i>                  break;
+</I>&gt;<i>          }
+</I>&gt;<i>      }
+</I>
+Der Rest kommt mir nur suspekt vor, aber genauer begründen kann ich das 
+nicht. ;-)
+</PRE>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="000897.html">[tyndur-devel] [PATCH 1/4] libc: Verarbeitung der Tastenbefehle in	readline vereinheitlicht
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="000989.html">[tyndur-devel] [PATCH] libc: Verarbeitung der Tastenbefehle in	readline vereinheitlicht
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#928">[ Datum ]</a>
+              <a href="thread.html#928">[ Thema ]</a>
+              <a href="subject.html#928">[ Betreff (Subject)]</a>
+              <a href="author.html#928">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

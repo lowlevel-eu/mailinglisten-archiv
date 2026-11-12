@@ -1,0 +1,968 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] kernel2: vm86
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20kernel2%3A%20vm86&In-Reply-To=%3C1283095205-26143-1-git-send-email-max%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001805.html">
+   <LINK REL="Next"  HREF="001807.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] kernel2: vm86</H1>
+    <B>Max Reitz</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20kernel2%3A%20vm86&In-Reply-To=%3C1283095205-26143-1-git-send-email-max%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH] kernel2: vm86">max at tyndur.org
+                  </A><BR>
+    <I>So Aug 29 17:20:05 CEST 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001805.html">[tyndur-devel] [PATCH] libm: fmod implementiert
+</A></li>
+        <LI>N�chste Nachricht: <A HREF="001807.html">[tyndur-devel] [PATCH] Pascal-RTL: Short Writes ber�cksichtigen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1806">[ Datum ]</a>
+              <a href="thread.html#1806">[ Thema ]</a>
+              <a href="subject.html#1806">[ Betreff (Subject) ]</a>
+              <a href="author.html#1806">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* Mit diesem Patch wird für jeden vm86-Thread ein komplett eigener
+  Adressraum erstellt, in welchen mittels Hardwaremultitasking
+  gewechselt wird. Dies erlaubt zwar noch nicht, dass mehrere vm86-
+  Threads gleichzeitig laufen können, sorgt aber zumindest dafür,
+  dass die Nullpage erstens in anderen Threads ungemappt bleibt und
+  diese anderen zweitens auch nicht auf den vm86-Speicher zugreifen
+  können.
+
+Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">max at tyndur.org</A>&gt;
+---
+ src/kernel2/include/arch/i386/cpu.h              |    1 +
+ src/kernel2/include/mm.h                         |    4 +
+ src/kernel2/src/arch/i386/gdt.c                  |   38 ++-
+ src/kernel2/src/arch/i386/interrupts/im.c        |    2 +-
+ src/kernel2/src/arch/i386/interrupts/int_stubs.S |   23 ++
+ src/kernel2/src/arch/i386/kernel.ld              |    9 +
+ src/kernel2/src/arch/i386/mm/mm_context.c        |   34 ++-
+ src/kernel2/src/arch/i386/vm86.c                 |  411 +++++++++++++++-------
+ src/kernel2/src/arch/i386/vm86_asm.S             |   15 +
+ src/kernel2/src/interrupts/im.c                  |    2 +-
+ src/kernel2/src/tasks/scheduler.c                |    2 +-
+ 11 files changed, 401 insertions(+), 140 deletions(-)
+ create mode 100644 src/kernel2/src/arch/i386/vm86_asm.S
+
+diff --git a/src/kernel2/include/arch/i386/cpu.h b/src/kernel2/include/arch/i386/cpu.h
+index bbc01b9..e1870b3 100644
+--- a/src/kernel2/include/arch/i386/cpu.h
++++ b/src/kernel2/include/arch/i386/cpu.h
+@@ -119,6 +119,7 @@ typedef struct {
+     uint8_t apic_id;
+     bool bootstrap;
+     cpu_tss_t tss;
++    uint16_t tss_selector;
+     pm_thread_t* thread;
+     vaddr_t apic_base;
+     mmc_context_t* mm_context;
+diff --git a/src/kernel2/include/mm.h b/src/kernel2/include/mm.h
+index ffb68b1..b3870ca 100644
+--- a/src/kernel2/include/mm.h
++++ b/src/kernel2/include/mm.h
+@@ -83,6 +83,7 @@ void vmm_kernel_unmap(vaddr_t start, size_t size);
+  */
+ 
+ mmc_context_t mmc_create(void);
++mmc_context_t mmc_create_empty(void);
+ mmc_context_t mmc_create_kernel_context(void);
+ 
+ void mmc_destroy(mmc_context_t* context);
+@@ -99,6 +100,9 @@ vaddr_t mmc_automap_user(mmc_context_t* target_ctx, mmc_context_t* source_ctx,
+     vaddr_t start, size_t count, uintptr_t lower_limit, uintptr_t upper_limit,
+     int flags);
+ 
++vaddr_t get_pagetable(mmc_context_t* context, size_t index);
++void free_pagetable(mmc_context_t* context, vaddr_t page_table);
++
+ /**
+  * Alloziert einen virtuell (aber nicht zwingend physisch) zusammenhaengenden
+  * Speicherbereich
+diff --git a/src/kernel2/src/arch/i386/gdt.c b/src/kernel2/src/arch/i386/gdt.c
+index 4b85a7a..dc4f3cb 100644
+--- a/src/kernel2/src/arch/i386/gdt.c
++++ b/src/kernel2/src/arch/i386/gdt.c
+@@ -33,6 +33,7 @@
+  * POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
++#include &lt;stdbool.h&gt;
+ #include &lt;stdint.h&gt;
+ 
+ #include &quot;mm.h&quot;
+@@ -60,7 +61,7 @@ typedef struct {
+ } segment_descriptor;
+ 
+ /// Die GDT
+-segment_descriptor gdt[GDT_SIZE];
++segment_descriptor gdt[GDT_SIZE] __attribute__((section(&quot;.gdt_section&quot;)));
+ 
+ /// Letzter Eintrag in der GDT
+ uint16_t next_entry_index = 0;
+@@ -81,8 +82,10 @@ cpu_tss_t double_fault_tss = {
+ void gdt_init_local(void);
+ static void gdt_set_descriptor(int segment, uint32_t size, uint32_t base,
+     uint8_t access, int dpl);
+-static void gdt_set_descriptor_byte_granularity(int segment, uint32_t size,
++void gdt_set_descriptor_byte_granularity(int segment, uint32_t size,
+     uint32_t base, uint8_t access, int dpl);
++void* gdt_get_descriptor_base(int segment);
++void gdt_set_busy_flag(int segment, bool state);
+ 
+ /**
+  * Legt eine GDT an und initialisiert sie mit mit jeweils einem Code- und
+@@ -122,8 +125,9 @@ void gdt_init_local(void)
+ 
+     lock(&amp;gdt_lock);
+     // Deskriptor fuer das Task state segment anlegen
++    cpu_get_current()-&gt;tss_selector = next_entry_index &lt;&lt; 3;
+     gdt_set_descriptor_byte_granularity(next_entry_index++, sizeof(cpu_tss_t) -
+-    1, (uint32_t) &amp;(cpu_get_current()-&gt;tss), GDT_PRESENT | GDT_TSS, 3);
++        1, (uint32_t) &amp;(cpu_get_current()-&gt;tss), GDT_PRESENT | GDT_TSS, 3);
+ 
+     // TSS fuer Double-Fault-Handler
+     double_fault_tss.cr3 = (uintptr_t) pmm_alloc(1);
+@@ -190,9 +194,35 @@ static void gdt_set_descriptor(int segment, uint32_t size, uint32_t base,
+  * @param access Access-Byte des Deskriptors
+  * @param dpl Descriptor Privilege Level
+  */
+-static void gdt_set_descriptor_byte_granularity(int segment, uint32_t size,
++void gdt_set_descriptor_byte_granularity(int segment, uint32_t size,
+     uint32_t base, uint8_t access, int dpl)
+ {
+     gdt_set_descriptor(segment, size, base, access, dpl);
+     gdt[segment].size2  = ((size &gt;&gt; 16) &amp; 0x0F) | 0x40;
+ }
++
++/**
++ * Gibt die Basisadresse eines Deskriptors in der GDT zur�ck.
++ *
++ * @param segment Nummer des Deskriptors
++ *
++ * @return Basisadresse
++ */
++void* gdt_get_descriptor_base(int segment)
++{
++    return (void*) (gdt[segment].base | (gdt[segment].base2 &lt;&lt; 16) | (gdt[segment].base3 &lt;&lt; 24));
++}
++
++/**
++ * Setzt den Status des Busyflags eines Deskriptors (von TSS).
++ *
++ * @param segment Nummer des Deskriptors
++ * @param state Neuer Status
++ */
++void gdt_set_busy_flag(int segment, bool state)
++{
++    if (state == true)
++        gdt[segment].access |= (1 &lt;&lt; 1);
++    else
++        gdt[segment].access &amp;= ~(1 &lt;&lt; 1);
++}
+diff --git a/src/kernel2/src/arch/i386/interrupts/im.c b/src/kernel2/src/arch/i386/interrupts/im.c
+index d8a7c1b..b6a123f 100644
+--- a/src/kernel2/src/arch/i386/interrupts/im.c
++++ b/src/kernel2/src/arch/i386/interrupts/im.c
+@@ -69,7 +69,7 @@ typedef struct {
+ } __attribute__((packed)) idt_gate_t;
+ 
+ // Die ganze IDT (Achtung wird auch aus dem SMP-Trampoline-Code geladen!)
+-idt_gate_t idt[IDT_GATE_COUNT];
++idt_gate_t idt[IDT_GATE_COUNT] __attribute__((section(&quot;.idt_section&quot;)));
+ bool use_apic;
+ 
+ static void idt_set_gate(size_t interrupt, vaddr_t handler,
+diff --git a/src/kernel2/src/arch/i386/interrupts/int_stubs.S b/src/kernel2/src/arch/i386/interrupts/int_stubs.S
+index d34e3b4..2c710ce 100644
+--- a/src/kernel2/src/arch/i386/interrupts/int_stubs.S
++++ b/src/kernel2/src/arch/i386/interrupts/int_stubs.S
+@@ -463,6 +463,29 @@ im_int_stub_8:
+     hlt
+     jmp .
+ 
++.globl load_isf_and_return
++load_isf_and_return:
++    mov 4(%esp), %esp
++
++    pop %ebx
++    pop %ecx
++    pop %edx
++    pop %esi
++    pop %edi
++    pop %ebp
++
++    pop %ds
++    pop %es
++    pop %fs
++    pop %gs
++
++    pop %eax
++
++    add $8, %esp
++
++    iret
++
++
+ msg_double_fault:
+     .ascii &quot;\033[1;41mPANIC: Double fault\n\0&quot;
+ 
+diff --git a/src/kernel2/src/arch/i386/kernel.ld b/src/kernel2/src/arch/i386/kernel.ld
+index 6921bcf..d9dcd48 100644
+--- a/src/kernel2/src/arch/i386/kernel.ld
++++ b/src/kernel2/src/arch/i386/kernel.ld
+@@ -31,6 +31,15 @@ SECTIONS
+ 		*(.bss)
+ 	}
+ 
++    .gdt_section ALIGN(4096) : AT(ADDR(.gdt_section) - VIRT_TO_PHYS)
++    {
++        *(.gdt_section)
++    }
++    .idt_section ALIGN(4096) : AT(ADDR(.idt_section) - VIRT_TO_PHYS)
++    {
++        *(.idt_section)
++    }
++
+ 	. = ALIGN(4096);
+ 
+ 	kernel_end = .;
+diff --git a/src/kernel2/src/arch/i386/mm/mm_context.c b/src/kernel2/src/arch/i386/mm/mm_context.c
+index 38c0d6b..dc7ef7a 100644
+--- a/src/kernel2/src/arch/i386/mm/mm_context.c
++++ b/src/kernel2/src/arch/i386/mm/mm_context.c
+@@ -63,8 +63,8 @@ bool use_phys_addr = true;
+  */
+ static void mmc_sync(mmc_context_t* context);
+ 
+-static inline vaddr_t get_pagetable(mmc_context_t* context, size_t index);
+-static inline void free_pagetable(mmc_context_t* context, vaddr_t page_table);
++vaddr_t get_pagetable(mmc_context_t* context, size_t index);
++void free_pagetable(mmc_context_t* context, vaddr_t page_table);
+ 
+ /**
+  * Erstellt einen neuen MM-Kontext (Page Directory)
+@@ -92,6 +92,25 @@ mmc_context_t mmc_create()
+ }
+ 
+ /**
++ * Erstellt einen komplett neuen und unabh�ngigen MM-Kontext
++ */
++mmc_context_t mmc_create_empty()
++{
++    // Das Page Directory initialisieren
++    paddr_t phys_page_directory = pmm_alloc(1);
++    mmc_context_t context;
++    context.version = 0xFFFFFFFF;
++    context.lock = LOCK_UNLOCKED;
++    context.page_directory = phys_page_directory;
++    context.page_directory_virt = vmm_kernel_automap(
++        context.page_directory, PAGE_SIZE);
++
++    memset(context.page_directory_virt, 0, PAGE_SIZE);
++
++    return context;
++}
++
++/**
+  * Erstellt einen neuen MM-Kontext (Page Directory) f�r den Kernel.
+  * Diese Funktion wird nur zur Initialisierung benutzt, solange Paging
+  * noch nicht aktiviert ist.
+@@ -189,7 +208,7 @@ void mmc_destroy(mmc_context_t* context)
+  * aktuellen Page Directory geh�rt. Ansonsten wird ein Pointer auf die 
+  * Page Table in den oberen 4 MB des Kernelspeichers zur�ckgegeben
+  */
+-static inline vaddr_t get_pagetable(mmc_context_t* context, size_t index)
++vaddr_t get_pagetable(mmc_context_t* context, size_t index)
+ {
+     page_directory_t pagedir = context-&gt;page_directory_virt;
+     page_table_t page_table;
+@@ -217,7 +236,7 @@ static inline vaddr_t get_pagetable(mmc_context_t* context, size_t index)
+  * Gibt eine mit get_pagetable angeforderte Page Table wieder frei, falls sie
+  * nicht zum aktuellen Page Directory geh�rt.
+  */
+-static inline void free_pagetable(mmc_context_t* context, vaddr_t page_table)
++void free_pagetable(mmc_context_t* context, vaddr_t page_table)
+ {
+     if (context-&gt;page_directory != mmc_current_context().page_directory) {
+         mmc_unmap(&amp;mmc_current_context(), page_table, 1);
+@@ -277,12 +296,17 @@ static bool map_page
+     // Kernelpages duerfen immer nur im gerade aktiven Kontext gemappt werden.
+     // Ales andere ergibt keinen Sinn, weil diese Bereiche ohnehin zwischen
+     // allen Kontexten synchron gehalten werden muessen.
++    //
++    // TODO: Ergibt sehr wohl Sinn, wenn man n�mlich IDT und GDT von einem
++    // vm86-Task erstellen will.
++#if 0
+     if ((context != &amp;mmc_current_context()) &amp;&amp;
+         ((uintptr_t) vaddr &gt;= KERNEL_MEM_START) &amp;&amp;
+         ((uintptr_t) vaddr &lt;  KERNEL_MEM_END))
+     {
+         panic(&quot;Versuch, Kernelpages in inaktivem Kontext zu mappen&quot;);
+     }
++#endif
+ 
+     // Falls es sich im den aktuellen Kontext handelt, muss das Page directory
+     // nicht gemappt werden, sonst schon.
+@@ -303,7 +327,7 @@ static bool map_page
+         clear_page_table = true;
+ 
+         if (((uintptr_t) vaddr &gt;= KERNEL_MEM_START) &amp;&amp; ((uintptr_t) vaddr &lt;
+-            KERNEL_MEM_END))
++            KERNEL_MEM_END) &amp;&amp; (context-&gt;version != 0xFFFFFFFF))
+         {
+             context-&gt;version = ++page_directory_version;
+             page_directory_current = context-&gt;page_directory_virt;
+diff --git a/src/kernel2/src/arch/i386/vm86.c b/src/kernel2/src/arch/i386/vm86.c
+index 2aa7a25..a040a55 100644
+--- a/src/kernel2/src/arch/i386/vm86.c
++++ b/src/kernel2/src/arch/i386/vm86.c
+@@ -35,6 +35,7 @@
+ 
+ #include &lt;stdint.h&gt;
+ #include &lt;stdbool.h&gt;
++#include &lt;stdlib.h&gt;
+ #include &lt;string.h&gt;
+ #include &lt;syscall_structs.h&gt;
+ #include &lt;errno.h&gt;
+@@ -87,15 +88,28 @@ static struct {
+ // FIXME Das darf eigentich nicht global sein
+ static struct {
+     bool            in_use;
+-    void*           stack;
+-    void*           nullpage;
++    void*           first_mb;
+     uint32_t*       memory;
+     pm_thread_t*    caller;
+     vm86_regs_t*    regs;
++    mmc_context_t   mmc;
+ } vm86_status = {
+     .in_use     =   false,
+ };
+ 
++extern uint16_t next_entry_index;
++extern lock_t gdt_lock;
++extern uint64_t idt[256];
++extern uint64_t gdt[255];
++
++extern void gdt_set_descriptor_byte_granularity(int segment, uint32_t size,
++    uint32_t base, uint8_t access, int dpl);
++extern void* gdt_get_descriptor_base(int segment);
++extern void gdt_set_busy_flag(int segment, bool state);
++
++extern interrupt_stack_frame_t* im_handler(interrupt_stack_frame_t* isf);
++extern void load_isf_and_return(uint32_t new_stack) __attribute__((noreturn));
++
+ /**
+  * Speichert BIOS-Daten, um sie den VM86-Tasks später bereitstellen zu können
+  */
+@@ -104,6 +118,94 @@ void vm86_init(void)
+     memcpy(&amp;bios_data, 0, 4096);
+ }
+ 
++// Einsprungspunkt für den vm86-Thread nach jedem Taskwechsel (setzt das
++// NT-Flag und biegt den Backlinkpointer vom aktuellen TSS um)
++extern void vm86_task_entry(void);
++
++/**
++ * Gibt einen Pointer zum Backlink des Standard-TSS zurück
++ */
++uint32_t vm86_get_backlink_pointer(void)
++{
++    return (uintptr_t) &amp;cpu_get_current()-&gt;tss.backlink;
++}
++
++static void vm86_gpf_entry(uint32_t above_error_code)
++{
++    // Der tatsächliche Fehlercode ist dort, wo normalerweise EIP für den
++    // Rücksprung liegt, also genau ein uint32_t unter dem ersten Parameter
++    uint32_t error_code = (&amp;above_error_code)[-1];
++    uint16_t tr;
++
++    asm volatile (&quot;str %0&quot; : &quot;=r&quot;(tr));
++
++    cpu_tss_t* gpf_tss = gdt_get_descriptor_base(tr &gt;&gt; 3);
++    cpu_tss_t* vm86_tss = gdt_get_descriptor_base(gpf_tss-&gt;backlink &gt;&gt; 3);
++
++    // Originalen Busyflagzustand wiederherstellen
++    gdt_set_busy_flag(tr &gt;&gt; 3, false);
++    gdt_set_busy_flag(gpf_tss-&gt;backlink &gt;&gt; 3, true);
++
++    // Das Standard-TSS verwenden
++    asm volatile (&quot;ltr %0&quot; :: &quot;r&quot;(cpu_get_current()-&gt;tss_selector));
++
++    asm volatile (&quot;pushfl;&quot;
++        &quot;pop %%eax;&quot;
++        &quot;and $0xFFFFBFFF,%%eax;&quot; // NT-Flag löschen
++        &quot;push %%eax;&quot;
++        &quot;popfl&quot; ::: &quot;eax&quot;);
++
++    // Der „künstliche“ Stackframe hier enthält zum Teil Werte, die nichts mit
++    // vm86 zu tun haben. Sollte der Thread unterbrochen werden, so wird die
++    // Ausführung beim nächsten Mal bei vm86_task_entry fortgeführt.
++    interrupt_stack_frame_t isf = {
++        .eax = vm86_tss-&gt;eax,
++        .ebx = gpf_tss-&gt;backlink,
++        .ecx = vm86_tss-&gt;ecx,
++        .edx = vm86_tss-&gt;edx,
++        .esi = vm86_tss-&gt;esi,
++        .edi = vm86_tss-&gt;edi,
++        .ebp = (uintptr_t) vm86_tss,
++        .esp = vm86_tss-&gt;esp,
++        .ds = 0x10,
++        .es = 0x10,
++        .fs = 0x10,
++        .gs = 0x10,
++        .ss = 0x10,
++        // Originale Interruptnummer wird aus dem Fehlercode bestimmt
++        .interrupt_number = (error_code &amp; (1 &lt;&lt; 1)) ? (error_code &gt;&gt; 3) : 13,
++        // Wenn dies ein reiner GPF ist, dann können wir den Fehlercode
++        // übernehmen, sonst ist er unbekannt.
++        .error_code = (error_code &amp; (1 &lt;&lt; 1)) ? 0 : error_code,
++        .eip = (uintptr_t) &amp;vm86_task_entry,
++        .cs = 0x08,
++        // Das gelöschte Bit 1 zeigt, dass es sich um einen vm86-Task handelt
++        .eflags = 0x200
++    };
++
++    if ((isf.interrupt_number &lt; 0x20) &amp;&amp; (isf.interrupt_number != 13)) {
++        // Das wird eine Exception, die eher nicht abgefangen werden dürfte.
++        // Also setzen wir die Registerwerte korrekt, damit man auch was vom
++        // Rot hat.
++        isf.ebx = vm86_tss-&gt;ebx;
++        isf.ebp = vm86_tss-&gt;ebp;
++        isf.eip = vm86_tss-&gt;eip;
++        isf.cs = vm86_tss-&gt;cs;
++        isf.ds = vm86_tss-&gt;ds;
++        isf.es = vm86_tss-&gt;es;
++        isf.fs = vm86_tss-&gt;fs;
++        isf.gs = vm86_tss-&gt;gs;
++        isf.ss = vm86_tss-&gt;ss;
++        isf.eflags = vm86_tss-&gt;eflags;
++    }
++
++    asm volatile (&quot;mov %%cr0,%%eax;&quot;
++        &quot;and $0xFFFFFFF7,%%eax;&quot; // TS-Flag löschen (FPU sollte benutzbar bleiben)
++        &quot;mov %%eax,%%cr0&quot; ::: &quot;eax&quot;);
++
++    load_isf_and_return((uintptr_t) im_handler(&amp;isf));
++}
++
+ /**
+  * Erstellt einen VM86-Thread im aktuellen Prozess. Der aktuell ausgefuehrte
+  * Thread wird pausiert und ein Taskwechsel zum neuen VM86-Task wird
+@@ -120,40 +222,128 @@ static int create_vm86_task(int intr, vm86_regs_t* regs, uintptr_t stack)
+ 
+     // Erst einmal einen ganz normalen Thread erzeugen
+     pm_thread_t* task = pm_thread_create(current_process,
+-        (vaddr_t)(uintptr_t) ivt_entry[0]);
++        &amp;vm86_task_entry);
++
++    cpu_tss_t* vm86_tss = calloc(2, sizeof(cpu_tss_t));
++    cpu_tss_t* gpf_tss = vm86_tss + 1;
++
++    lock(&amp;gdt_lock);
++
++    int vm86_tss_index = next_entry_index++;
++    gdt_set_descriptor_byte_granularity(vm86_tss_index, 2 * sizeof(*vm86_tss)
++        - 1, (uintptr_t) vm86_tss, 0x8B, 0);
++
++    int gpf_tss_index = next_entry_index++;
++    gdt_set_descriptor_byte_granularity(gpf_tss_index, 2 * sizeof(*gpf_tss) - 1,
++        (uintptr_t) gpf_tss, 0x89, 0);
++
++    unlock(&amp;gdt_lock);
++
++    interrupt_stack_frame_t* isf = task-&gt;user_isf;
++    isf-&gt;cs = 0x08;
++    isf-&gt;ds = isf-&gt;es = 0x10;
++    isf-&gt;ebx = vm86_tss_index &lt;&lt; 3;
++
++    vm86_tss-&gt;esp0 = (uintptr_t) isf;
++    vm86_tss-&gt;ss0 = 0x10;
++
++    // TODO: Das Folgende ist sehr i386- und 4-kB-Page-lastig
++    mmc_context_t vm86_mmc = mmc_create_empty();
++    mmc_context_t crnt_mmc = mmc_current_context();
++
++    vm86_status.mmc = vm86_mmc;
+ 
+-    interrupt_stack_frame_t* isf = task-&gt;kernel_stack;
++    // Sorgt dafür, dass die erste Pagetable vorhanden ist.
++    mmc_map(&amp;vm86_mmc, (vaddr_t) PAGE_SIZE, (paddr_t) 0, 0, 1);
+ 
+-    struct vm86_isf visf;
++    page_table_t vm86_pt0 = get_pagetable(&amp;vm86_mmc, 0);
+ 
++    uintptr_t first_mb = (uintptr_t) vm86_status.first_mb;
++    int pde = first_mb &gt;&gt; 22;
+ 
+-    // Register setzen
+-    isf-&gt;eflags = 0x20202;
+-    isf-&gt;cs = ivt_entry[1];
+-    isf-&gt;ss = stack / 16;
++    page_table_t crnt_pt = get_pagetable(&amp;crnt_mmc, pde);
+ 
+-    isf-&gt;eax = regs-&gt;ax;
+-    isf-&gt;ebx = regs-&gt;bx;
+-    isf-&gt;ecx = regs-&gt;cx;
+-    isf-&gt;edx = regs-&gt;dx;
+-    isf-&gt;esi = regs-&gt;si;
+-    isf-&gt;edi = regs-&gt;di;
+-    isf-&gt;esp = PAGE_SIZE - 16;
+-    isf-&gt;ebp = 0;
++    int page, pte = (first_mb &gt;&gt; 12) &amp; 0x3FF;
++    for (page = 0; page &lt; 256; page++) {
++        vm86_pt0[page] = crnt_pt[pte];
+ 
+-    // Segmentregister setzen
+-    // Dabei wird der bisherige Kernelstack in die temporaere
+-    // visf-Datenstruktur kopiert, denn er muss verschoben werden, damit die
+-    // VM86-Segmentregister noch Platz auf dem Stack haben
+-    visf.isf = *isf;
+-    visf.ds = regs-&gt;ds;
+-    visf.es = regs-&gt;es;
++        if (++pte &gt;= 1024) {
++            free_pagetable(&amp;crnt_mmc, crnt_pt);
++            crnt_pt = get_pagetable(&amp;crnt_mmc, ++pde);
++            pte -= 1024;
++        }
++    }
++
++    free_pagetable(&amp;crnt_mmc, crnt_pt);
++    free_pagetable(&amp;vm86_mmc, vm86_pt0);
++
++    // Wird auf i386 nicht größer (wenn wir hier einigermaßen unabhängig
++    // sein wöllten, wirds spätestens beim uint64_t* schwierig
++    paddr_t idt_phys = pmm_alloc(1);
++    mmc_map(&amp;vm86_mmc, idt, idt_phys, PTE_P | PTE_W, 1);
++
++    uint64_t* vm86_idt = vmm_kernel_automap(idt_phys, PAGE_SIZE);
++    int i;
++    for (i = 0; i &lt; 256; i++) {
++        switch (i) {
++            case 13:
++                vm86_idt[i] = (uint64_t)
++                    (gpf_tss_index &lt;&lt; 19) | (5LL &lt;&lt; 40) | (1LL &lt;&lt; 47);
++                break;
++            default:
++                vm86_idt[i] = 0;
++        }
++    }
+ 
+-    // Und das ganze auf den Stack
+-    task-&gt;kernel_stack = ((uint8_t*) task-&gt;kernel_stack)
+-        + sizeof(*isf) - sizeof(visf);
+-    task-&gt;user_isf = task-&gt;kernel_stack;
+-    memcpy(task-&gt;kernel_stack, &amp;visf, sizeof(visf));
++    vmm_kernel_unmap(vm86_idt, PAGE_SIZE);
++
++    paddr_t gdt_phys = mmc_resolve(&amp;crnt_mmc, gdt);
++    mmc_map(&amp;vm86_mmc, gdt, gdt_phys, PTE_P | PTE_W,
++        (sizeof(gdt) + PAGE_SIZE - 1) / PAGE_SIZE);
++
++    vm86_tss-&gt;cr3 = (uintptr_t) vm86_mmc.page_directory;
++    vm86_tss-&gt;eip = ivt_entry[0];
++    vm86_tss-&gt;eflags = 0x20202;
++    vm86_tss-&gt;eax = regs-&gt;ax;
++    vm86_tss-&gt;ebx = regs-&gt;bx;
++    vm86_tss-&gt;ecx = regs-&gt;cx;
++    vm86_tss-&gt;edx = regs-&gt;dx;
++    vm86_tss-&gt;esi = regs-&gt;si;
++    vm86_tss-&gt;edi = regs-&gt;di;
++    vm86_tss-&gt;esp = 0xFFFE;
++    vm86_tss-&gt;ebp = 0;
++    vm86_tss-&gt;cs = ivt_entry[1];
++    vm86_tss-&gt;ds = regs-&gt;ds;
++    vm86_tss-&gt;es = regs-&gt;es;
++    vm86_tss-&gt;ss = (stack - 65536) &gt;&gt; 4;
++
++    gpf_tss-&gt;esp0 = (uintptr_t) task-&gt;user_isf;
++    gpf_tss-&gt;ss0 = 0x10;
++    gpf_tss-&gt;cr3 = (uintptr_t) crnt_mmc.page_directory;
++    gpf_tss-&gt;eip = (uintptr_t) &amp;vm86_gpf_entry;
++    gpf_tss-&gt;eflags = 0x2;
++    gpf_tss-&gt;esp = gpf_tss-&gt;esp0;
++
++    gpf_tss-&gt;cs = 0x08;
++    gpf_tss-&gt;ds = 0x10;
++    gpf_tss-&gt;es = 0x10;
++    gpf_tss-&gt;fs = 0x10;
++    gpf_tss-&gt;gs = 0x10;
++    gpf_tss-&gt;ss = gpf_tss-&gt;ss0;
++
++    uint8_t* tss_base = (uint8_t*) vm86_tss;
++    int base_offset = (uintptr_t) tss_base % PAGE_SIZE;
++
++    paddr_t tss_phys = mmc_resolve(&amp;crnt_mmc, tss_base - base_offset);
++    mmc_map(&amp;vm86_mmc, tss_base - base_offset, tss_phys, PTE_P | PTE_W, 1);
++
++    i = PAGE_SIZE - base_offset;
++    while (i &lt; 2 * sizeof(cpu_tss_t)) {
++        paddr_t tss_phys = mmc_resolve(&amp;crnt_mmc, tss_base + i);
++        mmc_map(&amp;vm86_mmc, tss_base + i, tss_phys, PTE_P | PTE_W, 1);
++
++        i += PAGE_SIZE;
++    }
+ 
+     // Sofort in den VM86-Task wechseln. Der aufrufende Thread wird
+     // waehrenddessen nicht in den Scheduler zurueckgegeben und gestoppt.
+@@ -177,41 +367,25 @@ static int create_vm86_task(int intr, vm86_regs_t* regs, uintptr_t stack)
+  */
+ int arch_vm86(uint8_t intr, void* regs, uint32_t* memory)
+ {
+-    int res = 0;
+-
+     // Wir koennen nur einen VM86-Task
+     if (vm86_status.in_use) {
+         return -EBUSY;
+     }
+ 
+-    // Nullpage mappen
+-    uint32_t* page_table = (uint32_t*) PAGETABLES_MEM_START;
+-    void* nullpage = pmm_alloc(1);
+-    page_table[0] = (uintptr_t) nullpage | PTE_U | PTE_W | PTE_P;
+-    asm volatile(&quot;invlpg %0&quot; :: &quot;m&quot; (*(char*)0x0));
+-    memcpy(0, &amp;bios_data, 4096);
+-
+-    // Stack mappen
+-    void* stack = mmc_valloc_limits(&amp;mmc_current_context(), 1, NULL, NULL,
+-        0x0, 0x9fc00, PTE_U | PTE_W | PTE_P);
+-    if (stack == NULL) {
+-        kprintf(&quot;vm86: Kein Platz fuer den Stack\n&quot;);
+-        res = -ENOMEM;
+-        goto fail_stack;
+-    }
++    uint8_t* first_mb = mmc_valloc(&amp;mmc_current_context(),
++        (0xA0000 + PAGE_SIZE - 1) / PAGE_SIZE, PTE_P | PTE_W | PTE_U);
++
++    memcpy(first_mb, &amp;bios_data, 4096);
+ 
+     // Videospeicher mappen
+-    // FIXME Das tut nur durch Zufall
+-    bool ret = mmc_map(&amp;mmc_current_context(),
+-        (vaddr_t) 0xa0000, (paddr_t) 0xa0000,
+-        PTE_U | PTE_W | PTE_P, 0x10);
+-    if (!ret) {
+-        kprintf(&quot;vm86: Kein Platz fuer den Videospeicher\n&quot;);
+-        res = -ENOMEM;
+-        goto fail_video;
+-    }
++    mmc_map(&amp;mmc_current_context(), first_mb + 0xA0000, (paddr_t) 0xA0000,
++        PTE_U | PTE_W | PTE_P, (0x20000 + PAGE_SIZE - 1) / PAGE_SIZE);
++
++    // BIOS mappen
++    mmc_map(&amp;mmc_current_context(), first_mb + 0xC0000, (paddr_t) 0xC0000,
++        PTE_U | PTE_W | PTE_P, (0x40000 + PAGE_SIZE - 1) / PAGE_SIZE);
+ 
+-    // Falls noetig, ein paar Pages mehr mappen
++    // Speicherbereiche reinkopieren
+     if (memory != NULL) {
+         uint32_t infosize = memory[0];
+         uint32_t i;
+@@ -221,19 +395,7 @@ int arch_vm86(uint8_t intr, void* regs, uint32_t* memory)
+             uint32_t src = memory[1 + i * 3 + 1];
+             uint32_t size = memory[1 + i * 3 + 2];
+ 
+-            if (size &gt; PAGE_SIZE) {
+-                res = -EINVAL;
+-                goto fail_memory;
+-            }
+-
+-            paddr_t phys_mem = pmm_alloc(1);
+-            if (!mmc_map(&amp;mmc_current_context(), (vaddr_t)(addr &amp; ~0xFFF),
+-                phys_mem, PTE_W | PTE_P | PTE_U, 1))
+-            {
+-                res = -ENOMEM;
+-                goto fail_memory;
+-            }
+-            memcpy((void*)addr, (void*)src, size);
++            memcpy(first_mb + addr, (void*) src, size);
+         }
+     }
+ 
+@@ -241,8 +403,7 @@ int arch_vm86(uint8_t intr, void* regs, uint32_t* memory)
+     // TODO Ordentliches Locking fuer SMP
+     vm86_status.in_use   = 1;
+     vm86_status.caller   = current_thread;
+-    vm86_status.stack    = stack;
+-    vm86_status.nullpage = nullpage;
++    vm86_status.first_mb = first_mb;
+     vm86_status.memory   = memory;
+     vm86_status.regs     = regs;
+ 
+@@ -250,28 +411,18 @@ int arch_vm86(uint8_t intr, void* regs, uint32_t* memory)
+     pm_block_rpc(current_process, current_process-&gt;pid);
+ 
+     // Task erstellen
+-    create_vm86_task(intr, regs, (uintptr_t) stack);
++    create_vm86_task(intr, regs, 0x9FC00);
+ 
+     return 0;
+-
+-fail_memory:
+-    mmc_unmap(&amp;mmc_current_context(), (vaddr_t) 0xa0000, 0x10);
+-fail_video:
+-    mmc_vfree(&amp;mmc_current_context(), stack, 1);
+-fail_stack:
+-    pmm_free(nullpage, 1);
+-    return res;
+ }
+ 
+ /**
+  * Beendet einen VM86-Task, kopiert alle zu zurueckzugebenden Daten und setzt
+  * die Ausfuehrung des aufrufenden Tasks fort.
+  */
+-static void destroy_vm86_task(interrupt_stack_frame_t* isf)
++static void destroy_vm86_task(cpu_tss_t* tss)
+ {
+     pm_thread_t* vm86_task = current_thread;
+-    struct vm86_isf* visf = (struct vm86_isf*)
+-        (((char*) isf) + (sizeof(*isf) - sizeof(*visf)));
+ 
+     // Den Thread loeschen und den Aufrufer wieder aktiv machen
+     vm86_task-&gt;status = PM_STATUS_BLOCKED;
+@@ -280,17 +431,6 @@ static void destroy_vm86_task(interrupt_stack_frame_t* isf)
+     current_thread = vm86_status.caller;
+     current_thread-&gt;status = PM_STATUS_RUNNING;
+ 
+-    // Temporaere Mappings rueckgaengig machen
+-    mmc_unmap(&amp;mmc_current_context(), (vaddr_t) 0xa0000, 0x10);
+-    mmc_unmap(&amp;mmc_current_context(), vm86_status.stack, 1);
+-
+-    uint32_t* page_table = (uint32_t*) PAGETABLES_MEM_START;
+-    page_table[0] = 0;
+-    asm volatile(&quot;invlpg %0&quot; :: &quot;m&quot; (*(char*)0x0));
+-
+-    pmm_free(vm86_status.nullpage, 1);
+-
+-    // Vom Benutzer angeforderte Mappings rueckgaengig machen
+     if (vm86_status.memory != NULL) {
+         uint32_t infosize = vm86_status.memory[0];
+         uint32_t i;
+@@ -300,23 +440,27 @@ static void destroy_vm86_task(interrupt_stack_frame_t* isf)
+             uint32_t src = vm86_status.memory[1 + i * 3 + 1];
+             uint32_t size = vm86_status.memory[1 + i * 3 + 2];
+ 
+-            memcpy((void*)src, (void*)addr, size);
+-            pmm_free(mmc_resolve(&amp;mmc_current_context(),
+-                (vaddr_t) (addr &amp; ~0xFFF)), 1);
+-            mmc_unmap(&amp;mmc_current_context(), (vaddr_t)(addr &amp; ~0xFFF), 1);
++            memcpy((void*) src, vm86_status.first_mb + addr, size);
+         }
+     }
+ 
++    mmc_vfree(&amp;mmc_current_context(), vm86_status.first_mb,
++        (0xA0000 + PAGE_SIZE - 1) / PAGE_SIZE);
++    mmc_unmap(&amp;mmc_current_context(), vm86_status.first_mb + 0xA0000,
++        (0x60000 + PAGE_SIZE - 1) / PAGE_SIZE);
++
+     // Register sichern
+     vm86_regs_t* regs = vm86_status.regs;
+-    regs-&gt;ax = isf-&gt;eax;
+-    regs-&gt;bx = isf-&gt;ebx;
+-    regs-&gt;cx = isf-&gt;ecx;
+-    regs-&gt;dx = isf-&gt;edx;
+-    regs-&gt;si = isf-&gt;esi;
+-    regs-&gt;di = isf-&gt;edi;
+-    regs-&gt;ds = visf-&gt;ds;
+-    regs-&gt;es = visf-&gt;es;
++    regs-&gt;ax = tss-&gt;eax;
++    regs-&gt;bx = tss-&gt;ebx;
++    regs-&gt;cx = tss-&gt;ecx;
++    regs-&gt;dx = tss-&gt;edx;
++    regs-&gt;si = tss-&gt;esi;
++    regs-&gt;di = tss-&gt;edi;
++    regs-&gt;ds = tss-&gt;ds;
++    regs-&gt;es = tss-&gt;es;
++
++    mmc_destroy(&amp;vm86_status.mmc);
+ 
+     // Wir sind fertig mit VM86 :-)
+     pm_unblock_rpc(current_process, current_process-&gt;pid);
+@@ -324,17 +468,17 @@ static void destroy_vm86_task(interrupt_stack_frame_t* isf)
+ }
+ 
+ /** Pusht einen Wert auf den Stack des VM86-Tasks */
+-static inline void emulator_push(interrupt_stack_frame_t* isf, uint16_t value)
++static inline void emulator_push(cpu_tss_t* tss, uint16_t value)
+ {
+-    isf-&gt;esp -= 2;
+-    ((uint16_t*)(isf-&gt;esp + (isf-&gt;ss &lt;&lt; 4)))[0] = value;
++    tss-&gt;esp -= 2;
++    ((uint16_t*)(vm86_status.first_mb + tss-&gt;esp + (tss-&gt;ss &lt;&lt; 4)))[0] = value;
+ }
+ 
+ /** Popt einen Wert vom Stack des VM86-Tasks */
+-static inline uint16_t emulator_pop(interrupt_stack_frame_t* isf)
++static inline uint16_t emulator_pop(cpu_tss_t* tss)
+ {
+-    uint16_t res = ((uint16_t*)(isf-&gt;esp + (isf-&gt;ss &lt;&lt; 4)))[0];
+-    isf-&gt;esp += 2;
++    uint16_t res = ((uint16_t*)(vm86_status.first_mb + tss-&gt;esp + (tss-&gt;ss &lt;&lt; 4)))[0];
++    tss-&gt;esp += 2;
+     return res;
+ }
+ 
+@@ -355,20 +499,22 @@ int vm86_exception(interrupt_stack_frame_t* isf)
+         return 0;
+     }
+ 
++    cpu_tss_t* tss = (cpu_tss_t*) isf-&gt;ebp;
++
+     // Ein toller Emulator fuer privilegierte Instruktionen
+-    uint8_t* ops = (uint8_t*)(isf-&gt;eip + (isf-&gt;cs &lt;&lt; 4));
++    uint8_t* ops = (uint8_t*)(vm86_status.first_mb + tss-&gt;eip + (tss-&gt;cs &lt;&lt; 4));
+     switch (ops[0]) {
+ 
+         case 0x9c: /* pushf */
+-            emulator_push(isf, isf-&gt;eflags);
+-            isf-&gt;eip++;
++            emulator_push(tss, tss-&gt;eflags);
++            tss-&gt;eip++;
+             break;
+ 
+         case 0x9d: /* popf */
+             // So tun, als würden wir die EFLAGS wiederherstellen.
+             // Das hier ist wohl alles andere als korrekt, aber funzt erstmal.
+-            emulator_pop(isf);
+-            isf-&gt;eip++;
++            emulator_pop(tss);
++            tss-&gt;eip++;
+             break;
+ 
+         case 0xcd: /* int */
+@@ -376,31 +522,40 @@ int vm86_exception(interrupt_stack_frame_t* isf)
+             uint16_t intr = ops[1] &amp; 0xff;
+             uint16_t* ivt_entry = bios_data.ivt[intr];
+ 
+-            emulator_push(isf, isf-&gt;eip + 2);
+-            emulator_push(isf, isf-&gt;cs);
+-            emulator_push(isf, isf-&gt;eflags);
++            emulator_push(tss, tss-&gt;eip + 2);
++            emulator_push(tss, tss-&gt;cs);
++            emulator_push(tss, tss-&gt;eflags);
+ 
+-            isf-&gt;eip = ivt_entry[0];
+-            isf-&gt;cs  = ivt_entry[1];
++            tss-&gt;eip = ivt_entry[0];
++            tss-&gt;cs  = ivt_entry[1];
+             break;
+         }
+ 
+         case 0xcf: /* iret */
+ 
+             // Wenn es das finale iret ist, koennen wir den VM86-Task beenden
+-            if (isf-&gt;esp == PAGE_SIZE - 16) {
+-                destroy_vm86_task(isf);
++            if (tss-&gt;esp == 0xFFFE) {
++                destroy_vm86_task(tss);
+                 return 1;
+             }
+ 
+             // Ansonsten muss es ganz normal emuliert werden
+-            emulator_pop(isf);
+-            isf-&gt;cs  = emulator_pop(isf);
+-            isf-&gt;eip = emulator_pop(isf);
++            emulator_pop(tss);
++            tss-&gt;cs  = emulator_pop(tss);
++            tss-&gt;eip = emulator_pop(tss);
+             break;
+ 
+         default:
+-            kprintf(&quot;vm86: Unbekannter Opcode %x\n&quot;, ops[0]);
++            kprintf(&quot;vm86: Unbekannte Opcodesequenz %02x %02x %02x %02x %02x &quot;
++                &quot;%02x\n&quot;, ops[0], ops[1], ops[2], ops[3], ops[4], ops[5]);
++
++            // Für ordentliches Rot
++            isf-&gt;eflags = tss-&gt;eflags;
++            isf-&gt;eip = tss-&gt;eip;
++            isf-&gt;esp = tss-&gt;esp;
++            isf-&gt;cs = tss-&gt;cs;
++            isf-&gt;ss = tss-&gt;cs;
++
+             return 0;
+     }
+ 
+diff --git a/src/kernel2/src/arch/i386/vm86_asm.S b/src/kernel2/src/arch/i386/vm86_asm.S
+new file mode 100644
+index 0000000..bcafbd2
+--- /dev/null
++++ b/src/kernel2/src/arch/i386/vm86_asm.S
+@@ -0,0 +1,15 @@
++.code32
++
++.globl vm86_task_entry
++.extern vm86_get_backlink_pointer
++vm86_task_entry:
++    call vm86_get_backlink_pointer
++    mov %bx, (%eax)
++
++    pushfl
++    pop %eax
++    or $0x4000, %eax
++    push %eax
++    popfl
++
++    iret
+diff --git a/src/kernel2/src/interrupts/im.c b/src/kernel2/src/interrupts/im.c
+index 8492ae6..85376cc 100644
+--- a/src/kernel2/src/interrupts/im.c
++++ b/src/kernel2/src/interrupts/im.c
+@@ -74,7 +74,7 @@ static void handle_exception(interrupt_stack_frame_t* isf, uint8_t int_num)
+ 
+     // Pruefen, ob ein VM86-Task die Exception ausgeloest hat
+     // Falls ja lassen wir sie vom VM86-Code behandeln, wenn er kann
+-    if (isf-&gt;eflags &amp; 0x20000) {
++    if (!(isf-&gt;eflags &amp; (1 &lt;&lt; 1))) {
+         if (vm86_exception(isf)) {
+             return;
+         }
+diff --git a/src/kernel2/src/tasks/scheduler.c b/src/kernel2/src/tasks/scheduler.c
+index 84c7348..cb4f9dd 100644
+--- a/src/kernel2/src/tasks/scheduler.c
++++ b/src/kernel2/src/tasks/scheduler.c
+@@ -154,7 +154,7 @@ pm_thread_t* pm_scheduler_pop()
+     thread = list_pop(threads_scheduled);
+ 
+     // Falls das nicht geklappt hat, wird solange probiert, 
+-    while (thread == NULL) {
++    while ((thread == NULL) || (thread-&gt;status == PM_STATUS_BLOCKED)) {
+         // FIXME: Das ist so nicht wirklich geschickt, wenn der aufrufer dafür
+         // sorgen muss, dass wir nicht hängen bleiben.
+         unlock(&amp;scheduler_lock);
+-- 
+1.7.1
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001805.html">[tyndur-devel] [PATCH] libm: fmod implementiert
+</A></li>
+	<LI>N�chste Nachricht: <A HREF="001807.html">[tyndur-devel] [PATCH] Pascal-RTL: Short Writes ber�cksichtigen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1806">[ Datum ]</a>
+              <a href="thread.html#1806">[ Thema ]</a>
+              <a href="subject.html#1806">[ Betreff (Subject)]</a>
+              <a href="author.html#1806">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

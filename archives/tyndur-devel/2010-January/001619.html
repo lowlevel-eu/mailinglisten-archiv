@@ -1,0 +1,164 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH v2 4/7] kernel2: mmc_destroy implementieren
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%204/7%5D%20kernel2%3A%20mmc_destroy%20implementieren&In-Reply-To=%3C1262534601-14194-5-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001626.html">
+   <LINK REL="Next"  HREF="001630.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH v2 4/7] kernel2: mmc_destroy implementieren</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%204/7%5D%20kernel2%3A%20mmc_destroy%20implementieren&In-Reply-To=%3C1262534601-14194-5-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH v2 4/7] kernel2: mmc_destroy implementieren">kevin at tyndur.org
+                  </A><BR>
+    <I>So Jan  3 17:03:18 CET 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001626.html">[tyndur-devel] [PATCH v2 3/7] kernel2: Fuer Syscalls keinen Userspacestack benutzen
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001630.html">[tyndur-devel] [PATCH v2 4/7] kernel2: mmc_destroy implementieren
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1619">[ Datum ]</a>
+              <a href="thread.html#1619">[ Thema ]</a>
+              <a href="subject.html#1619">[ Betreff (Subject) ]</a>
+              <a href="author.html#1619">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ kernel2: mmc_destroy implementiert. Damit wird jetzt nach Prozessende
+  der Speicher auch wieder freigegeben.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/kernel2/src/arch/i386/mm/mm_context.c |   39 ++++++++++++++++++++++++++++-
+ src/kernel2/src/tasks/pm.c                |    7 +++++
+ 2 files changed, 45 insertions(+), 1 deletions(-)
+
+diff --git a/src/kernel2/src/arch/i386/mm/mm_context.c b/src/kernel2/src/arch/i386/mm/mm_context.c
+index 34ac946..a9fc8eb 100644
+--- a/src/kernel2/src/arch/i386/mm/mm_context.c
++++ b/src/kernel2/src/arch/i386/mm/mm_context.c
+@@ -61,6 +61,9 @@ bool use_phys_addr = TRUE;
+  */
+ static void mmc_sync(mmc_context_t* context);
+ 
++static inline vaddr_t get_pagetable(mmc_context_t* context, size_t index);
++static inline void free_pagetable(mmc_context_t* context, vaddr_t page_table);
++
+ /**
+  * Erstellt einen neuen MM-Kontext (Page Directory)
+  */
+@@ -142,11 +145,41 @@ void mmc_activate(mmc_context_t* context)
+ /**
+  * Kontext zerstoeren und Userspace-Speicher freigeben
+  *
++ * Achtung: Der noch gemappte Speicher darf nur zu diesem Kontext gehoeren, er
++ * wird physisch freigegeben! Shared Memory muss vorher freigegeben werden.
++ *
+  * @param context Kontext
+  */
+ void mmc_destroy(mmc_context_t* context)
+ {
+-    // TODO
++    page_directory_t page_directory = context-&gt;page_directory_virt;
++    page_table_t page_table;
++    int i, n;
++
++    for (i = (MM_USER_START &gt;&gt; PGDIR_SHIFT);
++         i &lt; (MM_USER_END &gt;&gt; PGDIR_SHIFT);
++         i++)
++    {
++        page_table = get_pagetable(context, i);
++        if (page_table == NULL) {
++            continue;
++        }
++
++        // Alle Page-Table-Eintraege freigeben
++        for(n = 0; n &lt; 1024; n++) {
++            if(page_table[n] &amp; PTE_P) {
++                pmm_free((paddr_t) (page_table[n] &amp; PAGE_MASK), 1);
++            }
++        }
++        free_pagetable(context, page_table);
++
++        // Page Table freigeben
++        pmm_free((paddr_t) (page_directory[i] &amp; PAGE_MASK), 1);
++    }
++
++    // Page Directory freigeben
++    mmc_unmap(&amp;mmc_current_context(), context-&gt;page_directory_virt, 1);
++    pmm_free(context-&gt;page_directory, 1);
+ }
+ 
+ /**
+@@ -159,6 +192,10 @@ static inline vaddr_t get_pagetable(mmc_context_t* context, size_t index)
+     page_directory_t pagedir = context-&gt;page_directory_virt;
+     page_table_t page_table;
+ 
++    if ((pagedir[index] &amp; PTE_P) == 0) {
++        return NULL;
++    }
++
+     if (context-&gt;page_directory == mmc_current_context().page_directory) {
+         if (!use_phys_addr) {
+             page_table = (page_table_t) 
+diff --git a/src/kernel2/src/tasks/pm.c b/src/kernel2/src/tasks/pm.c
+index 8dc8f2b..dde8f33 100644
+--- a/src/kernel2/src/tasks/pm.c
++++ b/src/kernel2/src/tasks/pm.c
+@@ -58,6 +58,7 @@ static pid_t next_pid = 1;
+ 
+ 
+ extern void scheduler_init(void);
++extern pm_process_t init_process;
+ 
+ /**
+  * Die Prozessverwaltung initialisieren
+@@ -155,6 +156,12 @@ void pm_destroy(pm_process_t* process)
+ {
+     struct on_destroy_info* info;
+ 
++    // Der aktuelle Speicherkontext darf nicht zum zu zerstoerenden Task
++    // gehoeren, sonst kriegen wir Probleme beim freigeben des Page Directory
++    if (&amp;process-&gt;context == &amp;mmc_current_context()) {
++        mmc_activate(&amp;init_process.context);
++    }
++
+     // Den Prozess blockieren
+     while (pm_block(process) == FALSE);
+ 
+-- 
+1.6.0.2
+
+</PRE>
+
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001626.html">[tyndur-devel] [PATCH v2 3/7] kernel2: Fuer Syscalls keinen Userspacestack benutzen
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001630.html">[tyndur-devel] [PATCH v2 4/7] kernel2: mmc_destroy implementieren
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1619">[ Datum ]</a>
+              <a href="thread.html#1619">[ Thema ]</a>
+              <a href="subject.html#1619">[ Betreff (Subject)]</a>
+              <a href="author.html#1619">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

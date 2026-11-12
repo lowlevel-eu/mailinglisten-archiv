@@ -1,0 +1,159 @@
+Index: src/kernel/include/tss.h
+===================================================================
+--- src/kernel/include/tss.h	(Revision 660)
++++ src/kernel/include/tss.h	(Arbeitskopie)
+@@ -5,6 +5,11 @@
+ 
+ #include "types.h"
+ 
++// Dieser Wert muss ausserhalb des in der GDT definierten Limits 
++// fuer das TSS liegen
++#define TSS_IO_BITMAP_NOT_LOADED (sizeof(tss) + 0x100)
++#define TSS_IO_BITMAP_OFFSET offsetof(tss_t, io_bit_map)
++
+ typedef struct tss_s
+ {
+ 	dword backlink;
+Index: src/kernel/include/tasks.h
+===================================================================
+--- src/kernel/include/tasks.h	(Revision 660)
++++ src/kernel/include/tasks.h	(Arbeitskopie)
+@@ -61,6 +61,7 @@
+ 
+ void schedule(dword* esp);
+ void schedule_to_task(struct task* target_task, dword* esp);
++void set_io_bitmap();
+ 
+ struct task * create_task(void * entry, const char* cmdline, pid_t parent);
+ void destroy_task(struct task* task);
+Index: src/kernel/src/tss.c
+===================================================================
+--- src/kernel/src/tss.c	(Revision 660)
++++ src/kernel/src/tss.c	(Arbeitskopie)
+@@ -39,6 +39,6 @@
+ 
+ tss_t tss = { 
+     .ss0 = SYS_DATA_SEL, 
+-    .io_bit_map_offset = offsetof(tss_t, io_bit_map),
++    .io_bit_map_offset = TSS_IO_BITMAP_OFFSET,
+     .io_bit_map_end = 0xFF 
+ };
+Index: src/kernel/src/intr.c
+===================================================================
+--- src/kernel/src/intr.c	(Revision 660)
++++ src/kernel/src/intr.c	(Arbeitskopie)
+@@ -53,6 +53,7 @@
+ #include "debug.h"
+ #include "rpc.h"
+ #include "vm86.h"
++#include "tss.h"
+ 
+ typedef struct {
+   word lsb_handler;
+@@ -410,6 +411,15 @@
+     dword cr2;
+     switch(isf->interrupt_number)
+     {
++        case 13:
++            // Falls der Task seine IO-Bitmap noch nicht bekommen hat,
++            // erledigen wir das jetzt und lassen ihn dann nochmal versuchen.
++            if (tss.io_bit_map_offset == TSS_IO_BITMAP_NOT_LOADED) {
++                set_io_bitmap();
++                return;
++            }
++            break;
++
+         case 14:
+             cr2 = read_cr2();
+             // Ueberprüfen ob der Pagefault durch einen Stackoverflow hervorgerufen wurde
+@@ -439,7 +449,7 @@
+                 "Computer nicht beschaedigt wird.\n"
+                 "\n"
+                 "Exception #%02d, int: #%d @ 0x%04x:0x%08x, PID %d, %s\n", 
+-                isf->interrupt_number, isf->interrupt_number, isf->cs, isf->eip, current_task ? current_task->pid : 0, current_task ? current_task->cmdline : "(kernel)");
++                isf->interrupt_number, isf->interrupt_number, isf->cs, isf->eip, current_task ? current_task->pid : 0, "(deaktiviert)" /*current_task ? current_task->cmdline : "(kernel)"*/);
+         kprintf("ss:esp= 0x%04x:0x%08x error code: 0x%08x\n", isf->ss, isf->esp, isf->error_code);
+         kprintf("eax:0x%08x, ebx:0x%08x, ecx:0x%08x, edx:0x%08x\n", isf->eax, isf->ebx, isf->ecx, isf->edx);
+         kprintf("ebp:0x%08x, esp:0x%08x, esi:0x%08x, edi:0x%08x\n", isf->ebp, isf->esp, isf->esi, isf->edi);
+Index: src/kernel/src/mm/phys.c
+===================================================================
+--- src/kernel/src/mm/phys.c	(Revision 660)
++++ src/kernel/src/mm/phys.c	(Arbeitskopie)
+@@ -54,6 +54,8 @@
+ unsigned long * phys_mmap;
+ unsigned long phys_mmap_size;
+ unsigned long phys_mmap_usable_pages;
++    
++void phys_fill_page_range(void* start, size_t size);
+ 
+ /**
+  * Gibt die Anzahl der freien Pages zurueck
+@@ -593,5 +595,27 @@
+     {
+         //kprintf("Mark as free: %x, %d Pages\n", available_memory[i].start, (available_memory[i].end - available_memory[i].start) / PAGE_SIZE);
+         phys_mark_page_range_as_free((void*)available_memory[i].start, (available_memory[i].end - available_memory[i].start) / PAGE_SIZE);
++
++#if 0
++        phys_fill_page_range((void*)available_memory[i].start, 
++            (available_memory[i].end - available_memory[i].start));
++#endif            
+     }
+ }
++
++/**
++ * Fuellt einen Speicherbereich mit einem Bitmuster
++ *
++ * @param start Beginn des zu überschreibenden Speicherbereichs
++ * @param size Laenge des zu schreibenden Bitmusters in Bytes 
++ * (sollte durch 4 teilbar sein!)
++ */
++void phys_fill_page_range(void* start, size_t size) 
++{
++    dword* cur = (dword*) start;
++
++    size /= 4;
++    while (size--) {
++        *(cur++) = 0xFEE1DEAD;
++    }
++}
+Index: src/kernel/src/schedule.c
+===================================================================
+--- src/kernel/src/schedule.c	(Revision 660)
++++ src/kernel/src/schedule.c	(Arbeitskopie)
+@@ -88,6 +88,7 @@
+     }
+ }
+ 
++
+ /**
+  * Naechsten Task auswaehlen der ausgefuehrt werden soll
+  * @param esp Pointer auf Stackpointer
+@@ -137,8 +138,10 @@
+ 
+     //kprintf("\nSwitch to %d", current_task->pid);
+     *esp = current_task->esp;
+-    
+-    set_io_bitmap();
++
++    // Wenn der Task auf einen Port zugreift, fliegt ein GPF.
++    // Wir haben dann immer noch Zeit, die IO-Bitmap zu kopieren.
++    tss.io_bit_map_offset = TSS_IO_BITMAP_NOT_LOADED;
+ }
+ 
+ void schedule_to_task(struct task* target_task, dword* esp) 
+@@ -148,12 +151,14 @@
+         current_task = target_task;
+         *esp = current_task->esp;
+         
+-        set_io_bitmap();
++        tss.io_bit_map_offset = TSS_IO_BITMAP_NOT_LOADED;
+     }
+ }
+ 
+ void set_io_bitmap()
+ {
++    tss.io_bit_map_offset = TSS_IO_BITMAP_OFFSET;
++
+     if (current_task->io_bitmap) {
+         memcpy(tss.io_bit_map, current_task->io_bitmap, IO_BITMAP_LENGTH / 8);
+     } else {

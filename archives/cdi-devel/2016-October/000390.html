@@ -1,0 +1,180 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH 1/5] e1000: Fix EERD reading for e1000e
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%201/5%5D%20e1000%3A%20Fix%20EERD%20reading%20for%20e1000e&In-Reply-To=%3C1476658120-27415-2-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000389.html">
+   <LINK REL="Next"  HREF="000391.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH 1/5] e1000: Fix EERD reading for e1000e</H1>
+    <B>Kevin Wolf</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%201/5%5D%20e1000%3A%20Fix%20EERD%20reading%20for%20e1000e&In-Reply-To=%3C1476658120-27415-2-git-send-email-kevin%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH 1/5] e1000: Fix EERD reading for e1000e">kevin at tyndur.org
+       </A><BR>
+    <I>Mon Oct 17 00:48:36 CEST 2016</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000389.html">[cdi-devel] [PATCH 0/5] e1000: Support qemu e1000e emulation
+</A></li>
+        <LI>Next message: <A HREF="000391.html">[cdi-devel] [PATCH 2/5] e1000: Improve debugging code
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#390">[ date ]</a>
+              <a href="thread.html#390">[ thread ]</a>
+              <a href="subject.html#390">[ subject ]</a>
+              <a href="author.html#390">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>The EERD reading function missed that the offset for the EEPROM address
+differs between e1000 and e1000e, too. Instead of adding yet another
+parameter to do_read_eerd() that has to be passed by model-specific
+wrappers, put the parameter directly in the model struct and take them
+from there.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">kevin at tyndur.org</A>&gt;
+---
+ e1000/device.c | 32 +++++++++++++++-----------------
+ e1000/device.h |  6 ++++++
+ 2 files changed, 21 insertions(+), 17 deletions(-)
+
+diff --git a/e1000/device.c b/e1000/device.c
+index 95ca731..26a9233 100644
+--- a/e1000/device.c
++++ b/e1000/device.c
+@@ -213,40 +213,29 @@ static uint32_t e1000_read_uwire(struct e1000_device *device, uint16_t offset)
+     return data;
+ }
+ 
+-static uint32_t do_read_eerd(struct e1000_device *device, uint16_t offset,
+-                             uint32_t start_flag, uint32_t done_flag)
++static uint32_t e1000_read_eerd(struct e1000_device* device, uint16_t offset)
+ {
++    struct e1000_model* m = device-&gt;model;
+     uint32_t eerd, i;
+ 
+-    reg_outl(device, REG_EEPROM_READ, (offset &lt;&lt; 8) | start_flag);
++    reg_outl(device, REG_EEPROM_READ,
++             (offset &lt;&lt; m-&gt;eerd_addr_sh) | m-&gt;eerd_start);
+     for(i = 0; i &lt; 100; i++)
+     {
+         eerd = reg_inl(device, REG_EEPROM_READ);
+-        if (eerd &amp; done_flag) {
++        if (eerd &amp; m-&gt;eerd_done) {
+             break;
+         }
+         cdi_sleep_ms(1);
+     }
+ 
+-    if (eerd &amp; done_flag) {
++    if (eerd &amp; m-&gt;eerd_done) {
+         return (eerd &gt;&gt; 16) &amp; 0xFFFF;
+     } else {
+         return (uint32_t) -1;
+     }
+ }
+ 
+-static uint32_t e1000_read_eerd(struct e1000_device *device, uint16_t offset)
+-{
+-    return do_read_eerd(device, offset, EERD_E1000_START, EERD_E1000_DONE);
+-}
+-
+-#if 0
+-static uint32_t e1000e_read_eerd(struct e1000_device *device, uint16_t offset)
+-{
+-    return do_read_eerd(device, offset, EERD_E1000E_START, EERD_E1000E_DONE);
+-}
+-#endif
+-
+ static uint32_t e1000e_read_flash(struct e1000_device *device, uint16_t offset)
+ {
+     uint16_t hsfsts;
+@@ -436,16 +425,25 @@ static struct e1000_model models[] = {
+         .device_id      = 0x1004,
+         .tctl_flags     = TCTL_COLL_DIST_E1000,
+         .eeprom_read    = e1000_read_eerd,
++        .eerd_start     = EERD_E1000_START,
++        .eerd_done      = EERD_E1000_DONE,
++        .eerd_addr_sh   = EERD_E1000_ADDR_SHIFT,
+     }, {
+         .vendor_id      = 0x8086,
+         .device_id      = 0x100e,
+         .tctl_flags     = TCTL_COLL_DIST_E1000,
+         .eeprom_read    = e1000_read_eerd,
++        .eerd_start     = EERD_E1000_START,
++        .eerd_done      = EERD_E1000_DONE,
++        .eerd_addr_sh   = EERD_E1000_ADDR_SHIFT,
+     }, {
+         .vendor_id      = 0x8086,
+         .device_id      = 0x100f,
+         .tctl_flags     = TCTL_COLL_DIST_E1000,
+         .eeprom_read    = e1000_read_eerd,
++        .eerd_start     = EERD_E1000_START,
++        .eerd_done      = EERD_E1000_DONE,
++        .eerd_addr_sh   = EERD_E1000_ADDR_SHIFT,
+     }, {
+         .vendor_id      = 0x8086,
+         .device_id      = 0x10f5,
+diff --git a/e1000/device.h b/e1000/device.h
+index 85bca25..657192d 100644
+--- a/e1000/device.h
++++ b/e1000/device.h
+@@ -142,9 +142,11 @@ enum {
+ 
+ #define EERD_E1000_START    (1 &lt;&lt;  0)
+ #define EERD_E1000_DONE     (1 &lt;&lt;  4)
++#define EERD_E1000_ADDR_SHIFT 8
+ 
+ #define EERD_E1000E_START   (1 &lt;&lt;  0)
+ #define EERD_E1000E_DONE    (1 &lt;&lt;  1)
++#define EERD_E1000E_ADDR_SHIFT 2
+ 
+ /* EEPROM/Flash Control */
+ #define E1000_EECD_SK        0x00000001 /* EEPROM Clock */
+@@ -207,6 +209,10 @@ struct e1000_model {
+     uint16_t device_id;
+ 
+     uint32_t tctl_flags;
++
++    uint32_t eerd_start;
++    uint32_t eerd_done;
++    uint32_t eerd_addr_sh;
+     uint32_t (*eeprom_read)(struct e1000_device *device, uint16_t offset);
+ };
+ 
+-- 
+2.1.4
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000389.html">[cdi-devel] [PATCH 0/5] e1000: Support qemu e1000e emulation
+</A></li>
+	<LI>Next message: <A HREF="000391.html">[cdi-devel] [PATCH 2/5] e1000: Improve debugging code
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#390">[ date ]</a>
+              <a href="thread.html#390">[ thread ]</a>
+              <a href="subject.html#390">[ subject ]</a>
+              <a href="author.html#390">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

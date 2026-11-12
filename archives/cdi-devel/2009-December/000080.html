@@ -1,0 +1,951 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH 5/6] USB 1.1
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%205/6%5D%20USB%201.1&In-Reply-To=%3C1260640035-11473-6-git-send-email-max%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000079.html">
+   <LINK REL="Next"  HREF="000081.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH 5/6] USB 1.1</H1>
+    <B>max at tyndur.org</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%205/6%5D%20USB%201.1&In-Reply-To=%3C1260640035-11473-6-git-send-email-max%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH 5/6] USB 1.1">max at tyndur.org
+       </A><BR>
+    <I>Sat Dec 12 18:47:14 CET 2009</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000079.html">[cdi-devel] [PATCH 4/6] UHCI
+</A></li>
+        <LI>Next message: <A HREF="000081.html">[cdi-devel] [PATCH 6/6] USB MSD
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#80">[ date ]</a>
+              <a href="thread.html#80">[ thread ]</a>
+              <a href="subject.html#80">[ subject ]</a>
+              <a href="author.html#80">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>From: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+
++ Added USB 1.1 bus driver
+
+Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+---
+ usb11/control.c             |  252 +++++++++++++++++++++++++++++++++++++++++++
+ usb11/include/control.h     |   31 ++++++
+ usb11/include/transfer.h    |   38 +++++++
+ usb11/include/usb-structs.h |  184 +++++++++++++++++++++++++++++++
+ usb11/include/usb11.h       |   41 +++++++
+ usb11/main.c                |   58 ++++++++++
+ usb11/transfer.c            |  223 ++++++++++++++++++++++++++++++++++++++
+ 7 files changed, 827 insertions(+), 0 deletions(-)
+ create mode 100644 usb11/control.c
+ create mode 100644 usb11/include/control.h
+ create mode 100644 usb11/include/transfer.h
+ create mode 100644 usb11/include/usb-structs.h
+ create mode 100644 usb11/include/usb11.h
+ create mode 100644 usb11/main.c
+ create mode 100644 usb11/transfer.c
+
+diff --git a/usb11/control.c b/usb11/control.c
+new file mode 100644
+index 0000000..170341d
+--- /dev/null
++++ b/usb11/control.c
+@@ -0,0 +1,252 @@
++/*****************************************************************************
++* Copyright (c) 2009 Max Reitz                                               *
++*                                                                            *
++* Permission is hereby granted,  free of charge,  to any  person obtaining a *
++* copy of this software and associated documentation files (the &quot;Software&quot;), *
++* to deal in the Software without restriction,  including without limitation *
++* the rights to use,  copy, modify, merge, publish,  distribute, sublicense, *
++* and/or sell copies  of the  Software,  and to permit  persons to whom  the *
++* Software is furnished to do so, subject to the following conditions:       *
++*                                                                            *
++* The above copyright notice and this permission notice shall be included in *
++* all copies or substantial portions of the Software.                        *
++*                                                                            *
++* THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++* IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF MERCHANTABILITY, *
++* FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT SHALL *
++* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++* LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++* FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++* DEALINGS IN THE SOFTWARE.                                                  *
++*****************************************************************************/
++
++#include &lt;stdlib.h&gt;
++
++#include &lt;cdi/lists.h&gt;
++#include &lt;cdi/misc.h&gt;
++#include &lt;cdi/usb.h&gt;
++
++#include &quot;usb11.h&quot;
++#include &quot;usb-structs.h&quot;
++#include &quot;transfer.h&quot;
++
++static int usb_dev_ids = 1;
++
++static void enumerate_hub(struct cdi_usb_device *usbdev);
++
++static int usb11_real_enumerate(struct cdi_usb_device *device)
++{
++    struct endpoint_desc *ep0;
++    struct device_desc *dev_desc;
++    struct cdi_usb_hcd *hcd;
++    int id;
++    char *name;
++    void *position;
++    struct config_desc *conf_desc;
++    struct interface_desc *if_desc, *best_if;
++
++    hcd = (struct cdi_usb_hcd *)device-&gt;hc-&gt;dev.driver;
++
++    //EP0 initialisieren
++    device-&gt;ep0 = malloc(sizeof(*device-&gt;ep0));
++    device-&gt;ep0-&gt;endpoint = malloc(sizeof(struct endpoint_desc));
++    ep0 = (struct endpoint_desc *)device-&gt;ep0-&gt;endpoint;
++    ep0-&gt;length = sizeof(struct endpoint_desc);
++    ep0-&gt;descriptor_type = DESC_ENDPOINT;
++    ep0-&gt;endpoint_address = 0;
++    ep0-&gt;attributes = 0;
++    ep0-&gt;max_packet_size = 8;
++    ep0-&gt;interval = 0;
++    device-&gt;ep0-&gt;device = device;
++    device-&gt;ep0-&gt;data_toggle = 0;
++
++    //Zur&#195;&#188;cksetzen
++    device-&gt;reset(device);
++
++    //Pipe erzeugen
++    hcd-&gt;add_pipe(device-&gt;ep0);
++
++    //Erste acht Bytes des Device-Descriptors abrufen und die maximale
++    //Paketgr&#195;&#182;&#195;&#159;e von EP0 feststellen
++    dev_desc = usb11_do_control(device, DEV_TO_HOST, NULL, 8, STD_REQUEST,
++        REC_DEVICE, GET_DESCRIPTOR, DESC_DEVICE &lt;&lt; 8, 0);
++    if (dev_desc == NULL) {
++        return 0;
++    }
++    ep0-&gt;max_packet_size = dev_desc-&gt;max_packet_size0;
++
++    //Nochmals zur&#195;&#188;cksetzen
++    device-&gt;reset(device);
++
++    //USB-Adresse zuweisen
++    usb11_do_control(device, HOST_TO_DEV | NO_DATA, NULL, 0, STD_REQUEST,
++        REC_DEVICE, SET_ADDRESS, (id = usb_dev_ids++), 0);
++    device-&gt;id = id;
++    if (usb_dev_ids &gt;= 128) {
++        d0printf(&quot;Warning: USB device ID overflow.\n&quot;);
++        usb_dev_ids = 1;
++    }
++
++    //So, jetzt haben wir eine Adresse, da gibts auch eine neue Pipe
++    hcd-&gt;add_pipe(device-&gt;ep0);
++
++    //Den ganzen Device-Descriptor einlesen
++    dev_desc = usb11_do_control(device, DEV_TO_HOST, NULL, sizeof(*dev_desc),
++        STD_REQUEST, REC_DEVICE, GET_DESCRIPTOR, DESC_DEVICE &lt;&lt; 8, 0);
++    device-&gt;device_desc = dev_desc;
++    device-&gt;vendor_id = dev_desc-&gt;vendor_id;
++    device-&gt;device_id = dev_desc-&gt;device_id;
++
++    if (dev_desc-&gt;iManufacturer) {
++        name = usb11_do_control(device, DEV_TO_HOST, NULL, 64, STD_REQUEST,
++            REC_DEVICE, GET_DESCRIPTOR,
++            (DESC_STRING &lt;&lt; 8) | dev_desc-&gt;iManufacturer, 0);
++        if (name == NULL) {
++            return 0;
++        }
++        d1printf(&quot; -&gt; Manufacturer: &quot;);
++        for (int i = 2; i &lt; name[0]; i += 2) {
++            _d1printf(&quot;%c&quot;, name[i]);
++        }
++        _d1printf(&quot;\n&quot;);
++    }
++    if (dev_desc-&gt;iProduct) {
++        name = usb11_do_control(device, DEV_TO_HOST, NULL, 64, STD_REQUEST,
++            REC_DEVICE, GET_DESCRIPTOR,
++            (DESC_STRING &lt;&lt; 8) | dev_desc-&gt;iProduct, 0);
++        if (name == NULL) {
++            return 0;
++        }
++        d1printf(&quot; -&gt; Product: &quot;);
++        for (int i = 2; i &lt; name[0]; i += 2) {
++            _d1printf(&quot;%c&quot;, name[i]);
++        }
++        _d1printf(&quot;\n&quot;);
++    }
++    //TODO: Man kann doch nicht immer den ersten nehmen...
++    conf_desc = usb11_do_control(device, DEV_TO_HOST, NULL,
++        sizeof(struct config_desc), STD_REQUEST, REC_DEVICE, GET_DESCRIPTOR,
++        DESC_CONFIGURATION &lt;&lt; 8, 0);
++    if (conf_desc == NULL) {
++        return 0;
++    }
++    conf_desc = usb11_do_control(device, DEV_TO_HOST, NULL,
++        conf_desc-&gt;total_length, STD_REQUEST, REC_DEVICE, GET_DESCRIPTOR,
++        DESC_CONFIGURATION &lt;&lt; 8, 0);
++    if (conf_desc == NULL) {
++        return 0;
++    }
++    device-&gt;config_desc = conf_desc;
++    usb11_do_control(device, HOST_TO_DEV, NULL, 0, STD_REQUEST, REC_DEVICE,
++        SET_CONFIGURATION, conf_desc-&gt;config_value, 0);
++    if (conf_desc-&gt;iConfiguration) {
++        name = usb11_do_control(device, DEV_TO_HOST, NULL, 64, STD_REQUEST,
++            REC_DEVICE, GET_DESCRIPTOR,
++            (DESC_STRING &lt;&lt; 8) | conf_desc-&gt;iConfiguration, 0);
++        if (name == NULL) {
++            return 0;
++        }
++        d1printf(&quot;Using configuration &quot;);
++        for (int i = 2; i &lt; name[0]; i += 2) {
++            _d1printf(&quot;%c&quot;, name[i]);
++        }
++        _d1printf(&quot;.\n&quot;);
++    }
++    position = conf_desc;
++    position = (void *)((uintptr_t)position + sizeof(struct config_desc));
++    best_if = position; //Standard-IF
++    for (int i = 0; i &lt; conf_desc-&gt;num_interfaces; i++) {
++        if_desc = position;
++        //TODO MSD ist zwar h&#195;&#188;bsch. Aber andere auch ;-)
++        if (if_desc-&gt;interface_class == 8) {
++            best_if = if_desc;
++            break;
++        }
++        position = (void *)((uintptr_t)position +
++            sizeof(struct interface_desc) +
++            if_desc-&gt;num_endpoints * sizeof(struct endpoint_desc));
++    }
++    usb11_do_control(device, HOST_TO_DEV, NULL, 0, STD_REQUEST, REC_DEVICE,
++        SET_INTERFACE, best_if-&gt;interface_number, 0);
++    device-&gt;interface_desc = (void *)best_if;
++    if (best_if-&gt;iInterface) {
++        name = usb11_do_control(device, DEV_TO_HOST, NULL, 64, STD_REQUEST,
++            REC_DEVICE, GET_DESCRIPTOR,
++            (DESC_STRING &lt;&lt; 8) | best_if-&gt;iInterface, 0);
++        if (name == NULL) {
++            return 0;
++        }
++        d1printf(&quot;Using interface &quot;);
++        for (int i = 2; i &lt; name[0]; i += 2) {
++            _d1printf(&quot;%c&quot;, name[i]);
++        }
++        _d1printf(&quot;.\n&quot;);
++    }
++    d1printf(&quot;Configuration: %i:%i (%i)\n&quot;, conf_desc-&gt;config_value,
++        best_if-&gt;interface_number, best_if-&gt;interface_class);
++
++    if (!dev_desc-&gt;class_id) { //Composite Device
++        device-&gt;class_id = best_if-&gt;interface_class;
++        device-&gt;subclass_id = best_if-&gt;interface_subclass;
++        device-&gt;protocol_id = best_if-&gt;interface_protocol;
++    } else {
++        device-&gt;class_id = dev_desc-&gt;class_id;
++        device-&gt;subclass_id = dev_desc-&gt;subclass_id;
++        device-&gt;protocol_id = dev_desc-&gt;protocol_id;
++    }
++
++    if (best_if-&gt;interface_class == USBDC_HUB) {
++        enumerate_hub(device);
++    }
++
++    return 1;
++}
++
++void usb11_enumerate(struct cdi_usb_device *device)
++{
++    if (!usb11_real_enumerate(device)) {
++        free(device-&gt;ep0-&gt;endpoint);
++        free(device-&gt;ep0);
++    }
++}
++
++static void reset_hub_device(struct cdi_usb_device *usbdev)
++{
++    usb11_do_control(usbdev-&gt;hub, HOST_TO_DEV, NULL, 0, CLS_REQUEST, REC_OTHER,
++        SET_FEATURE, PORTF_RESET, usbdev-&gt;port + 1);
++    cdi_sleep_ms(20);
++}
++
++static void enumerate_hub(struct cdi_usb_device *usbdev)
++{
++    struct hub_desc *hub_desc;
++    struct cdi_usb_device *down;
++    uint16_t *port_status;
++    int i;
++
++    //Mehr als 8 Ports sollte es nicht geben, die Gr&#195;&#182;&#195;&#159;e des Deskriptors wird
++    //daher wohl nicht gr&#195;&#182;&#195;&#159;er als sizeof()+16 werden
++    hub_desc = usb11_do_control(usbdev, DEV_TO_HOST, NULL,
++        sizeof(*hub_desc) + 16, CLS_REQUEST, REC_DEVICE, GET_DESCRIPTOR,
++        DESC_DEVICE &lt;&lt; 8, 0);
++    for (i = 0; i &lt; hub_desc-&gt;nbr_ports; i++) {
++        port_status = usb11_do_control(usbdev, DEV_TO_HOST, NULL, 4,
++            CLS_REQUEST,REC_OTHER, GET_STATUS, 0, i + 1);
++        if (!(port_status[0] &amp; PORT_DEVICE)) {
++            continue;
++        }
++        //Strom an
++        usb11_do_control(usbdev, HOST_TO_DEV, NULL, 0, CLS_REQUEST, REC_OTHER,
++            SET_FEATURE, PORTF_POWER, i + 1);
++        cdi_sleep_ms(hub_desc-&gt;pwron2pwrgood * 2);
++        down = malloc(sizeof(struct cdi_usb_device));
++        down-&gt;hc = usbdev-&gt;hc;
++        down-&gt;hub = usbdev;
++        down-&gt;id = 0;
++        down-&gt;port = i;
++        down-&gt;speed = (port_status[0] &amp; PORT_LOWSPEED) ?
++            CDI_USB_LOW_SPEED : CDI_USB_FULL_SPEED;
++        down-&gt;reset = &amp;reset_hub_device;
++        cdi_usb_device_init(down);
++    }
++}
+diff --git a/usb11/include/control.h b/usb11/include/control.h
+new file mode 100644
+index 0000000..97edefc
+--- /dev/null
++++ b/usb11/include/control.h
+@@ -0,0 +1,31 @@
++/*****************************************************************************
++* Copyright (c) 2009 Max Reitz                                               *
++*                                                                            *
++* Permission is hereby granted,  free of charge,  to any  person obtaining a *
++* copy of this software and associated documentation files (the &quot;Software&quot;), *
++* to deal in the Software without restriction,  including without limitation *
++* the rights to use,  copy, modify, merge, publish,  distribute, sublicense, *
++* and/or sell copies  of the  Software,  and to permit  persons to whom  the *
++* Software is furnished to do so, subject to the following conditions:       *
++*                                                                            *
++* The above copyright notice and this permission notice shall be included in *
++* all copies or substantial portions of the Software.                        *
++*                                                                            *
++* THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++* IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF MERCHANTABILITY, *
++* FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT SHALL *
++* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++* LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++* FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++* DEALINGS IN THE SOFTWARE.                                                  *
++*****************************************************************************/
++
++#ifndef CONTROL_H
++#define CONTROL_H
++
++#include &lt;cdi/lists.h&gt;
++#include &lt;cdi/usb.h&gt;
++
++void usb11_enumerate(struct cdi_usb_device *device);
++
++#endif
+diff --git a/usb11/include/transfer.h b/usb11/include/transfer.h
+new file mode 100644
+index 0000000..3b0f086
+--- /dev/null
++++ b/usb11/include/transfer.h
+@@ -0,0 +1,38 @@
++/*****************************************************************************
++* Copyright (c) 2009 Max Reitz                                               *
++*                                                                            *
++* Permission is hereby granted,  free of charge,  to any  person obtaining a *
++* copy of this software and associated documentation files (the &quot;Software&quot;), *
++* to deal in the Software without restriction,  including without limitation *
++* the rights to use,  copy, modify, merge, publish,  distribute, sublicense, *
++* and/or sell copies  of the  Software,  and to permit  persons to whom  the *
++* Software is furnished to do so, subject to the following conditions:       *
++*                                                                            *
++* The above copyright notice and this permission notice shall be included in *
++* all copies or substantial portions of the Software.                        *
++*                                                                            *
++* THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++* IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF MERCHANTABILITY, *
++* FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT SHALL *
++* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++* LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++* FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++* DEALINGS IN THE SOFTWARE.                                                  *
++*****************************************************************************/
++
++#ifndef TRANSFER_H
++#define TRANSFER_H
++
++#include &lt;stddef.h&gt;
++
++#include &lt;cdi/usb.h&gt;
++
++void *usb11_do_control(struct cdi_usb_device *device, int direction,
++    void *buffer, int length, int rtype, int recipient, int request, int value,
++    int index);
++void *usb11_export_control(struct cdi_usb_device *device,
++    struct cdi_usb_control_transfer *transfer);
++cdi_usb_status_t usb11_send_packets(struct cdi_usb_packet *packets,
++    size_t num_packets);
++
++#endif
+diff --git a/usb11/include/usb-structs.h b/usb11/include/usb-structs.h
+new file mode 100644
+index 0000000..427d0e5
+--- /dev/null
++++ b/usb11/include/usb-structs.h
+@@ -0,0 +1,184 @@
++/*****************************************************************************
++* Copyright (c) 2009 Max Reitz                                               *
++*                                                                            *
++* Permission is hereby granted,  free of charge,  to any  person obtaining a *
++* copy of this software and associated documentation files (the &quot;Software&quot;), *
++* to deal in the Software without restriction,  including without limitation *
++* the rights to use,  copy, modify, merge, publish,  distribute, sublicense, *
++* and/or sell copies  of the  Software,  and to permit  persons to whom  the *
++* Software is furnished to do so, subject to the following conditions:       *
++*                                                                            *
++* The above copyright notice and this permission notice shall be included in *
++* all copies or substantial portions of the Software.                        *
++*                                                                            *
++* THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++* IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF MERCHANTABILITY, *
++* FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT SHALL *
++* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++* LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++* FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++* DEALINGS IN THE SOFTWARE.                                                  *
++*****************************************************************************/
++
++#ifndef USB_STRUCTS_H
++#define USB_STRUCTS_H
++
++#include &lt;stdint.h&gt;
++
++
++#define NO_DATA                        0x01
++#define DEV_TO_HOST                    0x80
++#define HOST_TO_DEV                    0x00
++#define STD_REQUEST                    0x00
++#define CLS_REQUEST                    0x20
++#define VEN_REQUEST                    0x40
++#define REC_DEVICE                     0x00
++#define REC_INTERFACE                  0x01
++#define REC_ENDPOINT                   0x02
++#define REC_OTHER                      0x03
++
++#define GET_STATUS                     0
++#define CLEAR_FEATURE                  1
++#define SET_FEATURE                    3
++#define SET_ADDRESS                    5
++#define GET_DESCRIPTOR                 6
++#define SET_DESCRIPTOR                 7
++#define GET_CONFIGURATION              8
++#define SET_CONFIGURATION              9
++#define GET_INTERFACE                  10
++#define SET_INTERFACE                  11
++#define SYNC_FRAME                     12
++
++#define PORT_DEVICE                    0x0001
++#define PORT_ENABLED                   0x0002
++#define PORT_SUSPENDED                 0x0004
++#define PORT_OVERCURRENT               0x0008
++#define PORT_RESET                     0x0010
++#define PORT_POWER                     0x0100
++#define PORT_LOWSPEED                  0x0200
++#define PORT_HIGHSPEED                 0x0400
++#define PORT_TEST                      0x0800
++#define PORT_INDICATOR                 0x1000
++
++#define PORTF_CONNECTION               0
++#define PORTF_ENABLE                   1
++#define PORTF_SUSPEND                  2
++#define PORTF_OVERCURRENT              3
++#define PORTF_RESET                    4
++#define PORTF_POWER                    8
++#define PORTF_LOWSPEED                 9
++#define PORTF_HIGHSPEED                10
++#define PORTF_C_CONNECTION             16
++#define PORTF_C_ENABLE                 17
++#define PORTF_C_SUSPEND                18
++#define PORTF_C_OVERCURRENT            19
++#define PORTF_C_RESET                  20
++#define PORTF_TEST                     21
++#define PORTF_INDICATOR                22
++
++#define DESC_DEVICE                    1
++#define DESC_CONFIGURATION             2
++#define DESC_STRING                    3
++#define DESC_INTERFACE                 4
++#define DESC_ENDPOINT                  5
++#define DESC_DEVICE_QUALIFIER          6
++#define DESC_OTHER_SPEED_CONFIGURATION 7
++#define DESC_INTERFACE_POWER           8
++
++
++struct setup_packet
++{
++    uint8_t request_type;
++    uint8_t request;
++    uint16_t value;
++    uint16_t index;
++    uint16_t length;
++} __attribute__((packed));
++
++struct device_desc
++{
++    uint8_t length;
++    uint8_t descriptor_type;
++    uint16_t bcdUSB;
++    uint8_t class_id;
++    uint8_t subclass_id;
++    uint8_t protocol_id;
++    uint8_t max_packet_size0;
++    uint16_t vendor_id;
++    uint16_t device_id;
++    uint16_t bcdDevice;
++    uint8_t iManufacturer;
++    uint8_t iProduct;
++    uint8_t iSerialNumber;
++    uint8_t num_configurations;
++} __attribute__((packed));
++
++struct config_desc
++{
++    uint8_t length;
++    uint8_t descriptor_type;
++    uint16_t total_length;
++    uint8_t num_interfaces;
++    uint8_t config_value;
++    uint8_t iConfiguration;
++    uint8_t attributes;
++    uint8_t max_power;
++} __attribute__((packed));
++
++struct interface_desc
++{
++    uint8_t length;
++    uint8_t descriptor_type;
++    uint8_t interface_number;
++    uint8_t alternate_setting;
++    uint8_t num_endpoints;
++    uint8_t interface_class;
++    uint8_t interface_subclass;
++    uint8_t interface_protocol;
++    uint8_t iInterface;
++} __attribute__((packed));
++
++struct endpoint_desc
++{
++    uint8_t length;
++    uint8_t descriptor_type;
++    uint8_t endpoint_address;
++    uint8_t attributes;
++    uint16_t max_packet_size;
++    uint8_t interval;
++} __attribute__((packed));
++
++struct hub_desc
++{
++    uint8_t length;
++    uint8_t descriptor_type;
++    uint8_t nbr_ports;
++    uint16_t hub_characteristics;
++    uint8_t pwron2pwrgood;
++    uint8_t hub_contr_current;
++} __attribute__((packed));
++
++typedef enum
++{
++    USBDC_COMPOSITE = 0x00,
++    USBDC_AUDIO = 0x01,
++    USBDC_COMM_CDC = 0x02,
++    USBDC_HID = 0x03,
++    USBDC_PID = 0x05,
++    USBDC_IMAGE = 0x06,
++    USBDC_PRINTER = 0x07,
++    USBDC_MSC = 0x08,
++    USBDC_HUB = 0x09,
++    USBDC_CDC_DATA = 0x0A,
++    USBDC_CHIP = 0x0B,
++    USBDC_SECURITY = 0x0D,
++    USBDC_VIDEO = 0x0E,
++    USBDC_HEALTH = 0x0F,
++    USBDC_DIAGNOSIS = 0xDC,
++    USBDC_WIRELESS = 0xE0,
++    USBDC_MISC = 0xEF,
++    USBDC_SOFT_SPEC = 0xFE,
++    USBDC_VENDOR_SPEC = 0xFF
++} usb_class_t;
++
++#endif
+diff --git a/usb11/include/usb11.h b/usb11/include/usb11.h
+new file mode 100644
+index 0000000..77634e9
+--- /dev/null
++++ b/usb11/include/usb11.h
+@@ -0,0 +1,41 @@
++/*****************************************************************************
++* Copyright (c) 2009 Max Reitz                                               *
++*                                                                            *
++* Permission is hereby granted,  free of charge,  to any  person obtaining a *
++* copy of this software and associated documentation files (the &quot;Software&quot;), *
++* to deal in the Software without restriction,  including without limitation *
++* the rights to use,  copy, modify, merge, publish,  distribute, sublicense, *
++* and/or sell copies  of the  Software,  and to permit  persons to whom  the *
++* Software is furnished to do so, subject to the following conditions:       *
++*                                                                            *
++* The above copyright notice and this permission notice shall be included in *
++* all copies or substantial portions of the Software.                        *
++*                                                                            *
++* THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++* IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF MERCHANTABILITY, *
++* FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT SHALL *
++* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++* LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++* FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++* DEALINGS IN THE SOFTWARE.                                                  *
++*****************************************************************************/
++
++#ifndef USB11_H
++#define USB11_H
++
++#include &lt;stdio.h&gt;
++
++//#define DEBUG
++
++#ifdef DEBUG
++#define d1printf(...) printf(&quot;[usb 1.1] &quot; __VA_ARGS__)
++#define _d1printf(...) printf(__VA_ARGS__)
++#else
++#define d1printf(...)
++#define _d1printf(...)
++#endif
++
++#define d0printf(...) printf(&quot;[usb 1.1] &quot; __VA_ARGS__)
++#define _d0printf(...) printf(__VA_ARGS__)
++
++#endif
+diff --git a/usb11/main.c b/usb11/main.c
+new file mode 100644
+index 0000000..e381062
+--- /dev/null
++++ b/usb11/main.c
+@@ -0,0 +1,58 @@
++/*****************************************************************************
++* Copyright (c) 2009 Max Reitz                                               *
++*                                                                            *
++* Permission is hereby granted,  free of charge,  to any  person obtaining a *
++* copy of this software and associated documentation files (the &quot;Software&quot;), *
++* to deal in the Software without restriction,  including without limitation *
++* the rights to use,  copy, modify, merge, publish,  distribute, sublicense, *
++* and/or sell copies  of the  Software,  and to permit  persons to whom  the *
++* Software is furnished to do so, subject to the following conditions:       *
++*                                                                            *
++* The above copyright notice and this permission notice shall be included in *
++* all copies or substantial portions of the Software.                        *
++*                                                                            *
++* THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++* IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF MERCHANTABILITY, *
++* FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT SHALL *
++* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++* LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++* FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++* DEALINGS IN THE SOFTWARE.                                                  *
++*****************************************************************************/
++
++#include &lt;cdi/misc.h&gt;
++#include &lt;cdi/usb.h&gt;
++
++#include &quot;control.h&quot;
++#include &quot;transfer.h&quot;
++
++#define DRIVER_NAME &quot;USB 1.1&quot;
++
++int init_usb11(void);
++
++static struct cdi_usb_driver driver = {
++    .drv = {
++        .type          = CDI_USB,
++        .name          = DRIVER_NAME,
++        .devices       = NULL,
++        .init_device   = NULL,
++        .remove_device = NULL,
++        .init          = &amp;init_usb11,
++        .destroy       = NULL
++    },
++    .speeds            = CDI_USB_LOW_SPEED | CDI_USB_FULL_SPEED,
++    .enumerate_device  = &amp;usb11_enumerate,
++    .send_packets      = &amp;usb11_send_packets,
++    .do_control        = &amp;usb11_export_control
++};
++
++CDI_DRIVER(DRIVER_NAME, driver)
++
++int init_usb11()
++{
++    cdi_init();
++
++    cdi_usb_driver_init(&amp;driver);
++
++    return 0;
++}
+diff --git a/usb11/transfer.c b/usb11/transfer.c
+new file mode 100644
+index 0000000..eb4f949
+--- /dev/null
++++ b/usb11/transfer.c
+@@ -0,0 +1,223 @@
++/*****************************************************************************
++* Copyright (c) 2009 Max Reitz                                               *
++*                                                                            *
++* Permission is hereby granted,  free of charge,  to any  person obtaining a *
++* copy of this software and associated documentation files (the &quot;Software&quot;), *
++* to deal in the Software without restriction,  including without limitation *
++* the rights to use,  copy, modify, merge, publish,  distribute, sublicense, *
++* and/or sell copies  of the  Software,  and to permit  persons to whom  the *
++* Software is furnished to do so, subject to the following conditions:       *
++*                                                                            *
++* The above copyright notice and this permission notice shall be included in *
++* all copies or substantial portions of the Software.                        *
++*                                                                            *
++* THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++* IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF MERCHANTABILITY, *
++* FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT SHALL *
++* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++* LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++* FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++* DEALINGS IN THE SOFTWARE.                                                  *
++*****************************************************************************/
++
++#include &lt;stddef.h&gt;
++#include &lt;stdlib.h&gt;
++
++#include &lt;cdi/usb.h&gt;
++
++#include &quot;transfer.h&quot;
++#include &quot;usb11.h&quot;
++#include &quot;usb-structs.h&quot;
++
++#define MIN(a, b) ((a) &lt; (b) ? (a) : (b))
++
++/**
++ * Verarbeitet USB-Pakete.
++ *
++ * @param packet Die Paketliste
++ * @param num_packets Anzahl der Pakete
++ *
++ * @return Status
++ */
++
++cdi_usb_status_t usb11_send_packets(struct cdi_usb_packet *packets,
++    size_t num_packets)
++{
++    cdi_usb_status_t error = CDI_USB_NAK;
++    int i = 0, mps;
++    int num_out_packets;
++    struct cdi_usb_pipe *pipe;
++    struct cdi_usb_device *device;
++    struct cdi_usb_packet *out_packets;
++    struct endpoint_desc *ep;
++    struct cdi_usb_hcd *hcd;
++
++    if (num_packets &lt; 1) {
++        return CDI_USB_TRIVIAL_ERROR;
++    }
++
++    // Alle Pakete muessen dieselbe Pipe benutzen
++    pipe = packets[0].pipe;
++    for (i = 1; i &lt; (int)num_packets; i++) {
++        if (packets[i].pipe != pipe) {
++            return CDI_USB_TRIVIAL_ERROR;
++        }
++    }
++
++    device = pipe-&gt;device;
++    hcd = (struct cdi_usb_hcd *)device-&gt;hc-&gt;dev.driver;
++    ep = (struct endpoint_desc *)pipe-&gt;endpoint;
++
++    // Pruefen, wie viele Pakete wir draus machen muessen
++    mps = ep-&gt;max_packet_size;
++    num_out_packets = 0;
++    for (i = 0; i &lt; (int)num_packets; i++) {
++        int num = (packets[i].length + mps - 1) / mps;
++        if (num &gt; 0) {
++            num_out_packets += num;
++        } else {
++            // Pakete ohne Daten wollen auch gesendet werden
++            num_out_packets++;
++        }
++    }
++
++    // Ggf. Pakete kopieren und splitten
++    if (num_out_packets == (int)num_packets) {
++        out_packets = packets;
++    } else {
++        int j;
++        int cur = 0;
++
++        out_packets = calloc(num_out_packets, sizeof(*out_packets));
++        for (i = 0; i &lt; (int)num_packets; i++) {
++            int num = (packets[i].length + mps - 1) / mps;
++            if (num == 0) {
++                num = 1;
++            }
++
++            for (j = 0; j &lt; num; j++) {
++                out_packets[cur].pipe = pipe;
++                out_packets[cur].type = packets[i].type;
++                out_packets[cur].data = packets[i].data;
++                out_packets[cur].length = MIN((int)packets[i].length, mps);
++                out_packets[cur].condition = CDI_USB_NAK;
++
++                packets[i].data = (void *)((uintptr_t)packets[i].data +
++                        out_packets[cur].length);
++                packets[i].length -= out_packets[cur].length;
++                cur++;
++            }
++        }
++    }
++
++    error = hcd-&gt;send_packets(out_packets, num_out_packets);
++    if (error &amp; CDI_USB_STALLED) {
++        d0printf(&quot;ENDPOINT 0x%02X OF DEVICE %i STALLED!\n&quot;,
++               ep-&gt;endpoint_address, device-&gt;id);
++        usb11_do_control(device, HOST_TO_DEV | NO_DATA, NULL, 0, STD_REQUEST,
++                   REC_ENDPOINT, CLEAR_FEATURE, 0, ep-&gt;endpoint_address);
++    } else if (error &amp; CDI_USB_NAK) {
++        // Nicht angenommene Pakete (FIXME: einzeln) senden
++        for (i = 0; i &lt; num_out_packets; i++) {
++            if (!(out_packets[i].condition &amp; CDI_USB_NAK)) {
++                continue;
++            }
++            error = CDI_USB_NAK;
++            while (error &amp; CDI_USB_NAK) {
++                error = hcd-&gt;send_packets(&amp;out_packets[i], 1);
++                if (error &amp; CDI_USB_NAK) {
++                    cdi_sleep_ms(5);
++                }
++            }
++        }
++    }
++
++    if (out_packets != packets) {
++        free(out_packets);
++    }
++
++    return error;
++}
++
++void *usb11_do_control(struct cdi_usb_device *device, int direction,
++    void *buffer, int length, int rtype, int recipient, int request, int value,
++    int index)
++{
++    int no_data, alloced_here = 0;
++    cdi_usb_status_t rval;
++    struct setup_packet _setup;
++    struct setup_packet *setup = &amp;_setup;
++
++    no_data = direction &amp; NO_DATA;
++    direction &amp;= 0x80;
++
++    setup-&gt;request_type = direction | (rtype &amp; 0x60) | (recipient &amp; 0x1F);
++    setup-&gt;request = request;
++    setup-&gt;value = value;
++    setup-&gt;index = index;
++    setup-&gt;length = length;
++
++    struct cdi_usb_packet setup_packet = {
++        .pipe         = device-&gt;ep0,
++        .type         = CDI_USB_PACKET_SETUP,
++        .data         = setup,
++        .length       = sizeof(*setup),
++        .use_toggle   = TOGGLE_UNSPECIFIC
++    };
++
++    if (usb11_send_packets(&amp;setup_packet, 1)) {
++        return NULL;
++    }
++
++    if (no_data) {
++        rval = CDI_USB_NO_ERROR;
++        buffer = (void *)0xFFFFFFFF; //Kein Fehler, aber auch keine Daten
++    } else {
++        if ((direction != HOST_TO_DEV) || (length &amp;&amp; (buffer == NULL))) {
++            buffer = malloc(length);
++            alloced_here = 1;
++        }
++
++        struct cdi_usb_packet data_packet = {
++            .pipe         = device-&gt;ep0,
++            .type         = (direction == DEV_TO_HOST ?
++                CDI_USB_PACKET_IN : CDI_USB_PACKET_OUT),
++            .data         = buffer,
++            .length       = length,
++            .use_toggle   = TOGGLE_UNSPECIFIC
++        };
++
++        rval = usb11_send_packets(&amp;data_packet, 1);
++    }
++
++    if (rval == CDI_USB_NO_ERROR) {
++        struct cdi_usb_packet ack_packet = {
++            .pipe       = device-&gt;ep0,
++            .data       = NULL,
++            .length     = 0,
++            .use_toggle = TOGGLE_1
++        };
++
++        if (no_data || (direction == HOST_TO_DEV)) {
++            ack_packet.type = CDI_USB_PACKET_IN;
++        } else {
++            ack_packet.type = CDI_USB_PACKET_OUT;
++        }
++
++        rval = usb11_send_packets(&amp;ack_packet, 1);
++    }
++
++    if ((rval != CDI_USB_NO_ERROR) &amp;&amp; alloced_here) {
++        free(buffer);
++    }
++
++    return (rval == CDI_USB_NO_ERROR) ? buffer : NULL;
++}
++
++void *usb11_export_control(struct cdi_usb_device *device,
++    struct cdi_usb_control_transfer *transfer)
++{
++    return usb11_do_control(device, transfer-&gt;direction, transfer-&gt;buffer,
++        transfer-&gt;length, transfer-&gt;rtype, transfer-&gt;recipient,
++        transfer-&gt;request, transfer-&gt;value, transfer-&gt;index);
++}
+-- 
+1.6.4.2
+
+</PRE>
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000079.html">[cdi-devel] [PATCH 4/6] UHCI
+</A></li>
+	<LI>Next message: <A HREF="000081.html">[cdi-devel] [PATCH 6/6] USB MSD
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#80">[ date ]</a>
+              <a href="thread.html#80">[ thread ]</a>
+              <a href="subject.html#80">[ subject ]</a>
+              <a href="author.html#80">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

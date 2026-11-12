@@ -1,0 +1,979 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH v3 09/10] usb: Add USB 2.0 bus driver
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%20v3%2009/10%5D%20usb%3A%20Add%20USB%202.0%20bus%20driver&In-Reply-To=%3C20151014210615.GA3421%40silvanus%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000328.html">
+   <LINK REL="Next"  HREF="000330.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH v3 09/10] usb: Add USB 2.0 bus driver</H1>
+    <B>Kevin Wolf</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%20v3%2009/10%5D%20usb%3A%20Add%20USB%202.0%20bus%20driver&In-Reply-To=%3C20151014210615.GA3421%40silvanus%3E"
+       TITLE="[cdi-devel] [PATCH v3 09/10] usb: Add USB 2.0 bus driver">kevin at tyndur.org
+       </A><BR>
+    <I>Wed Oct 14 23:06:17 CEST 2015</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000328.html">[cdi-devel] [PATCH v3 08/10] ehci: Add EHCI driver
+</A></li>
+        <LI>Next message: <A HREF="000330.html">[cdi-devel] [PATCH v3 10/10] usb-storage: Add USB mass storage driver
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#329">[ date ]</a>
+              <a href="thread.html#329">[ thread ]</a>
+              <a href="subject.html#329">[ subject ]</a>
+              <a href="author.html#329">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>On Mon, May 11, 2015 at 09:59:29PM +0200, Max Reitz wrote:
+&gt;<i> + This adds a USB 2.0 bus driver. It is missing support for USB 3.x
+</I>&gt;<i>   (obviously), and also interrupt and isochronous transfers (and other
+</I>&gt;<i>   things, too). Also, it is probably bad (e.g. there is only a single
+</I>&gt;<i>   counter for device IDs instead of keeping track of which IDs are used
+</I>&gt;<i>   and which are not).
+</I>&gt;<i> 
+</I>&gt;<i> Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+</I>
+&gt;<i> diff --git a/usb/usb.c b/usb/usb.c
+</I>&gt;<i> new file mode 100644
+</I>&gt;<i> index 0000000..b9fc89f
+</I>&gt;<i> --- /dev/null
+</I>&gt;<i> +++ b/usb/usb.c
+</I>&gt;<i> @@ -0,0 +1,871 @@
+</I>&gt;<i> +/******************************************************************************
+</I>&gt;<i> + * Copyright (c) 2015 Max Reitz                                               *
+</I>&gt;<i> + *                                                                            *
+</I>&gt;<i> + * Permission is hereby granted,  free of charge,  to any person  obtaining a *
+</I>&gt;<i> + * copy of this software and associated documentation files (the &quot;Software&quot;), *
+</I>&gt;<i> + * to deal in the Software without restriction,  including without limitation *
+</I>&gt;<i> + * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
+</I>&gt;<i> + * and/or  sell copies of the  Software,  and to permit  persons to whom  the *
+</I>&gt;<i> + * Software is furnished to do so, subject to the following conditions:       *
+</I>&gt;<i> + *                                                                            *
+</I>&gt;<i> + * The above copyright notice and this permission notice shall be included in *
+</I>&gt;<i> + * all copies or substantial portions of the Software.                        *
+</I>&gt;<i> + *                                                                            *
+</I>&gt;<i> + * THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
+</I>&gt;<i> + * IMPLIED,  INCLUDING BUT NOT LIMITED TO THE WARRANTIES  OF MERCHANTABILITY, *
+</I>&gt;<i> + * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
+</I>&gt;<i> + * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
+</I>&gt;<i> + * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
+</I>&gt;<i> + * FROM,  OUT OF  OR IN CONNECTION  WITH  THE SOFTWARE  OR THE  USE OR  OTHER *
+</I>&gt;<i> + * DEALINGS IN THE SOFTWARE.                                                  *
+</I>&gt;<i> + ******************************************************************************/
+</I>&gt;<i> +
+</I>&gt;<i> +#include &lt;assert.h&gt;
+</I>&gt;<i> +#include &lt;errno.h&gt;
+</I>&gt;<i> +#include &lt;stdint.h&gt;
+</I>&gt;<i> +#include &lt;stdio.h&gt;
+</I>&gt;<i> +#include &lt;stdlib.h&gt;
+</I>&gt;<i> +#include &lt;string.h&gt;
+</I>&gt;<i> +
+</I>&gt;<i> +#include &lt;cdi.h&gt;
+</I>&gt;<i> +#include &lt;cdi/misc.h&gt;
+</I>&gt;<i> +#include &lt;cdi/usb.h&gt;
+</I>&gt;<i> +#include &lt;cdi/usb_hcd.h&gt;
+</I>&gt;<i> +
+</I>&gt;<i> +#include &quot;usb.h&quot;
+</I>&gt;<i> +#include &quot;usb-hubs.h&quot;
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +// #define DEBUG
+</I>&gt;<i> +
+</I>&gt;<i> +#ifdef DEBUG
+</I>&gt;<i> +#define DPRINTF(...) printf(__VA_ARGS__)
+</I>&gt;<i> +#else
+</I>&gt;<i> +#define DPRINTF(...)
+</I>&gt;<i> +#endif
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +static int current_usb_addr = 1;
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +static cdi_usb_transmission_result_t
+</I>&gt;<i> +    do_control_transfer(struct cdi_usb_hc *hc, int dev, cdi_usb_speed_t speed,
+</I>&gt;<i> +                        int tt_addr, int tt_port, const usb_endpoint_t *ep,
+</I>&gt;<i> +                        const struct cdi_usb_setup_packet *setup, void *data)
+</I>&gt;<i> +{
+</I>&gt;<i> +    struct cdi_usb_hcd *hcd = CDI_UPCAST(hc-&gt;dev.driver, struct cdi_usb_hcd,
+</I>&gt;<i> +                                         drv);
+</I>&gt;<i> +    cdi_usb_hc_transaction_t ta;
+</I>&gt;<i> +    cdi_usb_transmission_result_t r1, r2, r3;
+</I>&gt;<i> +
+</I>&gt;<i> +    ta = hcd-&gt;create_transaction(hc, &amp;(struct cdi_usb_hc_ep_info){
+</I>&gt;<i> +            .dev        = dev,
+</I>&gt;<i> +            .ep         = ep-&gt;ep,
+</I>&gt;<i> +            .ep_type    = ep-&gt;type,
+</I>&gt;<i> +            .speed      = speed,
+</I>&gt;<i> +            .mps        = ep-&gt;mps,
+</I>&gt;<i> +            .tt_addr    = tt_addr,
+</I>&gt;<i> +            .tt_port    = tt_port
+</I>&gt;<i> +        });
+</I>&gt;<i> +
+</I>&gt;<i> +    hcd-&gt;enqueue(hc, &amp;(struct cdi_usb_hc_transmission){
+</I>&gt;<i> +            .ta     = ta,
+</I>&gt;<i> +            .token  = CDI_USB_SETUP,
+</I>&gt;<i> +            .buffer = (void *)setup,
+</I>&gt;<i> +            .size   = sizeof(*setup),
+</I>&gt;<i> +            .toggle = 0,
+</I>&gt;<i> +            .result = &amp;r1
+</I>&gt;<i> +        });
+</I>&gt;<i> +
+</I>&gt;<i> +    if (data) {
+</I>&gt;<i> +        hcd-&gt;enqueue(hc, &amp;(struct cdi_usb_hc_transmission){
+</I>&gt;<i> +                .ta     = ta,
+</I>&gt;<i> +                .token  = setup-&gt;bm_request_type &amp; CDI_USB_CREQ_IN
+</I>&gt;<i> +                        ? CDI_USB_IN : CDI_USB_OUT,
+</I>&gt;<i> +                .buffer = data,
+</I>&gt;<i> +                .size   = setup-&gt;w_length,
+</I>&gt;<i> +                .toggle = 1,
+</I>&gt;<i> +                .result = &amp;r2
+</I>&gt;<i> +            });
+</I>&gt;<i> +    } else {
+</I>&gt;<i> +        r2 = CDI_USB_OK;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    hcd-&gt;enqueue(hc, &amp;(struct cdi_usb_hc_transmission){
+</I>&gt;<i> +            .ta     = ta,
+</I>&gt;<i> +            .token  = setup-&gt;bm_request_type &amp; CDI_USB_CREQ_IN ? CDI_USB_OUT
+</I>&gt;<i> +                                                               : CDI_USB_IN,
+</I>&gt;<i> +            .toggle = 1,
+</I>&gt;<i> +            .result = &amp;r3
+</I>&gt;<i> +        });
+</I>&gt;<i> +
+</I>&gt;<i> +    hcd-&gt;wait_transaction(hc, ta);
+</I>&gt;<i> +    hcd-&gt;destroy_transaction(hc, ta);
+</I>&gt;<i> +
+</I>&gt;<i> +    return r1 ? r1 : r2 ? r2 : r3;
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +static cdi_usb_transmission_result_t
+</I>&gt;<i> +    control_transfer(const usb_device_t *dev, const usb_endpoint_t *ep,
+</I>&gt;<i> +                     const struct cdi_usb_setup_packet *setup, void *data)
+</I>&gt;<i> +{
+</I>&gt;<i> +    return do_control_transfer(dev-&gt;hc, dev-&gt;id, dev-&gt;speed, dev-&gt;tt_addr,
+</I>&gt;<i> +                               dev-&gt;tt_port, ep, setup, data);
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +static int get_mps0(usb_hub_t *hub, int hub_port, cdi_usb_speed_t speed)
+</I>&gt;<i> +{
+</I>&gt;<i> +    cdi_usb_transmission_result_t res;
+</I>&gt;<i> +    struct cdi_usb_device_descriptor device_descriptor;
+</I>&gt;<i> +    int tt_addr = 0, tt_port = 0;
+</I>&gt;<i> +
+</I>&gt;<i> +    if (speed &lt; CDI_USB_HIGH_SPEED &amp;&amp; hub-&gt;ldev) {
+</I>&gt;<i> +        if (hub-&gt;ldev-&gt;dev-&gt;speed &lt; CDI_USB_HIGH_SPEED) {
+</I>&gt;<i> +            tt_addr = hub-&gt;ldev-&gt;dev-&gt;tt_addr;
+</I>&gt;<i> +            tt_port = hub-&gt;ldev-&gt;dev-&gt;tt_port;
+</I>&gt;<i> +        } else {
+</I>&gt;<i> +            tt_addr = hub-&gt;ldev-&gt;dev-&gt;id;
+</I>&gt;<i> +            tt_port = hub_port;
+</I>&gt;<i> +        }
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    res = do_control_transfer(hub-&gt;hc, 0, speed, tt_addr, tt_port,
+</I>&gt;<i> +        &amp;(usb_endpoint_t){
+</I>&gt;<i> +            .type       = CDI_USB_CONTROL,
+</I>&gt;<i> +            .mps        = 8
+</I>&gt;<i> +        }, &amp;(struct cdi_usb_setup_packet){
+</I>&gt;<i> +            .bm_request_type    = CDI_USB_CREQ_DEVICE | CDI_USB_CREQ_IN,
+</I>&gt;<i> +            .b_request          = CDI_USB_CREQ_GET_DESCRIPTOR,
+</I>&gt;<i> +            .w_value            = (CDI_USB_DESC_DEVICE &lt;&lt; 8) | 0,
+</I>&gt;<i> +            .w_length           = 8
+</I>&gt;<i> +        }, &amp;device_descriptor);
+</I>&gt;<i> +
+</I>&gt;<i> +    if (res != CDI_USB_OK) {
+</I>&gt;<i> +        return -EIO;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    return device_descriptor.b_max_packet_size_0;
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +static usb_device_t *enumerate(usb_hub_t *hub, int hub_port,
+</I>&gt;<i> +                               cdi_usb_speed_t speed, int mps0)
+</I>&gt;<i> +{
+</I>&gt;<i> +    cdi_usb_transmission_result_t res;
+</I>&gt;<i> +    usb_device_t *dev = calloc(1, sizeof(*dev));
+</I>&gt;<i> +
+</I>&gt;<i> +    int new_id = current_usb_addr++;
+</I>
+I guess not having proper ID management is okay for now, but should we
+at least check if new_id &gt; 127 and print an error and fail then? The
+spec says that in this case the behaviour of SET ADDRESS would be
+unspecified.
+
+&gt;<i> +    dev-&gt;hc = hub-&gt;hc;
+</I>&gt;<i> +    dev-&gt;speed = speed;
+</I>&gt;<i> +
+</I>&gt;<i> +    if (speed &lt; CDI_USB_HIGH_SPEED &amp;&amp; hub-&gt;ldev) {
+</I>&gt;<i> +        if (hub-&gt;ldev-&gt;dev-&gt;speed &lt; CDI_USB_HIGH_SPEED) {
+</I>&gt;<i> +            dev-&gt;tt_addr = hub-&gt;ldev-&gt;dev-&gt;tt_addr;
+</I>&gt;<i> +            dev-&gt;tt_port = hub-&gt;ldev-&gt;dev-&gt;tt_port;
+</I>&gt;<i> +        } else {
+</I>&gt;<i> +            dev-&gt;tt_addr = hub-&gt;ldev-&gt;dev-&gt;id;
+</I>&gt;<i> +            dev-&gt;tt_port = hub_port;
+</I>&gt;<i> +        }
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    dev-&gt;eps[0][0].type = CDI_USB_CONTROL;
+</I>&gt;<i> +    dev-&gt;eps[0][0].mps  = mps0;
+</I>&gt;<i> +
+</I>&gt;<i> +    res = control_transfer(dev, &amp;dev-&gt;eps[0][0], &amp;(struct cdi_usb_setup_packet){
+</I>&gt;<i> +            .bm_request_type    = CDI_USB_CREQ_DEVICE | CDI_USB_CREQ_OUT,
+</I>&gt;<i> +            .b_request          = CDI_USB_CREQ_SET_ADDRESS,
+</I>&gt;<i> +            .w_value            = new_id
+</I>&gt;<i> +        }, NULL);
+</I>&gt;<i> +    if (res != CDI_USB_OK) {
+</I>&gt;<i> +        free(dev);
+</I>&gt;<i> +        return NULL;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    dev-&gt;id = new_id;
+</I>&gt;<i> +
+</I>&gt;<i> +    res = control_transfer(dev, &amp;dev-&gt;eps[0][0], &amp;(struct cdi_usb_setup_packet){
+</I>&gt;<i> +            .bm_request_type    = CDI_USB_CREQ_DEVICE | CDI_USB_CREQ_IN,
+</I>&gt;<i> +            .b_request          = CDI_USB_CREQ_GET_DESCRIPTOR,
+</I>&gt;<i> +            .w_value            = (CDI_USB_DESC_DEVICE &lt;&lt; 8) | 0,
+</I>&gt;<i> +            .w_length           = sizeof(dev-&gt;dev_desc)
+</I>&gt;<i> +        }, &amp;dev-&gt;dev_desc);
+</I>&gt;<i> +    if (res != CDI_USB_OK) {
+</I>&gt;<i> +        free(dev);
+</I>&gt;<i> +        return NULL;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    return dev;
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +#ifdef DEBUG
+</I>&gt;<i> +static void get_string_descriptor(usb_device_t *dev, int index,
+</I>&gt;<i> +                                  struct cdi_usb_string_descriptor *dst)
+</I>&gt;<i> +{
+</I>&gt;<i> +    cdi_usb_transmission_result_t res;
+</I>&gt;<i> +
+</I>&gt;<i> +    res = control_transfer(dev, &amp;dev-&gt;eps[0][0], &amp;(struct cdi_usb_setup_packet){
+</I>&gt;<i> +            .bm_request_type    = CDI_USB_CREQ_DEVICE | CDI_USB_CREQ_IN,
+</I>&gt;<i> +            .b_request          = CDI_USB_CREQ_GET_DESCRIPTOR,
+</I>&gt;<i> +            .w_value            = (CDI_USB_DESC_STRING &lt;&lt; 8) | index,
+</I>&gt;<i> +            .w_length           = 1
+</I>&gt;<i> +        }, dst);
+</I>&gt;<i> +    if (res != CDI_USB_OK || !dst-&gt;b_length) {
+</I>&gt;<i> +        dst-&gt;b_length = 0;
+</I>&gt;<i> +        return;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    res = control_transfer(dev, &amp;dev-&gt;eps[0][0], &amp;(struct cdi_usb_setup_packet){
+</I>&gt;<i> +            .bm_request_type    = CDI_USB_CREQ_DEVICE | CDI_USB_CREQ_IN,
+</I>&gt;<i> +            .b_request          = CDI_USB_CREQ_GET_DESCRIPTOR,
+</I>&gt;<i> +            .w_value            = (CDI_USB_DESC_STRING &lt;&lt; 8) | index,
+</I>&gt;<i> +            .w_length           = dst-&gt;b_length
+</I>&gt;<i> +        }, dst);
+</I>&gt;<i> +    if (res != CDI_USB_OK) {
+</I>&gt;<i> +        dst-&gt;b_length = 0;
+</I>&gt;<i> +        return;
+</I>&gt;<i> +    }
+</I>&gt;<i> +}
+</I>&gt;<i> +#endif
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +static int get_configurations(usb_device_t *dev)
+</I>&gt;<i> +{
+</I>&gt;<i> +    cdi_usb_transmission_result_t res;
+</I>&gt;<i> +    struct cdi_usb_configuration_descriptor config;
+</I>&gt;<i> +
+</I>&gt;<i> +    dev-&gt;configs = calloc(1, dev-&gt;dev_desc.b_num_configurations
+</I>&gt;<i> +                             * sizeof(*dev-&gt;configs));
+</I>
+I think the idea with calloc() was that you don't multiply manually. ;-)
+
+&gt;<i> +
+</I>&gt;<i> +    for (int i = 0; i &lt; (int)dev-&gt;dev_desc.b_num_configurations; i++) {
+</I>&gt;<i> +        res = control_transfer(dev, &amp;dev-&gt;eps[0][0],
+</I>&gt;<i> +            &amp;(struct cdi_usb_setup_packet){
+</I>&gt;<i> +                .bm_request_type    = CDI_USB_CREQ_DEVICE | CDI_USB_CREQ_IN,
+</I>&gt;<i> +                .b_request          = CDI_USB_CREQ_GET_DESCRIPTOR,
+</I>&gt;<i> +                .w_value            = (CDI_USB_DESC_CONFIGURATION &lt;&lt; 8) | i,
+</I>&gt;<i> +                .w_length           = sizeof(config)
+</I>&gt;<i> +            }, &amp;config);
+</I>&gt;<i> +        if (res != CDI_USB_OK) {
+</I>&gt;<i> +            goto fail;
+</I>&gt;<i> +        }
+</I>&gt;<i> +
+</I>&gt;<i> +        dev-&gt;configs[i] = malloc(config.w_total_length);
+</I>&gt;<i> +        res = control_transfer(dev, &amp;dev-&gt;eps[0][0],
+</I>&gt;<i> +            &amp;(struct cdi_usb_setup_packet){
+</I>&gt;<i> +                .bm_request_type    = CDI_USB_CREQ_DEVICE | CDI_USB_CREQ_IN,
+</I>&gt;<i> +                .b_request          = CDI_USB_CREQ_GET_DESCRIPTOR,
+</I>&gt;<i> +                .w_value            = (CDI_USB_DESC_CONFIGURATION &lt;&lt; 8) | i,
+</I>&gt;<i> +                .w_length           = config.w_total_length
+</I>&gt;<i> +            }, dev-&gt;configs[i]);
+</I>&gt;<i> +        if (res != CDI_USB_OK) {
+</I>&gt;<i> +            goto fail;
+</I>&gt;<i> +        }
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    return 0;
+</I>&gt;<i> +
+</I>&gt;<i> +fail:
+</I>&gt;<i> +    for (int i = 0; i &lt; (int)dev-&gt;dev_desc.b_num_configurations; i++) {
+</I>&gt;<i> +        free(dev-&gt;configs[i]);
+</I>&gt;<i> +    }
+</I>&gt;<i> +    free(dev-&gt;configs);
+</I>&gt;<i> +    return -EIO;
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +static bool compare_configurations(usb_device_t *dev, int i, int j)
+</I>&gt;<i> +{
+</I>&gt;<i> +    // TODO: Prefer self-powered
+</I>&gt;<i> +    if (dev-&gt;configs[i]-&gt;b_max_power != dev-&gt;configs[j]-&gt;b_max_power) {
+</I>&gt;<i> +        return dev-&gt;configs[i]-&gt;b_max_power &gt; dev-&gt;configs[j]-&gt;b_max_power;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    if (dev-&gt;configs[i]-&gt;b_num_interfaces != dev-&gt;configs[j]-&gt;b_num_interfaces)
+</I>&gt;<i> +    {
+</I>&gt;<i> +        return dev-&gt;configs[i]-&gt;b_num_interfaces
+</I>&gt;<i> +               &gt; dev-&gt;configs[j]-&gt;b_num_interfaces;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    return false;
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +static int choose_configuration(usb_device_t *dev)
+</I>&gt;<i> +{
+</I>&gt;<i> +    cdi_usb_transmission_result_t res;
+</I>&gt;<i> +    int best_config = 0;
+</I>&gt;<i> +
+</I>&gt;<i> +    for (int i = 1; i &lt; (int)dev-&gt;dev_desc.b_num_configurations; i++) {
+</I>&gt;<i> +        if (compare_configurations(dev, i, best_config)) {
+</I>&gt;<i> +            best_config = i;
+</I>&gt;<i> +        }
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    dev-&gt;config = dev-&gt;configs[best_config];
+</I>&gt;<i> +
+</I>&gt;<i> +    res = control_transfer(dev, &amp;dev-&gt;eps[0][0], &amp;(struct cdi_usb_setup_packet){
+</I>&gt;<i> +            .bm_request_type    = CDI_USB_CREQ_DEVICE | CDI_USB_CREQ_OUT,
+</I>&gt;<i> +            .b_request          = CDI_USB_CREQ_SET_CONFIGURATION,
+</I>&gt;<i> +            .w_value            = dev-&gt;config-&gt;b_configuration_value,
+</I>&gt;<i> +        }, NULL);
+</I>&gt;<i> +    if (res != CDI_USB_OK) {
+</I>&gt;<i> +        dev-&gt;config = NULL;
+</I>&gt;<i> +        return -EIO;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    return 0;
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +#ifdef DEBUG
+</I>&gt;<i> +static void debug_device(usb_device_t *dev)
+</I>&gt;<i> +{
+</I>&gt;<i> +    printf(&quot;[usb] new %s device %04x:%04x (%x.%x.%x) &quot;,
+</I>&gt;<i> +           dev-&gt;speed == CDI_USB_LOW_SPEED  ?  &quot;low speed&quot; :
+</I>&gt;<i> +           dev-&gt;speed == CDI_USB_FULL_SPEED ? &quot;full speed&quot; :
+</I>&gt;<i> +           dev-&gt;speed == CDI_USB_HIGH_SPEED ? &quot;high speed&quot; :
+</I>&gt;<i> +           dev-&gt;speed == CDI_USB_SUPERSPEED ? &quot;superspeed&quot; :
+</I>&gt;<i> +                                              &quot;futurespeed&quot;,
+</I>&gt;<i> +           dev-&gt;dev_desc.id_vendor, dev-&gt;dev_desc.id_product,
+</I>&gt;<i> +           dev-&gt;dev_desc.b_device_class,
+</I>&gt;<i> +           dev-&gt;dev_desc.b_device_sub_class,
+</I>&gt;<i> +           dev-&gt;dev_desc.b_device_protocol);
+</I>&gt;<i> +
+</I>&gt;<i> +    struct cdi_usb_string_descriptor str;
+</I>&gt;<i> +
+</I>&gt;<i> +    if (dev-&gt;dev_desc.i_manufacturer) {
+</I>&gt;<i> +        get_string_descriptor(dev, dev-&gt;dev_desc.i_manufacturer, &amp;str);
+</I>&gt;<i> +        for (int i = 0; i &lt; (str.b_length - 2) / 2; i++) {
+</I>&gt;<i> +            putchar(str.b_string[i] &gt; 0x7f ? '?' : str.b_string[i]);
+</I>&gt;<i> +        }
+</I>&gt;<i> +        putchar(' ');
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    if (dev-&gt;dev_desc.i_product) {
+</I>&gt;<i> +        get_string_descriptor(dev, dev-&gt;dev_desc.i_product, &amp;str);
+</I>&gt;<i> +        for (int i = 0; i &lt; (str.b_length - 2) / 2; i++) {
+</I>&gt;<i> +            putchar(str.b_string[i] &gt; 0x7f ? '?' : str.b_string[i]);
+</I>&gt;<i> +        }
+</I>&gt;<i> +        putchar(' ');
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    putchar('\n');
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +static void debug_configuration(usb_device_t *dev)
+</I>&gt;<i> +{
+</I>&gt;<i> +    printf(&quot;[usb] chose configuration %i &quot;, dev-&gt;config-&gt;b_configuration_value);
+</I>&gt;<i> +
+</I>&gt;<i> +    struct cdi_usb_string_descriptor str;
+</I>&gt;<i> +
+</I>&gt;<i> +    if (dev-&gt;config-&gt;i_configuration) {
+</I>&gt;<i> +        get_string_descriptor(dev, dev-&gt;config-&gt;i_configuration, &amp;str);
+</I>&gt;<i> +        putchar('(');
+</I>&gt;<i> +        for (int i = 0; i &lt; (str.b_length - 2) / 2; i++) {
+</I>&gt;<i> +            putchar(str.b_string[i] &gt; 0x7f ? '?' : str.b_string[i]);
+</I>&gt;<i> +        }
+</I>&gt;<i> +        putchar(')');
+</I>&gt;<i> +        putchar(' ');
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    printf(&quot;with %i interface(s):\n&quot;, dev-&gt;config-&gt;b_num_interfaces);
+</I>&gt;<i> +
+</I>&gt;<i> +    struct cdi_usb_interface_descriptor *ifc = (void *)(dev-&gt;config + 1);
+</I>&gt;<i> +    for (int i = 0; i &lt; (int)dev-&gt;config-&gt;b_num_interfaces; i++) {
+</I>&gt;<i> +        printf(&quot;[usb] &quot;);
+</I>&gt;<i> +        if (ifc-&gt;i_interface) {
+</I>&gt;<i> +            get_string_descriptor(dev, ifc-&gt;i_interface, &amp;str);
+</I>&gt;<i> +            for (int j = 0; j &lt; (int)dev-&gt;config-&gt;b_num_interfaces; j++) {
+</I>&gt;<i> +                putchar(str.b_string[j] &gt; 0x7f ? '?' : str.b_string[j]);
+</I>&gt;<i> +            }
+</I>&gt;<i> +            putchar(' ');
+</I>&gt;<i> +        }
+</I>&gt;<i> +        printf(&quot;%x.%x.%x\n&quot;, ifc-&gt;b_interface_class,
+</I>&gt;<i> +               ifc-&gt;b_interface_sub_class, ifc-&gt;b_interface_protocol);
+</I>&gt;<i> +
+</I>&gt;<i> +        ifc = (void *)((struct cdi_usb_endpoint_descriptor *)(ifc + 1)
+</I>&gt;<i> +                + ifc-&gt;b_num_endpoints);
+</I>&gt;<i> +    }
+</I>&gt;<i> +}
+</I>&gt;<i> +#endif
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +static void new_hub_device(usb_logical_device_t *ldev);
+</I>&gt;<i> +
+</I>&gt;<i> +static void new_hub(usb_hub_t *hub)
+</I>&gt;<i> +{
+</I>&gt;<i> +    for (int i = 0; i &lt; hub-&gt;cdi-&gt;ports; i++) {
+</I>&gt;<i> +        hub-&gt;drv-&gt;port_disable(hub-&gt;cdi, i);
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    DPRINTF(&quot;[usb] new hub with %i ports detected\n&quot;, hub-&gt;cdi-&gt;ports);
+</I>&gt;<i> +
+</I>&gt;<i> +    for (int i = 0; i &lt; hub-&gt;cdi-&gt;ports; i++) {
+</I>&gt;<i> +        hub-&gt;drv-&gt;port_reset_enable(hub-&gt;cdi, i);
+</I>&gt;<i> +        cdi_sleep_ms(5);
+</I>&gt;<i> +
+</I>&gt;<i> +        cdi_usb_port_status_t status = hub-&gt;drv-&gt;port_status(hub-&gt;cdi, i);
+</I>&gt;<i> +        if (!(status &amp; CDI_USB_PORT_CONNECTED)) {
+</I>&gt;<i> +            hub-&gt;drv-&gt;port_disable(hub-&gt;cdi, i);
+</I>&gt;<i> +            continue;
+</I>&gt;<i> +        }
+</I>&gt;<i> +
+</I>&gt;<i> +        int mps0 = get_mps0(hub, i, status &amp; CDI_USB_PORT_SPEED_MASK);
+</I>&gt;<i> +        if (mps0 &lt; 0) {
+</I>&gt;<i> +            fprintf(stderr, &quot;[usb] failed to inquire MPS0\n&quot;);
+</I>&gt;<i> +            hub-&gt;drv-&gt;port_disable(hub-&gt;cdi, i);
+</I>&gt;<i> +            continue;
+</I>&gt;<i> +        }
+</I>&gt;<i> +
+</I>&gt;<i> +        hub-&gt;drv-&gt;port_reset_enable(hub-&gt;cdi, i);
+</I>&gt;<i> +        cdi_sleep_ms(5);
+</I>&gt;<i> +
+</I>&gt;<i> +        status = hub-&gt;drv-&gt;port_status(hub-&gt;cdi, i);
+</I>&gt;<i> +        if (!(status &amp; CDI_USB_PORT_CONNECTED)) {
+</I>&gt;<i> +            hub-&gt;drv-&gt;port_disable(hub-&gt;cdi, i);
+</I>&gt;<i> +            continue;
+</I>&gt;<i> +        }
+</I>
+I'm sure there is a reason for this second reset, but I couldn't find it
+in the spec and the procedure looks a bit odd. If you still remember the
+reason, a comment might be nice.
+
+&gt;<i> +
+</I>&gt;<i> +        usb_device_t *dev = enumerate(hub, i, status &amp; CDI_USB_PORT_SPEED_MASK,
+</I>&gt;<i> +                                      mps0);
+</I>&gt;<i> +        if (!dev) {
+</I>&gt;<i> +            fprintf(stderr, &quot;[usb] failed to enumerate device\n&quot;);
+</I>&gt;<i> +            hub-&gt;drv-&gt;port_disable(hub-&gt;cdi, i);
+</I>&gt;<i> +            continue;
+</I>&gt;<i> +        }
+</I>&gt;<i> +
+</I>&gt;<i> +#ifdef DEBUG
+</I>&gt;<i> +        debug_device(dev);
+</I>&gt;<i> +#endif
+</I>&gt;<i> +
+</I>&gt;<i> +        usb_logical_device_t *ldev = NULL;
+</I>&gt;<i> +        int ldev_ep_idx = 0;
+</I>&gt;<i> +        bool interface_level;
+</I>&gt;<i> +
+</I>&gt;<i> +        interface_level = dev-&gt;dev_desc.b_device_class == CDI_USB_DEVCLS_NONE;
+</I>&gt;<i> +        if (!interface_level) {
+</I>&gt;<i> +            ldev = calloc(1, sizeof(*ldev));
+</I>&gt;<i> +            ldev-&gt;cdi.bus_data.bus_type = CDI_USB;
+</I>&gt;<i> +            ldev-&gt;cdi.interface         = -1;
+</I>&gt;<i> +            ldev-&gt;cdi.endpoint_count    = 1; // EP0
+</I>&gt;<i> +            ldev-&gt;cdi.vendor_id         = dev-&gt;dev_desc.id_vendor;
+</I>&gt;<i> +            ldev-&gt;cdi.product_id        = dev-&gt;dev_desc.id_product;
+</I>&gt;<i> +            ldev-&gt;cdi.class_id          = dev-&gt;dev_desc.b_device_class;
+</I>&gt;<i> +            ldev-&gt;cdi.subclass_id       = dev-&gt;dev_desc.b_device_sub_class;
+</I>&gt;<i> +            ldev-&gt;cdi.protocol_id       = dev-&gt;dev_desc.b_device_protocol;
+</I>&gt;<i> +
+</I>&gt;<i> +            ldev-&gt;dev = dev;
+</I>&gt;<i> +
+</I>&gt;<i> +            ldev-&gt;endpoints = malloc(1 * sizeof(ldev-&gt;endpoints[0]));
+</I>&gt;<i> +            ldev-&gt;endpoints[0] = 0; // EP0
+</I>&gt;<i> +            ldev_ep_idx = 1;
+</I>&gt;<i> +        }
+</I>&gt;<i> +
+</I>&gt;<i> +        if (get_configurations(dev) &lt; 0) {
+</I>&gt;<i> +            fprintf(stderr, &quot;[usb] failed to get device configurations\n&quot;);
+</I>&gt;<i> +            free(ldev-&gt;endpoints);
+</I>&gt;<i> +            free(ldev);
+</I>&gt;<i> +            free(dev);
+</I>&gt;<i> +            hub-&gt;drv-&gt;port_disable(hub-&gt;cdi, i);
+</I>&gt;<i> +            continue;
+</I>&gt;<i> +        }
+</I>&gt;<i> +        if (choose_configuration(dev) &lt; 0) {
+</I>&gt;<i> +            fprintf(stderr, &quot;[usb] failed to select device configuration\n&quot;);
+</I>&gt;<i> +            free(ldev-&gt;endpoints);
+</I>&gt;<i> +            free(ldev);
+</I>&gt;<i> +            for (int j = 0; j &lt; (int)dev-&gt;dev_desc.b_num_configurations; j++) {
+</I>&gt;<i> +                free(dev-&gt;configs[j]);
+</I>&gt;<i> +            }
+</I>&gt;<i> +            free(dev-&gt;config);
+</I>&gt;<i> +            free(dev);
+</I>&gt;<i> +            hub-&gt;drv-&gt;port_disable(hub-&gt;cdi, i);
+</I>&gt;<i> +            continue;
+</I>&gt;<i> +        }
+</I>&gt;<i> +
+</I>&gt;<i> +#ifdef DEBUG
+</I>&gt;<i> +        debug_configuration(dev);
+</I>&gt;<i> +#endif
+</I>&gt;<i> +
+</I>&gt;<i> +        struct cdi_usb_interface_descriptor *ifc = (void *)(dev-&gt;config + 1);
+</I>&gt;<i> +        for (int j = 0; j &lt; (int)dev-&gt;config-&gt;b_num_interfaces; j++) {
+</I>&gt;<i> +            if (interface_level) {
+</I>&gt;<i> +                ldev = calloc(1, sizeof(*ldev));
+</I>&gt;<i> +                ldev-&gt;cdi.bus_data.bus_type = CDI_USB;
+</I>&gt;<i> +                ldev-&gt;cdi.interface         = j;
+</I>&gt;<i> +                // Include EP0
+</I>&gt;<i> +                ldev-&gt;cdi.endpoint_count    = ifc-&gt;b_num_endpoints + 1;
+</I>&gt;<i> +                ldev-&gt;cdi.vendor_id         = dev-&gt;dev_desc.id_vendor;
+</I>&gt;<i> +                ldev-&gt;cdi.product_id        = dev-&gt;dev_desc.id_product;
+</I>&gt;<i> +                ldev-&gt;cdi.class_id          = ifc-&gt;b_interface_class;
+</I>&gt;<i> +                ldev-&gt;cdi.subclass_id       = ifc-&gt;b_interface_sub_class;
+</I>&gt;<i> +                ldev-&gt;cdi.protocol_id       = ifc-&gt;b_interface_protocol;
+</I>&gt;<i> +
+</I>&gt;<i> +                ldev-&gt;dev = dev;
+</I>&gt;<i> +
+</I>&gt;<i> +                ldev-&gt;endpoints = malloc(ldev-&gt;cdi.endpoint_count
+</I>&gt;<i> +                                         * sizeof(ldev-&gt;endpoints[0]));
+</I>&gt;<i> +                ldev-&gt;endpoints[0] = 0; // EP0
+</I>&gt;<i> +                ldev_ep_idx = 1;
+</I>&gt;<i> +            } else {
+</I>&gt;<i> +                ldev-&gt;cdi.endpoint_count += ifc-&gt;b_num_endpoints;
+</I>&gt;<i> +                ldev-&gt;endpoints = realloc(ldev-&gt;endpoints,
+</I>&gt;<i> +                                          ldev-&gt;cdi.endpoint_count
+</I>&gt;<i> +                                          * sizeof(ldev-&gt;endpoints[0]));
+</I>&gt;<i> +            }
+</I>&gt;<i> +
+</I>&gt;<i> +            struct cdi_usb_endpoint_descriptor *ep = (void *)(ifc + 1);
+</I>&gt;<i> +            for (int k = 0; k &lt; (int)ifc-&gt;b_num_endpoints; k++, ep++) {
+</I>&gt;<i> +                bool in = ep-&gt;b_endpoint_address &amp; CDI_USB_EPDSC_EPADR_DIR;
+</I>&gt;<i> +                int id  = CDI_USB_EPDSC_EPADR_ID(ep-&gt;b_endpoint_address);
+</I>&gt;<i> +
+</I>&gt;<i> +                dev-&gt;eps[in][id].ep     = id;
+</I>&gt;<i> +                dev-&gt;eps[in][id].mps
+</I>&gt;<i> +                    = CDI_USB_EPDSC_MPS_MPS(ep-&gt;w_max_packet_size);
+</I>&gt;<i> +                dev-&gt;eps[in][id].desc   = ep;
+</I>&gt;<i> +
+</I>&gt;<i> +                switch (ep-&gt;bm_attributes &amp; CDI_USB_EPDSC_ATTR_XFER_TYPE_MASK) {
+</I>&gt;<i> +                    case CDI_USB_EPDSC_ATTR_CONTROL:
+</I>&gt;<i> +                        dev-&gt;eps[in][id].type = CDI_USB_CONTROL;
+</I>&gt;<i> +                        break;
+</I>&gt;<i> +                    case CDI_USB_EPDSC_ATTR_ISOCHRONOUS:
+</I>&gt;<i> +                        dev-&gt;eps[in][id].type = CDI_USB_ISOCHRONOUS;
+</I>&gt;<i> +                        break;
+</I>&gt;<i> +                    case CDI_USB_EPDSC_ATTR_BULK:
+</I>&gt;<i> +                        dev-&gt;eps[in][id].type = CDI_USB_BULK;
+</I>&gt;<i> +                        break;
+</I>&gt;<i> +                    case CDI_USB_EPDSC_ATTR_INTERRUPT:
+</I>&gt;<i> +                        dev-&gt;eps[in][id].type = CDI_USB_INTERRUPT;
+</I>&gt;<i> +                        break;
+</I>&gt;<i> +                }
+</I>&gt;<i> +
+</I>&gt;<i> +                ldev-&gt;endpoints[ldev_ep_idx++] = ((int)in &lt;&lt; 4) | id;
+</I>&gt;<i> +            }
+</I>&gt;<i> +
+</I>&gt;<i> +            if (interface_level) {
+</I>&gt;<i> +                if (ldev-&gt;cdi.class_id == CDI_USB_DEVCLS_HUB) {
+</I>&gt;<i> +                    new_hub_device(ldev);
+</I>&gt;<i> +                } else {
+</I>&gt;<i> +                    cdi_provide_device(&amp;ldev-&gt;cdi.bus_data);
+</I>&gt;<i> +                }
+</I>&gt;<i> +            }
+</I>&gt;<i> +
+</I>&gt;<i> +            ifc = (void *)ep;
+</I>&gt;<i> +        }
+</I>&gt;<i> +
+</I>&gt;<i> +        if (!interface_level) {
+</I>&gt;<i> +            if (ldev-&gt;cdi.class_id == CDI_USB_DEVCLS_HUB) {
+</I>&gt;<i> +                new_hub_device(ldev);
+</I>&gt;<i> +            } else {
+</I>&gt;<i> +                cdi_provide_device(&amp;ldev-&gt;cdi.bus_data);
+</I>&gt;<i> +            }
+</I>&gt;<i> +        }
+</I>&gt;<i> +    }
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +struct cdi_device *usb_init_hc(struct cdi_bus_data *bus_data)
+</I>&gt;<i> +{
+</I>&gt;<i> +    struct cdi_usb_hc_bus *hc_bus = CDI_UPCAST(bus_data, struct cdi_usb_hc_bus,
+</I>&gt;<i> +                                               bus_data);
+</I>&gt;<i> +    struct cdi_usb_hc *hc = hc_bus-&gt;hc;
+</I>&gt;<i> +    struct cdi_usb_hcd *hcd = CDI_UPCAST(hc-&gt;dev.driver, struct cdi_usb_hcd,
+</I>&gt;<i> +                                         drv);
+</I>&gt;<i> +
+</I>&gt;<i> +    usb_hub_t *hub = calloc(1, sizeof(*hub));
+</I>&gt;<i> +    hub-&gt;cdi = &amp;hc-&gt;rh;
+</I>&gt;<i> +    hub-&gt;hc = hc;
+</I>&gt;<i> +    hub-&gt;drv = &amp;hcd-&gt;rh_drv;
+</I>&gt;<i> +
+</I>&gt;<i> +    new_hub(hub);
+</I>&gt;<i> +
+</I>&gt;<i> +    return NULL;
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +void usb_get_endpoint_descriptor(struct cdi_usb_device *dev, int ep,
+</I>&gt;<i> +                                 struct cdi_usb_endpoint_descriptor *desc)
+</I>&gt;<i> +{
+</I>&gt;<i> +    usb_logical_device_t *ldev = CDI_UPCAST(dev, usb_logical_device_t, cdi);
+</I>&gt;<i> +
+</I>&gt;<i> +    if (ep &lt; 0 || ep &gt;= dev-&gt;endpoint_count) {
+</I>&gt;<i> +        return;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    int ep_idx = ldev-&gt;endpoints[ep];
+</I>&gt;<i> +    usb_endpoint_t *ep_info = &amp;ldev-&gt;dev-&gt;eps[ep_idx &gt;&gt; 4][ep_idx &amp; 0xf];
+</I>&gt;<i> +
+</I>&gt;<i> +    if (ep_idx) {
+</I>&gt;<i> +        assert(ep_info-&gt;desc);
+</I>&gt;<i> +        memcpy(desc, ep_info-&gt;desc, sizeof(*desc));
+</I>&gt;<i> +    } else {
+</I>&gt;<i> +        *desc = (struct cdi_usb_endpoint_descriptor){
+</I>&gt;<i> +            .b_length           = sizeof(*desc),
+</I>&gt;<i> +            .b_descriptor_type  = CDI_USB_DESC_ENDPOINT,
+</I>&gt;<i> +            .b_endpoint_address = 0,
+</I>&gt;<i> +            .bm_attributes      = 0x00,
+</I>&gt;<i> +            .w_max_packet_size  = ep_info-&gt;mps,
+</I>&gt;<i> +            .b_interval         = 0
+</I>&gt;<i> +        };
+</I>&gt;<i> +    }
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +cdi_usb_transmission_result_t
+</I>&gt;<i> +    usb_control_transfer(struct cdi_usb_device *dev, int ep,
+</I>&gt;<i> +                         const struct cdi_usb_setup_packet *setup, void *data)
+</I>&gt;<i> +{
+</I>&gt;<i> +    usb_logical_device_t *ldev = CDI_UPCAST(dev, usb_logical_device_t, cdi);
+</I>&gt;<i> +
+</I>&gt;<i> +    if (ep &lt; 0 || ep &gt;= dev-&gt;endpoint_count) {
+</I>&gt;<i> +        return CDI_USB_DRIVER_ERROR;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    int ep_idx = ldev-&gt;endpoints[ep];
+</I>&gt;<i> +    usb_endpoint_t *ep_info = &amp;ldev-&gt;dev-&gt;eps[ep_idx &gt;&gt; 4][ep_idx &amp; 0xf];
+</I>&gt;<i> +
+</I>&gt;<i> +    if (ep_info-&gt;type != CDI_USB_CONTROL) {
+</I>&gt;<i> +        return CDI_USB_DRIVER_ERROR;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    return control_transfer(ldev-&gt;dev, ep_info, setup, data);
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +cdi_usb_transmission_result_t usb_bulk_transfer(struct cdi_usb_device *dev,
+</I>&gt;<i> +                                                int ep, void *data, size_t size)
+</I>&gt;<i> +{
+</I>&gt;<i> +    usb_logical_device_t *ldev = CDI_UPCAST(dev, usb_logical_device_t, cdi);
+</I>&gt;<i> +
+</I>&gt;<i> +    if (ep &lt; 0 || ep &gt;= dev-&gt;endpoint_count) {
+</I>&gt;<i> +        return CDI_USB_DRIVER_ERROR;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    int ep_idx = ldev-&gt;endpoints[ep];
+</I>&gt;<i> +    usb_endpoint_t *ep_info = &amp;ldev-&gt;dev-&gt;eps[ep_idx &gt;&gt; 4][ep_idx &amp; 0xf];
+</I>&gt;<i> +
+</I>&gt;<i> +    if (ep_info-&gt;type != CDI_USB_BULK) {
+</I>&gt;<i> +        return CDI_USB_DRIVER_ERROR;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    struct cdi_usb_hcd *hcd = CDI_UPCAST(ldev-&gt;dev-&gt;hc-&gt;dev.driver,
+</I>&gt;<i> +                                         struct cdi_usb_hcd, drv);
+</I>&gt;<i> +    cdi_usb_hc_transaction_t ta;
+</I>&gt;<i> +    cdi_usb_transmission_result_t res;
+</I>&gt;<i> +
+</I>&gt;<i> +    ta = hcd-&gt;create_transaction(ldev-&gt;dev-&gt;hc, &amp;(struct cdi_usb_hc_ep_info){
+</I>&gt;<i> +            .dev        = ldev-&gt;dev-&gt;id,
+</I>&gt;<i> +            .ep         = ep_info-&gt;ep,
+</I>&gt;<i> +            .ep_type    = ep_info-&gt;type,
+</I>&gt;<i> +            .speed      = ldev-&gt;dev-&gt;speed,
+</I>&gt;<i> +            .mps        = ep_info-&gt;mps,
+</I>&gt;<i> +            .tt_addr    = ldev-&gt;dev-&gt;tt_addr,
+</I>&gt;<i> +            .tt_port    = ldev-&gt;dev-&gt;tt_port
+</I>&gt;<i> +        });
+</I>&gt;<i> +
+</I>&gt;<i> +    hcd-&gt;enqueue(ldev-&gt;dev-&gt;hc, &amp;(struct cdi_usb_hc_transmission){
+</I>&gt;<i> +            .ta     = ta,
+</I>&gt;<i> +            .token  = ep_idx &gt;&gt; 4 ? CDI_USB_IN : CDI_USB_OUT,
+</I>&gt;<i> +            .buffer = data,
+</I>&gt;<i> +            .size   = size,
+</I>&gt;<i> +            .toggle = ep_info-&gt;toggle,
+</I>&gt;<i> +            .result = &amp;res
+</I>&gt;<i> +        });
+</I>&gt;<i> +    ep_info-&gt;toggle ^= (((size + ep_info-&gt;mps - 1) / ep_info-&gt;mps) &amp; 1);
+</I>&gt;<i> +
+</I>&gt;<i> +    hcd-&gt;wait_transaction(ldev-&gt;dev-&gt;hc, ta);
+</I>&gt;<i> +    hcd-&gt;destroy_transaction(ldev-&gt;dev-&gt;hc, ta);
+</I>&gt;<i> +
+</I>&gt;<i> +    return res;
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +static struct cdi_usb_hub_driver hub_drv;
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +static void new_hub_device(usb_logical_device_t *ldev)
+</I>&gt;<i> +{
+</I>&gt;<i> +    cdi_usb_transmission_result_t res;
+</I>&gt;<i> +    usb_hub_device_t *hub;
+</I>&gt;<i> +    struct usb_hub_descriptor *hub_desc = NULL;
+</I>&gt;<i> +
+</I>&gt;<i> +    assert(ldev-&gt;cdi.interface &lt; 0);
+</I>&gt;<i> +
+</I>&gt;<i> +    hub = calloc(1, sizeof(*hub));
+</I>&gt;<i> +
+</I>&gt;<i> +    hub-&gt;hub = calloc(1, sizeof(*hub-&gt;hub));
+</I>&gt;<i> +    hub-&gt;hub-&gt;cdi = &amp;hub-&gt;cdi;
+</I>&gt;<i> +    hub-&gt;hub-&gt;drv = &amp;hub_drv;
+</I>&gt;<i> +    hub-&gt;hub-&gt;hc = ldev-&gt;dev-&gt;hc;
+</I>&gt;<i> +    hub-&gt;hub-&gt;ldev = ldev;
+</I>&gt;<i> +
+</I>&gt;<i> +    uint8_t hub_desc_length;
+</I>&gt;<i> +    res = usb_control_transfer(&amp;ldev-&gt;cdi, 0, &amp;(struct cdi_usb_setup_packet){
+</I>&gt;<i> +            .bm_request_type    = CDI_USB_CREQ_DEVICE | CDI_USB_CREQ_CLASS
+</I>&gt;<i> +                                | CDI_USB_CREQ_IN,
+</I>&gt;<i> +            .b_request          = CDI_USB_CREQ_GET_DESCRIPTOR,
+</I>&gt;<i> +            .w_value            = (USB_DESC_HUB &lt;&lt; 8) | 0,
+</I>&gt;<i> +            .w_length           = 1
+</I>&gt;<i> +        }, &amp;hub_desc_length);
+</I>&gt;<i> +    if (res != CDI_USB_OK ||
+</I>&gt;<i> +        hub_desc_length &lt; sizeof(struct usb_hub_descriptor))
+</I>&gt;<i> +    {
+</I>&gt;<i> +        goto fail;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    hub_desc = malloc(hub_desc_length);
+</I>&gt;<i> +    res = usb_control_transfer(&amp;ldev-&gt;cdi, 0, &amp;(struct cdi_usb_setup_packet){
+</I>&gt;<i> +            .bm_request_type    = CDI_USB_CREQ_DEVICE | CDI_USB_CREQ_CLASS
+</I>&gt;<i> +                                | CDI_USB_CREQ_IN,
+</I>&gt;<i> +            .b_request          = CDI_USB_CREQ_GET_DESCRIPTOR,
+</I>&gt;<i> +            .w_value            = (USB_DESC_HUB &lt;&lt; 8) | 0,
+</I>&gt;<i> +            .w_length           = hub_desc_length
+</I>&gt;<i> +        }, hub_desc);
+</I>&gt;<i> +    if (res != CDI_USB_OK) {
+</I>&gt;<i> +        goto fail;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    int ports = hub_desc-&gt;b_nbr_ports;
+</I>&gt;<i> +    hub-&gt;cdi.ports = ports;
+</I>&gt;<i> +
+</I>&gt;<i> +    // Enable port power
+</I>&gt;<i> +    if (!(hub_desc-&gt;w_hub_characteristics &amp; (1 &lt;&lt; 1))) {
+</I>&gt;<i> +        // Hub supports power switching, enable global power
+</I>&gt;<i> +        res = usb_control_transfer(&amp;ldev-&gt;cdi, 0,
+</I>&gt;<i> +            &amp;(struct cdi_usb_setup_packet){
+</I>&gt;<i> +                .bm_request_type    = CDI_USB_CREQ_DEVICE
+</I>&gt;<i> +                                    | CDI_USB_CREQ_CLASS | CDI_USB_CREQ_OUT,
+</I>&gt;<i> +                .b_request          = CDI_USB_CREQ_SET_FEATURE,
+</I>&gt;<i> +                .w_value            = C_HUB_LOCAL_POWER
+</I>&gt;<i> +            }, NULL);
+</I>&gt;<i> +        if (res != CDI_USB_OK) {
+</I>&gt;<i> +            goto fail;
+</I>&gt;<i> +        }
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    if ((hub_desc-&gt;w_hub_characteristics &amp; 0x3) == 1) {
+</I>&gt;<i> +        // Hub supports per-port power switching, enable power for each port
+</I>&gt;<i> +        for (int port = 0; port &lt; ports; port++) {
+</I>&gt;<i> +            res = usb_control_transfer(&amp;ldev-&gt;cdi, 0,
+</I>&gt;<i> +                &amp;(struct cdi_usb_setup_packet){
+</I>&gt;<i> +                    .bm_request_type    = CDI_USB_CREQ_OTHER
+</I>&gt;<i> +                                        | CDI_USB_CREQ_CLASS
+</I>&gt;<i> +                                        | CDI_USB_CREQ_OUT,
+</I>&gt;<i> +                    .b_request          = CDI_USB_CREQ_SET_FEATURE,
+</I>&gt;<i> +                    .w_value            = PORT_POWER,
+</I>&gt;<i> +                    .w_index            = port + 1
+</I>&gt;<i> +                }, NULL);
+</I>&gt;<i> +            if (res != CDI_USB_OK) {
+</I>&gt;<i> +                goto fail;
+</I>&gt;<i> +            }
+</I>&gt;<i> +        }
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    cdi_sleep_ms(hub_desc-&gt;b_pwr_on_2_pwr_good * 2);
+</I>&gt;<i> +
+</I>&gt;<i> +    free(hub_desc);
+</I>&gt;<i> +
+</I>&gt;<i> +    new_hub(hub-&gt;hub);
+</I>&gt;<i> +
+</I>&gt;<i> +    return;
+</I>&gt;<i> +
+</I>&gt;<i> +fail:
+</I>&gt;<i> +    free(hub_desc);
+</I>&gt;<i> +    free(hub-&gt;hub);
+</I>&gt;<i> +    free(hub);
+</I>&gt;<i> +    return;
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +static void hub_port_down(struct cdi_usb_hub *cdi_hub, int index)
+</I>&gt;<i> +{
+</I>&gt;<i> +    usb_hub_device_t *hub = CDI_UPCAST(cdi_hub, usb_hub_device_t, cdi);
+</I>&gt;<i> +
+</I>&gt;<i> +    usb_control_transfer(&amp;hub-&gt;hub-&gt;ldev-&gt;cdi, 0,
+</I>&gt;<i> +        &amp;(struct cdi_usb_setup_packet){
+</I>&gt;<i> +            .bm_request_type    = CDI_USB_CREQ_OTHER | CDI_USB_CREQ_CLASS
+</I>&gt;<i> +                                | CDI_USB_CREQ_OUT,
+</I>&gt;<i> +            .b_request          = CDI_USB_CREQ_CLEAR_FEATURE,
+</I>&gt;<i> +            .w_value            = PORT_ENABLE,
+</I>&gt;<i> +            .w_index            = index + 1
+</I>&gt;<i> +        }, NULL);
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +static void hub_port_up(struct cdi_usb_hub *cdi_hub, int index)
+</I>&gt;<i> +{
+</I>&gt;<i> +    usb_hub_device_t *hub = CDI_UPCAST(cdi_hub, usb_hub_device_t, cdi);
+</I>&gt;<i> +
+</I>&gt;<i> +    usb_control_transfer(&amp;hub-&gt;hub-&gt;ldev-&gt;cdi, 0,
+</I>&gt;<i> +        &amp;(struct cdi_usb_setup_packet){
+</I>&gt;<i> +            .bm_request_type    = CDI_USB_CREQ_OTHER | CDI_USB_CREQ_CLASS
+</I>&gt;<i> +                                | CDI_USB_CREQ_OUT,
+</I>&gt;<i> +            .b_request          = CDI_USB_CREQ_SET_FEATURE,
+</I>&gt;<i> +            .w_value            = PORT_ENABLE,
+</I>&gt;<i> +            .w_index            = index + 1
+</I>&gt;<i> +        }, NULL);
+</I>
+&quot;This bit may be set only as a result of a SetPortFeature(PORT_RESET)
+request. [...]
+The hub response to a SetPortFeature(PORT_ENABLE) request is not
+specified. The preferred behavior is that the hub respond with a Request
+Error. This may not be used by the USB System Software.&quot;
+
+Good that you don't check the result. ;-)
+
+&gt;<i> +    usb_control_transfer(&amp;hub-&gt;hub-&gt;ldev-&gt;cdi, 0,
+</I>&gt;<i> +        &amp;(struct cdi_usb_setup_packet){
+</I>&gt;<i> +            .bm_request_type    = CDI_USB_CREQ_OTHER | CDI_USB_CREQ_CLASS
+</I>&gt;<i> +                                | CDI_USB_CREQ_OUT,
+</I>&gt;<i> +            .b_request          = CDI_USB_CREQ_SET_FEATURE,
+</I>&gt;<i> +            .w_value            = PORT_RESET,
+</I>&gt;<i> +            .w_index            = index + 1
+</I>&gt;<i> +        }, NULL);
+</I>&gt;<i> +
+</I>&gt;<i> +    cdi_sleep_ms(50);
+</I>&gt;<i> +
+</I>&gt;<i> +    usb_control_transfer(&amp;hub-&gt;hub-&gt;ldev-&gt;cdi, 0,
+</I>&gt;<i> +        &amp;(struct cdi_usb_setup_packet){
+</I>&gt;<i> +            .bm_request_type    = CDI_USB_CREQ_OTHER | CDI_USB_CREQ_CLASS
+</I>&gt;<i> +                                | CDI_USB_CREQ_OUT,
+</I>&gt;<i> +            .b_request          = CDI_USB_CREQ_CLEAR_FEATURE,
+</I>&gt;<i> +            .w_value            = PORT_RESET,
+</I>&gt;<i> +            .w_index            = index + 1
+</I>&gt;<i> +        }, NULL);
+</I>
+&quot;The ClearPortFeature(PORT_RESET) request shall not be used by the USB
+System Software and may be treated as a no-operation request by hubs.&quot;
+
+If I understand the procedure correctly, C_PORT_RESET should be checked
+to see whether the reset was complete, and then C_PORT_RESET can be
+cleared.
+
+&gt;<i> +
+</I>&gt;<i> +    cdi_sleep_ms(5);
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +static cdi_usb_port_status_t hub_port_status(struct cdi_usb_hub *cdi_hub,
+</I>&gt;<i> +                                             int index)
+</I>&gt;<i> +{
+</I>&gt;<i> +    cdi_usb_transmission_result_t res;
+</I>&gt;<i> +    usb_hub_device_t *hub = CDI_UPCAST(cdi_hub, usb_hub_device_t, cdi);
+</I>&gt;<i> +
+</I>&gt;<i> +    uint32_t portsc;
+</I>&gt;<i> +    res = usb_control_transfer(&amp;hub-&gt;hub-&gt;ldev-&gt;cdi, 0,
+</I>&gt;<i> +        &amp;(struct cdi_usb_setup_packet){
+</I>&gt;<i> +            .bm_request_type    = CDI_USB_CREQ_OTHER | CDI_USB_CREQ_CLASS
+</I>&gt;<i> +                                | CDI_USB_CREQ_IN,
+</I>&gt;<i> +            .b_request          = CDI_USB_CREQ_GET_STATUS,
+</I>&gt;<i> +            .w_index            = index + 1,
+</I>&gt;<i> +            .w_length           = sizeof(portsc)
+</I>&gt;<i> +        }, &amp;portsc);
+</I>&gt;<i> +    if (res != CDI_USB_OK) {
+</I>&gt;<i> +        return 0;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    cdi_usb_port_status_t status = 0;
+</I>&gt;<i> +
+</I>&gt;<i> +    if (portsc &amp; ((1 &lt;&lt; PORT_ENABLE) | (1 &lt;&lt; PORT_CONNECTION))) {
+</I>&gt;<i> +        status |= CDI_USB_PORT_CONNECTED;
+</I>&gt;<i> +        if (portsc &amp; (1 &lt;&lt; PORT_LOW_SPEED)) {
+</I>&gt;<i> +            status |= CDI_USB_LOW_SPEED;
+</I>&gt;<i> +        } else if (portsc &amp; (1 &lt;&lt; PORT_HIGH_SPEED)) {
+</I>&gt;<i> +            status |= CDI_USB_HIGH_SPEED;
+</I>&gt;<i> +        } else {
+</I>&gt;<i> +            status |= CDI_USB_FULL_SPEED;
+</I>&gt;<i> +        }
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    return status;
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +static struct cdi_usb_hub_driver hub_drv = {
+</I>&gt;<i> +    .port_disable       = hub_port_down,
+</I>&gt;<i> +    .port_reset_enable  = hub_port_up,
+</I>&gt;<i> +    .port_status        = hub_port_status,
+</I>&gt;<i> +};
+</I>
+Kevin
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000328.html">[cdi-devel] [PATCH v3 08/10] ehci: Add EHCI driver
+</A></li>
+	<LI>Next message: <A HREF="000330.html">[cdi-devel] [PATCH v3 10/10] usb-storage: Add USB mass storage driver
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#329">[ date ]</a>
+              <a href="thread.html#329">[ thread ]</a>
+              <a href="subject.html#329">[ subject ]</a>
+              <a href="author.html#329">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

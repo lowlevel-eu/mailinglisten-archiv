@@ -1,0 +1,56 @@
+Index: trunk/src/kernel2/include/syscall.h
+===================================================================
+--- trunk.orig/src/kernel2/include/syscall.h
++++ trunk/src/kernel2/include/syscall.h
+@@ -96,6 +96,9 @@ int syscall_pm_p(void);
+ /// Kritischen Abschnitt verlassen
+ int syscall_pm_v(pid_t pid);
+ 
++/// Die Kontrolle an einen anderen Task abgeben
++void syscall_pm_sleep(void);
++
+ /// Prozess erstellen
+ pid_t syscall_pm_create_process(vaddr_t start, uid_t uid,
+     const char* cmdline, pid_t parent_pid);
+Index: trunk/src/kernel2/src/syscall.c
+===================================================================
+--- trunk.orig/src/kernel2/src/syscall.c
++++ trunk/src/kernel2/src/syscall.c
+@@ -57,6 +57,8 @@ void syscall_init()
+     syscall_register(SYSCALL_PM_GET_CMDLINE, (void*) syscall_pm_get_cmdline,
+         0);
+ 
++    syscall_register(SYSCALL_PM_SLEEP, &syscall_pm_sleep, 0);
++
+     syscall_register(SYSCALL_PM_P, (void*) &syscall_pm_p, 0);
+     syscall_register(SYSCALL_PM_V, (void*) &syscall_pm_v, 1);
+ 
+Index: trunk/src/kernel2/src/syscalls/pm.c
+===================================================================
+--- trunk.orig/src/kernel2/src/syscalls/pm.c
++++ trunk/src/kernel2/src/syscalls/pm.c
+@@ -167,3 +167,24 @@ void syscall_init_child_page(pid_t pid, 
+     // Speicherbereich aus dem Adressraum des Quellprozesses entfernen
+     mmc_unmap(&mmc_current_context(), src, NUM_PAGES(size));
+ }
++
++/**
++ * Die Kontrolle an einen anderen Task abgeben
++ *
++ * FIXME Diesen Code gibt es in genau dieser Form auch in im.c
++ */
++void syscall_pm_sleep(void)
++{
++    pm_thread_t* thread = cpu_get_current()->thread;
++
++    // Den aktuellen Thread an den Scheduler zurueckgeben
++    pm_scheduler_push(thread);
++
++    // Einen neuen Thread holen.
++    thread = pm_scheduler_pop();
++
++    cpu_get_current()->tss.esp0 = (uintptr_t) thread->kernel_stack + sizeof(interrupt_stack_frame_t);
++    cpu_get_current()->tss.ss0 = 2 << 3;
++
++    cpu_get_current()->thread = thread;
++}

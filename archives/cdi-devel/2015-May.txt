@@ -1,0 +1,3892 @@
+From max at tyndur.org  Mon May 11 21:59:20 2015
+From: max at tyndur.org (Max Reitz)
+Date: Mon, 11 May 2015 21:59:20 +0200
+Subject: [cdi-devel] [PATCH v3 00/10] USB support
+Message-ID: <1431374370-17120-1-git-send-email-max@tyndur.org>
+
+This series adds some long-missing USB drivers to the CDI repository
+(and defines the required interfaces).
+
+For now, it only supports control and bulk transfers (which are enough
+for mass storage devices), no hotplugging, no suspend/resume, neither a
+lot of other things. So among others, there is no USB keyboard support.
+Maybe writing the driver and implementing support for it in the USB bus
+driver would not be so difficult, but I'm really hesitant to define the
+necessary CDI interface for it (CDI.hid? CDI.keyboard? CDI.serial?).
+
+The drivers added by this series are an EHCI driver, a USB 2.0 bus
+driver (including a hub driver), and a bulk-only mass storage driver
+(with a SCSI interface; should be the right thing to drive your average
+thumb drive (and maybe even HDDs), but will not work for e.g. USB floppy
+drives).
+
+I tested these drivers using ?xo?cota and t?ndur in qemu and on three
+real machines.
+
+
+v3:
+- Patch 2: Documentation translation, different parameter order for
+  CDI_UPCAST
+- Patch 3: Added
+- Patch 5: Dropped comment about lun_count == 0 meaning one LUN
+- Patch 6: Documentation translation
+- Patch 7:
+  - Additional macros for previously magic values
+  - Some stricter integer types
+  - Dropped cdi_usb_provide_hc()
+- Patch 8:
+  - Macros instead of magic values
+  - Use CDI_CONDITION_WAIT() macro for most timeouts
+  - Drop bus mastering / MMIO enable
+  - Check whether the MMIO area could be found
+  - Try to force BIOS handoff if the clean way is unsucessful
+  - Drop mem_barrier()
+  - Register IRQ only after initialization is complete
+  - Different CDI_UPCAST parameter order
+- Patch 9:
+  - More macros instead of magic values
+  - Different CDI_UPCAST parameter order
+- Patch 10:
+  - More macros instead of magic values
+  - Different CDI_UPCAST parameter order
+
+
+git-backport-diff against v2:
+
+Key:
+[----] : patches are identical
+[####] : number of functional differences between upstream/downstream patch
+[down] : patch is downstream-only
+The flags [FC] indicate (F)unctional and (C)ontextual differences, respectively
+
+001/10:[----] [--] 'Makefile: Heed Makefile.conf'
+002/10:[0075] [FC] 'cdi/misc: Add CDI_UPCAST and endianness functions'
+003/10:[down] 'cdi/misc: Add cdi_elapsed_ms()'
+004/10:[----] [--] 'cdi/scsi, cdi.h: Remove t?ndur-specific fields'
+005/10:[0002] [FC] 'cdi/scsi: Add support for multiple LUNs'
+006/10:[0098] [FC] 'cdi.h: Add cdi_handle_bus_device()'
+007/10:[0093] [FC] 'cdi/usb: Add headers'
+008/10:[0410] [FC] 'ehci: Add EHCI driver'
+009/10:[0065] [FC] 'usb: Add USB 2.0 bus driver'
+010/10:[0051] [FC] 'usb-storage: Add USB mass storage driver'
+
+
+Max Reitz (10):
+  Makefile: Heed Makefile.conf
+  cdi/misc: Add CDI_UPCAST and endianness functions
+  cdi/misc: Add cdi_elapsed_ms()
+  cdi/scsi, cdi.h: Remove t?ndur-specific fields
+  cdi/scsi: Add support for multiple LUNs
+  cdi.h: Add cdi_handle_bus_device()
+  cdi/usb: Add headers
+  ehci: Add EHCI driver
+  usb: Add USB 2.0 bus driver
+  usb-storage: Add USB mass storage driver
+
+ Makefile                     |   4 +-
+ ehci/ehci.c                  | 643 ++++++++++++++++++++++++++++++++
+ ehci/ehci.h                  | 290 ++++++++++++++
+ ehci/main.c                  |  68 ++++
+ include/cdi.h                | 117 +++++-
+ include/cdi/misc.h           | 228 +++++++++++
+ include/cdi/scsi.h           |  11 +-
+ include/cdi/usb-structures.h | 174 +++++++++
+ include/cdi/usb.h            | 208 +++++++++++
+ include/cdi/usb_hcd.h        | 159 ++++++++
+ usb-storage/main.c           |  76 ++++
+ usb-storage/usb-storage.c    | 216 +++++++++++
+ usb-storage/usb-storage.h    |  60 +++
+ usb/main.c                   |  61 +++
+ usb/usb-hubs.h               |  78 ++++
+ usb/usb.c                    | 871 +++++++++++++++++++++++++++++++++++++++++++
+ usb/usb.h                    |  86 +++++
+ 17 files changed, 3340 insertions(+), 10 deletions(-)
+ create mode 100644 ehci/ehci.c
+ create mode 100644 ehci/ehci.h
+ create mode 100644 ehci/main.c
+ create mode 100644 include/cdi/usb-structures.h
+ create mode 100644 include/cdi/usb.h
+ create mode 100644 include/cdi/usb_hcd.h
+ create mode 100644 usb-storage/main.c
+ create mode 100644 usb-storage/usb-storage.c
+ create mode 100644 usb-storage/usb-storage.h
+ create mode 100644 usb/main.c
+ create mode 100644 usb/usb-hubs.h
+ create mode 100644 usb/usb.c
+ create mode 100644 usb/usb.h
+
+-- 
+2.4.0
+
+
+From max at tyndur.org  Mon May 11 21:59:21 2015
+From: max at tyndur.org (Max Reitz)
+Date: Mon, 11 May 2015 21:59:21 +0200
+Subject: [cdi-devel] [PATCH v3 01/10] Makefile: Heed Makefile.conf
+In-Reply-To: <1431374370-17120-1-git-send-email-max@tyndur.org>
+References: <1431374370-17120-1-git-send-email-max@tyndur.org>
+Message-ID: <1431374370-17120-2-git-send-email-max@tyndur.org>
+
++ Apparently it is allowed to specify additional CFLAGS (as "CC_FLAGS")
+  in a file named Makefile.conf (formatted as a shell script) in a
+  driver's root directory; or at least ext2 just does this.
+  This patch makes the CDI Makefile take the additional flags from that
+  file into account, if present.
+  Thanks to this, the ext2 driver can be compiled.
+
+Signed-off-by: Max Reitz <max at tyndur.org>
+Acked-by: Kevin Wolf <kevin at tyndur.org>
+---
+ Makefile | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/Makefile b/Makefile
+index 5360efb..bc04e58 100644
+--- a/Makefile
++++ b/Makefile
+@@ -9,7 +9,9 @@ run_command = $(if $(V),$(2), at echo $(1);$(2))
+ all: $(OBJS)
+ 
+ %.o: %.c
+-	$(call run_command,"CC $^",$(CC) $(CFLAGS) $(addprefix -I,$(addprefix $(dir $^),. include)) -c -o $@ $^)
++	$(call run_command,"CC $^",$(CC) $(CFLAGS) \
++		$(if $(shell if [ -f $(dir $^)/Makefile.conf ]; then echo .; fi),$(shell cd $(dir $^); echo -e "$$(< Makefile.conf)\necho \$$CC_FLAGS" | sh -s),) \
++		$(addprefix -I,$(addprefix $(dir $^),. include)) -c -o $@ $^)
+ 
+ clean:
+ 	-rm $(OBJS) 2> /dev/null
+-- 
+2.4.0
+
+
+From max at tyndur.org  Mon May 11 21:59:22 2015
+From: max at tyndur.org (Max Reitz)
+Date: Mon, 11 May 2015 21:59:22 +0200
+Subject: [cdi-devel] [PATCH v3 02/10] cdi/misc: Add CDI_UPCAST and
+	endianness functions
+In-Reply-To: <1431374370-17120-1-git-send-email-max@tyndur.org>
+References: <1431374370-17120-1-git-send-email-max@tyndur.org>
+Message-ID: <1431374370-17120-3-git-send-email-max@tyndur.org>
+
++ Type inheritance is a common pattern seen in CDI. The new CDI_UPCAST()
+  macro makes conversion to superclasses safer and allows for multiple
+  inheritance if the need arises.
++ Add some endianness conversion functions. Even though support for big
+  endian platforms is nowhere in sight, endianness conversion is still a
+  common operation which should not be implemented in the driver itself
+  but provided by the CDI implementation.
+
+Signed-off-by: Max Reitz <max at tyndur.org>
+---
+ include/cdi/misc.h | 141 +++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 141 insertions(+)
+
+diff --git a/include/cdi/misc.h b/include/cdi/misc.h
+index 07967ec..b0973e6 100644
+--- a/include/cdi/misc.h
++++ b/include/cdi/misc.h
+@@ -85,6 +85,147 @@ int cdi_ioports_free(uint16_t start, uint16_t count);
+  */
+ void cdi_sleep_ms(uint32_t ms);
+ 
++/**
++ * \german
++ * Castet @object (muss ein Pointer sein) zu einem Pointer auf ein Objekt des
++ * Typs @to, welcher eine Unterklasse vom Typ von @object sein muss. @field ist
++ * das Feld von @to, das @object enth?lt.
++ *
++ * Beispiel:
++ * struct cdi_driver* driver;
++ * struct cdi_storage_driver* storage_driver =
++ *     CDI_UPCAST(driver, struct cdi_storage_driver, drv);
++ * \endgerman
++ * \english
++ * Casts @object (must be a pointer) to a pointer to an object of type @to which
++ * must be a subclass of @object's type. @field is the entry in @to which
++ * contains @object.
++ *
++ * Example:
++ * struct cdi_driver* driver;
++ * struct cdi_storage_driver* storage_driver =
++ *     CDI_UPCAST(driver, struct cdi_storage_driver, drv);
++ * \endenglish
++ * \thuringiansaxonian
++ * Dud @object (muss? Boindr sein) zu? Boindr uffn Objekt vondn D?hp @to
++ * umw?rschn, der dannoo ?hne Undrglasse vondn D?hp von @object sein muss.
++ * @field is das Feld von @to, dasdawelsches @object enthaldn dud.
++ *
++ * Baispiel:
++ * struct cdi_driver* driver;
++ * struct cdi_storage_driver* storage_driver =
++ *     CDI_UPCAST(driver, struct cdi_storage_driver, drv);
++ * \endthuringiansaxonian
++ * \french
++ * Convertit @object (qui doit ?tre un pointeur) en un pointeur ? un objet du
++ * type @to, qui doit ?tre une sous-classe du type d'@objet. @field est
++ * l'inscription de @to qui est @object.
++ *
++ * Exemple:
++ * struct cdi_driver* driver;
++ * struct cdi_storage_driver* storage_driver =
++ *     CDI_UPCAST(driver, struct cdi_storage_driver, drv);
++ * \endfrench
++ * \japanese
++ * ?????@object????@to??????????????@to?@object?
++ * ????????????????@field?@to?@object??????????
++ *
++ * ??
++ * struct cdi_driver* driver;
++ * struct cdi_storage_driver* storage_driver =
++ *     CDI_UPCAST(driver, struct cdi_storage_driver, drv);
++ * \endjapanese
++ */
++#define CDI_UPCAST(object, to, field) \
++    /* Type compatibility check */ \
++    ((void)((object) - &((to*)0)->field), \
++    /* The cast itself */ \
++     (to*)((char*)(object) - (char*)&((to*)0)->field))
++
++/**
++ * \german
++ * Funktionen zur Endiannesskonvertierung. Es sei darauf hingewiesen, dass die
++ * meisten (wenn nicht alle) CDI-Treiber nur Little-Endian-Plattformen als Host
++ * unterst?tzen.
++ * \endgerman
++ * \english
++ * Functions for endianness conversion. Be aware that most if not all CDI
++ * drivers only support little endian machines as a host.
++ * \endenglish
++ * \thuringiansaxonian
++ * Fungzschjounen f?rde Endschjannessumwandlung. Passe uff, fast wenn ni gar
++ * wirklisch alle CDI-Draibr g?nnn nur uff Liddl-Endschjan-Blattform loofn.
++ * \endthuringiansaxonian
++ * \french
++ * Fonctions pour la conversion boutisme. Au fait, la plupart si pas tous des
++ * pilotes CDI ne peuvent que fonctionner sur une plateforme petit-boutiste.
++ * \endfrench
++ * \japanese
++ * ???????????????????????????????????
++ * CDI???????????????????????????????
++ * \endjapanese
++ */
++
++static inline uint16_t cdi_be16_to_cpu(uint16_t x)
++{
++    return (x >> 8) | (x << 8);
++}
++
++static inline uint32_t cdi_be32_to_cpu(uint32_t x)
++{
++    return ((uint32_t)cdi_be16_to_cpu(x) << 16) | (uint32_t)cdi_be16_to_cpu(x >> 16);
++}
++
++static inline uint64_t cdi_be64_to_cpu(uint64_t x)
++{
++    return ((uint64_t)cdi_be32_to_cpu(x) << 32) | (uint64_t)cdi_be32_to_cpu(x >> 32);
++}
++
++static inline uint16_t cdi_cpu_to_be16(uint16_t x)
++{
++    return cdi_be16_to_cpu(x);
++}
++
++static inline uint32_t cdi_cpu_to_be32(uint32_t x)
++{
++    return cdi_be32_to_cpu(x);
++}
++
++static inline uint64_t cdi_cpu_to_be64(uint64_t x)
++{
++    return cdi_be64_to_cpu(x);
++}
++
++static inline uint16_t cdi_le16_to_cpu(uint16_t x)
++{
++    return x;
++}
++
++static inline uint32_t cdi_le32_to_cpu(uint32_t x)
++{
++    return x;
++}
++
++static inline uint64_t cdi_le64_to_cpu(uint64_t x)
++{
++    return x;
++}
++
++static inline uint16_t cdi_cpu_to_le16(uint16_t x)
++{
++    return cdi_le16_to_cpu(x);
++}
++
++static inline uint32_t cdi_cpu_to_le32(uint32_t x)
++{
++    return cdi_le32_to_cpu(x);
++}
++
++static inline uint64_t cdi_cpu_to_le64(uint64_t x)
++{
++    return cdi_le64_to_cpu(x);
++}
++
+ #ifdef __cplusplus
+ }; // extern "C"
+ #endif
+-- 
+2.4.0
+
+
+From max at tyndur.org  Mon May 11 21:59:23 2015
+From: max at tyndur.org (Max Reitz)
+Date: Mon, 11 May 2015 21:59:23 +0200
+Subject: [cdi-devel] [PATCH v3 03/10] cdi/misc: Add cdi_elapsed_ms()
+In-Reply-To: <1431374370-17120-1-git-send-email-max@tyndur.org>
+References: <1431374370-17120-1-git-send-email-max@tyndur.org>
+Message-ID: <1431374370-17120-4-git-send-email-max@tyndur.org>
+
++ Add cdi_elapsed_ms()
++ Add CDI_CONDITION_WAIT() and CDI_CONDITION_WAIT_SLEEP() macros for
+  waiting until a volatile condition is fulfilled or a timeout occurs
+
+Signed-off-by: Max Reitz <max at tyndur.org>
+---
+ include/cdi/misc.h | 87 ++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 87 insertions(+)
+
+diff --git a/include/cdi/misc.h b/include/cdi/misc.h
+index b0973e6..9676b4a 100644
+--- a/include/cdi/misc.h
++++ b/include/cdi/misc.h
+@@ -87,6 +87,93 @@ void cdi_sleep_ms(uint32_t ms);
+ 
+ /**
+  * \german
++ * Gibt die Anzahl der vergangenen Millisekunden seit einem
++ * implementationsspezifischen Zeitpunkt zur?ck, mindestens aber seit dem ersten
++ * Aufruf dieser Funktion. Die Aufl?sung ist ebenfalls
++ * implementationsspezifisch. Der R?ckgabewert muss monoton wachsen (bis er
++ * wegen der Begrenzung des R?ckgabetyps ?berl?uft).
++ * \endgerman
++ * \english
++ * Returns the number of milliseconds elapsed since an implementation specific
++ * point in time, not later than the first call of this function. The resolution
++ * too is implementation specific. The return value must grow monotonically
++ * (until it overflows due to the return type's limit).
++ * \endenglish
++ * \thuringiansaxonian
++ * Dud zur?ckgehm, wie lange (in Millisegundn) ? imbl?m?ndazschjounssp?zifschr
++ * Zeitbunkt nu schon her is. Diesr Zeitbunkt muss oor vorm erstn Uffruf diesr
++ * Fungzschjoun lieschn. De Uffl?sung is ooch imbl?m?ndazschjounssp?zifsch. Dr
++ * R?ckgabewert muss monodohn wachsn (bissr w?schn d? Begrenzung vondn
++ * R?ckgabed?hp ?brloofn dud).
++ * \endthuringiansaxonian
++ * \french
++ * Rend le nombre des millisecondes qui ont pass? depuis un instant d?fini par
++ * impl?mentation, au plus tard depuis le premier appel de cette fonction. La
++ * r?solution aussi est d?fini par impl?mentation. La valeur rendue doit grandir
++ * monotonement (jusqu'elle d?passe par la limitation du type rendu).
++ * \endfrench
++ * \japanese
++ * ???????????????????????????????????
++ * ??????????????????????????????????
++ * ?????????????????????????
++ * \endjapanese
++ */
++uint64_t cdi_elapsed_ms(void);
++
++/**
++ * \german
++ * Wartet, bis die Bedingung @cond erf?llt ist oder mehr als @timeout
++ * Millisekunden vergangen sind.
++ * \endgerman
++ * \english
++ * Waits until the condition @cond yields true or more than @timeout
++ * milliseconds have passed.
++ * \endenglish
++ * \thuringiansaxonian
++ * Dud wortn, bisde Bedingung @cond erf?llt is oodr ?ber @timeout Millisekundn
++ * vorbei sin.
++ * \endthuringiansaxonian
++ * \french
++ * Attend que la condition @cond est satisfaite ou plus que @timeout
++ * millisecondes sont pass?es.
++ * \endgerman
++ * \japanese
++ * ??@cond??????@timeout???????
++ * \endjapanese
++ */
++#define CDI_CONDITION_WAIT(cond, timeout) \
++    do { \
++        uint64_t start = cdi_elapsed_ms(); \
++        while (!(cond) && cdi_elapsed_ms() - start < timeout); \
++    } while (0)
++
++/**
++ * \german
++ * CDI_CONDITION_WAIT() mit cdi_sleep_ms(@sleep) zwischen jeder Auswertung.
++ * \endgerman
++ * \english
++ * CDI_CONDITION_WAIT() with cdi_sleep_ms(@sleep) between each evaluation.
++ * \endenglish
++ * \thuringiansaxonian
++ * CDI_CONDITION_WAIT() mitt? cdi_sleep_ms(@sleep) zwischn j?dr Ausw?rdungn.
++ * \endthuringiansaxonian
++ * \french
++ * CDI_CONDITION_WAIT() avec cdi_sleep_ms(@sleep) entre toutes les ?valuations.
++ * \endfrench
++ * \japanese
++ * ????????cdi_sleep_ms(@sleep)?????CDI_CONDITION_WAIT()?
++ * \endjapanese
++ */
++#define CDI_CONDITION_WAIT_SLEEP(cond, timeout, sleep) \
++    do { \
++        uint64_t start = cdi_elapsed_ms(); \
++        while (!(cond) && cdi_elapsed_ms() - start < timeout) { \
++            cdi_sleep_ms(sleep); \
++        } \
++    } while (0)
++
++/**
++ * \german
+  * Castet @object (muss ein Pointer sein) zu einem Pointer auf ein Objekt des
+  * Typs @to, welcher eine Unterklasse vom Typ von @object sein muss. @field ist
+  * das Feld von @to, das @object enth?lt.
+-- 
+2.4.0
+
+
+From max at tyndur.org  Mon May 11 21:59:24 2015
+From: max at tyndur.org (Max Reitz)
+Date: Mon, 11 May 2015 21:59:24 +0200
+Subject: [cdi-devel] =?utf-8?q?=5BPATCH_v3_04/10=5D_cdi/scsi=2C_cdi=2Eh=3A?=
+	=?utf-8?q?_Remove_t=C3=BDndur-specific_fields?=
+In-Reply-To: <1431374370-17120-1-git-send-email-max@tyndur.org>
+References: <1431374370-17120-1-git-send-email-max@tyndur.org>
+Message-ID: <1431374370-17120-5-git-send-email-max@tyndur.org>
+
+- Remove t?ndur-specific fields from non-OS-dependant structures
+
+Signed-off-by: Max Reitz <max at tyndur.org>
+Acked-by: Kevin Wolf <kevin at tyndur.org>
+---
+ include/cdi.h      | 3 ---
+ include/cdi/scsi.h | 7 -------
+ 2 files changed, 10 deletions(-)
+
+diff --git a/include/cdi.h b/include/cdi.h
+index a9207db..998e080 100644
+--- a/include/cdi.h
++++ b/include/cdi.h
+@@ -178,9 +178,6 @@ struct cdi_device {
+      * \endenglish
+      */
+     struct cdi_bus_data*    bus_data;
+-
+-    // tyndur-spezifisch
+-    void*               backdev;
+ };
+ 
+ /**
+diff --git a/include/cdi/scsi.h b/include/cdi/scsi.h
+index 8edccbf..cef96ed 100644
+--- a/include/cdi/scsi.h
++++ b/include/cdi/scsi.h
+@@ -51,13 +51,6 @@ struct cdi_scsi_device {
+ 
+     /// Geraetetyp, der ueber SCSI angesteuert wird
+     cdi_device_type_t type;
+-
+-    /**
+-     * tyndur-spezifisch: Frontend-Geraet (z.B. CDI_STORAGE-Geraet, das ueber
+-     * SCSI angesteuert wird)
+-     */
+-    void* frontdev;
+-
+ };
+ 
+ /// SCSI-Treiber
+-- 
+2.4.0
+
+
+From max at tyndur.org  Mon May 11 21:59:25 2015
+From: max at tyndur.org (Max Reitz)
+Date: Mon, 11 May 2015 21:59:25 +0200
+Subject: [cdi-devel] [PATCH v3 05/10] cdi/scsi: Add support for multiple LUNs
+In-Reply-To: <1431374370-17120-1-git-send-email-max@tyndur.org>
+References: <1431374370-17120-1-git-send-email-max@tyndur.org>
+Message-ID: <1431374370-17120-6-git-send-email-max@tyndur.org>
+
++ One SCSI device may provide multiple LUNs. Add a field for the LUN
+  count to cdi_scsi_device.
++ Furthermore, add a field to select the LUN to cdi_scsi_packet.
+
+Signed-off-by: Max Reitz <max at tyndur.org>
+---
+ include/cdi/scsi.h | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/include/cdi/scsi.h b/include/cdi/scsi.h
+index cef96ed..5157a23 100644
+--- a/include/cdi/scsi.h
++++ b/include/cdi/scsi.h
+@@ -24,6 +24,9 @@
+ 
+ /// SCSI-Paket
+ struct cdi_scsi_packet {
++    /// LUN to address
++    int lun;
++
+     /// Buffer zum Senden oder Empfangen von Daten
+     void *buffer;
+ 
+@@ -51,6 +54,9 @@ struct cdi_scsi_device {
+ 
+     /// Geraetetyp, der ueber SCSI angesteuert wird
+     cdi_device_type_t type;
++
++    /// Number of LUNs
++    int lun_count;
+ };
+ 
+ /// SCSI-Treiber
+-- 
+2.4.0
+
+
+From max at tyndur.org  Mon May 11 21:59:26 2015
+From: max at tyndur.org (Max Reitz)
+Date: Mon, 11 May 2015 21:59:26 +0200
+Subject: [cdi-devel] [PATCH v3 06/10] cdi.h: Add cdi_handle_bus_device()
+In-Reply-To: <1431374370-17120-1-git-send-email-max@tyndur.org>
+References: <1431374370-17120-1-git-send-email-max@tyndur.org>
+Message-ID: <1431374370-17120-7-git-send-email-max@tyndur.org>
+
++ Currently, all devices provided on a bus have to be passed to the
+  init_device() function of all drivers handling any device type on that
+  bus. cdi_handle_bus_device() can be used by the driver to specify a
+  pattern (struct cdi_bus_device_pattern) which allows the CDI
+  implementation to speed up the selection of the correct driver for a
+  new device.
+
+Signed-off-by: Max Reitz <max at tyndur.org>
+---
+ include/cdi.h | 114 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 114 insertions(+)
+
+diff --git a/include/cdi.h b/include/cdi.h
+index 998e080..8ed0738 100644
+--- a/include/cdi.h
++++ b/include/cdi.h
+@@ -142,6 +142,51 @@ struct cdi_bus_data {
+ 
+ /**
+  * \german
++ * Diese von jedem sie unterst?tzenden Bustyp zu erweiternde Struktur enth?lt
++ * Informationen dar?ber, welche Ger?te von einem bestimmten Treiber verwaltet
++ * werden k?nnen.
++ * Typischerweise enth?lt sie einige der von der zugeh?rigen cdi_bus_data-
++ * Struktur bereitgestellten Felder (jene, die genutzt werden, um ein Ger?t zu
++ * identifizieren, wie Ger?te- und Hersteller-ID), wobei negative Werte "egal"
++ * bedeuten.
++ * \endgerman
++ * \english
++ * This structure, which is extended by any bus type supporting it, contains
++ * information about which devices can be handled by a certain driver.
++ * Typically, it will contain some of the fields provided by the appropriate
++ * cdi_bus_data structure (the ones which are used to identify a device like
++ * device/vendor ID) where negative values signify a "don't care".
++ * \endenglish
++ * \thuringiansaxonian
++ * Diese Schdruggtur wird von jehm Busd?hp, der se unnerst?tzn g?nnn dut,
++ * erweidert, und hat dann Informatzschjoun dar?bber, welsche Ger?ide vonn?
++ * bestimmdn Draibr unnr de Fiddische genomm wern g?nnn.
++ * T?bbischerweise endh?ltse ? b?r vondn Feldrn, die ooch in dr zugeh?rschn
++ * cdi_bus_data-Schdruggtur sin (welsche de nimmst, damitte weest, was f?r ?
++ * Ger?it das nu eigndlisch is, zum Beispiel Ger?ide- un Herschdellor-
++ * Idendifikatzschjoun). Negadive Werde dun dann "egal" bedeudn.
++ * \endthuringiansaxonian
++ * \french
++ * Cette structure, qui est enrichie par tous les types qui le peuvent, d?crit
++ * quels appareils un particulier pilote peut employer.
++ * R?guli?rement, il y a quelques valeurs de la cdi_bus_data structure ad?quate
++ * (qui sont utilis?es pour identifier un appareil, comme l'ID de l'appareil et
++ * du vendeur), o? des valeurs n?gatives signifient "n'importe quoi".
++ * \endfrench
++ * \japanese
++ * ???????????????????????????????????
++ * ????????????
++ * ???????cdi_bus_data????????????????????????
++ * ????????????????????????????????????ID?
++ * ?????????????????????
++ * \endjapanese
++ */
++struct cdi_bus_device_pattern {
++    cdi_device_type_t bus_type;
++};
++
++/**
++ * \german
+  * Beschreibt ein Ger?t
+  * \endgerman
+  * \english
+@@ -406,6 +451,75 @@ int cdi_provide_device(struct cdi_bus_data* device);
+ int cdi_provide_device_internal_drv(struct cdi_bus_data* device,
+                                     struct cdi_driver* driver);
+ 
++/**
++ * \german
++ * Teilt der CDI-Implementierung mit, dass der Treiber @drv nur Ger?te vom
++ * Muster @pattern akzeptiert (die am Bus @pattern->bus_type h?ngen). Diese
++ * Funktion darf mehrfach aufgerufen werden. Jedes neue Ger?t am Bus, das nicht
++ * auf das Muster passt, wird der @drv->init_device()-Funktion nicht ?bergeben.
++ * Diese Funktion darf andererseits aber NULL zur?ckgeben, selbst wenn
++ * cdi_handle_bus_device() vom Treiber benutzt wurde, das hei?t, diese Funktion
++ * darf mit einem Muster aufgerufen werden, das nicht nur auf Ger?te passt, die
++ * vom Treiber behandelt werden k?nnen, sondern auch auf andere (die dann
++ * abgewiesen werden k?nnen, indem @drv->init_device() NULL zur?ckgibt).
++ *
++ * Diese Funktion darf nur in @drv->init_driver() aufgerufen werden.
++ * \endgerman
++ * \english
++ * Tells the CDI implementation that the driver @drv is able to handle devices
++ * with the pattern @pattern (appearing on the bus @pattern->bus_type). This
++ * function can be called multiple times. Any device appearing on the bus not
++ * fitting the pattern will not be passed to the @drv->init_device() function.
++ * That function may however return NULL even after the driver has called
++ * cdi_handle_bus_device(), that is, it is valid to call this function with a
++ * @pattern that does not only fit devices handled by @drv but others as well
++ * (which can then be rejected by letting @drv->init_device() return NULL).
++ *
++ * This function must only be called from @drv->init_driver().
++ * \endenglish
++ * \thuringiansaxonian
++ * Dailt dr CDI-Imbl?m?ndierung mit, dass dr Draibr @drv nur an Gelumbsch mibm
++ * Musdr @pattern rummehrn kann (die andn Bus @pattern->bus_type sin). Diese
++ * Fungzschjoun gann oo mehrfach uffgerufn wern. Wenn ? neues Ger?it am Bus
++ * uffdoochn dut und das ni uffs Musdr bassn dut, dann gommt das bei dr
++ * @drv->init_device()-Fungzschjoun oo ni an. Uff dr annern Saide darf diese
++ * Fungzschjoun wiederum NULL zur?ckgehm, sogar wenner Draibr vorher
++ * cdi_handle_bus_device() uffgerufn hat, das hei?t, diese Fungzschjoun gann
++ * ooch midd? Musdr uffgerufn wern, das ni nur uff Ger?ide bassn dud, die midd?
++ * Draibr was zu dun hamm, sonnern ooch uff annere (eene M?jlischgeit die
++ * abzulehn isses dann, in @drv->init_device() NULL zur?ckzugehm).
++ *
++ * Diese Fungzschjoun gannsde nirschndwo sonst als in @drv->init_driver()
++ * uffrufn.
++ * \endthuringiansaxonian
++ * \french
++ * Informe la CDI impl?mentation que le pilote @drv ne peut qu'employer des
++ * appareils du type @pattern (qui se pr?sentent au bus @pattern->bus_type). On
++ * peut appeler cette fonction ? plus d'une fois. Tous les appareils qui se
++ * pr?sentent au bus qui ne correspondent pas au type ne seront pas transmises
++ * au fonction @drv->init_device(). ? l'inverse, cette fonction peut rendre NULL
++ * m?me que le pilote a appel? cdi_handle_bus_device(), c'est-?-dire que on peut
++ * appeler cette fonction avec un type qui ne corresponde pas seulement aux
++ * appareils qui le pilote peut employer, mais en plus au des autres (qui on
++ * peut renvoyer par faire @drv->init_device() rendre NULL).
++ *
++ * Cette fonction doit ?tre appeler seulement en @drv->init_driver().
++ * \endfrench
++ * \japanese
++ * ?????@drv?????@pattern??????????????????
++ * CDI???????????????????@pattern->bus_type??????
++ * ?????????????????????????????????????
++ * @drv->init_device()???????cdi_handle_bus_device()?????????
++ * @drv->init_device()??NULL??????????????????????
++ * ?????????????????????????????????
++ * ??????@drv->init_device()??NULL???????????
++ *
++ * @drv->init_driver()???????????????????????
++ * \endjapanese
++ */
++void cdi_handle_bus_device(struct cdi_driver* drv,
++                           struct cdi_bus_device_pattern* pattern);
++
+ #endif
+ 
+ /*\@}*/
+-- 
+2.4.0
+
+
+From max at tyndur.org  Mon May 11 21:59:27 2015
+From: max at tyndur.org (Max Reitz)
+Date: Mon, 11 May 2015 21:59:27 +0200
+Subject: [cdi-devel] [PATCH v3 07/10] cdi/usb: Add headers
+In-Reply-To: <1431374370-17120-1-git-send-email-max@tyndur.org>
+References: <1431374370-17120-1-git-send-email-max@tyndur.org>
+Message-ID: <1431374370-17120-8-git-send-email-max@tyndur.org>
+
++ Add headers to be used by USB host controller drivers, the USB bus
+  driver, and USB device drivers.
+  These headers are still lacking functions for periodic transactions
+  (interrupt/isochronous), hotplugging, suspend/resume, etc. pp..
+
+Signed-off-by: Max Reitz <max at tyndur.org>
+---
+ include/cdi/usb-structures.h | 174 ++++++++++++++++++++++++++++++++++++
+ include/cdi/usb.h            | 208 +++++++++++++++++++++++++++++++++++++++++++
+ include/cdi/usb_hcd.h        | 159 +++++++++++++++++++++++++++++++++
+ 3 files changed, 541 insertions(+)
+ create mode 100644 include/cdi/usb-structures.h
+ create mode 100644 include/cdi/usb.h
+ create mode 100644 include/cdi/usb_hcd.h
+
+diff --git a/include/cdi/usb-structures.h b/include/cdi/usb-structures.h
+new file mode 100644
+index 0000000..fecb609
+--- /dev/null
++++ b/include/cdi/usb-structures.h
+@@ -0,0 +1,174 @@
++/*
++ * Copyright (c) 2015 Max Reitz
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it
++ * and/or modify it under the terms of the Do What The Fuck You Want
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * http://sam.zoy.org/projects/COPYING.WTFPL for more details.
++ */
++
++/**
++ * This file contains some standard USB structures such as descriptors.
++ */
++
++#ifndef _CDI_USB_STRUCTURES_H_
++#define _CDI_USB_STRUCTURES_H_
++
++#include <stdint.h>
++
++
++struct cdi_usb_device_descriptor {
++    uint8_t b_length;
++    uint8_t b_descriptor_type;
++    uint16_t bcd_usb;
++    uint8_t b_device_class;
++    uint8_t b_device_sub_class;
++    uint8_t b_device_protocol;
++    uint8_t b_max_packet_size_0;
++    uint16_t id_vendor;
++    uint16_t id_product;
++    uint16_t bcd_device;
++    uint8_t i_manufacturer;
++    uint8_t i_product;
++    uint8_t i_serial_number;
++    uint8_t b_num_configurations;
++} __attribute__((packed));
++
++struct cdi_usb_configuration_descriptor {
++    uint8_t b_length;
++    uint8_t b_descriptor_type;
++    uint16_t w_total_length;
++    uint8_t b_num_interfaces;
++    uint8_t b_configuration_value;
++    uint8_t i_configuration;
++    uint8_t bm_attributes;
++    uint8_t b_max_power;
++} __attribute__((packed));
++
++struct cdi_usb_string_descriptor {
++    uint8_t b_length;
++    uint8_t b_descriptor_type;
++    uint16_t b_string[127];
++} __attribute__((packed));
++
++struct cdi_usb_interface_descriptor {
++    uint8_t b_length;
++    uint8_t b_descriptor_type;
++    uint8_t b_interface_number;
++    uint8_t b_alternate_setting;
++    uint8_t b_num_endpoints;
++    uint8_t b_interface_class;
++    uint8_t b_interface_sub_class;
++    uint8_t b_interface_protocol;
++    uint8_t i_interface;
++} __attribute__((packed));
++
++
++struct cdi_usb_endpoint_descriptor {
++    uint8_t b_length;
++    uint8_t b_descriptor_type;
++    uint8_t b_endpoint_address;
++    uint8_t bm_attributes;
++    uint16_t w_max_packet_size;
++    uint8_t b_interval;
++} __attribute__((packed));
++
++/// cdi_usb_endpoint_descriptor.b_endpoint_address
++#define CDI_USB_EPDSC_EPADR_ID(x)   ((x) & 0xf)
++#define CDI_USB_EPDSC_EPADR_DIR     (1 << 7) // IN if set
++
++/// cdi_usb_endpoint_descriptor.bm_attributes
++#define CDI_USB_EPDSC_ATTR_XFER_TYPE_MASK   0x03 // Transfer Type mask
++#define CDI_USB_EPDSC_ATTR_CONTROL          0x00
++#define CDI_USB_EPDSC_ATTR_ISOCHRONOUS      0x01
++#define CDI_USB_EPDSC_ATTR_BULK             0x02
++#define CDI_USB_EPDSC_ATTR_INTERRUPT        0x03
++#define CDI_USB_EPDSC_ATTR_SYNC_TYPE_MASK   0x0c // Synchronization Type mask
++#define CDI_USB_EPDSC_ATTR_NO_SYNC          0x00
++#define CDI_USB_EPDSC_ATTR_ASYNC            0x04
++#define CDI_USB_EPDSC_ATTR_ADAPTIVE         0x08
++#define CDI_USB_EPDSC_ATTR_SYNC             0x0c
++#define CDI_USB_EPDSC_ATTR_USAGE_TYPE_MASK  0x30 // Usage Type mask
++#define CDI_USB_EPDSC_ATTR_DATA             0x00
++#define CDI_USB_EPDSC_ATTR_FEEDBACK         0x10
++#define CDI_USB_EPDSC_ATTR_IMPL_FB_DATA     0x20 // Implicit Feedback Data
++
++/// cdi_usb_endpoint_descriptor.w_max_packet_size
++#define CDI_USB_EPDSC_MPS_MPS(x)    ((x) & 0x7ff)
++
++
++struct cdi_usb_setup_packet {
++    uint8_t bm_request_type;
++    uint8_t b_request;
++    uint16_t w_value;
++    uint16_t w_index;
++    uint16_t w_length;
++} __attribute__((packed));
++
++/// Values constituting cdi_usb_setup_packet.bm_request_type
++#define CDI_USB_CREQ_DEVICE     0
++#define CDI_USB_CREQ_INTERFACE  1
++#define CDI_USB_CREQ_ENDPOINT   2
++#define CDI_USB_CREQ_OTHER      3
++#define CDI_USB_CREQ_CLASS      (1 << 5)
++#define CDI_USB_CREQ_OUT        (0 << 7)
++#define CDI_USB_CREQ_IN         (1 << 7)
++
++/// Control request numbers (cdi_usb_setup_packet.b_request)
++enum {
++    CDI_USB_CREQ_GET_STATUS         =  0,
++    CDI_USB_CREQ_CLEAR_FEATURE      =  1,
++    CDI_USB_CREQ_SET_FEATURE        =  3,
++    CDI_USB_CREQ_SET_ADDRESS        =  5,
++    CDI_USB_CREQ_GET_DESCRIPTOR     =  6,
++    CDI_USB_CREQ_SET_DESCRIPTOR     =  7,
++    CDI_USB_CREQ_GET_CONFIGURATION  =  8,
++    CDI_USB_CREQ_SET_CONFIGURATION  =  9,
++    CDI_USB_CREQ_GET_INTERFACE      = 10,
++    CDI_USB_CREQ_SET_INTERFACE      = 11,
++    CDI_USB_CREQ_SYNCH_FRAME        = 12,
++};
++
++/// Descriptor IDs
++enum {
++    CDI_USB_DESC_DEVICE         = 1,
++    CDI_USB_DESC_CONFIGURATION  = 2,
++    CDI_USB_DESC_STRING         = 3,
++    CDI_USB_DESC_INTERFACE      = 4,
++    CDI_USB_DESC_ENDPOINT       = 5,
++};
++
++/// USB class codes. Defined here because they are not part of their respective
++/// specifications.
++
++/// USB class codes on the device level
++#define CDI_USB_DEVCLS_NONE     0x00 // No device-wide class, use interfaces
++#define CDI_USB_DEVCLS_CCDCC    0x02 // Communications and CDC Control
++#define CDI_USB_DEVCLS_HUB      0x09 // Hub
++#define CDI_USB_DEVCLS_BILLBD   0x11 // Billboard Device
++#define CDI_USB_DEVCLS_DIAG     0xdc // Diagnostic Device
++#define CDI_USB_DEVCLS_MISC     0xef // Miscellaneous
++#define CDI_USB_DEVCLS_VENDOR   0xff // Vendor-specific
++
++/// USB class codes on the interface level
++#define CDI_USB_IFCCLS_AUDIO    0x01 // Audio
++#define CDI_USB_IFCCLS_CCDCC    CDI_USB_DEVCLS_CCDCC
++#define CDI_USB_IFCCLS_HID      0x03 // Human Interface Device
++#define CDI_USB_IFCCLS_PHYS     0x05 // Physical
++#define CDI_USB_IFCCLS_IMAGE    0x06 // Image
++#define CDI_USB_IFCCLS_PRINTER  0x07 // Printer
++#define CDI_USB_IFCCLS_STORAGE  0x08 // Mass Storage
++#define CDI_USB_IFCCLS_CDCDATA  0x0a // CDC Data
++#define CDI_USB_IFCCLS_SMARTCD  0x0b // Smart Card
++#define CDI_USB_IFCCLS_CNTTSEC  0x0d // Content Security
++#define CDI_USB_IFCCLS_VIDEO    0x0e // Video
++#define CDI_USB_IFCCLS_HEALTH   0x0f // Personal Healthcare
++#define CDI_USB_IFCCLS_AV       0x10 // Audio/Video
++#define CDI_USB_IFCCLS_DIAG     CDI_USB_DEVCLS_DIAG
++#define CDI_USB_IFCCLS_WIRELESS 0xe0 // Wireless Controller
++#define CDI_USB_IFCCLS_MISC     CDI_USB_DEVCLS_MISC
++#define CDI_USB_IFCCLS_APP      0xfe // Application-specific
++#define CDI_USB_IFCCLS_VENDOR   CDI_USB_DEVCLS_VENDOR
++
++#endif
+diff --git a/include/cdi/usb.h b/include/cdi/usb.h
+new file mode 100644
+index 0000000..c95931d
+--- /dev/null
++++ b/include/cdi/usb.h
+@@ -0,0 +1,208 @@
++/*
++ * Copyright (c) 2015 Max Reitz
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it
++ * and/or modify it under the terms of the Do What The Fuck You Want
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * http://sam.zoy.org/projects/COPYING.WTFPL for more details.
++ */
++
++#ifndef _CDI_USB_H_
++#define _CDI_USB_H_
++
++#include <stdint.h>
++
++#include <cdi.h>
++#include <cdi/usb-structures.h>
++
++
++struct cdi_usb_hc;
++
++typedef enum {
++    CDI_USB_CONTROL,
++    CDI_USB_BULK,
++    CDI_USB_INTERRUPT,
++    CDI_USB_ISOCHRONOUS,
++} cdi_usb_endpoint_type_t;
++
++typedef enum {
++    CDI_USB_LOW_SPEED,
++    CDI_USB_FULL_SPEED,
++    CDI_USB_HIGH_SPEED,
++    CDI_USB_SUPERSPEED,
++} cdi_usb_speed_t;
++
++typedef enum {
++    CDI_USB_OK = 0,
++
++    CDI_USB_DRIVER_ERROR,
++    CDI_USB_TIMEOUT,
++    CDI_USB_BABBLE,
++    CDI_USB_STALL,
++    CDI_USB_HC_ERROR,
++    CDI_USB_BAD_RESPONSE,
++} cdi_usb_transmission_result_t;
++
++/* Bitmask of CDI_USB_PORT_* and CDI_USB_*_SPEED values */
++typedef uint32_t cdi_usb_port_status_t;
++
++#define CDI_USB_PORT_SPEED_MASK (0x7)
++#define CDI_USB_PORT_CONNECTED  (1 << 3)
++
++struct cdi_usb_hub;
++
++/**
++ * Describes a hub driver. This is not a CDI driver in the common sense. When
++ * used for a root hub, it is part of the host controller driver; when used for
++ * a device hub, it is only used internally by the USB driver.
++ */
++struct cdi_usb_hub_driver {
++    /**
++     * Makes a port unreachable by traffic which reaches the hub. @index is a
++     * 0-based index.
++     */
++    void (*port_disable)(struct cdi_usb_hub* hub, int index);
++
++    /**
++     * Makes a port reachable by traffic which reaches the hub and drives the
++     * reset signal for at least 50 ms on the port. @index is a 0-based index.
++     */
++    void (*port_reset_enable)(struct cdi_usb_hub* hub, int index);
++
++    /**
++     * Retrieves information about the given port. This should only be called
++     * after the port has been reset using port_reset_enable(). @index is a
++     * 0-based index.
++     */
++    cdi_usb_port_status_t (*port_status)(struct cdi_usb_hub* hub, int index);
++};
++
++/**
++ * Describes a USB hub. This is not a CDI device in the common sense. When used
++ * for a root hub, it is part of the host controller object; when used for a
++ * device hub, it is only used internally by the USB driver.
++ *
++ * For this reason, there is no struct cdi_usb_hub_driver object reachable from
++ * this object. If it is a root hub, the hub driver will be part of the host
++ * controller driver. Otherwise (if it is a device hub), the hub driver will be
++ * internal to the USB driver.
++ */
++struct cdi_usb_hub {
++    /**
++     * Number of ports provided by this hub.
++     */
++    int ports;
++};
++
++/**
++ * Describes a USB device as given to cdi_provide_device() and the init_device()
++ * function provided by USB device drivers.
++ */
++struct cdi_usb_device {
++    struct cdi_bus_data bus_data;
++
++    /**
++     * Various information which can be used for identifying a USB device.
++     */
++    uint16_t vendor_id, product_id;
++    uint8_t class_id, subclass_id, protocol_id;
++
++    /**
++     * If negative, this logical device is defined on the USB device level;
++     * otherwise, this is the index of the interface which this logical device
++     * represents.
++     */
++    int interface;
++
++    /**
++     * Number of endpoints available for this device; this does include the
++     * default pipe (endpoint 0) which can be used both on the physical device
++     * level and from any interface.
++     */
++    int endpoint_count;
++};
++
++/**
++ * Describes the USB bus driver.
++ */
++struct cdi_usb_driver {
++    struct cdi_driver drv;
++
++    /**
++     * Returns the endpoint descriptor for endpoint @ep (0 up until
++     * dev->endpoint_count - 1) of device @dev in @desc.
++     */
++    void (*get_endpoint_descriptor)(struct cdi_usb_device* dev, int ep,
++                                    struct cdi_usb_endpoint_descriptor* desc);
++
++    /**
++     * Executes a control transfer to endpoint @ep (0 up until
++     * dev->endpoint_count - 1) of device @dev, using @setup for the setup stage
++     * and @data for the data stage. The length and direction of transfer is
++     * deduced from @setup.
++     */
++    cdi_usb_transmission_result_t
++        (*control_transfer)(struct cdi_usb_device* dev, int ep,
++                            const struct cdi_usb_setup_packet* setup,
++                            void* data);
++
++    /**
++     * Executes a bulk transfer to endpoint @ep (0 up until
++     * dev->endpoint_count - 1) of device @dev, transferring @size bytes from/to
++     * @data. The direction of transfer is deduced from the endpoint given.
++     */
++    cdi_usb_transmission_result_t (*bulk_transfer)(struct cdi_usb_device* dev,
++                                                   int ep, void* data,
++                                                   size_t size);
++};
++
++/**
++ * Describes patterns for USB devices a device driver can use to specify which
++ * devices it can handle.
++ */
++struct cdi_usb_bus_device_pattern {
++    struct cdi_bus_device_pattern pattern;
++
++    /**
++     * Any field may be negative to signify "don't care".
++     */
++    int vendor_id, product_id;
++    int class_id, subclass_id, protocol_id;
++};
++
++
++/**
++ * Registers a USB bus driver. Should be called by the CDI library, ideally,
++ * after the USB bus driver's init() function has run.
++ */
++void cdi_usb_driver_register(struct cdi_usb_driver* drv);
++
++/**
++ * Returns the endpoint descriptor for endpoint @ep (0 up until
++ * dev->endpoint_count - 1) of device @dev in @desc.
++ */
++void cdi_usb_get_endpoint_descriptor(struct cdi_usb_device* dev, int ep,
++                                     struct cdi_usb_endpoint_descriptor* desc);
++
++/**
++ * Executes a control transfer to endpoint @ep (0 up until
++ * dev->endpoint_count - 1) of device @dev, using @setup for the setup stage and
++ * @data for the data stage. The length and direction of transfer is deduced
++ * from @setup.
++ */
++cdi_usb_transmission_result_t
++    cdi_usb_control_transfer(struct cdi_usb_device* dev, int ep,
++                             const struct cdi_usb_setup_packet* setup,
++                             void* data);
++
++/**
++ * Executes a bulk transfer to endpoint @ep (0 up until dev->endpoint_count - 1)
++ * of device @dev, transferring @size bytes from/to @data. The direction of
++ * transfer is deduced from the endpoint given.
++ */
++cdi_usb_transmission_result_t cdi_usb_bulk_transfer(struct cdi_usb_device* dev,
++                                                    int ep, void* data,
++                                                    size_t size);
++
++#endif
+diff --git a/include/cdi/usb_hcd.h b/include/cdi/usb_hcd.h
+new file mode 100644
+index 0000000..5481535
+--- /dev/null
++++ b/include/cdi/usb_hcd.h
+@@ -0,0 +1,159 @@
++/*
++ * Copyright (c) 2015 Max Reitz
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it
++ * and/or modify it under the terms of the Do What The Fuck You Want
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * http://sam.zoy.org/projects/COPYING.WTFPL for more details.
++ */
++
++#ifndef _CDI_USB_HCD_H_
++#define _CDI_USB_HCD_H_
++
++#include <cdi.h>
++#include <cdi/usb.h>
++
++
++/**
++ * Opaque value identifying a transaction for the host controller.
++ */
++typedef void* cdi_usb_hc_transaction_t;
++
++typedef enum {
++    CDI_USB_IN,
++    CDI_USB_OUT,
++    CDI_USB_SETUP,
++} cdi_usb_transfer_token_t;
++
++
++/**
++ * Describes a USB host controller.
++ */
++struct cdi_usb_hc {
++    struct cdi_device dev;
++
++    /**
++     * Root hub provided by the HC. The hub driver responsible for this root hub
++     * is part of the cdi_usb_hcd structure.
++     */
++    struct cdi_usb_hub rh;
++};
++
++/**
++ * Describes the USB bus provided by a USB host controller and its root hub. All
++ * buses are handled by the USB bus driver, therefore there are no "identifying"
++ * fields in this structure.
++ */
++struct cdi_usb_hc_bus {
++    struct cdi_bus_data bus_data;
++    struct cdi_usb_hc* hc;
++};
++
++/**
++ * Contains information about a communication pipe to a USB device endpoint used
++ * for USB transactions.
++ */
++struct cdi_usb_hc_ep_info {
++    /// Device ID
++    uint8_t dev;
++
++    /// Endpoint ID
++    uint8_t ep;
++
++    /// Endpoint type
++    cdi_usb_endpoint_type_t ep_type;
++
++    /// Transfer speed
++    cdi_usb_speed_t speed;
++
++    /// Maximum packet size for this endpoint
++    size_t mps;
++
++    /**
++     * For low and full speed devices operated behind a high speed hub: @tt_addr
++     * is the USB device address of the translating USB hub (the last high speed
++     * hub), @tt_port is the port (0-based index) of that hub where the first
++     * non-high-speed device of this device's tree is plugged into.
++     */
++    uint8_t tt_addr, tt_port;
++};
++
++/**
++ * Describes a single USB transmission.
++ */
++struct cdi_usb_hc_transmission {
++    /// Transaction this transmission is part of
++    cdi_usb_hc_transaction_t ta;
++
++    /// Type of transfer to be performed
++    cdi_usb_transfer_token_t token;
++
++    /// Buffer to be used (may be NULL if @size is 0)
++    void* buffer;
++
++    /// Number of bytes to be transferred (may be 0, and may exceed the MPS)
++    size_t size;
++
++    /**
++     * Toggle bit to be used for the first packet issued in this transmission.
++     * If @size exceeds the MPS and thus multiple packets are transmitted, the
++     * toggle bit will be toggled automatically.
++     */
++    unsigned toggle;
++
++    /**
++     * Result of this transmission. Only valid after wait_transaction() has
++     * returned.
++     */
++    cdi_usb_transmission_result_t* result;
++};
++
++/**
++ * Describes a USB host controller driver.
++ */
++struct cdi_usb_hcd {
++    struct cdi_driver drv;
++
++    /**
++     * USB hub driver which is responsible for all root hubs provided by this
++     * HCD.
++     */
++    struct cdi_usb_hub_driver rh_drv;
++
++    /**
++     * Creates a USB transaction. A transaction consists of one or more
++     * transmissions to a single endpoint.
++     */
++    cdi_usb_hc_transaction_t
++        (*create_transaction)(struct cdi_usb_hc* hc,
++                              const struct cdi_usb_hc_ep_info* target);
++
++    /**
++     * Enters a transmission into a transaction. The transmission will be
++     * executed asynchronously.
++     */
++    void (*enqueue)(struct cdi_usb_hc* hc,
++                    const struct cdi_usb_hc_transmission* trans);
++
++    /**
++     * Wait until all transmissions enqueued in the given transaction have been
++     * executed. The variables pointed to by the @result field of the
++     * transmissions enqueued will only be valid when the first call to this
++     * function after the enqueue() calls returns.
++     */
++    void (*wait_transaction)(struct cdi_usb_hc* hc,
++                             cdi_usb_hc_transaction_t ta);
++
++    /**
++     * Destroys a transaction. Transmissions which have not been waited on may
++     * or may not have been executed by the time this function returns. The
++     * values of the variables pointed to by the @result field of unwaited-for
++     * transmissions are not valid, neither are the buffer contents for
++     * receiving transmissions.
++     */
++    void (*destroy_transaction)(struct cdi_usb_hc* hc,
++                                cdi_usb_hc_transaction_t ta);
++};
++
++#endif
+-- 
+2.4.0
+
+
+From max at tyndur.org  Mon May 11 21:59:28 2015
+From: max at tyndur.org (Max Reitz)
+Date: Mon, 11 May 2015 21:59:28 +0200
+Subject: [cdi-devel] [PATCH v3 08/10] ehci: Add EHCI driver
+In-Reply-To: <1431374370-17120-1-git-send-email-max@tyndur.org>
+References: <1431374370-17120-1-git-send-email-max@tyndur.org>
+Message-ID: <1431374370-17120-9-git-send-email-max@tyndur.org>
+
++ This adds an EHCI USB host controller driver. It is missing support
+  for periodic schedule (interrupt and isochronous transfers),
+  hotplugging, suspend/resume, etc. pp..
+
+Signed-off-by: Max Reitz <max at tyndur.org>
+---
+ ehci/ehci.c | 643 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ ehci/ehci.h | 290 +++++++++++++++++++++++++++
+ ehci/main.c |  68 +++++++
+ 3 files changed, 1001 insertions(+)
+ create mode 100644 ehci/ehci.c
+ create mode 100644 ehci/ehci.h
+ create mode 100644 ehci/main.c
+
+diff --git a/ehci/ehci.c b/ehci/ehci.c
+new file mode 100644
+index 0000000..7ece05f
+--- /dev/null
++++ b/ehci/ehci.c
+@@ -0,0 +1,643 @@
++/******************************************************************************
++ * Copyright (c) 2015 Max Reitz                                               *
++ *                                                                            *
++ * Permission is hereby granted,  free of charge,  to any person  obtaining a *
++ * copy of this software and associated documentation files (the "Software"), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
++ * and/or  sell copies of the  Software,  and to permit  persons to whom  the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED,  INCLUDING BUT NOT LIMITED TO THE WARRANTIES  OF MERCHANTABILITY, *
++ * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH  THE SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#include <assert.h>
++#include <stdbool.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <cdi.h>
++#include <cdi/lists.h>
++#include <cdi/misc.h>
++#include <cdi/pci.h>
++#include <cdi/usb.h>
++#include <cdi/usb_hcd.h>
++
++#include "ehci.h"
++
++
++#define EHCI_TIMEOUT 1000 // ms
++
++
++static void bios_handoff(struct cdi_pci_device *pci_dev, struct ehci *hc);
++static void irq_handler(struct cdi_device *dev);
++
++
++struct cdi_device *ehci_init_device(struct cdi_bus_data *bus_data)
++{
++    struct cdi_pci_device *pci_dev = (struct cdi_pci_device *)bus_data;
++    static int dev_counter = 0;
++
++    if (pci_dev->class_id     != PCI_CLASS_SERIAL_BUS_CONTROLLER ||
++        pci_dev->subclass_id  != PCI_SUBCLASS_USB_HOST_CONTROLLER ||
++        pci_dev->interface_id != PCI_INTERFACE_EHCI)
++    {
++        return NULL;
++    }
++
++    struct ehci *hc = calloc(1, sizeof(*hc));
++
++    hc->hc.dev.name = malloc(8);
++    sprintf((char *)hc->hc.dev.name, "ehci%i", dev_counter++);
++
++    hc->retired_qhs = cdi_list_create();
++
++    cdi_pci_alloc_memory(pci_dev);
++
++    struct cdi_pci_resource *res;
++    for (int i = 0; (res = cdi_list_get(pci_dev->resources, i)); i++) {
++        if (res->type == CDI_PCI_MEMORY && !res->index) {
++            hc->caps = res->address;
++            hc->regs = (struct ehci_registers *)((uintptr_t)res->address +
++                                                 hc->caps->caplength);
++            break;
++        }
++    }
++    if (!hc->regs) {
++        goto fail;
++    }
++
++    bios_handoff(pci_dev, hc);
++
++    // Stop operation
++    hc->regs->usbcmd = (hc->regs->usbcmd & EHCI_CMD_RSVD) | EHCI_CMD_ITC(8);
++
++    // Wait until HCHALTED becomes true
++    CDI_CONDITION_WAIT(hc->regs->usbsts & EHCI_STS_HCH, 50);
++    if (!(hc->regs->usbsts & EHCI_STS_HCH)) {
++        goto fail;
++    }
++
++    hc->regs->usbcmd |= EHCI_CMD_HCRES; // Reset
++    CDI_CONDITION_WAIT(!(hc->regs->usbcmd & EHCI_CMD_HCRES), 50);
++    if (hc->regs->usbcmd & EHCI_CMD_HCRES) {
++        goto fail;
++    }
++
++    if (hc->caps->hccparams & EHCI_HCC_64) {
++        // 64-bit addressing capability
++        hc->regs->ctrldssegment = 0;
++    }
++
++    hc->regs->usbintr = 0;
++    hc->regs->usbsts  = hc->regs->usbsts;
++
++    hc->periodic_list_mem = cdi_mem_alloc(4096, 12
++                                                | CDI_MEM_PHYS_CONTIGUOUS
++                                                | CDI_MEM_DMA_4G
++                                                | CDI_MEM_NOINIT);
++    hc->periodic_list = hc->periodic_list_mem->vaddr;
++    for (int i = 0; i < 1024; i++) {
++        hc->periodic_list[i] = EHCI_T;
++    }
++    hc->regs->periodiclistbase = hc->periodic_list_mem->paddr.items[0].start;
++
++    // Create anchor
++    struct cdi_mem_area *anchor_qh;
++    anchor_qh = cdi_mem_alloc(sizeof(ehci_fat_qh_t), 6
++                                                     | CDI_MEM_PHYS_CONTIGUOUS
++                                                     | CDI_MEM_DMA_4G
++                                                     | CDI_MEM_NOINIT);
++
++    hc->async_start = anchor_qh->vaddr;
++    memset(hc->async_start, 0, sizeof(*hc->async_start));
++
++    hc->async_start->cdi_mem_area = anchor_qh;
++    hc->async_start->paddr = anchor_qh->paddr.items[0].start
++                           + offsetof(ehci_fat_qh_t, qh);
++
++    hc->async_start->next = hc->async_start;
++    hc->async_start->previous = hc->async_start;
++
++    hc->async_start->qh.next_qh = hc->async_start->paddr | EHCI_QH;
++    hc->async_start->qh.ep_state[0] = EHCI_QHES0_RL(0) | EHCI_QHES0_MPL(8)
++                                    | EHCI_QHES0_EP(0) | EHCI_QHES0_DEV(0)
++                                    | EHCI_QHES0_H | EHCI_QHES0_DTC
++                                    | EHCI_QHES0_EPS_HS;
++    hc->async_start->qh.ep_state[1] = EHCI_QHES1_MULT(1) | EHCI_QHES1_SCM(0xff);
++
++    hc->async_start->qh.overlay.next_qtd = EHCI_T;
++    hc->async_start->qh.overlay.alt_next_qtd = EHCI_T;
++
++    hc->regs->asynclistaddr = hc->async_start->paddr;
++
++    // Start operation
++    hc->regs->usbcmd = (hc->regs->usbcmd & EHCI_CMD_RSVD)
++                      | EHCI_CMD_ITC(8) | EHCI_CMD_ASE | EHCI_CMD_PSE
++                      | EHCI_CMD_FLS_1K | EHCI_CMD_RS;
++
++    // Wait until HCHalted becomes false and the schedules are running
++    CDI_CONDITION_WAIT((hc->regs->usbsts
++                        & (EHCI_STS_ASS | EHCI_STS_PSS | EHCI_STS_HCH))
++                       == (EHCI_STS_ASS | EHCI_STS_PSS), 50);
++    if ((hc->regs->usbsts & (EHCI_STS_ASS | EHCI_STS_PSS | EHCI_STS_HCH))
++        != (EHCI_STS_ASS | EHCI_STS_PSS))
++    {
++        goto fail;
++    }
++
++    cdi_register_irq(pci_dev->irq, &irq_handler, &hc->hc.dev);
++
++    // async advance doorbell
++    hc->regs->usbintr = EHCI_INT_IAA;
++
++    // Route everything to this HC
++    hc->regs->configflag |= EHCI_CF_CF;
++
++    cdi_sleep_ms(5);
++
++    hc->hc.rh.ports = EHCI_HCS_N_PORTS(hc->caps->hcsparams);
++
++    // Power up all ports
++    for (int i = 0; i < hc->hc.rh.ports; i++) {
++        hc->regs->portsc[i] |= EHCI_PSC_PP;
++    }
++
++    return &hc->hc.dev;
++
++fail:
++    if (hc->async_start) {
++        cdi_mem_free(hc->async_start->cdi_mem_area);
++    }
++    if (hc->periodic_list_mem) {
++        cdi_mem_free(hc->periodic_list_mem);
++    }
++    cdi_list_destroy(hc->retired_qhs);
++    free((void *)hc->hc.dev.name);
++    free(hc);
++    cdi_pci_free_memory(pci_dev);
++
++    return NULL;
++}
++
++
++static void bios_handoff(struct cdi_pci_device *pci_dev, struct ehci *hc)
++{
++    int eecp = EHCI_HCC_EECP(hc->caps->hccparams);
++
++    // Iterate through the list of capabilities
++    while (eecp >= 0x40) {
++        uint32_t cap = cdi_pci_config_readl(pci_dev, eecp);
++
++        // Look for USBLEGSUP
++        if (EHCI_EEC_ID(cap) == EHCI_EECID_LEGSUP) {
++            // Set OS semaphore
++            cdi_pci_config_writeb(pci_dev, eecp + 3, 1);
++
++            // Wait for BIOS semaphore to get unset
++            CDI_CONDITION_WAIT(!(cdi_pci_config_readb(pci_dev, eecp + 2) & 1),
++                               5000);
++            if (cdi_pci_config_readb(pci_dev, eecp + 2) & 1) {
++                // Okay Max, stay calm, don't swear
++                fprintf(stderr, "[ehci] Warning: Clean BIOS handoff failed\n");
++                // Disable all SMI sources (0xff000000 is the R/WC mask of this
++                // register)
++                cdi_pci_config_writel(pci_dev, eecp + 4,
++                    cdi_pci_config_readl(pci_dev, eecp + 4) & 0xff000000u);
++                // Unset BIOS semaphore
++                cdi_pci_config_writeb(pci_dev, eecp + 2, 0);
++            }
++        }
++
++        eecp = EHCI_EEC_NEXT(cap);
++    }
++}
++
++
++static void irq_handler(struct cdi_device *dev)
++{
++    struct cdi_usb_hc *cdi_hc = CDI_UPCAST(dev, struct cdi_usb_hc, dev);
++    struct ehci *hc = CDI_UPCAST(cdi_hc, struct ehci, hc);
++
++    uint32_t usbsts = hc->regs->usbsts;
++    hc->regs->usbsts = usbsts;
++
++    // async advance doorbell
++    if (!(usbsts & EHCI_STS_IAA)) {
++        return;
++    }
++
++    ehci_fat_qh_t *rqh;
++    while ((rqh = cdi_list_pop(hc->retired_qhs))) {
++        cdi_mem_free(rqh->cdi_mem_area);
++    }
++}
++
++
++void ehci_rh_port_down(struct cdi_usb_hub *hub, int index)
++{
++    struct cdi_usb_hc *cdi_hc = CDI_UPCAST(hub, struct cdi_usb_hc, rh);
++    struct ehci *hc = CDI_UPCAST(cdi_hc, struct ehci, hc);
++
++    hc->regs->portsc[index] &= ~EHCI_PSC_PED;
++}
++
++
++void ehci_rh_port_up(struct cdi_usb_hub *hub, int index)
++{
++    struct cdi_usb_hc *cdi_hc = CDI_UPCAST(hub, struct cdi_usb_hc, rh);
++    struct ehci *hc = CDI_UPCAST(cdi_hc, struct ehci, hc);
++    uint32_t portsc = hc->regs->portsc[index];
++
++    if ((portsc & EHCI_PSC_LS_MASK) == EHCI_PSC_LS_K) {
++        // Low-speed device, release ownership
++        hc->regs->portsc[index] = portsc | EHCI_PSC_PO;
++        return;
++    }
++
++    // Assert reset signal
++    hc->regs->portsc[index] = ((portsc & ~(EHCI_PSC_PO | EHCI_PSC_SUS |
++                                           EHCI_PSC_FPR | EHCI_PSC_PED))
++                                       | EHCI_PSC_RES);
++    cdi_sleep_ms(50);
++
++    // De-assert reset signal
++    hc->regs->portsc[index] = portsc & ~EHCI_PSC_RES;
++    CDI_CONDITION_WAIT(!(hc->regs->portsc[index] & EHCI_PSC_RES), 50);
++
++    portsc = hc->regs->portsc[index];
++    if (portsc & EHCI_PSC_RES) {
++        // Disable port, route on to companion controller
++        // (maybe it can do at least something with it)
++        hc->regs->portsc[index] = (portsc & ~EHCI_PSC_PED) | EHCI_PSC_PO;
++    } else if ((portsc & (EHCI_PSC_PED | EHCI_PSC_CCS)) == EHCI_PSC_CCS) {
++        // Device connected but port disabled:
++        // Full-speed device, release ownership
++        hc->regs->portsc[index] = portsc | EHCI_PSC_PO;
++    }
++}
++
++
++cdi_usb_port_status_t ehci_rh_port_status(struct cdi_usb_hub *hub, int index)
++{
++    struct cdi_usb_hc *cdi_hc = CDI_UPCAST(hub, struct cdi_usb_hc, rh);
++    struct ehci *hc = CDI_UPCAST(cdi_hc, struct ehci, hc);
++    uint32_t portsc = hc->regs->portsc[index];
++    cdi_usb_port_status_t status = 0;
++
++    if ((portsc & (EHCI_PSC_PED | EHCI_PSC_CCS)) ==
++                  (EHCI_PSC_PED | EHCI_PSC_CCS))
++    {
++        // Device connected and port enabled
++        status |= CDI_USB_PORT_CONNECTED | CDI_USB_HIGH_SPEED;
++    }
++
++    return status;
++}
++
++
++static void enter_async_qh(struct ehci *hc, ehci_fat_qh_t *qh)
++{
++    // Enter the new QH as last
++
++    qh->next = hc->async_start;
++    qh->previous = hc->async_start->previous;
++
++    qh->previous->next = qh;
++    hc->async_start->previous = qh;
++
++    qh->qh.next_qh = hc->async_start->paddr | EHCI_QH;
++    qh->previous->qh.next_qh = qh->paddr | EHCI_QH;
++}
++
++
++static void retire_qh(struct ehci *hc, ehci_fat_qh_t *qh)
++{
++    qh->previous->qh.next_qh = qh->qh.next_qh;
++
++    qh->previous->next = qh->next;
++    qh->next->previous = qh->previous;
++
++    cdi_list_push(hc->retired_qhs, qh);
++    // Request async advance doorbell
++    hc->regs->usbcmd |= EHCI_CMD_IAADB;
++}
++
++
++static void retire_qtd(ehci_fat_qtd_t *qtd)
++{
++    ehci_fat_qh_t *qh = qtd->qh;
++
++    uint32_t err_mask = (qh->qh.ep_state[0] & EHCI_QHES0_EPS_MASK)
++                         == EHCI_QHES0_EPS_HS
++                        ? EHCI_QTDS_HS_ERR_MASK
++                        : EHCI_QTDS_LFS_ERR_MASK;
++
++    if (qtd->qtd.status & err_mask) {
++        if (qtd->qtd.status & EHCI_QTDS_BABBLE) {
++            *qtd->result = CDI_USB_BABBLE;
++        } else if (qtd->qtd.status & (EHCI_QTDS_XACTERR | EHCI_QTDS_P_ERR)) {
++            *qtd->result = CDI_USB_BAD_RESPONSE;
++        } else if (qtd->qtd.status & (EHCI_QTDS_BUFERR | EHCI_QTDS_MuF)) {
++            *qtd->result = CDI_USB_HC_ERROR;
++        } else if (qtd->qtd.status & EHCI_QTDS_HALTED) {
++            *qtd->result = CDI_USB_STALL;
++        } else {
++            *qtd->result = CDI_USB_HC_ERROR;
++        }
++    }
++
++    if (qtd->write_back) {
++        size_t rem = qtd->write_back_size;
++        for (int i = 0; i < 5 && rem; i++) {
++            size_t sz = rem > 4096 ? 4096 : rem;
++            memcpy((void *)((uintptr_t)qtd->write_back + i * 4096),
++                   qtd->buffers[i]->vaddr, sz);
++            rem -= sz;
++        }
++        assert(!rem);
++    }
++
++    qh->first_qtd = qtd->next;
++    if (qh->last_qtd == qtd) {
++        qh->last_qtd = NULL;
++    }
++
++    for (int i = 0; i < 5; i++) {
++        if (qtd->buffers[i]) {
++            cdi_mem_free(qtd->buffers[i]);
++        }
++    }
++
++    cdi_mem_free(qtd->cdi_mem_area);
++}
++
++
++static void enter_qtd(ehci_fat_qh_t *qh, ehci_fat_qtd_t *qtd)
++{
++    bool first;
++
++    qtd->qh = qh;
++    qtd->qtd.next_qtd = EHCI_T;
++    qtd->qtd.alt_next_qtd = EHCI_T;
++
++    while (qh->first_qtd) {
++        // Break if an active qTD is encountered
++        if (qh->first_qtd->qtd.status & EHCI_QTDS_ACTIVE) {
++            break;
++        }
++
++        retire_qtd(qh->first_qtd);
++    }
++
++    first = !qh->first_qtd;
++
++    // Note: Race condition (a qTD might retire here and we are thus appending
++    // the one to be queued to an inactive qTD); it's fine as long as we are
++    // constantly rescanning the queue (here and in ehci_wait_transaction())
++
++    if (first) {
++        qh->first_qtd = qtd;
++    } else {
++        qh->last_qtd->next = qtd;
++    }
++    qh->last_qtd = qtd;
++
++    if (!first) {
++        qh->last_qtd->qtd.next_qtd = qtd->paddr;
++    }
++
++    // If the QH is not active, it's done with its queue of qTDs and we should
++    // continue from this qTD
++    if (!(qh->qh.overlay.status & EHCI_QTDS_ACTIVE)) {
++        qh->qh.overlay.next_qtd = qh->first_qtd->paddr;
++    }
++}
++
++
++cdi_usb_hc_transaction_t ehci_create_transaction(struct cdi_usb_hc *cdi_hc,
++    const struct cdi_usb_hc_ep_info *target)
++{
++    struct ehci *hc = CDI_UPCAST(cdi_hc, struct ehci, hc);
++    struct cdi_mem_area *qh_mem;
++
++    qh_mem = cdi_mem_alloc(sizeof(ehci_fat_qh_t), 6
++                                                  | CDI_MEM_PHYS_CONTIGUOUS
++                                                  | CDI_MEM_DMA_4G
++                                                  | CDI_MEM_NOINIT);
++    ehci_fat_qh_t *qh = qh_mem->vaddr;
++
++    memset(qh, 0, sizeof(*qh));
++
++    int non_high_speed_control = target->speed != CDI_USB_HIGH_SPEED
++                                 && target->ep_type == CDI_USB_CONTROL;
++
++    qh->qh.ep_state[0] = EHCI_QHES0_RL(0)
++                       | (non_high_speed_control ? EHCI_QHES0_C : 0)
++                       | EHCI_QHES0_MPL(target->mps)
++                       | EHCI_QHES0_DTC
++                       | EHCI_QHES0_EP(target->ep)
++                       | EHCI_QHES0_DEV(target->dev);
++    switch (target->speed) {
++        case CDI_USB_LOW_SPEED:  qh->qh.ep_state[0] |= EHCI_QHES0_EPS_LS; break;
++        case CDI_USB_FULL_SPEED: qh->qh.ep_state[0] |= EHCI_QHES0_EPS_FS; break;
++        case CDI_USB_HIGH_SPEED: qh->qh.ep_state[0] |= EHCI_QHES0_EPS_HS; break;
++        case CDI_USB_SUPERSPEED:
++        default:
++            abort();
++    }
++
++    qh->qh.ep_state[1] = EHCI_QHES1_MULT(1)
++                       | EHCI_QHES1_PORT(target->tt_port + 1)
++                       | EHCI_QHES1_HUB(target->tt_addr)
++                       | EHCI_QHES1_SCM(0xff);
++
++    qh->qh.overlay.next_qtd = EHCI_T;
++    qh->qh.overlay.alt_next_qtd = EHCI_T;
++
++    qh->cdi_mem_area = qh_mem;
++    qh->paddr = qh_mem->paddr.items[0].start + offsetof(ehci_fat_qh_t, qh);
++
++    enter_async_qh(hc, qh);
++
++    return qh;
++}
++
++
++static void create_qtd(ehci_fat_qh_t *qh, cdi_usb_transfer_token_t token,
++                       int toggle, void *buffer, size_t size,
++                       cdi_usb_transmission_result_t *result)
++{
++    struct cdi_mem_area *qtd_mem;
++
++    qtd_mem = cdi_mem_alloc(sizeof(ehci_fat_qtd_t), 6
++                                                    | CDI_MEM_PHYS_CONTIGUOUS
++                                                    | CDI_MEM_DMA_4G
++                                                    | CDI_MEM_NOINIT);
++    ehci_fat_qtd_t *qtd = qtd_mem->vaddr;
++
++    memset(qtd, 0, sizeof(*qtd));
++
++    qtd->qtd.status = EHCI_QTDS_DT(toggle)
++                    | EHCI_QTDS_XFLEN(size)
++                    | EHCI_QTDS_CP(0)
++                    | EHCI_QTDS_CERR(3)
++                    | EHCI_QTDS_ACTIVE;
++
++    switch (token) {
++        case CDI_USB_IN:    qtd->qtd.status |= EHCI_QTDS_PID_IN;    break;
++        case CDI_USB_OUT:   qtd->qtd.status |= EHCI_QTDS_PID_OUT;   break;
++        case CDI_USB_SETUP: qtd->qtd.status |= EHCI_QTDS_PID_SETUP; break;
++        default:
++            abort();
++    }
++
++    if (token == CDI_USB_IN) {
++        qtd->write_back = buffer;
++        qtd->write_back_size = size;
++    }
++
++    for (int i = 0; i < 5 && size; i++) {
++        size_t sz = size > 4096 ? 4096 : size;
++
++        qtd->buffers[i] = cdi_mem_alloc(4096, 12
++                                              | CDI_MEM_PHYS_CONTIGUOUS
++                                              | CDI_MEM_DMA_4G
++                                              | CDI_MEM_NOINIT);
++        qtd->qtd.buffers[i] = qtd->buffers[i]->paddr.items[0].start;
++
++        if (token == CDI_USB_OUT || token == CDI_USB_SETUP) {
++            memcpy(qtd->buffers[i]->vaddr,
++                   (void *)((uintptr_t)buffer + i * 4096), sz);
++        }
++
++        size -= sz;
++    }
++
++    qtd->cdi_mem_area = qtd_mem;
++    qtd->paddr = qtd_mem->paddr.items[0].start + offsetof(ehci_fat_qtd_t, qtd);
++
++    qtd->result = result;
++
++    enter_qtd(qh, qtd);
++}
++
++
++void ehci_enqueue(struct cdi_usb_hc *cdi_hc,
++                  const struct cdi_usb_hc_transmission *trans)
++{
++    (void)cdi_hc;
++
++    ehci_fat_qh_t *qh = trans->ta;
++    bool first = true;
++    size_t sz = trans->size;
++    char *buf = trans->buffer;
++    int toggle = trans->toggle;
++    size_t mps = EHCI_QHES0_READ_MPL(qh->qh.ep_state[0]);
++
++    *trans->result = CDI_USB_OK;
++
++    while (sz || first) {
++        first = false;
++
++        size_t iter_sz = sz > 4096 * 5 ? 4096 * 5 : sz;
++
++        create_qtd(qh, trans->token, toggle, buf, iter_sz, trans->result);
++
++        buf += iter_sz;
++        sz -= iter_sz;
++
++        toggle ^= ((iter_sz + mps - 1) / mps) & 1;
++    }
++}
++
++
++void ehci_wait_transaction(struct cdi_usb_hc *cdi_hc,
++                           cdi_usb_hc_transaction_t ta)
++{
++    (void)cdi_hc;
++
++    ehci_fat_qh_t *qh = ta;
++    bool had_timeout = false;
++
++    irq_handler(&cdi_hc->dev);
++
++    while (qh->first_qtd) {
++        if (!had_timeout) {
++            if (!(qh->qh.overlay.status & EHCI_QTDS_ACTIVE)) {
++                qh->qh.overlay.next_qtd = qh->first_qtd->paddr;
++            }
++
++            uint64_t timestamp = cdi_elapsed_ms();
++
++            while ((qh->first_qtd->qtd.status & EHCI_QTDS_ACTIVE) &&
++                   cdi_elapsed_ms() - timestamp < EHCI_TIMEOUT)
++            {
++                // I don't really know who's to blame for this (qemu or
++                // t?ndur), and actually, I don't even want to know.
++                // As a matter of fact, qemu will not work on the async
++                // schedule if the async advance doorbell is set but the driver
++                // has not acknowledged this; however, the interrupt handler
++                // will always clear that bit and the interrupt handler is
++                // active all the time, so something is apparently sometimes
++                // blocking the handler from being executed. Force it here to
++                // prevent qemu's HC from stalling.
++                irq_handler(&cdi_hc->dev);
++            }
++
++            had_timeout = qh->first_qtd->qtd.status & EHCI_QTDS_ACTIVE;
++        }
++
++        if (had_timeout) {
++            // Stop this queue
++            qh->qh.overlay.next_qtd = EHCI_T;
++            qh->qh.overlay.status &= ~(uint32_t)EHCI_QTDS_ACTIVE;
++
++            *qh->first_qtd->result = CDI_USB_TIMEOUT;
++        }
++
++        retire_qtd(qh->first_qtd);
++    }
++}
++
++
++void ehci_destroy_transaction(struct cdi_usb_hc *cdi_hc,
++                              cdi_usb_hc_transaction_t ta)
++{
++    struct ehci *hc = CDI_UPCAST(cdi_hc, struct ehci, hc);
++    ehci_fat_qh_t *qh = ta;
++
++    qh->qh.overlay.next_qtd = EHCI_T;
++
++    uint64_t timestamp = cdi_elapsed_ms();
++
++    while ((qh->qh.overlay.status & EHCI_QTDS_ACTIVE) &&
++           cdi_elapsed_ms() - timestamp < EHCI_TIMEOUT)
++    {
++        // See above.
++        irq_handler(&cdi_hc->dev);
++    }
++
++    if (qh->qh.overlay.status & EHCI_QTDS_ACTIVE) {
++        qh->qh.overlay.status &= ~(uint32_t)EHCI_QTDS_ACTIVE;
++        // Could probably be solved more elegantly, but we are in a timeout
++        // already, so waiting a bit longer will not be that big of a problem
++        // (the sleep is here to ensure that the HC is no longer trying to work
++        // on the qTDs belonging to this QH)
++        cdi_sleep_ms(100);
++    }
++
++    while (qh->first_qtd) {
++        retire_qtd(qh->first_qtd);
++    }
++    retire_qh(hc, qh);
++}
+diff --git a/ehci/ehci.h b/ehci/ehci.h
+new file mode 100644
+index 0000000..9207170
+--- /dev/null
++++ b/ehci/ehci.h
+@@ -0,0 +1,290 @@
++/******************************************************************************
++ * Copyright (c) 2015 Max Reitz                                               *
++ *                                                                            *
++ * Permission is hereby granted,  free of charge,  to any person  obtaining a *
++ * copy of this software and associated documentation files (the "Software"), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
++ * and/or  sell copies of the  Software,  and to permit  persons to whom  the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED,  INCLUDING BUT NOT LIMITED TO THE WARRANTIES  OF MERCHANTABILITY, *
++ * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH  THE SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#ifndef EHCI_H
++#define EHCI_H
++
++#include <stddef.h>
++#include <stdint.h>
++
++#include <cdi/lists.h>
++#include <cdi/mem.h>
++#include <cdi/usb.h>
++#include <cdi/usb_hcd.h>
++
++
++struct ehci_registers {
++    uint32_t usbcmd;
++    uint32_t usbsts;
++    uint32_t usbintr;
++    uint32_t frindex;
++    uint32_t ctrldssegment;
++    uint32_t periodiclistbase;
++    uint32_t asynclistaddr;
++    uint8_t reserved[0x24];
++    uint32_t configflag;
++    uint32_t portsc[];
++} __attribute__((packed));
++
++struct ehci_capabilities {
++    uint8_t caplength;
++    uint8_t reserved;
++    uint16_t hciversion;
++    uint32_t hcsparams;
++    uint32_t hccparams;
++    uint64_t hcsp_portroute;
++} __attribute__((packed));
++
++struct ehci_qtd {
++    uint32_t next_qtd;
++    uint32_t alt_next_qtd;
++    uint32_t status;
++    uint32_t buffers[5];
++
++    // 64-bit structures
++    uint32_t ext_buffer[5];
++} __attribute__((packed));
++
++struct ehci_qh {
++    uint32_t next_qh;
++    uint32_t ep_state[2];
++    uint32_t current_qtd;
++    struct ehci_qtd overlay;
++} __attribute__((packed));
++
++typedef struct ehci_fat_qh ehci_fat_qh_t;
++typedef struct ehci_fat_qtd ehci_fat_qtd_t;
++
++#define DIFF_TO_MULTIPLE(value, divisor) \
++    ((divisor) - ((((value) + (divisor) - 1) % (divisor)) + 1))
++
++struct ehci_fat_qh {
++    volatile struct ehci_qh qh;
++
++    // Align the QH to 128 bytes (something with cache lines?). Otherwise,
++    // there may be conflicts between data we are writing to our very own
++    // fields provided by ehci_fat_qh_t and writes done by the HC to this
++    // structure.
++    uint8_t alignment[DIFF_TO_MULTIPLE(sizeof(struct ehci_qh), 128)];
++
++    struct cdi_mem_area *cdi_mem_area;
++    uintptr_t paddr;
++
++    ehci_fat_qh_t *next, *previous;
++    ehci_fat_qtd_t *first_qtd, *last_qtd;
++};
++
++struct ehci_fat_qtd {
++    volatile struct ehci_qtd qtd;
++
++    // Align the qTD to a multiple of 128 bytes.
++    uint8_t alignment[DIFF_TO_MULTIPLE(sizeof(struct ehci_qtd), 128)];
++
++    struct cdi_mem_area *cdi_mem_area;
++    uintptr_t paddr;
++
++    ehci_fat_qh_t *qh;
++    ehci_fat_qtd_t *next;
++
++    struct cdi_mem_area *buffers[5];
++
++    void *write_back;
++    size_t write_back_size;
++
++    cdi_usb_transmission_result_t *result;
++};
++
++struct ehci {
++    struct cdi_usb_hc hc;
++
++    volatile struct ehci_capabilities *caps;
++    volatile struct ehci_registers *regs;
++
++    struct cdi_mem_area *periodic_list_mem;
++    volatile uint32_t *periodic_list;
++
++    ehci_fat_qh_t *async_start;
++    cdi_list_t retired_qhs;
++};
++
++#define PCI_CLASS_SERIAL_BUS_CONTROLLER     0x0c
++#define PCI_SUBCLASS_USB_HOST_CONTROLLER    0x03
++#define PCI_INTERFACE_EHCI                  0x20
++
++#define EHCI_T       (1u << 0)
++#define EHCI_ITD     (0u << 1)
++#define EHCI_QH      (1u << 1)
++#define EHCI_SITD    (2u << 1)
++#define EHCI_FSTN    (3u << 1)
++
++// Operational Registers: USBCMD
++#define EHCI_CMD_RSVD   0xff00ff00u // Consider async sched park mode reserved
++#define EHCI_CMD_ITC(x) ((x) << 16) // Interrupt Threshold Control
++#define EHCI_CMD_LHCRES (1 <<  7)   // Light Host Controller Reset
++#define EHCI_CMD_IAADB  (1 <<  6)   // Interrupt on Async Advance Doorbell
++#define EHCI_CMD_ASE    (1 <<  5)   // Async Schedule Enable
++#define EHCI_CMD_PSE    (1 <<  4)   // Periodic Schedule Enable
++#define EHCI_CMD_FLS_1K (0 <<  2)   // Frame List Size: 1024 elements (default)
++#define EHCI_CMD_HCRES  (1 <<  1)   // Host Controller Reset
++#define EHCI_CMD_RS     (1 <<  0)   // Run/Stop (1 = Run)
++
++// Operational Registers: USBINTR
++#define EHCI_INT_IAA    (1 <<  5)   // Interrupt on Async Advance Enable
++#define EHCI_INT_HSE    (1 <<  4)   // Host System Error Enable
++#define EHCI_INT_FLR    (1 <<  3)   // Frame List Rollover Enable
++#define EHCI_INT_PCD    (1 <<  2)   // Port Change Detect Enable
++#define EHCI_INT_USBERR (1 <<  1)   // USB Error Interrupt
++#define EHCI_INT_USBINT (1 <<  0)   // USB Interrupt
++
++// Operational Registers: USBSTS
++#define EHCI_STS_ASS    (1 << 15)   // Async Schedule Status
++#define EHCI_STS_PSS    (1 << 14)   // Periodic Schedule Status
++#define EHCI_STS_REC    (1 << 13)   // Reclamation bit
++#define EHCI_STS_HCH    (1 << 12)   // Host Controller Halted
++#define EHCI_STS_IAA    EHCI_INT_IAA    // Interrupt on Async Advance
++#define EHCI_STS_HSE    EHCI_INT_HSE    // Host System Error
++#define EHCI_STS_FLR    EHCI_INT_FLR    // Frame List Rollover
++#define EHCI_STS_PCD    EHCI_INT_PCD    // Port Change Detect
++#define EHCI_STS_USBERR EHCI_INT_USBERR // USB Error Interrupt
++#define EHCI_STS_USBINT EHCI_INT_USBINT // USB Interrupt
++
++// Operational Registers: FRINDEX
++#define EHCI_FI_FI(x)   (((x) >> 3) & 0x3ff)    // Frame Index
++
++// Operational Registers: CONFIGFLAG
++#define EHCI_CF_CF      (1 <<  0)   // Configure Flag
++
++// Operational Registers: PORTSC
++#define EHCI_PSC_WKOC_E     (1 << 22)   // Wake on Over-current Enable
++#define EHCI_PSC_WKDSCNNT_E (1 << 21)   // Wake on Disconnect Enable
++#define EHCI_PSC_WKCNNT_E   (1 << 20)   // Wake on Connect Enable
++#define EHCI_PSC_PTC_DIS    (0 << 16)   // Port Test Control: disabled
++#define EHCI_PSC_PTC_J      (1 << 16)   // Port Test Control: J-State
++#define EHCI_PSC_PTC_K      (2 << 16)   // Port Test Control: K-State
++#define EHCI_PSC_PTC_SE0    (3 << 16)   // Port Test Control: SE0 Nak
++#define EHCI_PSC_PTC_PKT    (4 << 16)   // Port Test Control: Packet
++#define EHCI_PSC_PTC_FEN    (5 << 16)   // Port Test Control: Force Enable
++#define EHCI_PSC_PI_OFF     (0 << 14)   // Port Indicators: off
++#define EHCI_PSC_PI_AMBER   (1 << 14)   // Port Indicators: amber
++#define EHCI_PSC_PI_GREEN   (2 << 14)   // Port Indicators: green
++#define EHCI_PSC_PO         (1 << 13)   // Port Owner
++#define EHCI_PSC_PP         (1 << 12)   // Port Power
++#define EHCI_PSC_LS_MASK    (3 << 10)   // Line Status mask
++#define EHCI_PSC_LS_SE0     (0 << 10)   // Line Status: SE0
++#define EHCI_PSC_LS_K       (1 << 10)   // Line Status: K-State
++#define EHCI_PSC_LS_J       (2 << 10)   // Line Status: J-State
++#define EHCI_PSC_RES        (1 <<  8)   // Port Reset
++#define EHCI_PSC_SUS        (1 <<  7)   // Suspend
++#define EHCI_PSC_FPR        (1 <<  6)   // Force Port Resume
++#define EHCI_PSC_OCC        (1 <<  5)   // Over-current Change
++#define EHCI_PSC_OCA        (1 <<  4)   // Over-current Active
++#define EHCI_PSC_PEDC       (1 <<  3)   // Port Enable/Disable Change
++#define EHCI_PSC_PED        (1 <<  2)   // Port Enabled/Disabled
++#define EHCI_PSC_CSC        (1 <<  1)   // Connect Status Change
++#define EHCI_PSC_CCS        (1 <<  0)   // Current Connect Status
++
++// Capability Registers: HCSPARAMS
++#define EHCI_HCS_N_CC(x)    (((x) >> 12) & 0xf) // Number of Companion
++                                                // Controllers
++#define EHCI_HCS_N_PCC(x)   (((x) >>  8) & 0xf) // Number of Ports per CC
++#define EHCI_HCS_PRR        (1 <<  7)           // Port Routing Rules
++#define EHCI_HCS_PPC        (1 <<  4)           // Port Power Control
++#define EHCI_HCS_N_PORTS(x) (((x) >>  0) & 0xf) // Number of Ports
++
++// Capability Registers: HCCPARAMS
++#define EHCI_HCC_EECP(x)    (((x) >> 8) & 0xff) // EHCI Extended Capabilities
++                                                // Pointer
++#define EHCI_HCC_64         (1 <<  0)           // 64-bit Addressing Capability
++
++// EHCI Extended Capability
++#define EHCI_EEC_NEXT(x)    (((x) >> 8) & 0xff)
++#define EHCI_EEC_ID(x)      (((x) >> 0) & 0xff)
++
++#define EHCI_EECID_LEGSUP   0x01
++
++// QH.ep_state[0] (Endpoint Characteristics)
++#define EHCI_QHES0_RL(x)    ((uint32_t)(x) << 28) // Nak Count Reload
++#define EHCI_QHES0_C        (1 << 27)   // Control Endpoint Flag
++#define EHCI_QHES0_MPL(x)   ((x) << 16) // Maximum Packet Length
++#define EHCI_QHES0_READ_MPL(x)  (((x) >> 16) & 0x7ff)
++#define EHCI_QHES0_H        (1 << 15)   // Head of Reclamation List flag
++#define EHCI_QHES0_DTC      (1 << 14)   // Data Toggle Control
++#define EHCI_QHES0_EPS_MASK (3 << 12)   // Endpoint Speed mask
++#define EHCI_QHES0_EPS_FS   (0 << 12)   // Endpoint Speed: Full Speed
++#define EHCI_QHES0_EPS_LS   (1 << 12)   // Endpoint Speed: Low Speed
++#define EHCI_QHES0_EPS_HS   (2 << 12)   // Endpoint Speed: High Speed
++#define EHCI_QHES0_EP(x)    ((x) <<  8) // Endpoint Number
++#define EHCI_QHES0_I        (1 <<  7)   // Inactive on Next Transaction
++#define EHCI_QHES0_DEV(x)   ((x) <<  0) // Device Address
++
++// QH.ep_state[1] (Endpoint Capabilities)
++#define EHCI_QHES1_MULT(x)  ((uint32_t)(x) << 30) // High-Bandwidth Pipe
++                                                  // Multiplier
++#define EHCI_QHES1_PORT(x)  ((x) << 23) // Port Number
++#define EHCI_QHES1_HUB(x)   ((x) << 16) // Hub Address
++#define EHCI_QHES1_SCM(x)   ((x) <<  8) // Split Completion Mask
++#define EHCI_QHES1_ISM(x)   ((x) <<  0) // Interrupt Schedule Mask
++
++// qTD.status (Token)
++#define EHCI_QTDS_DT(x)     ((uint32_t)(x) << 31) // Data Toggle
++#define EHCI_QTDS_XFLEN(x)  ((x) << 16) // Total Bytes to Transfer
++#define EHCI_QTDS_IOC       (1 << 15)   // Interrupt on Complete
++#define EHCI_QTDS_CP(x)     ((x) << 12) // Current Page
++#define EHCI_QTDS_CERR(x)   ((x) << 10) // Error Counter
++#define EHCI_QTDS_PID_OUT   (0 <<  8)   // PID: OUT
++#define EHCI_QTDS_PID_IN    (1 <<  8)   // PID: IN
++#define EHCI_QTDS_PID_SETUP (2 <<  8)   // PID: SETUP
++#define EHCI_QTDS_ACTIVE    (1 <<  7)   // Status: Active
++#define EHCI_QTDS_HALTED    (1 <<  6)   // Status: Halted
++#define EHCI_QTDS_BUFERR    (1 <<  5)   // Status: Data Buffer Error
++#define EHCI_QTDS_BABBLE    (1 <<  4)   // Status: Babble Detected
++#define EHCI_QTDS_XACTERR   (1 <<  3)   // Status: Transaction Error
++#define EHCI_QTDS_MuF       (1 <<  2)   // Status: Missed Microframe
++#define EHCI_QTDS_SPLITXS   (1 <<  1)   // Status: Split Transaction State
++#define EHCI_QTDS_P_ERR     (1 <<  0)   // Status: Ping State / Error
++
++// High Speed Error Mask
++#define EHCI_QTDS_HS_ERR_MASK \
++    (EHCI_QTDS_HALTED | EHCI_QTDS_BUFERR | EHCI_QTDS_BABBLE | \
++     EHCI_QTDS_XACTERR | EHCI_QTDS_MuF)
++
++// Low/Full Speed Error Mask
++#define EHCI_QTDS_LFS_ERR_MASK \
++    (EHCI_QTDS_HS_ERR_MASK | EHCI_QTDS_P_ERR)
++
++
++struct cdi_device *ehci_init_device(struct cdi_bus_data *bus_data);
++
++void ehci_rh_port_down(struct cdi_usb_hub *hub, int index);
++void ehci_rh_port_up(struct cdi_usb_hub *hub, int index);
++cdi_usb_port_status_t ehci_rh_port_status(struct cdi_usb_hub *hub, int index);
++
++cdi_usb_hc_transaction_t
++    ehci_create_transaction(struct cdi_usb_hc *hc,
++                            const struct cdi_usb_hc_ep_info *target);
++void ehci_enqueue(struct cdi_usb_hc *hc,
++                  const struct cdi_usb_hc_transmission *trans);
++void ehci_wait_transaction(struct cdi_usb_hc *hc, cdi_usb_hc_transaction_t ta);
++void ehci_destroy_transaction(struct cdi_usb_hc *hc,
++                              cdi_usb_hc_transaction_t ta);
++
++#endif
+diff --git a/ehci/main.c b/ehci/main.c
+new file mode 100644
+index 0000000..62939b2
+--- /dev/null
++++ b/ehci/main.c
+@@ -0,0 +1,68 @@
++/******************************************************************************
++ * Copyright (c) 2015 Max Reitz                                               *
++ *                                                                            *
++ * Permission is hereby granted,  free of charge,  to any person  obtaining a *
++ * copy of this software and associated documentation files (the "Software"), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
++ * and/or  sell copies of the  Software,  and to permit  persons to whom  the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED,  INCLUDING BUT NOT LIMITED TO THE WARRANTIES  OF MERCHANTABILITY, *
++ * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH  THE SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#include <cdi.h>
++#include <cdi/usb_hcd.h>
++
++#include "ehci.h"
++
++
++#define DRIVER_NAME "ehci"
++
++
++static struct cdi_usb_hcd ehcd;
++
++static int ehcd_init(void)
++{
++    cdi_driver_init(&ehcd.drv);
++    return 0;
++}
++
++static int ehcd_destroy(void)
++{
++    cdi_driver_destroy(&ehcd.drv);
++    return 0;
++}
++
++static struct cdi_usb_hcd ehcd = {
++    .drv = {
++        .name           = DRIVER_NAME,
++        .type           = CDI_USB_HCD,
++        .bus            = CDI_PCI,
++        .init           = ehcd_init,
++        .destroy        = ehcd_destroy,
++        .init_device    = ehci_init_device,
++    },
++
++    .rh_drv = {
++        .port_disable       = ehci_rh_port_down,
++        .port_reset_enable  = ehci_rh_port_up,
++        .port_status        = ehci_rh_port_status,
++    },
++
++    .create_transaction     = ehci_create_transaction,
++    .enqueue                = ehci_enqueue,
++    .wait_transaction       = ehci_wait_transaction,
++    .destroy_transaction    = ehci_destroy_transaction,
++};
++
++CDI_DRIVER(DRIVER_NAME, ehcd)
+-- 
+2.4.0
+
+
+From max at tyndur.org  Mon May 11 21:59:29 2015
+From: max at tyndur.org (Max Reitz)
+Date: Mon, 11 May 2015 21:59:29 +0200
+Subject: [cdi-devel] [PATCH v3 09/10] usb: Add USB 2.0 bus driver
+In-Reply-To: <1431374370-17120-1-git-send-email-max@tyndur.org>
+References: <1431374370-17120-1-git-send-email-max@tyndur.org>
+Message-ID: <1431374370-17120-10-git-send-email-max@tyndur.org>
+
++ This adds a USB 2.0 bus driver. It is missing support for USB 3.x
+  (obviously), and also interrupt and isochronous transfers (and other
+  things, too). Also, it is probably bad (e.g. there is only a single
+  counter for device IDs instead of keeping track of which IDs are used
+  and which are not).
+
+Signed-off-by: Max Reitz <max at tyndur.org>
+---
+ usb/main.c     |  61 ++++
+ usb/usb-hubs.h |  78 ++++++
+ usb/usb.c      | 871 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ usb/usb.h      |  86 ++++++
+ 4 files changed, 1096 insertions(+)
+ create mode 100644 usb/main.c
+ create mode 100644 usb/usb-hubs.h
+ create mode 100644 usb/usb.c
+ create mode 100644 usb/usb.h
+
+diff --git a/usb/main.c b/usb/main.c
+new file mode 100644
+index 0000000..3add372
+--- /dev/null
++++ b/usb/main.c
+@@ -0,0 +1,61 @@
++/******************************************************************************
++ * Copyright (c) 2015 Max Reitz                                               *
++ *                                                                            *
++ * Permission is hereby granted,  free of charge,  to any person  obtaining a *
++ * copy of this software and associated documentation files (the "Software"), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
++ * and/or  sell copies of the  Software,  and to permit  persons to whom  the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED,  INCLUDING BUT NOT LIMITED TO THE WARRANTIES  OF MERCHANTABILITY, *
++ * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH  THE SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#include <cdi.h>
++#include <cdi/usb.h>
++
++#include "usb.h"
++
++
++#define DRIVER_NAME "usb"
++
++
++static struct cdi_usb_driver usbd;
++
++static int usbd_init(void)
++{
++    cdi_driver_init(&usbd.drv);
++    return 0;
++}
++
++static int usbd_destroy(void)
++{
++    cdi_driver_destroy(&usbd.drv);
++    return 0;
++}
++
++static struct cdi_usb_driver usbd = {
++    .drv = {
++        .name           = DRIVER_NAME,
++        .type           = CDI_USB,
++        .bus            = CDI_USB_HCD,
++        .init           = usbd_init,
++        .destroy        = usbd_destroy,
++        .init_device    = usb_init_hc,
++    },
++
++    .get_endpoint_descriptor    = usb_get_endpoint_descriptor,
++    .control_transfer           = usb_control_transfer,
++    .bulk_transfer              = usb_bulk_transfer,
++};
++
++CDI_DRIVER(DRIVER_NAME, usbd)
+diff --git a/usb/usb-hubs.h b/usb/usb-hubs.h
+new file mode 100644
+index 0000000..da8ac3e
+--- /dev/null
++++ b/usb/usb-hubs.h
+@@ -0,0 +1,78 @@
++/******************************************************************************
++ * Copyright (c) 2015 Max Reitz                                               *
++ *                                                                            *
++ * Permission is hereby granted,  free of charge,  to any person  obtaining a *
++ * copy of this software and associated documentation files (the "Software"), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
++ * and/or  sell copies of the  Software,  and to permit  persons to whom  the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED,  INCLUDING BUT NOT LIMITED TO THE WARRANTIES  OF MERCHANTABILITY, *
++ * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH  THE SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#ifndef USB_HUBS_H
++#define USB_HUBS_H
++
++#include <stdint.h>
++
++#include "usb.h"
++
++
++struct usb_hub_descriptor {
++    uint8_t b_length;
++    uint8_t b_descriptor_type;
++    uint8_t b_nbr_ports;
++    uint16_t w_hub_characteristics;
++    uint8_t b_pwr_on_2_pwr_good;
++    uint8_t b_hub_contr_current;
++    uint8_t device_removable[];
++} __attribute__((packed));
++
++
++enum {
++    USB_DESC_HUB = 0x29,
++};
++
++// hub device features
++enum {
++    C_HUB_LOCAL_POWER = 0,
++    C_HUB_OVER_CURRENT,
++};
++
++// hub port features
++enum {
++    PORT_CONNECTION = 0,
++    PORT_ENABLE,
++    PORT_SUSPEND,
++    PORT_OVER_CURRENT,
++    PORT_RESET,
++
++    PORT_POWER = 8,
++    PORT_LOW_SPEED,
++    PORT_HIGH_SPEED,
++
++    C_PORT_CONNECTION = 16,
++    C_PORT_ENABLE,
++    C_PORT_SUSPEND,
++    C_PORT_OVER_CURRENT,
++    C_PORT_RESET,
++    PORT_TEST,
++    PORT_INDICATOR,
++};
++
++typedef struct usb_hub_device {
++    struct cdi_usb_hub cdi;
++    usb_hub_t *hub;
++} usb_hub_device_t;
++
++#endif
+diff --git a/usb/usb.c b/usb/usb.c
+new file mode 100644
+index 0000000..b9fc89f
+--- /dev/null
++++ b/usb/usb.c
+@@ -0,0 +1,871 @@
++/******************************************************************************
++ * Copyright (c) 2015 Max Reitz                                               *
++ *                                                                            *
++ * Permission is hereby granted,  free of charge,  to any person  obtaining a *
++ * copy of this software and associated documentation files (the "Software"), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
++ * and/or  sell copies of the  Software,  and to permit  persons to whom  the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED,  INCLUDING BUT NOT LIMITED TO THE WARRANTIES  OF MERCHANTABILITY, *
++ * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH  THE SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#include <assert.h>
++#include <errno.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include <cdi.h>
++#include <cdi/misc.h>
++#include <cdi/usb.h>
++#include <cdi/usb_hcd.h>
++
++#include "usb.h"
++#include "usb-hubs.h"
++
++
++// #define DEBUG
++
++#ifdef DEBUG
++#define DPRINTF(...) printf(__VA_ARGS__)
++#else
++#define DPRINTF(...)
++#endif
++
++
++static int current_usb_addr = 1;
++
++
++static cdi_usb_transmission_result_t
++    do_control_transfer(struct cdi_usb_hc *hc, int dev, cdi_usb_speed_t speed,
++                        int tt_addr, int tt_port, const usb_endpoint_t *ep,
++                        const struct cdi_usb_setup_packet *setup, void *data)
++{
++    struct cdi_usb_hcd *hcd = CDI_UPCAST(hc->dev.driver, struct cdi_usb_hcd,
++                                         drv);
++    cdi_usb_hc_transaction_t ta;
++    cdi_usb_transmission_result_t r1, r2, r3;
++
++    ta = hcd->create_transaction(hc, &(struct cdi_usb_hc_ep_info){
++            .dev        = dev,
++            .ep         = ep->ep,
++            .ep_type    = ep->type,
++            .speed      = speed,
++            .mps        = ep->mps,
++            .tt_addr    = tt_addr,
++            .tt_port    = tt_port
++        });
++
++    hcd->enqueue(hc, &(struct cdi_usb_hc_transmission){
++            .ta     = ta,
++            .token  = CDI_USB_SETUP,
++            .buffer = (void *)setup,
++            .size   = sizeof(*setup),
++            .toggle = 0,
++            .result = &r1
++        });
++
++    if (data) {
++        hcd->enqueue(hc, &(struct cdi_usb_hc_transmission){
++                .ta     = ta,
++                .token  = setup->bm_request_type & CDI_USB_CREQ_IN
++                        ? CDI_USB_IN : CDI_USB_OUT,
++                .buffer = data,
++                .size   = setup->w_length,
++                .toggle = 1,
++                .result = &r2
++            });
++    } else {
++        r2 = CDI_USB_OK;
++    }
++
++    hcd->enqueue(hc, &(struct cdi_usb_hc_transmission){
++            .ta     = ta,
++            .token  = setup->bm_request_type & CDI_USB_CREQ_IN ? CDI_USB_OUT
++                                                               : CDI_USB_IN,
++            .toggle = 1,
++            .result = &r3
++        });
++
++    hcd->wait_transaction(hc, ta);
++    hcd->destroy_transaction(hc, ta);
++
++    return r1 ? r1 : r2 ? r2 : r3;
++}
++
++static cdi_usb_transmission_result_t
++    control_transfer(const usb_device_t *dev, const usb_endpoint_t *ep,
++                     const struct cdi_usb_setup_packet *setup, void *data)
++{
++    return do_control_transfer(dev->hc, dev->id, dev->speed, dev->tt_addr,
++                               dev->tt_port, ep, setup, data);
++}
++
++
++static int get_mps0(usb_hub_t *hub, int hub_port, cdi_usb_speed_t speed)
++{
++    cdi_usb_transmission_result_t res;
++    struct cdi_usb_device_descriptor device_descriptor;
++    int tt_addr = 0, tt_port = 0;
++
++    if (speed < CDI_USB_HIGH_SPEED && hub->ldev) {
++        if (hub->ldev->dev->speed < CDI_USB_HIGH_SPEED) {
++            tt_addr = hub->ldev->dev->tt_addr;
++            tt_port = hub->ldev->dev->tt_port;
++        } else {
++            tt_addr = hub->ldev->dev->id;
++            tt_port = hub_port;
++        }
++    }
++
++    res = do_control_transfer(hub->hc, 0, speed, tt_addr, tt_port,
++        &(usb_endpoint_t){
++            .type       = CDI_USB_CONTROL,
++            .mps        = 8
++        }, &(struct cdi_usb_setup_packet){
++            .bm_request_type    = CDI_USB_CREQ_DEVICE | CDI_USB_CREQ_IN,
++            .b_request          = CDI_USB_CREQ_GET_DESCRIPTOR,
++            .w_value            = (CDI_USB_DESC_DEVICE << 8) | 0,
++            .w_length           = 8
++        }, &device_descriptor);
++
++    if (res != CDI_USB_OK) {
++        return -EIO;
++    }
++
++    return device_descriptor.b_max_packet_size_0;
++}
++
++
++static usb_device_t *enumerate(usb_hub_t *hub, int hub_port,
++                               cdi_usb_speed_t speed, int mps0)
++{
++    cdi_usb_transmission_result_t res;
++    usb_device_t *dev = calloc(1, sizeof(*dev));
++
++    int new_id = current_usb_addr++;
++    dev->hc = hub->hc;
++    dev->speed = speed;
++
++    if (speed < CDI_USB_HIGH_SPEED && hub->ldev) {
++        if (hub->ldev->dev->speed < CDI_USB_HIGH_SPEED) {
++            dev->tt_addr = hub->ldev->dev->tt_addr;
++            dev->tt_port = hub->ldev->dev->tt_port;
++        } else {
++            dev->tt_addr = hub->ldev->dev->id;
++            dev->tt_port = hub_port;
++        }
++    }
++
++    dev->eps[0][0].type = CDI_USB_CONTROL;
++    dev->eps[0][0].mps  = mps0;
++
++    res = control_transfer(dev, &dev->eps[0][0], &(struct cdi_usb_setup_packet){
++            .bm_request_type    = CDI_USB_CREQ_DEVICE | CDI_USB_CREQ_OUT,
++            .b_request          = CDI_USB_CREQ_SET_ADDRESS,
++            .w_value            = new_id
++        }, NULL);
++    if (res != CDI_USB_OK) {
++        free(dev);
++        return NULL;
++    }
++
++    dev->id = new_id;
++
++    res = control_transfer(dev, &dev->eps[0][0], &(struct cdi_usb_setup_packet){
++            .bm_request_type    = CDI_USB_CREQ_DEVICE | CDI_USB_CREQ_IN,
++            .b_request          = CDI_USB_CREQ_GET_DESCRIPTOR,
++            .w_value            = (CDI_USB_DESC_DEVICE << 8) | 0,
++            .w_length           = sizeof(dev->dev_desc)
++        }, &dev->dev_desc);
++    if (res != CDI_USB_OK) {
++        free(dev);
++        return NULL;
++    }
++
++    return dev;
++}
++
++
++#ifdef DEBUG
++static void get_string_descriptor(usb_device_t *dev, int index,
++                                  struct cdi_usb_string_descriptor *dst)
++{
++    cdi_usb_transmission_result_t res;
++
++    res = control_transfer(dev, &dev->eps[0][0], &(struct cdi_usb_setup_packet){
++            .bm_request_type    = CDI_USB_CREQ_DEVICE | CDI_USB_CREQ_IN,
++            .b_request          = CDI_USB_CREQ_GET_DESCRIPTOR,
++            .w_value            = (CDI_USB_DESC_STRING << 8) | index,
++            .w_length           = 1
++        }, dst);
++    if (res != CDI_USB_OK || !dst->b_length) {
++        dst->b_length = 0;
++        return;
++    }
++
++    res = control_transfer(dev, &dev->eps[0][0], &(struct cdi_usb_setup_packet){
++            .bm_request_type    = CDI_USB_CREQ_DEVICE | CDI_USB_CREQ_IN,
++            .b_request          = CDI_USB_CREQ_GET_DESCRIPTOR,
++            .w_value            = (CDI_USB_DESC_STRING << 8) | index,
++            .w_length           = dst->b_length
++        }, dst);
++    if (res != CDI_USB_OK) {
++        dst->b_length = 0;
++        return;
++    }
++}
++#endif
++
++
++static int get_configurations(usb_device_t *dev)
++{
++    cdi_usb_transmission_result_t res;
++    struct cdi_usb_configuration_descriptor config;
++
++    dev->configs = calloc(1, dev->dev_desc.b_num_configurations
++                             * sizeof(*dev->configs));
++
++    for (int i = 0; i < (int)dev->dev_desc.b_num_configurations; i++) {
++        res = control_transfer(dev, &dev->eps[0][0],
++            &(struct cdi_usb_setup_packet){
++                .bm_request_type    = CDI_USB_CREQ_DEVICE | CDI_USB_CREQ_IN,
++                .b_request          = CDI_USB_CREQ_GET_DESCRIPTOR,
++                .w_value            = (CDI_USB_DESC_CONFIGURATION << 8) | i,
++                .w_length           = sizeof(config)
++            }, &config);
++        if (res != CDI_USB_OK) {
++            goto fail;
++        }
++
++        dev->configs[i] = malloc(config.w_total_length);
++        res = control_transfer(dev, &dev->eps[0][0],
++            &(struct cdi_usb_setup_packet){
++                .bm_request_type    = CDI_USB_CREQ_DEVICE | CDI_USB_CREQ_IN,
++                .b_request          = CDI_USB_CREQ_GET_DESCRIPTOR,
++                .w_value            = (CDI_USB_DESC_CONFIGURATION << 8) | i,
++                .w_length           = config.w_total_length
++            }, dev->configs[i]);
++        if (res != CDI_USB_OK) {
++            goto fail;
++        }
++    }
++
++    return 0;
++
++fail:
++    for (int i = 0; i < (int)dev->dev_desc.b_num_configurations; i++) {
++        free(dev->configs[i]);
++    }
++    free(dev->configs);
++    return -EIO;
++}
++
++
++static bool compare_configurations(usb_device_t *dev, int i, int j)
++{
++    // TODO: Prefer self-powered
++    if (dev->configs[i]->b_max_power != dev->configs[j]->b_max_power) {
++        return dev->configs[i]->b_max_power > dev->configs[j]->b_max_power;
++    }
++
++    if (dev->configs[i]->b_num_interfaces != dev->configs[j]->b_num_interfaces)
++    {
++        return dev->configs[i]->b_num_interfaces
++               > dev->configs[j]->b_num_interfaces;
++    }
++
++    return false;
++}
++
++
++static int choose_configuration(usb_device_t *dev)
++{
++    cdi_usb_transmission_result_t res;
++    int best_config = 0;
++
++    for (int i = 1; i < (int)dev->dev_desc.b_num_configurations; i++) {
++        if (compare_configurations(dev, i, best_config)) {
++            best_config = i;
++        }
++    }
++
++    dev->config = dev->configs[best_config];
++
++    res = control_transfer(dev, &dev->eps[0][0], &(struct cdi_usb_setup_packet){
++            .bm_request_type    = CDI_USB_CREQ_DEVICE | CDI_USB_CREQ_OUT,
++            .b_request          = CDI_USB_CREQ_SET_CONFIGURATION,
++            .w_value            = dev->config->b_configuration_value,
++        }, NULL);
++    if (res != CDI_USB_OK) {
++        dev->config = NULL;
++        return -EIO;
++    }
++
++    return 0;
++}
++
++
++#ifdef DEBUG
++static void debug_device(usb_device_t *dev)
++{
++    printf("[usb] new %s device %04x:%04x (%x.%x.%x) ",
++           dev->speed == CDI_USB_LOW_SPEED  ?  "low speed" :
++           dev->speed == CDI_USB_FULL_SPEED ? "full speed" :
++           dev->speed == CDI_USB_HIGH_SPEED ? "high speed" :
++           dev->speed == CDI_USB_SUPERSPEED ? "superspeed" :
++                                              "futurespeed",
++           dev->dev_desc.id_vendor, dev->dev_desc.id_product,
++           dev->dev_desc.b_device_class,
++           dev->dev_desc.b_device_sub_class,
++           dev->dev_desc.b_device_protocol);
++
++    struct cdi_usb_string_descriptor str;
++
++    if (dev->dev_desc.i_manufacturer) {
++        get_string_descriptor(dev, dev->dev_desc.i_manufacturer, &str);
++        for (int i = 0; i < (str.b_length - 2) / 2; i++) {
++            putchar(str.b_string[i] > 0x7f ? '?' : str.b_string[i]);
++        }
++        putchar(' ');
++    }
++
++    if (dev->dev_desc.i_product) {
++        get_string_descriptor(dev, dev->dev_desc.i_product, &str);
++        for (int i = 0; i < (str.b_length - 2) / 2; i++) {
++            putchar(str.b_string[i] > 0x7f ? '?' : str.b_string[i]);
++        }
++        putchar(' ');
++    }
++
++    putchar('\n');
++}
++
++static void debug_configuration(usb_device_t *dev)
++{
++    printf("[usb] chose configuration %i ", dev->config->b_configuration_value);
++
++    struct cdi_usb_string_descriptor str;
++
++    if (dev->config->i_configuration) {
++        get_string_descriptor(dev, dev->config->i_configuration, &str);
++        putchar('(');
++        for (int i = 0; i < (str.b_length - 2) / 2; i++) {
++            putchar(str.b_string[i] > 0x7f ? '?' : str.b_string[i]);
++        }
++        putchar(')');
++        putchar(' ');
++    }
++
++    printf("with %i interface(s):\n", dev->config->b_num_interfaces);
++
++    struct cdi_usb_interface_descriptor *ifc = (void *)(dev->config + 1);
++    for (int i = 0; i < (int)dev->config->b_num_interfaces; i++) {
++        printf("[usb] ");
++        if (ifc->i_interface) {
++            get_string_descriptor(dev, ifc->i_interface, &str);
++            for (int j = 0; j < (int)dev->config->b_num_interfaces; j++) {
++                putchar(str.b_string[j] > 0x7f ? '?' : str.b_string[j]);
++            }
++            putchar(' ');
++        }
++        printf("%x.%x.%x\n", ifc->b_interface_class,
++               ifc->b_interface_sub_class, ifc->b_interface_protocol);
++
++        ifc = (void *)((struct cdi_usb_endpoint_descriptor *)(ifc + 1)
++                + ifc->b_num_endpoints);
++    }
++}
++#endif
++
++
++static void new_hub_device(usb_logical_device_t *ldev);
++
++static void new_hub(usb_hub_t *hub)
++{
++    for (int i = 0; i < hub->cdi->ports; i++) {
++        hub->drv->port_disable(hub->cdi, i);
++    }
++
++    DPRINTF("[usb] new hub with %i ports detected\n", hub->cdi->ports);
++
++    for (int i = 0; i < hub->cdi->ports; i++) {
++        hub->drv->port_reset_enable(hub->cdi, i);
++        cdi_sleep_ms(5);
++
++        cdi_usb_port_status_t status = hub->drv->port_status(hub->cdi, i);
++        if (!(status & CDI_USB_PORT_CONNECTED)) {
++            hub->drv->port_disable(hub->cdi, i);
++            continue;
++        }
++
++        int mps0 = get_mps0(hub, i, status & CDI_USB_PORT_SPEED_MASK);
++        if (mps0 < 0) {
++            fprintf(stderr, "[usb] failed to inquire MPS0\n");
++            hub->drv->port_disable(hub->cdi, i);
++            continue;
++        }
++
++        hub->drv->port_reset_enable(hub->cdi, i);
++        cdi_sleep_ms(5);
++
++        status = hub->drv->port_status(hub->cdi, i);
++        if (!(status & CDI_USB_PORT_CONNECTED)) {
++            hub->drv->port_disable(hub->cdi, i);
++            continue;
++        }
++
++        usb_device_t *dev = enumerate(hub, i, status & CDI_USB_PORT_SPEED_MASK,
++                                      mps0);
++        if (!dev) {
++            fprintf(stderr, "[usb] failed to enumerate device\n");
++            hub->drv->port_disable(hub->cdi, i);
++            continue;
++        }
++
++#ifdef DEBUG
++        debug_device(dev);
++#endif
++
++        usb_logical_device_t *ldev = NULL;
++        int ldev_ep_idx = 0;
++        bool interface_level;
++
++        interface_level = dev->dev_desc.b_device_class == CDI_USB_DEVCLS_NONE;
++        if (!interface_level) {
++            ldev = calloc(1, sizeof(*ldev));
++            ldev->cdi.bus_data.bus_type = CDI_USB;
++            ldev->cdi.interface         = -1;
++            ldev->cdi.endpoint_count    = 1; // EP0
++            ldev->cdi.vendor_id         = dev->dev_desc.id_vendor;
++            ldev->cdi.product_id        = dev->dev_desc.id_product;
++            ldev->cdi.class_id          = dev->dev_desc.b_device_class;
++            ldev->cdi.subclass_id       = dev->dev_desc.b_device_sub_class;
++            ldev->cdi.protocol_id       = dev->dev_desc.b_device_protocol;
++
++            ldev->dev = dev;
++
++            ldev->endpoints = malloc(1 * sizeof(ldev->endpoints[0]));
++            ldev->endpoints[0] = 0; // EP0
++            ldev_ep_idx = 1;
++        }
++
++        if (get_configurations(dev) < 0) {
++            fprintf(stderr, "[usb] failed to get device configurations\n");
++            free(ldev->endpoints);
++            free(ldev);
++            free(dev);
++            hub->drv->port_disable(hub->cdi, i);
++            continue;
++        }
++        if (choose_configuration(dev) < 0) {
++            fprintf(stderr, "[usb] failed to select device configuration\n");
++            free(ldev->endpoints);
++            free(ldev);
++            for (int j = 0; j < (int)dev->dev_desc.b_num_configurations; j++) {
++                free(dev->configs[j]);
++            }
++            free(dev->config);
++            free(dev);
++            hub->drv->port_disable(hub->cdi, i);
++            continue;
++        }
++
++#ifdef DEBUG
++        debug_configuration(dev);
++#endif
++
++        struct cdi_usb_interface_descriptor *ifc = (void *)(dev->config + 1);
++        for (int j = 0; j < (int)dev->config->b_num_interfaces; j++) {
++            if (interface_level) {
++                ldev = calloc(1, sizeof(*ldev));
++                ldev->cdi.bus_data.bus_type = CDI_USB;
++                ldev->cdi.interface         = j;
++                // Include EP0
++                ldev->cdi.endpoint_count    = ifc->b_num_endpoints + 1;
++                ldev->cdi.vendor_id         = dev->dev_desc.id_vendor;
++                ldev->cdi.product_id        = dev->dev_desc.id_product;
++                ldev->cdi.class_id          = ifc->b_interface_class;
++                ldev->cdi.subclass_id       = ifc->b_interface_sub_class;
++                ldev->cdi.protocol_id       = ifc->b_interface_protocol;
++
++                ldev->dev = dev;
++
++                ldev->endpoints = malloc(ldev->cdi.endpoint_count
++                                         * sizeof(ldev->endpoints[0]));
++                ldev->endpoints[0] = 0; // EP0
++                ldev_ep_idx = 1;
++            } else {
++                ldev->cdi.endpoint_count += ifc->b_num_endpoints;
++                ldev->endpoints = realloc(ldev->endpoints,
++                                          ldev->cdi.endpoint_count
++                                          * sizeof(ldev->endpoints[0]));
++            }
++
++            struct cdi_usb_endpoint_descriptor *ep = (void *)(ifc + 1);
++            for (int k = 0; k < (int)ifc->b_num_endpoints; k++, ep++) {
++                bool in = ep->b_endpoint_address & CDI_USB_EPDSC_EPADR_DIR;
++                int id  = CDI_USB_EPDSC_EPADR_ID(ep->b_endpoint_address);
++
++                dev->eps[in][id].ep     = id;
++                dev->eps[in][id].mps
++                    = CDI_USB_EPDSC_MPS_MPS(ep->w_max_packet_size);
++                dev->eps[in][id].desc   = ep;
++
++                switch (ep->bm_attributes & CDI_USB_EPDSC_ATTR_XFER_TYPE_MASK) {
++                    case CDI_USB_EPDSC_ATTR_CONTROL:
++                        dev->eps[in][id].type = CDI_USB_CONTROL;
++                        break;
++                    case CDI_USB_EPDSC_ATTR_ISOCHRONOUS:
++                        dev->eps[in][id].type = CDI_USB_ISOCHRONOUS;
++                        break;
++                    case CDI_USB_EPDSC_ATTR_BULK:
++                        dev->eps[in][id].type = CDI_USB_BULK;
++                        break;
++                    case CDI_USB_EPDSC_ATTR_INTERRUPT:
++                        dev->eps[in][id].type = CDI_USB_INTERRUPT;
++                        break;
++                }
++
++                ldev->endpoints[ldev_ep_idx++] = ((int)in << 4) | id;
++            }
++
++            if (interface_level) {
++                if (ldev->cdi.class_id == CDI_USB_DEVCLS_HUB) {
++                    new_hub_device(ldev);
++                } else {
++                    cdi_provide_device(&ldev->cdi.bus_data);
++                }
++            }
++
++            ifc = (void *)ep;
++        }
++
++        if (!interface_level) {
++            if (ldev->cdi.class_id == CDI_USB_DEVCLS_HUB) {
++                new_hub_device(ldev);
++            } else {
++                cdi_provide_device(&ldev->cdi.bus_data);
++            }
++        }
++    }
++}
++
++struct cdi_device *usb_init_hc(struct cdi_bus_data *bus_data)
++{
++    struct cdi_usb_hc_bus *hc_bus = CDI_UPCAST(bus_data, struct cdi_usb_hc_bus,
++                                               bus_data);
++    struct cdi_usb_hc *hc = hc_bus->hc;
++    struct cdi_usb_hcd *hcd = CDI_UPCAST(hc->dev.driver, struct cdi_usb_hcd,
++                                         drv);
++
++    usb_hub_t *hub = calloc(1, sizeof(*hub));
++    hub->cdi = &hc->rh;
++    hub->hc = hc;
++    hub->drv = &hcd->rh_drv;
++
++    new_hub(hub);
++
++    return NULL;
++}
++
++
++void usb_get_endpoint_descriptor(struct cdi_usb_device *dev, int ep,
++                                 struct cdi_usb_endpoint_descriptor *desc)
++{
++    usb_logical_device_t *ldev = CDI_UPCAST(dev, usb_logical_device_t, cdi);
++
++    if (ep < 0 || ep >= dev->endpoint_count) {
++        return;
++    }
++
++    int ep_idx = ldev->endpoints[ep];
++    usb_endpoint_t *ep_info = &ldev->dev->eps[ep_idx >> 4][ep_idx & 0xf];
++
++    if (ep_idx) {
++        assert(ep_info->desc);
++        memcpy(desc, ep_info->desc, sizeof(*desc));
++    } else {
++        *desc = (struct cdi_usb_endpoint_descriptor){
++            .b_length           = sizeof(*desc),
++            .b_descriptor_type  = CDI_USB_DESC_ENDPOINT,
++            .b_endpoint_address = 0,
++            .bm_attributes      = 0x00,
++            .w_max_packet_size  = ep_info->mps,
++            .b_interval         = 0
++        };
++    }
++}
++
++
++cdi_usb_transmission_result_t
++    usb_control_transfer(struct cdi_usb_device *dev, int ep,
++                         const struct cdi_usb_setup_packet *setup, void *data)
++{
++    usb_logical_device_t *ldev = CDI_UPCAST(dev, usb_logical_device_t, cdi);
++
++    if (ep < 0 || ep >= dev->endpoint_count) {
++        return CDI_USB_DRIVER_ERROR;
++    }
++
++    int ep_idx = ldev->endpoints[ep];
++    usb_endpoint_t *ep_info = &ldev->dev->eps[ep_idx >> 4][ep_idx & 0xf];
++
++    if (ep_info->type != CDI_USB_CONTROL) {
++        return CDI_USB_DRIVER_ERROR;
++    }
++
++    return control_transfer(ldev->dev, ep_info, setup, data);
++}
++
++
++cdi_usb_transmission_result_t usb_bulk_transfer(struct cdi_usb_device *dev,
++                                                int ep, void *data, size_t size)
++{
++    usb_logical_device_t *ldev = CDI_UPCAST(dev, usb_logical_device_t, cdi);
++
++    if (ep < 0 || ep >= dev->endpoint_count) {
++        return CDI_USB_DRIVER_ERROR;
++    }
++
++    int ep_idx = ldev->endpoints[ep];
++    usb_endpoint_t *ep_info = &ldev->dev->eps[ep_idx >> 4][ep_idx & 0xf];
++
++    if (ep_info->type != CDI_USB_BULK) {
++        return CDI_USB_DRIVER_ERROR;
++    }
++
++    struct cdi_usb_hcd *hcd = CDI_UPCAST(ldev->dev->hc->dev.driver,
++                                         struct cdi_usb_hcd, drv);
++    cdi_usb_hc_transaction_t ta;
++    cdi_usb_transmission_result_t res;
++
++    ta = hcd->create_transaction(ldev->dev->hc, &(struct cdi_usb_hc_ep_info){
++            .dev        = ldev->dev->id,
++            .ep         = ep_info->ep,
++            .ep_type    = ep_info->type,
++            .speed      = ldev->dev->speed,
++            .mps        = ep_info->mps,
++            .tt_addr    = ldev->dev->tt_addr,
++            .tt_port    = ldev->dev->tt_port
++        });
++
++    hcd->enqueue(ldev->dev->hc, &(struct cdi_usb_hc_transmission){
++            .ta     = ta,
++            .token  = ep_idx >> 4 ? CDI_USB_IN : CDI_USB_OUT,
++            .buffer = data,
++            .size   = size,
++            .toggle = ep_info->toggle,
++            .result = &res
++        });
++    ep_info->toggle ^= (((size + ep_info->mps - 1) / ep_info->mps) & 1);
++
++    hcd->wait_transaction(ldev->dev->hc, ta);
++    hcd->destroy_transaction(ldev->dev->hc, ta);
++
++    return res;
++}
++
++
++static struct cdi_usb_hub_driver hub_drv;
++
++
++static void new_hub_device(usb_logical_device_t *ldev)
++{
++    cdi_usb_transmission_result_t res;
++    usb_hub_device_t *hub;
++    struct usb_hub_descriptor *hub_desc = NULL;
++
++    assert(ldev->cdi.interface < 0);
++
++    hub = calloc(1, sizeof(*hub));
++
++    hub->hub = calloc(1, sizeof(*hub->hub));
++    hub->hub->cdi = &hub->cdi;
++    hub->hub->drv = &hub_drv;
++    hub->hub->hc = ldev->dev->hc;
++    hub->hub->ldev = ldev;
++
++    uint8_t hub_desc_length;
++    res = usb_control_transfer(&ldev->cdi, 0, &(struct cdi_usb_setup_packet){
++            .bm_request_type    = CDI_USB_CREQ_DEVICE | CDI_USB_CREQ_CLASS
++                                | CDI_USB_CREQ_IN,
++            .b_request          = CDI_USB_CREQ_GET_DESCRIPTOR,
++            .w_value            = (USB_DESC_HUB << 8) | 0,
++            .w_length           = 1
++        }, &hub_desc_length);
++    if (res != CDI_USB_OK ||
++        hub_desc_length < sizeof(struct usb_hub_descriptor))
++    {
++        goto fail;
++    }
++
++    hub_desc = malloc(hub_desc_length);
++    res = usb_control_transfer(&ldev->cdi, 0, &(struct cdi_usb_setup_packet){
++            .bm_request_type    = CDI_USB_CREQ_DEVICE | CDI_USB_CREQ_CLASS
++                                | CDI_USB_CREQ_IN,
++            .b_request          = CDI_USB_CREQ_GET_DESCRIPTOR,
++            .w_value            = (USB_DESC_HUB << 8) | 0,
++            .w_length           = hub_desc_length
++        }, hub_desc);
++    if (res != CDI_USB_OK) {
++        goto fail;
++    }
++
++    int ports = hub_desc->b_nbr_ports;
++    hub->cdi.ports = ports;
++
++    // Enable port power
++    if (!(hub_desc->w_hub_characteristics & (1 << 1))) {
++        // Hub supports power switching, enable global power
++        res = usb_control_transfer(&ldev->cdi, 0,
++            &(struct cdi_usb_setup_packet){
++                .bm_request_type    = CDI_USB_CREQ_DEVICE
++                                    | CDI_USB_CREQ_CLASS | CDI_USB_CREQ_OUT,
++                .b_request          = CDI_USB_CREQ_SET_FEATURE,
++                .w_value            = C_HUB_LOCAL_POWER
++            }, NULL);
++        if (res != CDI_USB_OK) {
++            goto fail;
++        }
++    }
++
++    if ((hub_desc->w_hub_characteristics & 0x3) == 1) {
++        // Hub supports per-port power switching, enable power for each port
++        for (int port = 0; port < ports; port++) {
++            res = usb_control_transfer(&ldev->cdi, 0,
++                &(struct cdi_usb_setup_packet){
++                    .bm_request_type    = CDI_USB_CREQ_OTHER
++                                        | CDI_USB_CREQ_CLASS
++                                        | CDI_USB_CREQ_OUT,
++                    .b_request          = CDI_USB_CREQ_SET_FEATURE,
++                    .w_value            = PORT_POWER,
++                    .w_index            = port + 1
++                }, NULL);
++            if (res != CDI_USB_OK) {
++                goto fail;
++            }
++        }
++    }
++
++    cdi_sleep_ms(hub_desc->b_pwr_on_2_pwr_good * 2);
++
++    free(hub_desc);
++
++    new_hub(hub->hub);
++
++    return;
++
++fail:
++    free(hub_desc);
++    free(hub->hub);
++    free(hub);
++    return;
++}
++
++
++static void hub_port_down(struct cdi_usb_hub *cdi_hub, int index)
++{
++    usb_hub_device_t *hub = CDI_UPCAST(cdi_hub, usb_hub_device_t, cdi);
++
++    usb_control_transfer(&hub->hub->ldev->cdi, 0,
++        &(struct cdi_usb_setup_packet){
++            .bm_request_type    = CDI_USB_CREQ_OTHER | CDI_USB_CREQ_CLASS
++                                | CDI_USB_CREQ_OUT,
++            .b_request          = CDI_USB_CREQ_CLEAR_FEATURE,
++            .w_value            = PORT_ENABLE,
++            .w_index            = index + 1
++        }, NULL);
++}
++
++
++static void hub_port_up(struct cdi_usb_hub *cdi_hub, int index)
++{
++    usb_hub_device_t *hub = CDI_UPCAST(cdi_hub, usb_hub_device_t, cdi);
++
++    usb_control_transfer(&hub->hub->ldev->cdi, 0,
++        &(struct cdi_usb_setup_packet){
++            .bm_request_type    = CDI_USB_CREQ_OTHER | CDI_USB_CREQ_CLASS
++                                | CDI_USB_CREQ_OUT,
++            .b_request          = CDI_USB_CREQ_SET_FEATURE,
++            .w_value            = PORT_ENABLE,
++            .w_index            = index + 1
++        }, NULL);
++
++    usb_control_transfer(&hub->hub->ldev->cdi, 0,
++        &(struct cdi_usb_setup_packet){
++            .bm_request_type    = CDI_USB_CREQ_OTHER | CDI_USB_CREQ_CLASS
++                                | CDI_USB_CREQ_OUT,
++            .b_request          = CDI_USB_CREQ_SET_FEATURE,
++            .w_value            = PORT_RESET,
++            .w_index            = index + 1
++        }, NULL);
++
++    cdi_sleep_ms(50);
++
++    usb_control_transfer(&hub->hub->ldev->cdi, 0,
++        &(struct cdi_usb_setup_packet){
++            .bm_request_type    = CDI_USB_CREQ_OTHER | CDI_USB_CREQ_CLASS
++                                | CDI_USB_CREQ_OUT,
++            .b_request          = CDI_USB_CREQ_CLEAR_FEATURE,
++            .w_value            = PORT_RESET,
++            .w_index            = index + 1
++        }, NULL);
++
++    cdi_sleep_ms(5);
++}
++
++
++static cdi_usb_port_status_t hub_port_status(struct cdi_usb_hub *cdi_hub,
++                                             int index)
++{
++    cdi_usb_transmission_result_t res;
++    usb_hub_device_t *hub = CDI_UPCAST(cdi_hub, usb_hub_device_t, cdi);
++
++    uint32_t portsc;
++    res = usb_control_transfer(&hub->hub->ldev->cdi, 0,
++        &(struct cdi_usb_setup_packet){
++            .bm_request_type    = CDI_USB_CREQ_OTHER | CDI_USB_CREQ_CLASS
++                                | CDI_USB_CREQ_IN,
++            .b_request          = CDI_USB_CREQ_GET_STATUS,
++            .w_index            = index + 1,
++            .w_length           = sizeof(portsc)
++        }, &portsc);
++    if (res != CDI_USB_OK) {
++        return 0;
++    }
++
++    cdi_usb_port_status_t status = 0;
++
++    if (portsc & ((1 << PORT_ENABLE) | (1 << PORT_CONNECTION))) {
++        status |= CDI_USB_PORT_CONNECTED;
++        if (portsc & (1 << PORT_LOW_SPEED)) {
++            status |= CDI_USB_LOW_SPEED;
++        } else if (portsc & (1 << PORT_HIGH_SPEED)) {
++            status |= CDI_USB_HIGH_SPEED;
++        } else {
++            status |= CDI_USB_FULL_SPEED;
++        }
++    }
++
++    return status;
++}
++
++
++static struct cdi_usb_hub_driver hub_drv = {
++    .port_disable       = hub_port_down,
++    .port_reset_enable  = hub_port_up,
++    .port_status        = hub_port_status,
++};
+diff --git a/usb/usb.h b/usb/usb.h
+new file mode 100644
+index 0000000..27dc061
+--- /dev/null
++++ b/usb/usb.h
+@@ -0,0 +1,86 @@
++/******************************************************************************
++ * Copyright (c) 2015 Max Reitz                                               *
++ *                                                                            *
++ * Permission is hereby granted,  free of charge,  to any person  obtaining a *
++ * copy of this software and associated documentation files (the "Software"), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
++ * and/or  sell copies of the  Software,  and to permit  persons to whom  the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED,  INCLUDING BUT NOT LIMITED TO THE WARRANTIES  OF MERCHANTABILITY, *
++ * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH  THE SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#ifndef USB_H
++#define USB_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#include <cdi.h>
++#include <cdi/usb.h>
++#include <cdi/usb_hcd.h>
++
++
++typedef struct usb_logical_device usb_logical_device_t;
++
++typedef struct usb_hub {
++    struct cdi_usb_hub *cdi;
++
++    const struct cdi_usb_hub_driver *drv;
++    struct cdi_usb_hc *hc;
++    usb_logical_device_t *ldev;
++} usb_hub_t;
++
++typedef struct usb_endpoint {
++    int ep;
++    cdi_usb_endpoint_type_t type;
++    int mps;
++    int toggle;
++    struct cdi_usb_endpoint_descriptor *desc;
++} usb_endpoint_t;
++
++typedef struct usb_device {
++    struct cdi_usb_hc *hc;
++    int id;
++    cdi_usb_speed_t speed;
++
++    int tt_addr, tt_port;
++
++    // First index: OUT (0) / IN (1)
++    usb_endpoint_t eps[2][16];
++
++    struct cdi_usb_device_descriptor dev_desc;
++    struct cdi_usb_configuration_descriptor **configs, *config;
++} usb_device_t;
++
++struct usb_logical_device {
++    struct cdi_usb_device cdi;
++    usb_device_t *dev;
++    int *endpoints;
++};
++
++
++struct cdi_device *usb_init_hc(struct cdi_bus_data *bus_data);
++
++void usb_get_endpoint_descriptor(struct cdi_usb_device *dev, int ep,
++                                 struct cdi_usb_endpoint_descriptor *desc);
++
++cdi_usb_transmission_result_t
++    usb_control_transfer(struct cdi_usb_device *dev, int ep,
++                         const struct cdi_usb_setup_packet *setup, void *data);
++
++cdi_usb_transmission_result_t usb_bulk_transfer(struct cdi_usb_device *dev,
++                                                int ep, void *data,
++                                                size_t size);
++
++#endif
+-- 
+2.4.0
+
+
+From max at tyndur.org  Mon May 11 21:59:30 2015
+From: max at tyndur.org (Max Reitz)
+Date: Mon, 11 May 2015 21:59:30 +0200
+Subject: [cdi-devel] [PATCH v3 10/10] usb-storage: Add USB mass storage
+	driver
+In-Reply-To: <1431374370-17120-1-git-send-email-max@tyndur.org>
+References: <1431374370-17120-1-git-send-email-max@tyndur.org>
+Message-ID: <1431374370-17120-11-git-send-email-max@tyndur.org>
+
++ This adds a USB mass storage device driver. It is missing proper error
+  handling (e.g. for STALLed endpoints) and support for any USB MSD
+  class other than bulk-only (e.g. control-bulk-interrupt for USB floppy
+  drives).
+
+Signed-off-by: Max Reitz <max at tyndur.org>
+---
+ usb-storage/main.c        |  76 ++++++++++++++++
+ usb-storage/usb-storage.c | 216 ++++++++++++++++++++++++++++++++++++++++++++++
+ usb-storage/usb-storage.h |  60 +++++++++++++
+ 3 files changed, 352 insertions(+)
+ create mode 100644 usb-storage/main.c
+ create mode 100644 usb-storage/usb-storage.c
+ create mode 100644 usb-storage/usb-storage.h
+
+diff --git a/usb-storage/main.c b/usb-storage/main.c
+new file mode 100644
+index 0000000..aa896ca
+--- /dev/null
++++ b/usb-storage/main.c
+@@ -0,0 +1,76 @@
++/******************************************************************************
++ * Copyright (c) 2015 Max Reitz                                               *
++ *                                                                            *
++ * Permission is hereby granted,  free of charge,  to any person  obtaining a *
++ * copy of this software and associated documentation files (the "Software"), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
++ * and/or  sell copies of the  Software,  and to permit  persons to whom  the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED,  INCLUDING BUT NOT LIMITED TO THE WARRANTIES  OF MERCHANTABILITY, *
++ * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH  THE SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#include <cdi.h>
++#include <cdi/scsi.h>
++#include <cdi/usb.h>
++
++#include "usb-storage.h"
++
++
++#define DRIVER_NAME "usb-storage"
++
++
++static struct cdi_scsi_driver drv;
++static struct cdi_usb_bus_device_pattern bus_pattern;
++
++static int drv_init(void)
++{
++    cdi_scsi_driver_init(&drv);
++    cdi_handle_bus_device(&drv.drv, &bus_pattern.pattern);
++    return 0;
++}
++
++static int drv_destroy(void)
++{
++    cdi_driver_destroy(&drv.drv);
++    return 0;
++}
++
++
++static struct cdi_scsi_driver drv = {
++    .drv = {
++        .name               = DRIVER_NAME,
++        .type               = CDI_SCSI,
++        .bus                = CDI_USB,
++        .init               = drv_init,
++        .destroy            = drv_destroy,
++        .init_device        = init_usb_device,
++    },
++
++    .request    = usb_storage_request,
++};
++
++static struct cdi_usb_bus_device_pattern bus_pattern = {
++    .pattern = {
++        .bus_type = CDI_USB,
++    },
++
++    .vendor_id  = -1,
++    .product_id = -1,
++
++    .class_id       = CDI_USB_IFCCLS_STORAGE,
++    .subclass_id    = -1,
++    .protocol_id    = -1,
++};
++
++CDI_DRIVER(DRIVER_NAME, drv)
+diff --git a/usb-storage/usb-storage.c b/usb-storage/usb-storage.c
+new file mode 100644
+index 0000000..07d6eb7
+--- /dev/null
++++ b/usb-storage/usb-storage.c
+@@ -0,0 +1,216 @@
++/******************************************************************************
++ * Copyright (c) 2015 Max Reitz                                               *
++ *                                                                            *
++ * Permission is hereby granted,  free of charge,  to any person  obtaining a *
++ * copy of this software and associated documentation files (the "Software"), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
++ * and/or  sell copies of the  Software,  and to permit  persons to whom  the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED,  INCLUDING BUT NOT LIMITED TO THE WARRANTIES  OF MERCHANTABILITY, *
++ * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH  THE SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#include <errno.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <cdi.h>
++#include <cdi/misc.h>
++#include <cdi/scsi.h>
++#include <cdi/usb.h>
++
++#include "usb-storage.h"
++
++
++#define CBW_IN  0x80
++#define CBW_OUT 0x00
++
++#define CBW_SIGNATURE 0x43425355 // 'USBC' => USB command
++#define CSW_SIGNATURE 0x53425355 // 'USBS' => USB status
++
++struct msd_bo_cbw {
++    uint32_t signature;
++    uint32_t tag;
++    uint32_t data_length;
++    uint8_t flags;
++    uint8_t lun;
++    uint8_t cb_length;
++    uint8_t cb[16];
++} __attribute__((packed));
++
++struct msd_bo_csw {
++    uint32_t signature;
++    uint32_t tag;
++    uint32_t data_residue;
++    uint8_t status;
++} __attribute__((packed));
++
++
++typedef enum usb_mass_storage_type {
++    USBMS_BULK_ONLY,
++} usb_mass_storage_type_t;
++
++
++typedef struct usb_mass_storage_device {
++    struct cdi_scsi_device dev;
++    struct cdi_usb_device *usb;
++
++    usb_mass_storage_type_t type;
++    int luns;
++
++    // FIXME: put into own class
++    int bulk_in, bulk_out;
++} usb_mass_storage_device_t;
++
++
++static int bulk_only_reset(usb_mass_storage_device_t *dev)
++{
++    cdi_usb_transmission_result_t res;
++
++    res = cdi_usb_control_transfer(dev->usb, 0, &(struct cdi_usb_setup_packet){
++            .bm_request_type    = CDI_USB_CREQ_CLASS | CDI_USB_CREQ_INTERFACE
++                                | CDI_USB_CREQ_OUT,
++            .b_request          = USBMS_REQ_BOMSR,
++            .w_index            = dev->usb->interface
++        }, NULL);
++    if (res != CDI_USB_OK) {
++        return -EIO;
++    }
++
++    if (dev->luns > 0) {
++        return 0;
++    }
++
++    uint8_t lun_count;
++    res = cdi_usb_control_transfer(dev->usb, 0, &(struct cdi_usb_setup_packet) {
++            .bm_request_type    = CDI_USB_CREQ_CLASS | CDI_USB_CREQ_INTERFACE
++                                | CDI_USB_CREQ_IN,
++            .b_request          = USBMS_REQ_GML,
++            .w_index            = dev->usb->interface,
++            .w_length           = 1
++        }, &lun_count);
++    if (res == CDI_USB_OK) {
++        dev->luns = lun_count + 1;
++    } else {
++        dev->luns = 1;
++    }
++
++    return 0;
++}
++
++
++struct cdi_device *init_usb_device(struct cdi_bus_data *bus_data)
++{
++    static int dev_counter = 0;
++    usb_mass_storage_device_t *dev = calloc(1, sizeof(*dev));
++    dev->usb = CDI_UPCAST(bus_data, struct cdi_usb_device, bus_data);
++
++    if ((dev->usb->subclass_id == USBMS_SUBCLS_SCSILEG ||
++         dev->usb->subclass_id == USBMS_SUBCLS_SCSI) &&
++        dev->usb->protocol_id == USBMS_PROTO_BBB)
++    {
++        dev->type = USBMS_BULK_ONLY;
++    } else {
++        free(dev);
++        return NULL;
++    }
++
++    if (dev->type == USBMS_BULK_ONLY) {
++        if (bulk_only_reset(dev) < 0) {
++            free(dev);
++            return NULL;
++        }
++
++        struct cdi_usb_endpoint_descriptor ep_desc;
++        for (int ep = 1; ep < dev->usb->endpoint_count; ep++) {
++            cdi_usb_get_endpoint_descriptor(dev->usb, ep, &ep_desc);
++
++            if ((ep_desc.bm_attributes & CDI_USB_EPDSC_ATTR_XFER_TYPE_MASK)
++                == CDI_USB_EPDSC_ATTR_BULK)
++            {
++                bool is_in;
++                is_in = ep_desc.b_endpoint_address & CDI_USB_EPDSC_EPADR_DIR;
++                if (!dev->bulk_in && is_in) {
++                    dev->bulk_in = ep;
++                } else if (dev->bulk_in && !is_in) {
++                    dev->bulk_out = ep;
++                }
++            }
++        }
++
++        if (!dev->bulk_in || !dev->bulk_out) {
++            free(dev);
++            return NULL;
++        }
++    }
++
++    dev->dev.dev.name = malloc(5);
++    sprintf((char *)dev->dev.dev.name, "msd%c", 'a' + dev_counter++);
++
++    dev->dev.type = CDI_STORAGE;
++    dev->dev.lun_count = dev->luns;
++
++    return &dev->dev.dev;
++}
++
++
++int usb_storage_request(struct cdi_scsi_device *device,
++                        struct cdi_scsi_packet *packet)
++{
++    cdi_usb_transmission_result_t res;
++    usb_mass_storage_device_t *dev = CDI_UPCAST(device,
++                                                usb_mass_storage_device_t, dev);
++
++    struct msd_bo_cbw cbw = {
++        .signature      = CBW_SIGNATURE,
++        .tag            = 42,
++        .data_length    = packet->bufsize,
++        .flags          = packet->direction == CDI_SCSI_READ ? CBW_IN : CBW_OUT,
++        .lun            = packet->lun,
++        .cb_length      = packet->cmdsize
++    };
++    memcpy(cbw.cb, packet->command, sizeof(cbw.cb));
++
++    res = cdi_usb_bulk_transfer(dev->usb, dev->bulk_out, &cbw, sizeof(cbw));
++    if (res != CDI_USB_OK) {
++        bulk_only_reset(dev);
++        return -1;
++    }
++
++    if (packet->direction == CDI_SCSI_READ) {
++        res = cdi_usb_bulk_transfer(dev->usb, dev->bulk_in,
++                                    packet->buffer, packet->bufsize);
++    } else if (packet->direction == CDI_SCSI_WRITE) {
++        res = cdi_usb_bulk_transfer(dev->usb, dev->bulk_out,
++                                    packet->buffer, packet->bufsize);
++    }
++
++    if (res != CDI_USB_OK) {
++        bulk_only_reset(dev);
++        return -1;
++    }
++
++    struct msd_bo_csw csw;
++    res = cdi_usb_bulk_transfer(dev->usb, dev->bulk_in, &csw, sizeof(csw));
++
++    if (res != CDI_USB_OK || csw.signature != CSW_SIGNATURE || csw.tag != 42 ||
++        csw.data_residue || csw.status)
++    {
++        bulk_only_reset(dev);
++        return -1;
++    }
++
++    return 0;
++}
+diff --git a/usb-storage/usb-storage.h b/usb-storage/usb-storage.h
+new file mode 100644
+index 0000000..eed3462
+--- /dev/null
++++ b/usb-storage/usb-storage.h
+@@ -0,0 +1,60 @@
++/******************************************************************************
++ * Copyright (c) 2015 Max Reitz                                               *
++ *                                                                            *
++ * Permission is hereby granted,  free of charge,  to any person  obtaining a *
++ * copy of this software and associated documentation files (the "Software"), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
++ * and/or  sell copies of the  Software,  and to permit  persons to whom  the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED,  INCLUDING BUT NOT LIMITED TO THE WARRANTIES  OF MERCHANTABILITY, *
++ * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH  THE SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#ifndef USB_STORAGE_H
++#define USB_STORAGE_H
++
++#include <cdi.h>
++#include <cdi/scsi.h>
++
++
++// Mass storage subclass codes
++#define USBMS_SUBCLS_SCSILEG    0x00 // SCSI legacy ("command set not reported")
++#define USBMS_SUBCLS_RBC        0x01 // RBC
++#define USBMS_SUBCLS_MMC5       0x02 // MMC-5 (ATAPI)
++#define USBMS_SUBCLS_UFI        0x04 // UFI for Floppy Disk Drives
++#define USBMS_SUBCLS_SCSI       0x06 // SCSI transparent command set
++#define USBMS_SUBCLS_LSDFS      0x07 // LSD FS for negotiating SCSI access
++#define USBMS_SUBCLS_IEEE1667   0x08 // IEEE 1667
++#define USBMS_SUBCLS_VENDOR     0xff // Vendor-specific
++
++// Mass storage protocol codes
++#define USBMS_PROTO_CBI_CCI     0x00 // Control/Bulk/Interrupt with
++                                     // Command Completion Interrupt
++#define USBMS_PROTO_CBI         0x01 // CBI without CCI
++#define USBMS_PROTO_BBB         0x50 // Bulk-only
++#define USBMS_PROTO_UAS         0x62 // UAS
++#define USBMS_PROTO_VENDOR      0xff // Vendor-specific
++
++// Mass storage request codes
++#define USBMS_REQ_ADSC  0x00 // Accept Device-Specific Command (CBI)
++#define USBMS_REQ_GETRQ 0xfc // Get Requests (LSD FS)
++#define USBMS_REQ_PUTRQ 0xfd // Put Requests (LSD FS)
++#define USBMS_REQ_GML   0xfe // Get Max LUN (Bulk-only)
++#define USBMS_REQ_BOMSR 0xff // Bulk-Only Mass Storage Reset (Bulk-only)
++
++
++struct cdi_device *init_usb_device(struct cdi_bus_data *bus_data);
++int usb_storage_request(struct cdi_scsi_device *device,
++                        struct cdi_scsi_packet *packet);
++
++#endif
+-- 
+2.4.0
+
+

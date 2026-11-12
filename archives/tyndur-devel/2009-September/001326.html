@@ -1,0 +1,825 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] kedit: Syntax-Highlighting für Pascal
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH%3D5D_kedit%3D3A_Syntax-Highlighting%3F%3D%0A%09%3D%3Futf-8%3Fq%3F_f%3DC3%3DBCr_Pascal%3F%3D&In-Reply-To=%3C1252023680-12501-1-git-send-email-hartmut%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001325.html">
+   <LINK REL="Next"  HREF="001327.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] kedit: Syntax-Highlighting für Pascal</H1>
+    <B>Alexander Hartmut Kluth</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH%3D5D_kedit%3D3A_Syntax-Highlighting%3F%3D%0A%09%3D%3Futf-8%3Fq%3F_f%3DC3%3DBCr_Pascal%3F%3D&In-Reply-To=%3C1252023680-12501-1-git-send-email-hartmut%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH] kedit: Syntax-Highlighting für Pascal">hartmut at tyndur.org
+                  </A><BR>
+    <I>Fr Sep  4 02:21:20 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001325.html">[tyndur-devel] [PATCH] tyndur-fpc: Patch gepatcht
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001327.html">[tyndur-devel] [PATCH] kedit: Syntax-Highlighting für Pascal
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1326">[ Datum ]</a>
+              <a href="thread.html#1326">[ Thema ]</a>
+              <a href="subject.html#1326">[ Betreff (Subject) ]</a>
+              <a href="author.html#1326">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>Syntax-Highlighting für Pascal hinzugefügt, weitere folgen (falls das hier so
+richtig ist)
+
++ kedit: Aufteilung in syntax.pas, syntax_*.pas für verschiedene Syntaxdateien
+* kedit: syntax.pas, Klasse TSyntax
++ kedit: syntax_c.pas, C-Syntax-Highlighting
++ kedit: syntax_pas.pas, Pascal-Syntax-Highlighting
+* kedit: kedit_main.pas, Dateiendungsprüfung, setzen des Highlightings
+* kedit: kedit_tui.pas, Prozedur zum Setzen des Highlightings
+
+Signed-off-by: Alexander Hartmut Kluth &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">hartmut at tyndur.org</A>&gt;
+---
+ src/modules/pas/kedit/kedit_main.pas |   20 +++
+ src/modules/pas/kedit/kedit_tui.pas  |   14 ++-
+ src/modules/pas/kedit/syntax.pas     |  195 ++----------------------------
+ src/modules/pas/kedit/syntax_c.pas   |  197 ++++++++++++++++++++++++++++++
+ src/modules/pas/kedit/syntax_pas.pas |  222 ++++++++++++++++++++++++++++++++++
+ 5 files changed, 460 insertions(+), 188 deletions(-)
+ create mode 100644 src/modules/pas/kedit/syntax_c.pas
+ create mode 100644 src/modules/pas/kedit/syntax_pas.pas
+
+diff --git a/src/modules/pas/kedit/kedit_main.pas b/src/modules/pas/kedit/kedit_main.pas
+index 18dbef7..ab1412d 100644
+--- a/src/modules/pas/kedit/kedit_main.pas
++++ b/src/modules/pas/kedit/kedit_main.pas
+@@ -12,6 +12,7 @@ type
+     // Beschreibt einen offenen Puffer
+     kedit_state = record
+         filename:   String;
++        extension:  String;
+ 
+         cursX:      longint;
+         cursY:      longint;
+@@ -141,6 +142,8 @@ var lfile: textfile;
+     i: integer;
+     attr: word;
+     s: String;
++    ext: String;
++    reversed: String;
+ begin
+     if loadname = '' then begin
+         Textbackground(1);
+@@ -167,6 +170,23 @@ begin
+     end;
+ 
+     with state^ do begin
++        loadname := Trim(loadname);
++
++        // Dateiendung herausbekommen
++        ext := RightStr(loadname, 4);
++
++        if CompareStr(ext, '.pas') &lt;&gt; 0 then begin
++            ext := RightStr(loadname, 2);
++
++            if CompareStr(ext, '.c') = 0 then begin
++                extension := 'c';
++            end;
++        end else begin
++            extension := 'pas';
++        end;
++
++        SetSyntaxHighlighting(state);
++
+         Assign(lfile,loadname);
+         GetFAttr(lfile, attr);
+         if attr and dos.ReadOnly = dos.ReadOnly then readonly := true;
+diff --git a/src/modules/pas/kedit/kedit_tui.pas b/src/modules/pas/kedit/kedit_tui.pas
+index 13c7781..c85cb97 100644
+--- a/src/modules/pas/kedit/kedit_tui.pas
++++ b/src/modules/pas/kedit/kedit_tui.pas
+@@ -61,10 +61,11 @@ function YesNoCancel(question: string; cancel: boolean): integer;
+ procedure RedrawLine(state: pkedit_state; y: longint);
+ procedure DrawTitleBar(state: pkedit_state);
+ procedure DrawEditor(state: pkedit_state);
++procedure SetSyntaxHighlighting(state: pkedit_state);
+ 
+ implementation
+ 
+-uses crt, syntax;
++uses crt, strutils, sysutils, syntax, syntax_c, syntax_pas;
+ 
+ var
+     highlighter: TSyntax;
+@@ -357,6 +358,15 @@ begin
+     flush(output);
+ end;
+ 
++procedure SetSyntaxHighlighting(state: pkedit_state);
+ begin
+-    highlighter := TSyntax_C.create;
++    if CompareStr(state^.extension, 'c') = 0 then begin
++        highlighter := TSyntax_C.create;
++    end else begin
++        highlighter := TSyntax_Pas.create;
++    end;
++end;
++
++begin
++    highlighter := NIL;
+ end.
+diff --git a/src/modules/pas/kedit/syntax.pas b/src/modules/pas/kedit/syntax.pas
+index b382265..0f9950e 100644
+--- a/src/modules/pas/kedit/syntax.pas
++++ b/src/modules/pas/kedit/syntax.pas
+@@ -29,30 +29,18 @@ type
+             property GetState: integer read f_state;
+     end;
+ 
+-    TSyntax_C = class(TSyntax)
+-        public
+-            procedure StartLine(s: String; state: integer); override;
+-            function Next: TSyntaxChange; override;
+-    end;
+-
+ 
+ function SyntaxColor(c: TSyntaxColor): byte;
+ function SyntaxBgColor(c: TSyntaxColor): byte;
++function Matches(s: String; pos: integer; pattern: String): boolean;
++function MatchesNumber(s: string; pos: integer): integer;
++function MatchesKeyword(s: string; pos: integer; p: Array of String): integer;
++function MatchesLabel(s: string; pos: integer): integer;
++function MatchesType(s: string; pos: integer): integer;
++function MatchesTrailingSpace(s: string; pos: integer): boolean;
+ 
+ 
+ implementation
+-
+-const
+-    Keywords_C: Array [1..15] of String = (
+-        'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'default', 'goto',
+-        'break', 'continue', 'return', 'sizeof', 'typedef', 'asm'
+-    );
+-    Types_C: Array [1..17] of String = (
+-        'void', 'char', 'short', 'int', 'long', 'signed', 'unsigned', 'float', 'double',
+-        'static', 'inline', 'extern', 'enum', 'struct', 'union', 'volatile', 'const'
+-    );
+-
+-
+ function SyntaxColor(c: TSyntaxColor): byte;
+ begin
+     case c of
+@@ -70,6 +58,7 @@ begin
+     exit(8);
+ end;
+ 
++
+ function SyntaxBgColor(c: TSyntaxColor): byte;
+ begin
+     case c of
+@@ -79,11 +68,13 @@ begin
+     exit(0);
+ end;
+ 
++
+ function Matches(s: String; pos: integer; pattern: String): boolean;
+ begin
+     Matches := (Copy(s, pos, length(pattern)) = pattern);
+ end;
+ 
++
+ function MatchesNumber(s: String; pos: integer): integer;
+ var
+     i: integer;
+@@ -261,172 +252,4 @@ begin
+     color := c;
+ end;
+ 
+-procedure TSyntax_C.StartLine(s: String; state: integer);
+-begin
+-    line := s;
+-    f_state := state;
+-    pos := 1;
+-
+-    case f_state of
+-        1:   color := syn_comment;
+-        2:   color := syn_comment;
+-        3:   color := syn_number;
+-        4:   color := syn_string;
+-        5:   color := syn_string_special;
+-        6:   color := syn_keyword;
+-        7:   color := syn_type;
+-        8:   color := syn_label;
+-        else color := syn_other;
+-    end;
+-end;
+-
+-function TSyntax_C.Next: TSyntaxChange;
+-var
+-    c: char;
+-    tmp: integer;
+-begin
+-    Next.posY := 0;
+-    Next.color := color;
+-
+-    while pos &lt;= length(line) do begin
+-        c := line[pos];
+-
+-        case f_state of
+-
+-            0: { Normaler Text }
+-                case c of
+-                    '/':
+-                        if Matches(line, pos, '//') then begin
+-                            f_state := 1;
+-                            exit(Highlight(syn_comment));
+-                        end else if Matches(line, pos, '/*') then begin
+-                            f_state := 2;
+-                            exit(Highlight(syn_comment));
+-                        end;
+-
+-                    '0' .. '9', '-', '+':
+-                        begin
+-                            tmp := MatchesNumber(line, pos);
+-                            if tmp &lt;&gt; 0 then begin
+-                                Next := Highlight(syn_number);
+-                                Inc(pos, tmp);
+-                                f_state := 3;
+-                                exit;
+-                            end;
+-                        end;
+-
+-                    '#':
+-                        begin
+-                            if Copy(line, 1, pos - 1) = Space(pos - 1) then begin
+-                                f_state := 1;
+-                                exit(Highlight(syn_compiler));
+-                            end;
+-                        end;
+-
+-                    '&quot;':
+-                        begin
+-                            Next := Highlight(syn_string);
+-                            Inc(pos);
+-                            f_state := 4;
+-                            exit;
+-                        end;
+-                    ' ':
+-                        begin
+-                            if MatchesTrailingSpace(line, pos) then begin
+-                                Next := Highlight(syn_trailing_space);
+-                                pos := length(line) + 1;
+-                                exit;
+-                            end;
+-                        end;
+-
+-                    else
+-                        begin
+-                            tmp := MatchesKeyword(line, pos, Keywords_C);
+-                            if tmp &lt;&gt; 0 then begin
+-                                Next := Highlight(syn_keyword);
+-                                Inc(pos, tmp);
+-                                f_state := 6;
+-                                exit;
+-                            end;
+-
+-                            tmp := MatchesKeyword(line, pos, Types_C);
+-                            if tmp &lt;&gt; 0 then begin
+-                                Next := Highlight(syn_type);
+-                                Inc(pos, tmp);
+-                                f_state := 7;
+-                                exit;
+-                            end;
+-
+-                            tmp := MatchesType(line, pos);
+-                            if tmp &lt;&gt; 0 then begin
+-                                Next := Highlight(syn_type);
+-                                Inc(pos, tmp);
+-                                f_state := 7;
+-                                exit;
+-                            end;
+-
+-                            tmp := MatchesLabel(line, pos);
+-                            if tmp &lt;&gt; 0 then begin
+-                                Next := Highlight(syn_label);
+-                                Inc(pos, tmp);
+-                                f_state := 8;
+-                                exit;
+-                            end;
+-                        end;
+-                end;
+-
+-            1: { Kommentar bis Zeilenende }
+-                begin
+-                    pos := length(line);
+-                    break;
+-                end;
+-
+-            2: { C-Kommentar }
+-                if Matches(line, pos, '*/') then begin
+-                    f_state := 0;
+-                    Inc(pos, 2);
+-                    exit(Highlight(syn_other));
+-                end;
+-
+-            3, 6, 7, 8: { Ende eines gefaerbten Worts }
+-                begin
+-                    f_state := 0;
+-                    exit(Highlight(syn_other));
+-                end;
+-
+-            4: { String }
+-                case c of
+-                    '\':
+-                        begin
+-                            f_state := 5;
+-                            Next := Highlight(syn_string_special);
+-                            Inc(pos);
+-                            exit;
+-                        end;
+-
+-                    '&quot;':
+-                        begin
+-                            f_state := 0;
+-                            Inc(pos);
+-                            exit(Highlight(syn_other));
+-                        end;
+-                end;
+-
+-            5: { Escaptes Zeichen in einem String }
+-                begin
+-                    f_state := 4;
+-                    Inc(pos);
+-                    exit(Highlight(syn_string));
+-                end;
+-
+-        end;
+-
+-        Inc(pos);
+-    end;
+-
+-    if f_state in [1, 3, 4, 5] then begin
+-        f_state := 0;
+-    end;
+-end;
+-
+ end.
+diff --git a/src/modules/pas/kedit/syntax_c.pas b/src/modules/pas/kedit/syntax_c.pas
+new file mode 100644
+index 0000000..f7662cc
+--- /dev/null
++++ b/src/modules/pas/kedit/syntax_c.pas
+@@ -0,0 +1,197 @@
++unit syntax_c;
++{$mode ObjFPC}
++
++interface
++
++uses syntax;
++
++type
++    TSyntax_C = class(TSyntax)
++    public
++        procedure StartLine(s: String; state: integer); override;
++        function Next: TSyntaxChange; override;
++    end;
++
++
++implementation
++const
++    Keywords_C: Array [1..15] of String = (
++        'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'default', 'goto',
++        'break', 'continue', 'return', 'sizeof', 'typedef', 'asm'
++    );
++
++    Types_C: Array [1..17] of String = (
++        'void', 'char', 'short', 'int', 'long', 'signed', 'unsigned', 'float', 'double',
++        'static', 'inline', 'extern', 'enum', 'struct', 'union', 'volatile', 'const'
++    );
++
++procedure TSyntax_C.StartLine(s: String; state: integer);
++begin
++    line := s;
++    f_state := state;
++    pos := 1;
++
++    case f_state of
++        1:   color := syn_comment;
++        2:   color := syn_comment;
++        3:   color := syn_number;
++        4:   color := syn_string;
++        5:   color := syn_string_special;
++        6:   color := syn_keyword;
++        7:   color := syn_type;
++        8:   color := syn_label;
++        else color := syn_other;
++    end;
++end;
++
++
++function TSyntax_C.Next: TSyntaxChange;
++var
++    c: char;
++    tmp: integer;
++begin
++    Next.posY := 0;
++    Next.color := color;
++
++    while pos &lt;= length(line) do begin
++        c := line[pos];
++
++        case f_state of
++
++            0: { Normaler Text }
++                case c of
++                    '/':
++                        if Matches(line, pos, '//') then begin
++                            f_state := 1;
++                            exit(Highlight(syn_comment));
++                        end else if Matches(line, pos, '/*') then begin
++                            f_state := 2;
++                            exit(Highlight(syn_comment));
++                        end;
++
++                    '0' .. '9', '-', '+':
++                        begin
++                            tmp := MatchesNumber(line, pos);
++                            if tmp &lt;&gt; 0 then begin
++                                Next := Highlight(syn_number);
++                                Inc(pos, tmp);
++                                f_state := 3;
++                                exit;
++                            end;
++                        end;
++
++                    '#':
++                        begin
++                            if Copy(line, 1, pos - 1) = Space(pos - 1) then begin
++                                f_state := 1;
++                                exit(Highlight(syn_compiler));
++                            end;
++                        end;
++
++                    '&quot;':
++                        begin
++                            Next := Highlight(syn_string);
++                            Inc(pos);
++                            f_state := 4;
++                            exit;
++                        end;
++                    ' ':
++                        begin
++                            if MatchesTrailingSpace(line, pos) then begin
++                                Next := Highlight(syn_trailing_space);
++                                pos := length(line) + 1;
++                                exit;
++                            end;
++                        end;
++
++                    else
++                        begin
++                            tmp := MatchesKeyword(line, pos, Keywords_C);
++                            if tmp &lt;&gt; 0 then begin
++                                Next := Highlight(syn_keyword);
++                                Inc(pos, tmp);
++                                f_state := 6;
++                                exit;
++                            end;
++
++                            tmp := MatchesKeyword(line, pos, Types_C);
++                            if tmp &lt;&gt; 0 then begin
++                                Next := Highlight(syn_type);
++                                Inc(pos, tmp);
++                                f_state := 7;
++                                exit;
++                            end;
++
++                            tmp := MatchesType(line, pos);
++                            if tmp &lt;&gt; 0 then begin
++                                Next := Highlight(syn_type);
++                                Inc(pos, tmp);
++                                f_state := 7;
++                                exit;
++                            end;
++
++                            tmp := MatchesLabel(line, pos);
++                            if tmp &lt;&gt; 0 then begin
++                                Next := Highlight(syn_label);
++                                Inc(pos, tmp);
++                                f_state := 8;
++                                exit;
++                            end;
++                        end;
++                end;
++
++            1: { Kommentar bis Zeilenende }
++                begin
++                    pos := length(line);
++                    break;
++                end;
++
++            2: { C-Kommentar }
++                if Matches(line, pos, '*/') then begin
++                    f_state := 0;
++                    Inc(pos, 2);
++                    exit(Highlight(syn_other));
++                end;
++
++            3, 6, 7, 8: { Ende eines gefaerbten Worts }
++                begin
++                    f_state := 0;
++                    exit(Highlight(syn_other));
++                end;
++
++            4: { String }
++                case c of
++                    '\':
++                        begin
++                            f_state := 5;
++                            Next := Highlight(syn_string_special);
++                            Inc(pos);
++                            exit;
++                        end;
++
++                    '&quot;':
++                        begin
++                            f_state := 0;
++                            Inc(pos);
++                            exit(Highlight(syn_other));
++                        end;
++                end;
++
++            5: { Escaptes Zeichen in einem String }
++                begin
++                    f_state := 4;
++                    Inc(pos);
++                    exit(Highlight(syn_string));
++                end;
++
++        end;
++
++        Inc(pos);
++    end;
++
++    if f_state in [1, 3, 4, 5] then begin
++        f_state := 0;
++    end;
++end;
++
++end.
+diff --git a/src/modules/pas/kedit/syntax_pas.pas b/src/modules/pas/kedit/syntax_pas.pas
+new file mode 100644
+index 0000000..314f9f5
+--- /dev/null
++++ b/src/modules/pas/kedit/syntax_pas.pas
+@@ -0,0 +1,222 @@
++unit syntax_pas;
++{$mode ObjFPC}
++
++interface
++
++uses syntax;
++
++type
++    TSyntax_Pas = class(TSyntax)
++    public
++        procedure StartLine(s: String; state: integer); override;
++        function Next: TSyntaxChange; override;
++    end;
++
++
++implementation
++const
++    Keywords_Pas: Array [1..81] of String = (
++        'absolute', 'abstract', 'and', 'array', 'assembler', 'asm',
++        'automated', 'begin', 'case', 'cdecl',
++        'class', 'compilerprog', 'const', 'constructor',
++        'deconstructor', 'default', 'deprecated', 'div', 'do', 'downto',
++        'dynamic', 'else', 'end', 'export', 'external', 'far',
++        'forward', 'finalization', 'for',
++        'function', 'generic', 'goto', 'inline', 'if', 'implementation', 'in',
++        'interface', 'label', 'message', 'mod', 'near', 'nil', 'not',
++        'object', 'overlay', 'overload', 'override', 'of', 'or', 'packed',
++        'platform', 'private', 'procedure',
++        'program', 'property', 'protected', 'public', 'published', 'raise',
++        'record', 'reintroduce', 'resourcestring',
++        'repeat', 'sealed', 'set', 'shl', 'shr', 'specialize', 'stdcall',
++        'then', 'threadvar', 'to',
++        'type', 'unit', 'until', 'uses', 'var', 'virtual', 'while', 'with',
++        'xor'
++    );
++
++    Types_Pas: Array [1..8] of String = (
++        'integer', 'byte', 'real', 'char', 'string', 'boolean', 'string',
++        'file'
++    );
++
++
++procedure TSyntax_Pas.StartLine(s: String; state: integer);
++begin
++    line := s;
++    f_state := state;
++    pos := 1;
++
++    case f_state of
++        1:   color := syn_comment;
++        2:   color := syn_comment;
++        3:   color := syn_number;
++        4:   color := syn_string;
++        5:   color := syn_string_special;
++        6:   color := syn_keyword;
++        7:   color := syn_type;
++        8:   color := syn_label;
++        else color := syn_other;
++    end;
++end;
++
++
++function TSyntax_Pas.Next: TSyntaxChange;
++var
++    c: char;
++    tmp: integer;
++begin
++    Next.posY := 0;
++    Next.color := color;
++
++    while pos &lt;= length(line) do begin
++        c := line[pos];
++
++        case f_state of
++            0:
++                case c of
++                    '{':
++                        if Matches(line, pos, '{$') then begin
++                            f_state := 1;
++                            exit(Highlight(syn_compiler));
++                        end else begin
++                            f_state := 2;
++                            exit(Highlight(syn_comment));
++                        end;
++
++                    '(':
++                        if Matches(line, pos, '(*') then begin
++                            f_state := 2;
++                            exit(Highlight(syn_comment));
++                        end;
++
++                    '/':
++                        if (Matches(line, pos, '//')) then begin
++                            f_state := 1;
++                            exit(Highlight(syn_comment));
++                        end;
++
++                    '0' .. '9', '-', '+':
++                        begin
++                            tmp := MatchesNumber(line, pos);
++
++                            if tmp &lt;&gt; 0 then begin
++                                Next := Highlight(syn_number);
++                                Inc(pos, tmp);
++                                f_state := 3;
++                                exit;
++                            end;
++                        end;
++
++                    '''':
++                        begin
++                            Next := Highlight(syn_string);
++                            Inc(pos);
++                            f_state := 4;
++                            exit;
++                        end;
++
++                    ' ':
++                        begin
++                            if MatchesTrailingSpace(line, pos) then begin
++                                Next := Highlight(syn_trailing_space);
++                                pos := length(line) + 1;
++                                exit;
++                            end;
++                        end;
++
++                    else
++                        begin
++                            tmp := MatchesKeyword(line, pos, Keywords_Pas);
++                            if tmp &lt;&gt; 0 then begin
++                                Next := Highlight(syn_keyword);
++                                Inc(pos, tmp);
++                                f_state := 6;
++                                exit;
++                            end;
++
++                            tmp := MatchesKeyword(line, pos, Types_Pas);
++                            if tmp &lt;&gt; 0 then begin
++                                Next := Highlight(syn_type);
++                                Inc(pos, tmp);
++                                f_state := 7;
++                                exit;
++                            end;
++
++                            tmp := MatchesType(line, pos);
++                            if tmp &lt;&gt; 0 then begin
++                                Next := Highlight(syn_type);
++                                Inc(pos, tmp);
++                                f_state := 7;
++                                exit;
++                            end;
++
++                            tmp := MatchesLabel(line, pos);
++                            if tmp &lt;&gt; 0 then begin
++                                Next := Highlight(syn_label);
++                                Inc(pos, tmp);
++                                f_state := 8;
++                                exit;
++                            end;
++                        end;
++                end;
++
++            1: { Kommentar bis Zeilenende }
++                begin
++                    pos := length(line);
++                    break;
++                end;
++
++            2: { Pascal-Kommentar }
++                if Matches(line, pos, '}') then begin
++                    f_state := 0;
++                    Inc(pos, 1);
++                    exit(Highlight(syn_other));
++                end else if Matches(line, pos, '*)') then begin
++                    f_state := 0;
++                    Inc(pos, 2);
++                    exit(Highlight(syn_other));
++                end;
++
++            3, 6, 7, 8: { Ende eines gefaerbten Worts }
++                begin
++                    f_state := 0;
++                    exit(Highlight(syn_other));
++                end;
++
++            4: { String }
++                case c of
++                    {'''''':
++                        begin
++                            f_state := 5;
++                            Next := Highlight(syn_string_special);
++                            Inc(pos);
++                            exit;
++                        end;}
++
++                    '''':
++                        begin
++                            f_state := 0;
++                            Inc(pos);
++                            exit(Highlight(syn_other));
++                        end;
++                end;
++
++            5: { Escaptes Zeichen in einem String }
++                begin
++                    f_state := 4;
++                    Inc(pos);
++                    exit(Highlight(syn_string));
++                end;
++
++        end;
++
++        Inc(pos);
++    end;
++
++    if f_state in [1, 3, 4, 5] then begin
++        f_state := 0;
++    end;
++end;
++
++end.
++
+-- 
+1.6.0.4
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001325.html">[tyndur-devel] [PATCH] tyndur-fpc: Patch gepatcht
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001327.html">[tyndur-devel] [PATCH] kedit: Syntax-Highlighting für Pascal
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1326">[ Datum ]</a>
+              <a href="thread.html#1326">[ Thema ]</a>
+              <a href="subject.html#1326">[ Betreff (Subject)]</a>
+              <a href="author.html#1326">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

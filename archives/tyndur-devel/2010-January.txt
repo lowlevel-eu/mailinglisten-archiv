@@ -1,0 +1,4539 @@
+From kevin at tyndur.org  Fri Jan  1 14:58:06 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Fri,  1 Jan 2010 14:58:06 +0100
+Subject: [tyndur-devel] [PATCH 0/3] kernel2: Speicher beim Prozessende
+	freigeben
+Message-ID: <1262354289-20159-1-git-send-email-kevin@tyndur.org>
+
+Der Speicherkontext wird zwar bisher brav zerstÃ¶rt, aber dummerweise
+ist mmc_destroy nicht implementiert, so dass der Speicher verloren
+geht. Kein Wunder ist der gcc immer mit einem OOM gescheitert.
+AuÃŸerdem mÃ¼ssen wir SHM beim Prozessende erstmal schlieÃŸen, sonst
+kann der Speicher zu frÃ¼h physisch freigegeben werden.
+
+Kevin Wolf (3):
+  kernel2: SHM-Funktionen bekommen Prozess als Parameter
+  kernel2: SHM beim Prozessende schliessen
+  kernel2: mmc_destroy implementieren
+
+ src/kernel2/include/mm.h                  |    4 +-
+ src/kernel2/include/tasks.h               |    5 ++-
+ src/kernel2/src/arch/i386/gdt.c           |    1 +
+ src/kernel2/src/arch/i386/mm/mm_context.c |   38 +++++++++++++++++++++-
+ src/kernel2/src/mm/shm.c                  |   50 +++++++++++++++++++++++++---
+ src/kernel2/src/syscalls/pm.c             |    1 +
+ src/kernel2/src/syscalls/rpc.c            |    1 +
+ src/kernel2/src/syscalls/shm.c            |    4 +-
+ src/kernel2/src/tasks/pm.c                |    1 +
+ 9 files changed, 92 insertions(+), 13 deletions(-)
+
+
+From kevin at tyndur.org  Fri Jan  1 14:58:07 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Fri,  1 Jan 2010 14:58:07 +0100
+Subject: [tyndur-devel] [PATCH 1/3] kernel2: SHM-Funktionen bekommen Prozess
+	als Parameter
+In-Reply-To: <1262354289-20159-1-git-send-email-kevin@tyndur.org>
+References: <1262354289-20159-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1262354289-20159-2-git-send-email-kevin@tyndur.org>
+
+* kernel2: Bis jetzt haben die SHM-Funktionen immer angenommen, dass
+  fuer den aktuellen Prozess geoeffnet/geschlossen wird. Den Prozess
+  wird jetzt als Parameter uebergeben.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/include/mm.h        |    4 ++--
+ src/kernel2/include/tasks.h     |    2 +-
+ src/kernel2/src/arch/i386/gdt.c |    1 +
+ src/kernel2/src/mm/shm.c        |   13 +++++++------
+ src/kernel2/src/syscalls/pm.c   |    1 +
+ src/kernel2/src/syscalls/rpc.c  |    1 +
+ src/kernel2/src/syscalls/shm.c  |    4 ++--
+ src/kernel2/src/tasks/pm.c      |    1 +
+ 8 files changed, 16 insertions(+), 11 deletions(-)
+
+diff --git a/src/kernel2/include/mm.h b/src/kernel2/include/mm.h
+index 0144aca..617713c 100644
+--- a/src/kernel2/include/mm.h
++++ b/src/kernel2/include/mm.h
+@@ -140,10 +140,10 @@ void shm_init(void);
+ uint32_t shm_create(size_t size);
+ 
+ /// Bestehenden Shared Memory oeffnen.
+-void* shm_attach(uint32_t id);
++void* shm_attach(pm_process_t* process, uint32_t id);
+ 
+ /// Shared Memory schliessen.
+-void shm_detach(uint32_t id);
++void shm_detach(pm_process_t* process, uint32_t id);
+ 
+ #endif
+ 
+diff --git a/src/kernel2/include/tasks.h b/src/kernel2/include/tasks.h
+index 1aedbec..c8370f4 100644
+--- a/src/kernel2/include/tasks.h
++++ b/src/kernel2/include/tasks.h
+@@ -39,7 +39,7 @@
+ #include <types.h>
+ #include <collections.h>
+ 
+-#include "mm.h"
++#include "mm_arch.h"
+ #include "lock.h"
+ 
+ #define PM_STATUS_READY 0
+diff --git a/src/kernel2/src/arch/i386/gdt.c b/src/kernel2/src/arch/i386/gdt.c
+index e42c973..3dcdd3b 100644
+--- a/src/kernel2/src/arch/i386/gdt.c
++++ b/src/kernel2/src/arch/i386/gdt.c
+@@ -35,6 +35,7 @@
+ 
+ #include <types.h>
+ 
++#include "mm.h"
+ #include "cpu.h"
+ #include "lock.h"
+ 
+diff --git a/src/kernel2/src/mm/shm.c b/src/kernel2/src/mm/shm.c
+index 67b4831..d05de0e 100644
+--- a/src/kernel2/src/mm/shm.c
++++ b/src/kernel2/src/mm/shm.c
+@@ -94,11 +94,12 @@ uint32_t shm_create(size_t size)
+ /**
+  * Bestehenden Shared Memory oeffnen.
+  *
++ * @param process Prozess, der den Shared Memory oeffnet
+  * @param id ID des zu oeffnenden Shared Memory
+  * @return Virtuelle Adresse des geoeffneten Shared Memory; NULL, wenn der
+  * Shared Memory mit der angegebenen ID nicht existiert.
+  */
+-void* shm_attach(uint32_t id)
++void* shm_attach(pm_process_t* process, uint32_t id)
+ {
+     struct shm_desc* shm = tree_search(shms, id);
+     void* ret;
+@@ -115,7 +116,7 @@ void* shm_attach(uint32_t id)
+     } else {
+         // Ansonsten Mapping von einem anderen Prozess uebernehmen
+         struct shm_process* first = list_get_element_at(shm->processes, 0);
+-        ret = mmc_automap_user(&mmc_current_context(),
++        ret = mmc_automap_user(&process->context,
+             &first->process->context, first->vaddr, shm->num_pages,
+             MM_USER_START, MM_USER_END, MM_FLAGS_USER_DATA);
+     }
+@@ -125,7 +126,7 @@ void* shm_attach(uint32_t id)
+     }
+ 
+     shm_proc = calloc(1, sizeof(*shm_proc));
+-    shm_proc->process = current_process;
++    shm_proc->process = process;
+     shm_proc->vaddr = ret;
+     list_push(shm->processes, shm_proc);
+ 
+@@ -136,13 +137,13 @@ void* shm_attach(uint32_t id)
+  * Shared Memory schliessen. Wenn keine Prozesse den Shared Memory mehr
+  * geoeffnet haben, wird er geloescht.
+  *
++ * @param process Prozess, der den Shared Memory schliesst
+  * @param id ID des zu schliessenden Shared Memory
+  */
+-void shm_detach(uint32_t id)
++void shm_detach(pm_process_t* process, uint32_t id)
+ {
+     struct shm_desc* shm = tree_search(shms, id);
+     struct shm_process* shm_proc;
+-    pm_process_t* current_proc = current_process;
+     int i;
+ 
+     if (shm == NULL) {
+@@ -150,7 +151,7 @@ void shm_detach(uint32_t id)
+     }
+ 
+     for (i = 0; (shm_proc = list_get_element_at(shm->processes, i)); i++) {
+-        if (shm_proc->process == current_proc) {
++        if (shm_proc->process == process) {
+             list_remove(shm->processes, i);
+             goto found;
+         }
+diff --git a/src/kernel2/src/syscalls/pm.c b/src/kernel2/src/syscalls/pm.c
+index 8826a50..486b030 100644
+--- a/src/kernel2/src/syscalls/pm.c
++++ b/src/kernel2/src/syscalls/pm.c
+@@ -39,6 +39,7 @@
+ 
+ #include "syscall.h"
+ #include "syscall_structs.h"
++#include "mm.h"
+ #include "tasks.h"
+ #include "cpu.h"
+ 
+diff --git a/src/kernel2/src/syscalls/rpc.c b/src/kernel2/src/syscalls/rpc.c
+index 3c51ec6..515ad80 100644
+--- a/src/kernel2/src/syscalls/rpc.c
++++ b/src/kernel2/src/syscalls/rpc.c
+@@ -41,6 +41,7 @@
+ 
+ #include "kernel.h"
+ #include "syscall.h"
++#include "mm.h"
+ #include "tasks.h"
+ #include "cpu.h"
+ #include "im.h"
+diff --git a/src/kernel2/src/syscalls/shm.c b/src/kernel2/src/syscalls/shm.c
+index c3aed63..0892622 100644
+--- a/src/kernel2/src/syscalls/shm.c
++++ b/src/kernel2/src/syscalls/shm.c
+@@ -56,7 +56,7 @@ uint32_t syscall_shm_create(size_t size)
+  */
+ void* syscall_shm_attach(uint32_t id)
+ {
+-    return shm_attach(id);
++    return shm_attach(current_process, id);
+ }
+ 
+ /**
+@@ -67,6 +67,6 @@ void* syscall_shm_attach(uint32_t id)
+  */
+ void syscall_shm_detach(uint32_t id)
+ {
+-    shm_detach(id);
++    shm_detach(current_process, id);
+ }
+ 
+diff --git a/src/kernel2/src/tasks/pm.c b/src/kernel2/src/tasks/pm.c
+index e5c4b9f..8dc8f2b 100644
+--- a/src/kernel2/src/tasks/pm.c
++++ b/src/kernel2/src/tasks/pm.c
+@@ -39,6 +39,7 @@
+ #include <string.h>
+ #include <collections.h>
+ 
++#include "mm.h"
+ #include "tasks.h"
+ #include "lock.h"
+ #include "timer.h"
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Fri Jan  1 14:58:08 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Fri,  1 Jan 2010 14:58:08 +0100
+Subject: [tyndur-devel] [PATCH 2/3] kernel2: SHM beim Prozessende schliessen
+In-Reply-To: <1262354289-20159-1-git-send-email-kevin@tyndur.org>
+References: <1262354289-20159-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1262354289-20159-3-git-send-email-kevin@tyndur.org>
+
+! kernel2: Alle geoeffneten SHM-Bereiche beim Prozessende schliessen
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/include/tasks.h |    3 +++
+ src/kernel2/src/mm/shm.c    |   37 +++++++++++++++++++++++++++++++++++++
+ 2 files changed, 40 insertions(+), 0 deletions(-)
+
+diff --git a/src/kernel2/include/tasks.h b/src/kernel2/include/tasks.h
+index c8370f4..37d9714 100644
+--- a/src/kernel2/include/tasks.h
++++ b/src/kernel2/include/tasks.h
+@@ -84,6 +84,9 @@ typedef struct pm_process {
+     /// Eine Liste von RPC-Backlinks
+     list_t* rpcs;
+ 
++    /// Eine Liste von geoeffneten SHM-Bereichen
++    list_t* shm;
++
+     /**
+      * Eine Liste von Eventhandlern, die beim Loeschen des Prozesses
+      * aufgerufen werden
+diff --git a/src/kernel2/src/mm/shm.c b/src/kernel2/src/mm/shm.c
+index d05de0e..b067d91 100644
+--- a/src/kernel2/src/mm/shm.c
++++ b/src/kernel2/src/mm/shm.c
+@@ -51,6 +51,7 @@ struct shm_desc {
+ };
+ 
+ struct shm_process {
++    struct shm_desc*    shm;
+     pm_process_t*       process;
+     vaddr_t             vaddr;
+ };
+@@ -58,6 +59,8 @@ struct shm_process {
+ static tree_t* shms = NULL;
+ static uint32_t shm_last_id = 0;
+ 
++static void shm_destroy_task(pm_process_t* process, void* prv);
++
+ /**
+  * Initialisiert die SHM-Verwaltung
+  */
+@@ -126,10 +129,17 @@ void* shm_attach(pm_process_t* process, uint32_t id)
+     }
+ 
+     shm_proc = calloc(1, sizeof(*shm_proc));
++    shm_proc->shm = shm;
+     shm_proc->process = process;
+     shm_proc->vaddr = ret;
+     list_push(shm->processes, shm_proc);
+ 
++    if (process->shm == NULL) {
++        process->shm = list_create();
++        pm_register_on_destroy(process, shm_destroy_task, NULL);
++    }
++    list_push(process->shm, shm_proc);
++
+     return ret;
+ }
+ 
+@@ -150,6 +160,15 @@ void shm_detach(pm_process_t* process, uint32_t id)
+         return;
+     }
+ 
++    // Aus der SHM-Liste des Prozesses austragen
++    for (i = 0; (shm_proc = list_get_element_at(process->shm, i)); i++) {
++        if (shm_proc->shm == shm) {
++            list_remove(process->shm, i);
++            break;
++        }
++    }
++
++    // Aus der Prozessliste des SHM austragen
+     for (i = 0; (shm_proc = list_get_element_at(shm->processes, i)); i++) {
+         if (shm_proc->process == process) {
+             list_remove(shm->processes, i);
+@@ -184,3 +203,21 @@ found:
+ 
+     return;
+ }
++
++/**
++ * Schliesst alle SHM-Bereiche eines Prozesses
++ */
++static void shm_destroy_task(pm_process_t* process, void* prv)
++{
++    struct shm_process* shm_proc;
++
++    if (process->shm == NULL) {
++        return;
++    }
++
++    while ((shm_proc = list_get_element_at(process->shm, 0))) {
++        shm_detach(process, shm_proc->shm->id);
++    }
++
++    list_destroy(process->shm);
++}
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Fri Jan  1 14:58:09 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Fri,  1 Jan 2010 14:58:09 +0100
+Subject: [tyndur-devel] [PATCH 3/3] kernel2: mmc_destroy implementieren
+In-Reply-To: <1262354289-20159-1-git-send-email-kevin@tyndur.org>
+References: <1262354289-20159-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1262354289-20159-4-git-send-email-kevin@tyndur.org>
+
++ kernel2: mmc_destroy implementiert. Damit wird jetzt nach Prozessende
+  der Speicher auch wieder freigegeben.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/src/arch/i386/mm/mm_context.c |   38 +++++++++++++++++++++++++++-
+ 1 files changed, 36 insertions(+), 2 deletions(-)
+
+diff --git a/src/kernel2/src/arch/i386/mm/mm_context.c b/src/kernel2/src/arch/i386/mm/mm_context.c
+index 34ac946..b5d8d3f 100644
+--- a/src/kernel2/src/arch/i386/mm/mm_context.c
++++ b/src/kernel2/src/arch/i386/mm/mm_context.c
+@@ -61,6 +61,9 @@ bool use_phys_addr = TRUE;
+  */
+ static void mmc_sync(mmc_context_t* context);
+ 
++static inline vaddr_t get_pagetable(mmc_context_t* context, size_t index);
++static inline void free_pagetable(mmc_context_t* context, vaddr_t page_table);
++
+ /**
+  * Erstellt einen neuen MM-Kontext (Page Directory)
+  */
+@@ -142,11 +145,40 @@ void mmc_activate(mmc_context_t* context)
+ /**
+  * Kontext zerstoeren und Userspace-Speicher freigeben
+  *
++ * Achtung: Der noch gemappte Speicher darf nur zu diesem Kontext gehoeren, er
++ * wird physisch freigegeben! Shared Memory muss vorher freigegeben werden.
++ *
+  * @param context Kontext
+  */
+ void mmc_destroy(mmc_context_t* context)
+ {
+-    // TODO
++    page_directory_t page_directory = context->page_directory_virt;
++    page_table_t page_table;
++    int i, n;
++
++    for (i = (MM_USER_START >> PGDIR_SHIFT);
++         i < (MM_USER_END >> PGDIR_SHIFT);
++         i++)
++    {
++        page_table = get_pagetable(context, i);
++        if (page_table == NULL) {
++            continue;
++        }
++
++        // Alle Page-Table-Eintraege freigeben
++        for(n = 0; n < 1024; n++) {
++            if(page_table[n] & PTE_P) {
++                pmm_free((paddr_t) (page_table[n] & PAGE_MASK), 1);
++            }
++        }
++        free_pagetable(context, page_table);
++
++        // Page Table freigeben
++        pmm_free((paddr_t) (page_directory[i] & PAGE_MASK), 1);
++    }
++
++    // Page Directory freigeben
++    pmm_free(context->page_directory_virt, 1);
+ }
+ 
+ /**
+@@ -160,7 +192,9 @@ static inline vaddr_t get_pagetable(mmc_context_t* context, size_t index)
+     page_table_t page_table;
+ 
+     if (context->page_directory == mmc_current_context().page_directory) {
+-        if (!use_phys_addr) {
++        if ((pagedir[index] & PTE_P) == 0) {
++            page_table = NULL;
++        } else if (!use_phys_addr) {
+             page_table = (page_table_t) 
+                 (PAGETABLES_MEM_START + (PAGE_TABLE_LENGTH * 4 * index));
+         } else {
+-- 
+1.6.0.2
+
+
+From toni at tyndur.org  Fri Jan  1 15:37:39 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Fri, 1 Jan 2010 15:37:39 +0100
+Subject: [tyndur-devel] [PATCH 1/3] kernel2: SHM-Funktionen bekommen
+ Prozess als Parameter
+In-Reply-To: <1262354289-20159-2-git-send-email-kevin@tyndur.org>
+References: <1262354289-20159-1-git-send-email-kevin@tyndur.org>
+	<1262354289-20159-2-git-send-email-kevin@tyndur.org>
+Message-ID: <20100101143739.GB4316@neo.geekcave.lan>
+
+On Fri, Jan 01 14:58, Kevin Wolf wrote:
+> * kernel2: Bis jetzt haben die SHM-Funktionen immer angenommen, dass
+>   fuer den aktuellen Prozess geoeffnet/geschlossen wird. Den Prozess
+>   wird jetzt als Parameter uebergeben.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+> ---
+>  src/kernel2/include/mm.h        |    4 ++--
+>  src/kernel2/include/tasks.h     |    2 +-
+>  src/kernel2/src/arch/i386/gdt.c |    1 +
+>  src/kernel2/src/mm/shm.c        |   13 +++++++------
+>  src/kernel2/src/syscalls/pm.c   |    1 +
+>  src/kernel2/src/syscalls/rpc.c  |    1 +
+>  src/kernel2/src/syscalls/shm.c  |    4 ++--
+>  src/kernel2/src/tasks/pm.c      |    1 +
+>  8 files changed, 16 insertions(+), 11 deletions(-)
+> 
+> diff --git a/src/kernel2/include/mm.h b/src/kernel2/include/mm.h
+> index 0144aca..617713c 100644
+> --- a/src/kernel2/include/mm.h
+> +++ b/src/kernel2/include/mm.h
+> @@ -140,10 +140,10 @@ void shm_init(void);
+>  uint32_t shm_create(size_t size);
+>  
+>  /// Bestehenden Shared Memory oeffnen.
+> -void* shm_attach(uint32_t id);
+> +void* shm_attach(pm_process_t* process, uint32_t id);
+>  
+>  /// Shared Memory schliessen.
+> -void shm_detach(uint32_t id);
+> +void shm_detach(pm_process_t* process, uint32_t id);
+>  
+>  #endif
+>  
+> diff --git a/src/kernel2/include/tasks.h b/src/kernel2/include/tasks.h
+> index 1aedbec..c8370f4 100644
+> --- a/src/kernel2/include/tasks.h
+> +++ b/src/kernel2/include/tasks.h
+> @@ -39,7 +39,7 @@
+>  #include <types.h>
+>  #include <collections.h>
+>  
+> -#include "mm.h"
+> +#include "mm_arch.h"
+>  #include "lock.h"
+>  
+>  #define PM_STATUS_READY 0
+> diff --git a/src/kernel2/src/arch/i386/gdt.c b/src/kernel2/src/arch/i386/gdt.c
+> index e42c973..3dcdd3b 100644
+> --- a/src/kernel2/src/arch/i386/gdt.c
+> +++ b/src/kernel2/src/arch/i386/gdt.c
+> @@ -35,6 +35,7 @@
+>  
+>  #include <types.h>
+>  
+> +#include "mm.h"
+>  #include "cpu.h"
+>  #include "lock.h"
+>  
+> diff --git a/src/kernel2/src/mm/shm.c b/src/kernel2/src/mm/shm.c
+> index 67b4831..d05de0e 100644
+> --- a/src/kernel2/src/mm/shm.c
+> +++ b/src/kernel2/src/mm/shm.c
+> @@ -94,11 +94,12 @@ uint32_t shm_create(size_t size)
+>  /**
+>   * Bestehenden Shared Memory oeffnen.
+>   *
+> + * @param process Prozess, der den Shared Memory oeffnet
+>   * @param id ID des zu oeffnenden Shared Memory
+>   * @return Virtuelle Adresse des geoeffneten Shared Memory; NULL, wenn der
+>   * Shared Memory mit der angegebenen ID nicht existiert.
+>   */
+> -void* shm_attach(uint32_t id)
+> +void* shm_attach(pm_process_t* process, uint32_t id)
+>  {
+>      struct shm_desc* shm = tree_search(shms, id);
+>      void* ret;
+> @@ -115,7 +116,7 @@ void* shm_attach(uint32_t id)
+>      } else {
+>          // Ansonsten Mapping von einem anderen Prozess uebernehmen
+>          struct shm_process* first = list_get_element_at(shm->processes, 0);
+> -        ret = mmc_automap_user(&mmc_current_context(),
+> +        ret = mmc_automap_user(&process->context,
+>              &first->process->context, first->vaddr, shm->num_pages,
+>              MM_USER_START, MM_USER_END, MM_FLAGS_USER_DATA);
+>      }
+> @@ -125,7 +126,7 @@ void* shm_attach(uint32_t id)
+>      }
+>  
+>      shm_proc = calloc(1, sizeof(*shm_proc));
+> -    shm_proc->process = current_process;
+> +    shm_proc->process = process;
+>      shm_proc->vaddr = ret;
+>      list_push(shm->processes, shm_proc);
+>  
+> @@ -136,13 +137,13 @@ void* shm_attach(uint32_t id)
+>   * Shared Memory schliessen. Wenn keine Prozesse den Shared Memory mehr
+>   * geoeffnet haben, wird er geloescht.
+>   *
+> + * @param process Prozess, der den Shared Memory schliesst
+>   * @param id ID des zu schliessenden Shared Memory
+>   */
+> -void shm_detach(uint32_t id)
+> +void shm_detach(pm_process_t* process, uint32_t id)
+>  {
+>      struct shm_desc* shm = tree_search(shms, id);
+>      struct shm_process* shm_proc;
+> -    pm_process_t* current_proc = current_process;
+>      int i;
+>  
+>      if (shm == NULL) {
+> @@ -150,7 +151,7 @@ void shm_detach(uint32_t id)
+>      }
+>  
+>      for (i = 0; (shm_proc = list_get_element_at(shm->processes, i)); i++) {
+> -        if (shm_proc->process == current_proc) {
+> +        if (shm_proc->process == process) {
+>              list_remove(shm->processes, i);
+>              goto found;
+>          }
+> diff --git a/src/kernel2/src/syscalls/pm.c b/src/kernel2/src/syscalls/pm.c
+> index 8826a50..486b030 100644
+> --- a/src/kernel2/src/syscalls/pm.c
+> +++ b/src/kernel2/src/syscalls/pm.c
+> @@ -39,6 +39,7 @@
+>  
+>  #include "syscall.h"
+>  #include "syscall_structs.h"
+> +#include "mm.h"
+>  #include "tasks.h"
+>  #include "cpu.h"
+>  
+> diff --git a/src/kernel2/src/syscalls/rpc.c b/src/kernel2/src/syscalls/rpc.c
+> index 3c51ec6..515ad80 100644
+> --- a/src/kernel2/src/syscalls/rpc.c
+> +++ b/src/kernel2/src/syscalls/rpc.c
+> @@ -41,6 +41,7 @@
+>  
+>  #include "kernel.h"
+>  #include "syscall.h"
+> +#include "mm.h"
+>  #include "tasks.h"
+>  #include "cpu.h"
+>  #include "im.h"
+> diff --git a/src/kernel2/src/syscalls/shm.c b/src/kernel2/src/syscalls/shm.c
+> index c3aed63..0892622 100644
+> --- a/src/kernel2/src/syscalls/shm.c
+> +++ b/src/kernel2/src/syscalls/shm.c
+> @@ -56,7 +56,7 @@ uint32_t syscall_shm_create(size_t size)
+>   */
+>  void* syscall_shm_attach(uint32_t id)
+>  {
+> -    return shm_attach(id);
+> +    return shm_attach(current_process, id);
+>  }
+>  
+>  /**
+> @@ -67,6 +67,6 @@ void* syscall_shm_attach(uint32_t id)
+>   */
+>  void syscall_shm_detach(uint32_t id)
+>  {
+> -    shm_detach(id);
+> +    shm_detach(current_process, id);
+>  }
+>  
+> diff --git a/src/kernel2/src/tasks/pm.c b/src/kernel2/src/tasks/pm.c
+> index e5c4b9f..8dc8f2b 100644
+> --- a/src/kernel2/src/tasks/pm.c
+> +++ b/src/kernel2/src/tasks/pm.c
+> @@ -39,6 +39,7 @@
+>  #include <string.h>
+>  #include <collections.h>
+>  
+> +#include "mm.h"
+>  #include "tasks.h"
+>  #include "lock.h"
+>  #include "timer.h"
+
+Was haben denn die ganzen include-Änderungen hier zu suchen?
+
+Aber sonst sieht das vernünfig aus.
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100101/40bbd181/attachment.pgp>
+
+From toni at tyndur.org  Fri Jan  1 15:48:57 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Fri, 1 Jan 2010 15:48:57 +0100
+Subject: [tyndur-devel] [PATCH 2/3] kernel2: SHM beim Prozessende
+ schliessen
+In-Reply-To: <1262354289-20159-3-git-send-email-kevin@tyndur.org>
+References: <1262354289-20159-1-git-send-email-kevin@tyndur.org>
+	<1262354289-20159-3-git-send-email-kevin@tyndur.org>
+Message-ID: <20100101144856.GC4316@neo.geekcave.lan>
+
+On Fri, Jan 01 14:58, Kevin Wolf wrote:
+> ! kernel2: Alle geoeffneten SHM-Bereiche beim Prozessende schliessen
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100101/d1944cf4/attachment.pgp>
+
+From kevin at tyndur.org  Fri Jan  1 16:55:01 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Fri, 1 Jan 2010 16:55:01 +0100
+Subject: [tyndur-devel] [PATCH 1/3] kernel2: SHM-Funktionen bekommen
+ Prozess als Parameter
+In-Reply-To: <20100101143739.GB4316@neo.geekcave.lan>
+References: <1262354289-20159-1-git-send-email-kevin@tyndur.org>
+	<1262354289-20159-2-git-send-email-kevin@tyndur.org>
+	<20100101143739.GB4316@neo.geekcave.lan>
+Message-ID: <20100101155501.GA32252@silvanus>
+
+On Fri, Jan 01, 2010 at 03:37:39PM +0100, Antoine Kaufmann wrote:
+> On Fri, Jan 01 14:58, Kevin Wolf wrote:
+> > * kernel2: Bis jetzt haben die SHM-Funktionen immer angenommen, dass
+> >   fuer den aktuellen Prozess geoeffnet/geschlossen wird. Den Prozess
+> >   wird jetzt als Parameter uebergeben.
+> > 
+> > Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+> > ---
+> >  src/kernel2/include/mm.h        |    4 ++--
+> >  src/kernel2/include/tasks.h     |    2 +-
+> >  src/kernel2/src/arch/i386/gdt.c |    1 +
+> >  src/kernel2/src/mm/shm.c        |   13 +++++++------
+> >  src/kernel2/src/syscalls/pm.c   |    1 +
+> >  src/kernel2/src/syscalls/rpc.c  |    1 +
+> >  src/kernel2/src/syscalls/shm.c  |    4 ++--
+> >  src/kernel2/src/tasks/pm.c      |    1 +
+> >  8 files changed, 16 insertions(+), 11 deletions(-)
+> > 
+> > diff --git a/src/kernel2/include/mm.h b/src/kernel2/include/mm.h
+> > index 0144aca..617713c 100644
+> > --- a/src/kernel2/include/mm.h
+> > +++ b/src/kernel2/include/mm.h
+> > @@ -140,10 +140,10 @@ void shm_init(void);
+> >  uint32_t shm_create(size_t size);
+> >  
+> >  /// Bestehenden Shared Memory oeffnen.
+> > -void* shm_attach(uint32_t id);
+> > +void* shm_attach(pm_process_t* process, uint32_t id);
+> >  
+> >  /// Shared Memory schliessen.
+> > -void shm_detach(uint32_t id);
+> > +void shm_detach(pm_process_t* process, uint32_t id);
+> >  
+> >  #endif
+> >  
+> > diff --git a/src/kernel2/include/tasks.h b/src/kernel2/include/tasks.h
+> > index 1aedbec..c8370f4 100644
+> > --- a/src/kernel2/include/tasks.h
+> > +++ b/src/kernel2/include/tasks.h
+> > @@ -39,7 +39,7 @@
+> >  #include <types.h>
+> >  #include <collections.h>
+> >  
+> > -#include "mm.h"
+> > +#include "mm_arch.h"
+> >  #include "lock.h"
+> >  
+> >  #define PM_STATUS_READY 0
+> > diff --git a/src/kernel2/src/arch/i386/gdt.c b/src/kernel2/src/arch/i386/gdt.c
+> > index e42c973..3dcdd3b 100644
+> > --- a/src/kernel2/src/arch/i386/gdt.c
+> > +++ b/src/kernel2/src/arch/i386/gdt.c
+> > @@ -35,6 +35,7 @@
+> >  
+> >  #include <types.h>
+> >  
+> > +#include "mm.h"
+> >  #include "cpu.h"
+> >  #include "lock.h"
+> >  
+> > diff --git a/src/kernel2/src/mm/shm.c b/src/kernel2/src/mm/shm.c
+> > index 67b4831..d05de0e 100644
+> > --- a/src/kernel2/src/mm/shm.c
+> > +++ b/src/kernel2/src/mm/shm.c
+> > @@ -94,11 +94,12 @@ uint32_t shm_create(size_t size)
+> >  /**
+> >   * Bestehenden Shared Memory oeffnen.
+> >   *
+> > + * @param process Prozess, der den Shared Memory oeffnet
+> >   * @param id ID des zu oeffnenden Shared Memory
+> >   * @return Virtuelle Adresse des geoeffneten Shared Memory; NULL, wenn der
+> >   * Shared Memory mit der angegebenen ID nicht existiert.
+> >   */
+> > -void* shm_attach(uint32_t id)
+> > +void* shm_attach(pm_process_t* process, uint32_t id)
+> >  {
+> >      struct shm_desc* shm = tree_search(shms, id);
+> >      void* ret;
+> > @@ -115,7 +116,7 @@ void* shm_attach(uint32_t id)
+> >      } else {
+> >          // Ansonsten Mapping von einem anderen Prozess uebernehmen
+> >          struct shm_process* first = list_get_element_at(shm->processes, 0);
+> > -        ret = mmc_automap_user(&mmc_current_context(),
+> > +        ret = mmc_automap_user(&process->context,
+> >              &first->process->context, first->vaddr, shm->num_pages,
+> >              MM_USER_START, MM_USER_END, MM_FLAGS_USER_DATA);
+> >      }
+> > @@ -125,7 +126,7 @@ void* shm_attach(uint32_t id)
+> >      }
+> >  
+> >      shm_proc = calloc(1, sizeof(*shm_proc));
+> > -    shm_proc->process = current_process;
+> > +    shm_proc->process = process;
+> >      shm_proc->vaddr = ret;
+> >      list_push(shm->processes, shm_proc);
+> >  
+> > @@ -136,13 +137,13 @@ void* shm_attach(uint32_t id)
+> >   * Shared Memory schliessen. Wenn keine Prozesse den Shared Memory mehr
+> >   * geoeffnet haben, wird er geloescht.
+> >   *
+> > + * @param process Prozess, der den Shared Memory schliesst
+> >   * @param id ID des zu schliessenden Shared Memory
+> >   */
+> > -void shm_detach(uint32_t id)
+> > +void shm_detach(pm_process_t* process, uint32_t id)
+> >  {
+> >      struct shm_desc* shm = tree_search(shms, id);
+> >      struct shm_process* shm_proc;
+> > -    pm_process_t* current_proc = current_process;
+> >      int i;
+> >  
+> >      if (shm == NULL) {
+> > @@ -150,7 +151,7 @@ void shm_detach(uint32_t id)
+> >      }
+> >  
+> >      for (i = 0; (shm_proc = list_get_element_at(shm->processes, i)); i++) {
+> > -        if (shm_proc->process == current_proc) {
+> > +        if (shm_proc->process == process) {
+> >              list_remove(shm->processes, i);
+> >              goto found;
+> >          }
+> > diff --git a/src/kernel2/src/syscalls/pm.c b/src/kernel2/src/syscalls/pm.c
+> > index 8826a50..486b030 100644
+> > --- a/src/kernel2/src/syscalls/pm.c
+> > +++ b/src/kernel2/src/syscalls/pm.c
+> > @@ -39,6 +39,7 @@
+> >  
+> >  #include "syscall.h"
+> >  #include "syscall_structs.h"
+> > +#include "mm.h"
+> >  #include "tasks.h"
+> >  #include "cpu.h"
+> >  
+> > diff --git a/src/kernel2/src/syscalls/rpc.c b/src/kernel2/src/syscalls/rpc.c
+> > index 3c51ec6..515ad80 100644
+> > --- a/src/kernel2/src/syscalls/rpc.c
+> > +++ b/src/kernel2/src/syscalls/rpc.c
+> > @@ -41,6 +41,7 @@
+> >  
+> >  #include "kernel.h"
+> >  #include "syscall.h"
+> > +#include "mm.h"
+> >  #include "tasks.h"
+> >  #include "cpu.h"
+> >  #include "im.h"
+> > diff --git a/src/kernel2/src/syscalls/shm.c b/src/kernel2/src/syscalls/shm.c
+> > index c3aed63..0892622 100644
+> > --- a/src/kernel2/src/syscalls/shm.c
+> > +++ b/src/kernel2/src/syscalls/shm.c
+> > @@ -56,7 +56,7 @@ uint32_t syscall_shm_create(size_t size)
+> >   */
+> >  void* syscall_shm_attach(uint32_t id)
+> >  {
+> > -    return shm_attach(id);
+> > +    return shm_attach(current_process, id);
+> >  }
+> >  
+> >  /**
+> > @@ -67,6 +67,6 @@ void* syscall_shm_attach(uint32_t id)
+> >   */
+> >  void syscall_shm_detach(uint32_t id)
+> >  {
+> > -    shm_detach(id);
+> > +    shm_detach(current_process, id);
+> >  }
+> >  
+> > diff --git a/src/kernel2/src/tasks/pm.c b/src/kernel2/src/tasks/pm.c
+> > index e5c4b9f..8dc8f2b 100644
+> > --- a/src/kernel2/src/tasks/pm.c
+> > +++ b/src/kernel2/src/tasks/pm.c
+> > @@ -39,6 +39,7 @@
+> >  #include <string.h>
+> >  #include <collections.h>
+> >  
+> > +#include "mm.h"
+> >  #include "tasks.h"
+> >  #include "lock.h"
+> >  #include "timer.h"
+> 
+> Was haben denn die ganzen include-Änderungen hier zu suchen?
+
+mm.h und tasks.h haben sich bisher gegenseitig eingebunden, obwohl task.h
+eigentlich nur mm_arch.h braucht. Das Ergebnis war halt, dass wenn
+tasks.h zuerst eingebunden wird, das #include "tasks.h" in mm.h nichts
+gebracht hat und pm_process_t undefiniert war.
+
+Sollte ich vielleicht noch in die Commitlog aufnehmen.
+
+> 
+> Aber sonst sieht das vernünfig aus.
+> Acked-by: Antoine Kaufmann <toni at tyndur.org>
+> 
+> -- 
+> Antoine Kaufmann
+> <toni at famkaufmann.info>
+
+
+
+> _______________________________________________
+> tyndur-devel mailing list
+> tyndur-devel at tyndur.org
+> http://list.tyndur.org/mailman/listinfo/tyndur-devel
+
+
+From toni at tyndur.org  Fri Jan  1 19:18:27 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Fri, 1 Jan 2010 19:18:27 +0100
+Subject: [tyndur-devel] [PATCH 3/3] kernel2: mmc_destroy implementieren
+In-Reply-To: <1262354289-20159-4-git-send-email-kevin@tyndur.org>
+References: <1262354289-20159-1-git-send-email-kevin@tyndur.org>
+	<1262354289-20159-4-git-send-email-kevin@tyndur.org>
+Message-ID: <20100101181827.GD4316@neo.geekcave.lan>
+
+On Fri, Jan 01 14:58, Kevin Wolf wrote:
+> + kernel2: mmc_destroy implementiert. Damit wird jetzt nach Prozessende
+>   der Speicher auch wieder freigegeben.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+> ---
+>  src/kernel2/src/arch/i386/mm/mm_context.c |   38 +++++++++++++++++++++++++++-
+>  1 files changed, 36 insertions(+), 2 deletions(-)
+> 
+> diff --git a/src/kernel2/src/arch/i386/mm/mm_context.c b/src/kernel2/src/arch/i386/mm/mm_context.c
+> index 34ac946..b5d8d3f 100644
+> --- a/src/kernel2/src/arch/i386/mm/mm_context.c
+> +++ b/src/kernel2/src/arch/i386/mm/mm_context.c
+> @@ -61,6 +61,9 @@ bool use_phys_addr = TRUE;
+>   */
+>  static void mmc_sync(mmc_context_t* context);
+>  
+> +static inline vaddr_t get_pagetable(mmc_context_t* context, size_t index);
+> +static inline void free_pagetable(mmc_context_t* context, vaddr_t page_table);
+> +
+>  /**
+>   * Erstellt einen neuen MM-Kontext (Page Directory)
+>   */
+> @@ -142,11 +145,40 @@ void mmc_activate(mmc_context_t* context)
+>  /**
+>   * Kontext zerstoeren und Userspace-Speicher freigeben
+>   *
+> + * Achtung: Der noch gemappte Speicher darf nur zu diesem Kontext gehoeren, er
+> + * wird physisch freigegeben! Shared Memory muss vorher freigegeben werden.
+> + *
+>   * @param context Kontext
+>   */
+>  void mmc_destroy(mmc_context_t* context)
+>  {
+> -    // TODO
+> +    page_directory_t page_directory = context->page_directory_virt;
+> +    page_table_t page_table;
+> +    int i, n;
+> +
+> +    for (i = (MM_USER_START >> PGDIR_SHIFT);
+> +         i < (MM_USER_END >> PGDIR_SHIFT);
+> +         i++)
+> +    {
+> +        page_table = get_pagetable(context, i);
+> +        if (page_table == NULL) {
+> +            continue;
+> +        }
+> +
+> +        // Alle Page-Table-Eintraege freigeben
+> +        for(n = 0; n < 1024; n++) {
+> +            if(page_table[n] & PTE_P) {
+> +                pmm_free((paddr_t) (page_table[n] & PAGE_MASK), 1);
+> +            }
+> +        }
+> +        free_pagetable(context, page_table);
+> +
+> +        // Page Table freigeben
+> +        pmm_free((paddr_t) (page_directory[i] & PAGE_MASK), 1);
+> +    }
+> +
+> +    // Page Directory freigeben
+> +    pmm_free(context->page_directory_virt, 1);
+
+Also dieses virt kommt mir etwas seltsam vor...
+
+>  }
+>  
+>  /**
+> @@ -160,7 +192,9 @@ static inline vaddr_t get_pagetable(mmc_context_t* context, size_t index)
+>      page_table_t page_table;
+>  
+>      if (context->page_directory == mmc_current_context().page_directory) {
+> -        if (!use_phys_addr) {
+> +        if ((pagedir[index] & PTE_P) == 0) {
+> +            page_table = NULL;
+> +        } else if (!use_phys_addr) {
+>              page_table = (page_table_t) 
+>                  (PAGETABLES_MEM_START + (PAGE_TABLE_LENGTH * 4 * index));
+>          } else {
+
+Der Rest sieht gut aus.
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100101/e3b8c19c/attachment.pgp>
+
+From kevin at tyndur.org  Sun Jan  3 17:03:14 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  3 Jan 2010 17:03:14 +0100
+Subject: [tyndur-devel] [PATCH v2 0/7] kernel2: Speicher beim Prozessende
+	freigeben (und andere Fixes)
+Message-ID: <1262534601-14194-1-git-send-email-kevin@tyndur.org>
+
+Gleiche Fixes wie letztes Mal, nur dass mit der Korrektur nach dem
+Review noch ein paar weitere Fehler aufgedeckt worden sind, so dass
+die Patchserie auf etwas mehr als die doppelte Laenge angewachsen
+ist...
+
+Kevin Wolf (7):
+  kernel2: SHM-Funktionen bekommen Prozess als Parameter
+  kernel2: SHM beim Prozessende schliessen
+  kernel2: Fuer Syscalls keinen Userspacestack benutzen
+  kernel2: mmc_destroy implementieren
+  kernel2: Kernel-PD bei Paging-Initialisierung richtig setzen
+  kernel2: Richtige Flags fuer Page Directories
+  kernel2: Page Directories seltener kopieren
+
+ src/kernel2/include/mm.h                  |    4 +-
+ src/kernel2/include/tasks.h               |    5 ++-
+ src/kernel2/src/arch/i386/gdt.c           |    1 +
+ src/kernel2/src/arch/i386/mm/mm_context.c |   56 ++++++++++++++++++++++++-----
+ src/kernel2/src/arch/i386/mm/virt.c       |    2 +
+ src/kernel2/src/arch/i386/syscall.c       |   30 +++++----------
+ src/kernel2/src/mm/shm.c                  |   50 ++++++++++++++++++++++---
+ src/kernel2/src/syscalls/pm.c             |    1 +
+ src/kernel2/src/syscalls/rpc.c            |    1 +
+ src/kernel2/src/syscalls/shm.c            |    4 +-
+ src/kernel2/src/tasks/pm.c                |    8 ++++
+ 11 files changed, 122 insertions(+), 40 deletions(-)
+
+
+From kevin at tyndur.org  Sun Jan  3 17:03:15 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  3 Jan 2010 17:03:15 +0100
+Subject: [tyndur-devel] [PATCH v2 1/7] kernel2: SHM-Funktionen bekommen
+	Prozess als Parameter
+In-Reply-To: <1262534601-14194-1-git-send-email-kevin@tyndur.org>
+References: <1262534601-14194-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1262534601-14194-2-git-send-email-kevin@tyndur.org>
+
+* kernel2: Bis jetzt haben die SHM-Funktionen immer angenommen, dass
+  fuer den aktuellen Prozess geoeffnet/geschlossen wird. Den Prozess
+  wird jetzt als Parameter uebergeben.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/include/mm.h        |    4 ++--
+ src/kernel2/include/tasks.h     |    2 +-
+ src/kernel2/src/arch/i386/gdt.c |    1 +
+ src/kernel2/src/mm/shm.c        |   13 +++++++------
+ src/kernel2/src/syscalls/pm.c   |    1 +
+ src/kernel2/src/syscalls/rpc.c  |    1 +
+ src/kernel2/src/syscalls/shm.c  |    4 ++--
+ src/kernel2/src/tasks/pm.c      |    1 +
+ 8 files changed, 16 insertions(+), 11 deletions(-)
+
+diff --git a/src/kernel2/include/mm.h b/src/kernel2/include/mm.h
+index 0144aca..617713c 100644
+--- a/src/kernel2/include/mm.h
++++ b/src/kernel2/include/mm.h
+@@ -140,10 +140,10 @@ void shm_init(void);
+ uint32_t shm_create(size_t size);
+ 
+ /// Bestehenden Shared Memory oeffnen.
+-void* shm_attach(uint32_t id);
++void* shm_attach(pm_process_t* process, uint32_t id);
+ 
+ /// Shared Memory schliessen.
+-void shm_detach(uint32_t id);
++void shm_detach(pm_process_t* process, uint32_t id);
+ 
+ #endif
+ 
+diff --git a/src/kernel2/include/tasks.h b/src/kernel2/include/tasks.h
+index 1aedbec..c8370f4 100644
+--- a/src/kernel2/include/tasks.h
++++ b/src/kernel2/include/tasks.h
+@@ -39,7 +39,7 @@
+ #include <types.h>
+ #include <collections.h>
+ 
+-#include "mm.h"
++#include "mm_arch.h"
+ #include "lock.h"
+ 
+ #define PM_STATUS_READY 0
+diff --git a/src/kernel2/src/arch/i386/gdt.c b/src/kernel2/src/arch/i386/gdt.c
+index e42c973..3dcdd3b 100644
+--- a/src/kernel2/src/arch/i386/gdt.c
++++ b/src/kernel2/src/arch/i386/gdt.c
+@@ -35,6 +35,7 @@
+ 
+ #include <types.h>
+ 
++#include "mm.h"
+ #include "cpu.h"
+ #include "lock.h"
+ 
+diff --git a/src/kernel2/src/mm/shm.c b/src/kernel2/src/mm/shm.c
+index 67b4831..d05de0e 100644
+--- a/src/kernel2/src/mm/shm.c
++++ b/src/kernel2/src/mm/shm.c
+@@ -94,11 +94,12 @@ uint32_t shm_create(size_t size)
+ /**
+  * Bestehenden Shared Memory oeffnen.
+  *
++ * @param process Prozess, der den Shared Memory oeffnet
+  * @param id ID des zu oeffnenden Shared Memory
+  * @return Virtuelle Adresse des geoeffneten Shared Memory; NULL, wenn der
+  * Shared Memory mit der angegebenen ID nicht existiert.
+  */
+-void* shm_attach(uint32_t id)
++void* shm_attach(pm_process_t* process, uint32_t id)
+ {
+     struct shm_desc* shm = tree_search(shms, id);
+     void* ret;
+@@ -115,7 +116,7 @@ void* shm_attach(uint32_t id)
+     } else {
+         // Ansonsten Mapping von einem anderen Prozess uebernehmen
+         struct shm_process* first = list_get_element_at(shm->processes, 0);
+-        ret = mmc_automap_user(&mmc_current_context(),
++        ret = mmc_automap_user(&process->context,
+             &first->process->context, first->vaddr, shm->num_pages,
+             MM_USER_START, MM_USER_END, MM_FLAGS_USER_DATA);
+     }
+@@ -125,7 +126,7 @@ void* shm_attach(uint32_t id)
+     }
+ 
+     shm_proc = calloc(1, sizeof(*shm_proc));
+-    shm_proc->process = current_process;
++    shm_proc->process = process;
+     shm_proc->vaddr = ret;
+     list_push(shm->processes, shm_proc);
+ 
+@@ -136,13 +137,13 @@ void* shm_attach(uint32_t id)
+  * Shared Memory schliessen. Wenn keine Prozesse den Shared Memory mehr
+  * geoeffnet haben, wird er geloescht.
+  *
++ * @param process Prozess, der den Shared Memory schliesst
+  * @param id ID des zu schliessenden Shared Memory
+  */
+-void shm_detach(uint32_t id)
++void shm_detach(pm_process_t* process, uint32_t id)
+ {
+     struct shm_desc* shm = tree_search(shms, id);
+     struct shm_process* shm_proc;
+-    pm_process_t* current_proc = current_process;
+     int i;
+ 
+     if (shm == NULL) {
+@@ -150,7 +151,7 @@ void shm_detach(uint32_t id)
+     }
+ 
+     for (i = 0; (shm_proc = list_get_element_at(shm->processes, i)); i++) {
+-        if (shm_proc->process == current_proc) {
++        if (shm_proc->process == process) {
+             list_remove(shm->processes, i);
+             goto found;
+         }
+diff --git a/src/kernel2/src/syscalls/pm.c b/src/kernel2/src/syscalls/pm.c
+index 8826a50..486b030 100644
+--- a/src/kernel2/src/syscalls/pm.c
++++ b/src/kernel2/src/syscalls/pm.c
+@@ -39,6 +39,7 @@
+ 
+ #include "syscall.h"
+ #include "syscall_structs.h"
++#include "mm.h"
+ #include "tasks.h"
+ #include "cpu.h"
+ 
+diff --git a/src/kernel2/src/syscalls/rpc.c b/src/kernel2/src/syscalls/rpc.c
+index 3c51ec6..515ad80 100644
+--- a/src/kernel2/src/syscalls/rpc.c
++++ b/src/kernel2/src/syscalls/rpc.c
+@@ -41,6 +41,7 @@
+ 
+ #include "kernel.h"
+ #include "syscall.h"
++#include "mm.h"
+ #include "tasks.h"
+ #include "cpu.h"
+ #include "im.h"
+diff --git a/src/kernel2/src/syscalls/shm.c b/src/kernel2/src/syscalls/shm.c
+index c3aed63..0892622 100644
+--- a/src/kernel2/src/syscalls/shm.c
++++ b/src/kernel2/src/syscalls/shm.c
+@@ -56,7 +56,7 @@ uint32_t syscall_shm_create(size_t size)
+  */
+ void* syscall_shm_attach(uint32_t id)
+ {
+-    return shm_attach(id);
++    return shm_attach(current_process, id);
+ }
+ 
+ /**
+@@ -67,6 +67,6 @@ void* syscall_shm_attach(uint32_t id)
+  */
+ void syscall_shm_detach(uint32_t id)
+ {
+-    shm_detach(id);
++    shm_detach(current_process, id);
+ }
+ 
+diff --git a/src/kernel2/src/tasks/pm.c b/src/kernel2/src/tasks/pm.c
+index e5c4b9f..8dc8f2b 100644
+--- a/src/kernel2/src/tasks/pm.c
++++ b/src/kernel2/src/tasks/pm.c
+@@ -39,6 +39,7 @@
+ #include <string.h>
+ #include <collections.h>
+ 
++#include "mm.h"
+ #include "tasks.h"
+ #include "lock.h"
+ #include "timer.h"
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sun Jan  3 17:03:16 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  3 Jan 2010 17:03:16 +0100
+Subject: [tyndur-devel] [PATCH v2 2/7] kernel2: SHM beim Prozessende
+	schliessen
+In-Reply-To: <1262534601-14194-1-git-send-email-kevin@tyndur.org>
+References: <1262534601-14194-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1262534601-14194-3-git-send-email-kevin@tyndur.org>
+
+! kernel2: Alle geoeffneten SHM-Bereiche beim Prozessende schliessen
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/include/tasks.h |    3 +++
+ src/kernel2/src/mm/shm.c    |   37 +++++++++++++++++++++++++++++++++++++
+ 2 files changed, 40 insertions(+), 0 deletions(-)
+
+diff --git a/src/kernel2/include/tasks.h b/src/kernel2/include/tasks.h
+index c8370f4..37d9714 100644
+--- a/src/kernel2/include/tasks.h
++++ b/src/kernel2/include/tasks.h
+@@ -84,6 +84,9 @@ typedef struct pm_process {
+     /// Eine Liste von RPC-Backlinks
+     list_t* rpcs;
+ 
++    /// Eine Liste von geoeffneten SHM-Bereichen
++    list_t* shm;
++
+     /**
+      * Eine Liste von Eventhandlern, die beim Loeschen des Prozesses
+      * aufgerufen werden
+diff --git a/src/kernel2/src/mm/shm.c b/src/kernel2/src/mm/shm.c
+index d05de0e..b067d91 100644
+--- a/src/kernel2/src/mm/shm.c
++++ b/src/kernel2/src/mm/shm.c
+@@ -51,6 +51,7 @@ struct shm_desc {
+ };
+ 
+ struct shm_process {
++    struct shm_desc*    shm;
+     pm_process_t*       process;
+     vaddr_t             vaddr;
+ };
+@@ -58,6 +59,8 @@ struct shm_process {
+ static tree_t* shms = NULL;
+ static uint32_t shm_last_id = 0;
+ 
++static void shm_destroy_task(pm_process_t* process, void* prv);
++
+ /**
+  * Initialisiert die SHM-Verwaltung
+  */
+@@ -126,10 +129,17 @@ void* shm_attach(pm_process_t* process, uint32_t id)
+     }
+ 
+     shm_proc = calloc(1, sizeof(*shm_proc));
++    shm_proc->shm = shm;
+     shm_proc->process = process;
+     shm_proc->vaddr = ret;
+     list_push(shm->processes, shm_proc);
+ 
++    if (process->shm == NULL) {
++        process->shm = list_create();
++        pm_register_on_destroy(process, shm_destroy_task, NULL);
++    }
++    list_push(process->shm, shm_proc);
++
+     return ret;
+ }
+ 
+@@ -150,6 +160,15 @@ void shm_detach(pm_process_t* process, uint32_t id)
+         return;
+     }
+ 
++    // Aus der SHM-Liste des Prozesses austragen
++    for (i = 0; (shm_proc = list_get_element_at(process->shm, i)); i++) {
++        if (shm_proc->shm == shm) {
++            list_remove(process->shm, i);
++            break;
++        }
++    }
++
++    // Aus der Prozessliste des SHM austragen
+     for (i = 0; (shm_proc = list_get_element_at(shm->processes, i)); i++) {
+         if (shm_proc->process == process) {
+             list_remove(shm->processes, i);
+@@ -184,3 +203,21 @@ found:
+ 
+     return;
+ }
++
++/**
++ * Schliesst alle SHM-Bereiche eines Prozesses
++ */
++static void shm_destroy_task(pm_process_t* process, void* prv)
++{
++    struct shm_process* shm_proc;
++
++    if (process->shm == NULL) {
++        return;
++    }
++
++    while ((shm_proc = list_get_element_at(process->shm, 0))) {
++        shm_detach(process, shm_proc->shm->id);
++    }
++
++    list_destroy(process->shm);
++}
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sun Jan  3 17:03:17 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  3 Jan 2010 17:03:17 +0100
+Subject: [tyndur-devel] [PATCH v2 3/7] kernel2: Fuer Syscalls keinen
+	Userspacestack benutzen
+In-Reply-To: <1262534601-14194-1-git-send-email-kevin@tyndur.org>
+References: <1262534601-14194-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1262534601-14194-4-git-send-email-kevin@tyndur.org>
+
+! kernel2: Auf dem Userspacestack zu arbeiten hat einen Haufen negative
+  Konsequenzen. Und wenn man den Task grad zerstoert hat, hat man sich
+  seinen eigenen Stack unter den Fuessen weggezogen. Lieber kopieren
+  statt direkt benutzen.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/src/arch/i386/syscall.c |   30 ++++++++++--------------------
+ 1 files changed, 10 insertions(+), 20 deletions(-)
+
+diff --git a/src/kernel2/src/arch/i386/syscall.c b/src/kernel2/src/arch/i386/syscall.c
+index e8d71dc..7d5724e 100644
+--- a/src/kernel2/src/arch/i386/syscall.c
++++ b/src/kernel2/src/arch/i386/syscall.c
+@@ -97,28 +97,18 @@ void syscall_arch(machine_state_t* isf)
+ 
+     } else {
+         uint32_t eax, edx;
+-        dword stack_backup;
+ 
+-
+-        // 512 Bytes Sicherheitsabstand auf dem Stack, denn wenn der Kernel
+-        // hier einen Stack Overflow produziert, haben wir ein Problem.
+-        if ((void*) (isf->esp - 0x200) < current_thread->user_stack_bottom) {
+-            increase_user_stack_size(current_thread, 1);
+-        }
+-
+-         // Die Syscallhandler werden mit dem Userspace-Stack aufgerufen, damit
+-        // keine Parameter kopiert werden muessen.
+-        asm("pusha;"
+-            // Den original-Stackpointer retten
+-            "movl %%esp, %3;"
+-            // Stack wechseln
+-            "movl %2, %%esp;"
++        asm volatile(
++            "sub %%ecx, %%esp;"
++            "shr $0x2, %%ecx;"
++            "mov %%esp, %%edi;"
++            "rep movsd;"
+             "call *%4;"
+-            "movl %%eax, %0;"
+-            "movl %%edx, %1;"
+-            "movl %3, %%esp;"
+-            "popa;"
+-            : "=m" (eax), "=m" (edx) : "r" (stack), "m" (stack_backup), "r" (handler));
++            "shl $0x2, %%ecx;"
++            "add %%ecx, %%esp;"
++            : "=a" (eax), "=d" (edx), "=S" (stack)
++            : "S" (stack), "r" (handler), "c" (syscalls[number].arg_count * 4)
++            : "edi");
+ 
+         isf->eax = eax;
+         if (handler == syscall_get_tick_count) {
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sun Jan  3 17:03:18 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  3 Jan 2010 17:03:18 +0100
+Subject: [tyndur-devel] [PATCH v2 4/7] kernel2: mmc_destroy implementieren
+In-Reply-To: <1262534601-14194-1-git-send-email-kevin@tyndur.org>
+References: <1262534601-14194-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1262534601-14194-5-git-send-email-kevin@tyndur.org>
+
++ kernel2: mmc_destroy implementiert. Damit wird jetzt nach Prozessende
+  der Speicher auch wieder freigegeben.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/src/arch/i386/mm/mm_context.c |   39 ++++++++++++++++++++++++++++-
+ src/kernel2/src/tasks/pm.c                |    7 +++++
+ 2 files changed, 45 insertions(+), 1 deletions(-)
+
+diff --git a/src/kernel2/src/arch/i386/mm/mm_context.c b/src/kernel2/src/arch/i386/mm/mm_context.c
+index 34ac946..a9fc8eb 100644
+--- a/src/kernel2/src/arch/i386/mm/mm_context.c
++++ b/src/kernel2/src/arch/i386/mm/mm_context.c
+@@ -61,6 +61,9 @@ bool use_phys_addr = TRUE;
+  */
+ static void mmc_sync(mmc_context_t* context);
+ 
++static inline vaddr_t get_pagetable(mmc_context_t* context, size_t index);
++static inline void free_pagetable(mmc_context_t* context, vaddr_t page_table);
++
+ /**
+  * Erstellt einen neuen MM-Kontext (Page Directory)
+  */
+@@ -142,11 +145,41 @@ void mmc_activate(mmc_context_t* context)
+ /**
+  * Kontext zerstoeren und Userspace-Speicher freigeben
+  *
++ * Achtung: Der noch gemappte Speicher darf nur zu diesem Kontext gehoeren, er
++ * wird physisch freigegeben! Shared Memory muss vorher freigegeben werden.
++ *
+  * @param context Kontext
+  */
+ void mmc_destroy(mmc_context_t* context)
+ {
+-    // TODO
++    page_directory_t page_directory = context->page_directory_virt;
++    page_table_t page_table;
++    int i, n;
++
++    for (i = (MM_USER_START >> PGDIR_SHIFT);
++         i < (MM_USER_END >> PGDIR_SHIFT);
++         i++)
++    {
++        page_table = get_pagetable(context, i);
++        if (page_table == NULL) {
++            continue;
++        }
++
++        // Alle Page-Table-Eintraege freigeben
++        for(n = 0; n < 1024; n++) {
++            if(page_table[n] & PTE_P) {
++                pmm_free((paddr_t) (page_table[n] & PAGE_MASK), 1);
++            }
++        }
++        free_pagetable(context, page_table);
++
++        // Page Table freigeben
++        pmm_free((paddr_t) (page_directory[i] & PAGE_MASK), 1);
++    }
++
++    // Page Directory freigeben
++    mmc_unmap(&mmc_current_context(), context->page_directory_virt, 1);
++    pmm_free(context->page_directory, 1);
+ }
+ 
+ /**
+@@ -159,6 +192,10 @@ static inline vaddr_t get_pagetable(mmc_context_t* context, size_t index)
+     page_directory_t pagedir = context->page_directory_virt;
+     page_table_t page_table;
+ 
++    if ((pagedir[index] & PTE_P) == 0) {
++        return NULL;
++    }
++
+     if (context->page_directory == mmc_current_context().page_directory) {
+         if (!use_phys_addr) {
+             page_table = (page_table_t) 
+diff --git a/src/kernel2/src/tasks/pm.c b/src/kernel2/src/tasks/pm.c
+index 8dc8f2b..dde8f33 100644
+--- a/src/kernel2/src/tasks/pm.c
++++ b/src/kernel2/src/tasks/pm.c
+@@ -58,6 +58,7 @@ static pid_t next_pid = 1;
+ 
+ 
+ extern void scheduler_init(void);
++extern pm_process_t init_process;
+ 
+ /**
+  * Die Prozessverwaltung initialisieren
+@@ -155,6 +156,12 @@ void pm_destroy(pm_process_t* process)
+ {
+     struct on_destroy_info* info;
+ 
++    // Der aktuelle Speicherkontext darf nicht zum zu zerstoerenden Task
++    // gehoeren, sonst kriegen wir Probleme beim freigeben des Page Directory
++    if (&process->context == &mmc_current_context()) {
++        mmc_activate(&init_process.context);
++    }
++
+     // Den Prozess blockieren
+     while (pm_block(process) == FALSE);
+ 
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sun Jan  3 17:03:19 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  3 Jan 2010 17:03:19 +0100
+Subject: [tyndur-devel] [PATCH v2 5/7] kernel2: Kernel-PD bei
+	Paging-Initialisierung richtig setzen
+In-Reply-To: <1262534601-14194-1-git-send-email-kevin@tyndur.org>
+References: <1262534601-14194-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1262534601-14194-6-git-send-email-kevin@tyndur.org>
+
+! kernel2: Nachdem Paging an ist, muessen wir auf die virtuelle Adresse
+  des Kernel-PD zugreifen
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/src/arch/i386/mm/virt.c |    2 ++
+ 1 files changed, 2 insertions(+), 0 deletions(-)
+
+diff --git a/src/kernel2/src/arch/i386/mm/virt.c b/src/kernel2/src/arch/i386/mm/virt.c
+index 55ced12..065a0c7 100644
+--- a/src/kernel2/src/arch/i386/mm/virt.c
++++ b/src/kernel2/src/arch/i386/mm/virt.c
+@@ -42,6 +42,7 @@
+ 
+ extern void pmm_set_bitmap_start(void* bitmap_start);
+ extern bool use_phys_addr;
++extern page_directory_t page_directory_current;
+ 
+ /**
+  * Initialisiert die virtuelle Speicherverwaltung. Insbesondere wird ein
+@@ -84,6 +85,7 @@ void vmm_init(mmc_context_t* kernel_context)
+     use_phys_addr = FALSE;
+ 
+     kernel_context->page_directory_virt = virtual_pd;
++    page_directory_current = virtual_pd;
+ }
+ 
+ /**
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sun Jan  3 17:03:20 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  3 Jan 2010 17:03:20 +0100
+Subject: [tyndur-devel] [PATCH v2 6/7] kernel2: Richtige Flags fuer Page
+	Directories
+In-Reply-To: <1262534601-14194-1-git-send-email-kevin@tyndur.org>
+References: <1262534601-14194-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1262534601-14194-7-git-send-email-kevin@tyndur.org>
+
+! kernel2: Die richtigen Flags fuer ein Page Directory sind nicht
+  unbedingt die Flags der ersten zu mappenden Page. (Bei mir war das
+  sogar ein unmap und flags entsprechend 0 - fragt mich nicht...)
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/src/arch/i386/mm/mm_context.c |    3 ++-
+ 1 files changed, 2 insertions(+), 1 deletions(-)
+
+diff --git a/src/kernel2/src/arch/i386/mm/mm_context.c b/src/kernel2/src/arch/i386/mm/mm_context.c
+index a9fc8eb..e4eb79b 100644
+--- a/src/kernel2/src/arch/i386/mm/mm_context.c
++++ b/src/kernel2/src/arch/i386/mm/mm_context.c
+@@ -283,7 +283,8 @@ static bool map_page
+     {
+         page_table = (page_table_t) pmm_alloc(1);
+         // kprintf("Pagetable=0x%08x\n", page_table);
+-        page_directory[vpage / PAGE_TABLE_LENGTH] = (dword) page_table | flags;
++        page_directory[vpage / PAGE_TABLE_LENGTH] =
++            (dword) page_table | PTE_P | PTE_W | PTE_U;
+        
+         // An dieser Stelle kann die Page Table noch nicht initialisiert
+         // werden, weil sie noch nicht gemappt ist.
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sun Jan  3 17:03:21 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  3 Jan 2010 17:03:21 +0100
+Subject: [tyndur-devel] [PATCH v2 7/7] kernel2: Page Directories seltener
+	kopieren
+In-Reply-To: <1262534601-14194-1-git-send-email-kevin@tyndur.org>
+References: <1262534601-14194-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1262534601-14194-8-git-send-email-kevin@tyndur.org>
+
+! kernel2: Page Directories muessen nur neu kopiert werden, wenn sie
+  sich auch tatsaechlich geaendert haben. Wenn sich nur eine Page Table
+  geaendert hat, ist das nicht noetig.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/src/arch/i386/mm/mm_context.c |   14 +++++++-------
+ 1 files changed, 7 insertions(+), 7 deletions(-)
+
+diff --git a/src/kernel2/src/arch/i386/mm/mm_context.c b/src/kernel2/src/arch/i386/mm/mm_context.c
+index e4eb79b..20edcfa 100644
+--- a/src/kernel2/src/arch/i386/mm/mm_context.c
++++ b/src/kernel2/src/arch/i386/mm/mm_context.c
+@@ -289,6 +289,13 @@ static bool map_page
+         // An dieser Stelle kann die Page Table noch nicht initialisiert
+         // werden, weil sie noch nicht gemappt ist.
+         clear_page_table = TRUE;
++
++        if (((uintptr_t) vaddr >= KERNEL_MEM_START) && ((uintptr_t) vaddr <
++            KERNEL_MEM_END))
++        {
++            context->version = ++page_directory_version;
++            page_directory_current = context->page_directory_virt;
++        }
+     } 
+     else if (page_directory[vpage / PAGE_TABLE_LENGTH] & PTE_PS) 
+     {
+@@ -343,13 +350,6 @@ static bool map_page
+         } else {
+             mmc_unmap(&mmc_current_context(), page_table, 1);
+         }
+-        
+-        if (((uintptr_t) vaddr >= KERNEL_MEM_START) && ((uintptr_t) vaddr <
+-            KERNEL_MEM_END))
+-        {
+-            context->version = ++page_directory_version;
+-            page_directory_current = context->page_directory_virt;
+-        }
+         unlock(&context->lock);
+         return TRUE;
+     }
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sun Jan  3 17:06:03 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 3 Jan 2010 17:06:03 +0100
+Subject: [tyndur-devel] [PATCH v2 6/7] kernel2: Richtige Flags fuer Page
+	Directories
+In-Reply-To: <1262534601-14194-7-git-send-email-kevin@tyndur.org>
+References: <1262534601-14194-1-git-send-email-kevin@tyndur.org>
+	<1262534601-14194-7-git-send-email-kevin@tyndur.org>
+Message-ID: <20100103160603.GA16371@silvanus>
+
+On Sun, Jan 03, 2010 at 05:03:20PM +0100, Kevin Wolf wrote:
+> ! kernel2: Die richtigen Flags fuer ein Page Directory sind nicht
+>   unbedingt die Flags der ersten zu mappenden Page. (Bei mir war das
+>   sogar ein unmap und flags entsprechend 0 - fragt mich nicht...)
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+> ---
+>  src/kernel2/src/arch/i386/mm/mm_context.c |    3 ++-
+>  1 files changed, 2 insertions(+), 1 deletions(-)
+
+Ups, ich glaube, das ist die falsche Position, wenn es bisectable sein
+soll. Stellt euch einfach vor, dieser Patch käme vor Patch 4.
+
+> 
+> diff --git a/src/kernel2/src/arch/i386/mm/mm_context.c b/src/kernel2/src/arch/i386/mm/mm_context.c
+> index a9fc8eb..e4eb79b 100644
+> --- a/src/kernel2/src/arch/i386/mm/mm_context.c
+> +++ b/src/kernel2/src/arch/i386/mm/mm_context.c
+> @@ -283,7 +283,8 @@ static bool map_page
+>      {
+>          page_table = (page_table_t) pmm_alloc(1);
+>          // kprintf("Pagetable=0x%08x\n", page_table);
+> -        page_directory[vpage / PAGE_TABLE_LENGTH] = (dword) page_table | flags;
+> +        page_directory[vpage / PAGE_TABLE_LENGTH] =
+> +            (dword) page_table | PTE_P | PTE_W | PTE_U;
+>         
+>          // An dieser Stelle kann die Page Table noch nicht initialisiert
+>          // werden, weil sie noch nicht gemappt ist.
+> -- 
+> 1.6.0.2
+> 
+
+From toni at tyndur.org  Sun Jan  3 17:17:22 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Sun, 3 Jan 2010 17:17:22 +0100
+Subject: [tyndur-devel] [PATCH v2 1/7] kernel2: SHM-Funktionen bekommen
+ Prozess als Parameter
+In-Reply-To: <1262534601-14194-2-git-send-email-kevin@tyndur.org>
+References: <1262534601-14194-1-git-send-email-kevin@tyndur.org>
+	<1262534601-14194-2-git-send-email-kevin@tyndur.org>
+Message-ID: <20100103161722.GA31714@neo.geekcave.lan>
+
+On Sun, Jan 03 17:03, Kevin Wolf wrote:
+> * kernel2: Bis jetzt haben die SHM-Funktionen immer angenommen, dass
+>   fuer den aktuellen Prozess geoeffnet/geschlossen wird. Den Prozess
+>   wird jetzt als Parameter uebergeben.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+> ---
+>  src/kernel2/include/mm.h        |    4 ++--
+>  src/kernel2/include/tasks.h     |    2 +-
+>  src/kernel2/src/arch/i386/gdt.c |    1 +
+>  src/kernel2/src/mm/shm.c        |   13 +++++++------
+>  src/kernel2/src/syscalls/pm.c   |    1 +
+>  src/kernel2/src/syscalls/rpc.c  |    1 +
+>  src/kernel2/src/syscalls/shm.c  |    4 ++--
+>  src/kernel2/src/tasks/pm.c      |    1 +
+>  8 files changed, 16 insertions(+), 11 deletions(-)
+> 
+> diff --git a/src/kernel2/include/mm.h b/src/kernel2/include/mm.h
+> index 0144aca..617713c 100644
+> --- a/src/kernel2/include/mm.h
+> +++ b/src/kernel2/include/mm.h
+> @@ -140,10 +140,10 @@ void shm_init(void);
+>  uint32_t shm_create(size_t size);
+>  
+>  /// Bestehenden Shared Memory oeffnen.
+> -void* shm_attach(uint32_t id);
+> +void* shm_attach(pm_process_t* process, uint32_t id);
+>  
+>  /// Shared Memory schliessen.
+> -void shm_detach(uint32_t id);
+> +void shm_detach(pm_process_t* process, uint32_t id);
+>  
+>  #endif
+>  
+> diff --git a/src/kernel2/include/tasks.h b/src/kernel2/include/tasks.h
+> index 1aedbec..c8370f4 100644
+> --- a/src/kernel2/include/tasks.h
+> +++ b/src/kernel2/include/tasks.h
+> @@ -39,7 +39,7 @@
+>  #include <types.h>
+>  #include <collections.h>
+>  
+> -#include "mm.h"
+> +#include "mm_arch.h"
+>  #include "lock.h"
+>  
+>  #define PM_STATUS_READY 0
+> diff --git a/src/kernel2/src/arch/i386/gdt.c b/src/kernel2/src/arch/i386/gdt.c
+> index e42c973..3dcdd3b 100644
+> --- a/src/kernel2/src/arch/i386/gdt.c
+> +++ b/src/kernel2/src/arch/i386/gdt.c
+> @@ -35,6 +35,7 @@
+>  
+>  #include <types.h>
+>  
+> +#include "mm.h"
+>  #include "cpu.h"
+>  #include "lock.h"
+>  
+> diff --git a/src/kernel2/src/mm/shm.c b/src/kernel2/src/mm/shm.c
+> index 67b4831..d05de0e 100644
+> --- a/src/kernel2/src/mm/shm.c
+> +++ b/src/kernel2/src/mm/shm.c
+> @@ -94,11 +94,12 @@ uint32_t shm_create(size_t size)
+>  /**
+>   * Bestehenden Shared Memory oeffnen.
+>   *
+> + * @param process Prozess, der den Shared Memory oeffnet
+>   * @param id ID des zu oeffnenden Shared Memory
+>   * @return Virtuelle Adresse des geoeffneten Shared Memory; NULL, wenn der
+>   * Shared Memory mit der angegebenen ID nicht existiert.
+>   */
+> -void* shm_attach(uint32_t id)
+> +void* shm_attach(pm_process_t* process, uint32_t id)
+>  {
+>      struct shm_desc* shm = tree_search(shms, id);
+>      void* ret;
+> @@ -115,7 +116,7 @@ void* shm_attach(uint32_t id)
+>      } else {
+>          // Ansonsten Mapping von einem anderen Prozess uebernehmen
+>          struct shm_process* first = list_get_element_at(shm->processes, 0);
+> -        ret = mmc_automap_user(&mmc_current_context(),
+> +        ret = mmc_automap_user(&process->context,
+>              &first->process->context, first->vaddr, shm->num_pages,
+>              MM_USER_START, MM_USER_END, MM_FLAGS_USER_DATA);
+>      }
+> @@ -125,7 +126,7 @@ void* shm_attach(uint32_t id)
+>      }
+>  
+>      shm_proc = calloc(1, sizeof(*shm_proc));
+> -    shm_proc->process = current_process;
+> +    shm_proc->process = process;
+>      shm_proc->vaddr = ret;
+>      list_push(shm->processes, shm_proc);
+>  
+> @@ -136,13 +137,13 @@ void* shm_attach(uint32_t id)
+>   * Shared Memory schliessen. Wenn keine Prozesse den Shared Memory mehr
+>   * geoeffnet haben, wird er geloescht.
+>   *
+> + * @param process Prozess, der den Shared Memory schliesst
+>   * @param id ID des zu schliessenden Shared Memory
+>   */
+> -void shm_detach(uint32_t id)
+> +void shm_detach(pm_process_t* process, uint32_t id)
+>  {
+>      struct shm_desc* shm = tree_search(shms, id);
+>      struct shm_process* shm_proc;
+> -    pm_process_t* current_proc = current_process;
+>      int i;
+>  
+>      if (shm == NULL) {
+> @@ -150,7 +151,7 @@ void shm_detach(uint32_t id)
+>      }
+>  
+>      for (i = 0; (shm_proc = list_get_element_at(shm->processes, i)); i++) {
+> -        if (shm_proc->process == current_proc) {
+> +        if (shm_proc->process == process) {
+>              list_remove(shm->processes, i);
+>              goto found;
+>          }
+> diff --git a/src/kernel2/src/syscalls/pm.c b/src/kernel2/src/syscalls/pm.c
+> index 8826a50..486b030 100644
+> --- a/src/kernel2/src/syscalls/pm.c
+> +++ b/src/kernel2/src/syscalls/pm.c
+> @@ -39,6 +39,7 @@
+>  
+>  #include "syscall.h"
+>  #include "syscall_structs.h"
+> +#include "mm.h"
+>  #include "tasks.h"
+>  #include "cpu.h"
+>  
+> diff --git a/src/kernel2/src/syscalls/rpc.c b/src/kernel2/src/syscalls/rpc.c
+> index 3c51ec6..515ad80 100644
+> --- a/src/kernel2/src/syscalls/rpc.c
+> +++ b/src/kernel2/src/syscalls/rpc.c
+> @@ -41,6 +41,7 @@
+>  
+>  #include "kernel.h"
+>  #include "syscall.h"
+> +#include "mm.h"
+>  #include "tasks.h"
+>  #include "cpu.h"
+>  #include "im.h"
+> diff --git a/src/kernel2/src/syscalls/shm.c b/src/kernel2/src/syscalls/shm.c
+> index c3aed63..0892622 100644
+> --- a/src/kernel2/src/syscalls/shm.c
+> +++ b/src/kernel2/src/syscalls/shm.c
+> @@ -56,7 +56,7 @@ uint32_t syscall_shm_create(size_t size)
+>   */
+>  void* syscall_shm_attach(uint32_t id)
+>  {
+> -    return shm_attach(id);
+> +    return shm_attach(current_process, id);
+>  }
+>  
+>  /**
+> @@ -67,6 +67,6 @@ void* syscall_shm_attach(uint32_t id)
+>   */
+>  void syscall_shm_detach(uint32_t id)
+>  {
+> -    shm_detach(id);
+> +    shm_detach(current_process, id);
+>  }
+>  
+> diff --git a/src/kernel2/src/tasks/pm.c b/src/kernel2/src/tasks/pm.c
+> index e5c4b9f..8dc8f2b 100644
+> --- a/src/kernel2/src/tasks/pm.c
+> +++ b/src/kernel2/src/tasks/pm.c
+> @@ -39,6 +39,7 @@
+>  #include <string.h>
+>  #include <collections.h>
+>  
+> +#include "mm.h"
+>  #include "tasks.h"
+>  #include "lock.h"
+>  #include "timer.h"
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100103/6990fed3/attachment.pgp>
+
+From toni at tyndur.org  Sun Jan  3 17:18:44 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Sun, 3 Jan 2010 17:18:44 +0100
+Subject: [tyndur-devel] [PATCH v2 2/7] kernel2: SHM beim Prozessende
+ schliessen
+In-Reply-To: <1262534601-14194-3-git-send-email-kevin@tyndur.org>
+References: <1262534601-14194-1-git-send-email-kevin@tyndur.org>
+	<1262534601-14194-3-git-send-email-kevin@tyndur.org>
+Message-ID: <20100103161844.GB31714@neo.geekcave.lan>
+
+On Sun, Jan 03 17:03, Kevin Wolf wrote:
+> ! kernel2: Alle geoeffneten SHM-Bereiche beim Prozessende schliessen
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+> ---
+>  src/kernel2/include/tasks.h |    3 +++
+>  src/kernel2/src/mm/shm.c    |   37 +++++++++++++++++++++++++++++++++++++
+>  2 files changed, 40 insertions(+), 0 deletions(-)
+> 
+> diff --git a/src/kernel2/include/tasks.h b/src/kernel2/include/tasks.h
+> index c8370f4..37d9714 100644
+> --- a/src/kernel2/include/tasks.h
+> +++ b/src/kernel2/include/tasks.h
+> @@ -84,6 +84,9 @@ typedef struct pm_process {
+>      /// Eine Liste von RPC-Backlinks
+>      list_t* rpcs;
+>  
+> +    /// Eine Liste von geoeffneten SHM-Bereichen
+> +    list_t* shm;
+> +
+>      /**
+>       * Eine Liste von Eventhandlern, die beim Loeschen des Prozesses
+>       * aufgerufen werden
+> diff --git a/src/kernel2/src/mm/shm.c b/src/kernel2/src/mm/shm.c
+> index d05de0e..b067d91 100644
+> --- a/src/kernel2/src/mm/shm.c
+> +++ b/src/kernel2/src/mm/shm.c
+> @@ -51,6 +51,7 @@ struct shm_desc {
+>  };
+>  
+>  struct shm_process {
+> +    struct shm_desc*    shm;
+>      pm_process_t*       process;
+>      vaddr_t             vaddr;
+>  };
+> @@ -58,6 +59,8 @@ struct shm_process {
+>  static tree_t* shms = NULL;
+>  static uint32_t shm_last_id = 0;
+>  
+> +static void shm_destroy_task(pm_process_t* process, void* prv);
+> +
+>  /**
+>   * Initialisiert die SHM-Verwaltung
+>   */
+> @@ -126,10 +129,17 @@ void* shm_attach(pm_process_t* process, uint32_t id)
+>      }
+>  
+>      shm_proc = calloc(1, sizeof(*shm_proc));
+> +    shm_proc->shm = shm;
+>      shm_proc->process = process;
+>      shm_proc->vaddr = ret;
+>      list_push(shm->processes, shm_proc);
+>  
+> +    if (process->shm == NULL) {
+> +        process->shm = list_create();
+> +        pm_register_on_destroy(process, shm_destroy_task, NULL);
+> +    }
+> +    list_push(process->shm, shm_proc);
+> +
+>      return ret;
+>  }
+>  
+> @@ -150,6 +160,15 @@ void shm_detach(pm_process_t* process, uint32_t id)
+>          return;
+>      }
+>  
+> +    // Aus der SHM-Liste des Prozesses austragen
+> +    for (i = 0; (shm_proc = list_get_element_at(process->shm, i)); i++) {
+> +        if (shm_proc->shm == shm) {
+> +            list_remove(process->shm, i);
+> +            break;
+> +        }
+> +    }
+> +
+> +    // Aus der Prozessliste des SHM austragen
+>      for (i = 0; (shm_proc = list_get_element_at(shm->processes, i)); i++) {
+>          if (shm_proc->process == process) {
+>              list_remove(shm->processes, i);
+> @@ -184,3 +203,21 @@ found:
+>  
+>      return;
+>  }
+> +
+> +/**
+> + * Schliesst alle SHM-Bereiche eines Prozesses
+> + */
+> +static void shm_destroy_task(pm_process_t* process, void* prv)
+> +{
+> +    struct shm_process* shm_proc;
+> +
+> +    if (process->shm == NULL) {
+> +        return;
+> +    }
+> +
+> +    while ((shm_proc = list_get_element_at(process->shm, 0))) {
+> +        shm_detach(process, shm_proc->shm->id);
+> +    }
+> +
+> +    list_destroy(process->shm);
+> +}
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100103/e5927180/attachment.pgp>
+
+From toni at tyndur.org  Sun Jan  3 17:27:37 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Sun, 3 Jan 2010 17:27:37 +0100
+Subject: [tyndur-devel] [PATCH v2 3/7] kernel2: Fuer Syscalls keinen
+ Userspacestack benutzen
+In-Reply-To: <1262534601-14194-4-git-send-email-kevin@tyndur.org>
+References: <1262534601-14194-1-git-send-email-kevin@tyndur.org>
+	<1262534601-14194-4-git-send-email-kevin@tyndur.org>
+Message-ID: <20100103162736.GC31714@neo.geekcave.lan>
+
+On Sun, Jan 03 17:03, Kevin Wolf wrote:
+> ! kernel2: Auf dem Userspacestack zu arbeiten hat einen Haufen negative
+>   Konsequenzen. Und wenn man den Task grad zerstoert hat, hat man sich
+>   seinen eigenen Stack unter den Fuessen weggezogen. Lieber kopieren
+>   statt direkt benutzen.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+> ---
+>  src/kernel2/src/arch/i386/syscall.c |   30 ++++++++++--------------------
+>  1 files changed, 10 insertions(+), 20 deletions(-)
+> 
+> diff --git a/src/kernel2/src/arch/i386/syscall.c b/src/kernel2/src/arch/i386/syscall.c
+> index e8d71dc..7d5724e 100644
+> --- a/src/kernel2/src/arch/i386/syscall.c
+> +++ b/src/kernel2/src/arch/i386/syscall.c
+> @@ -97,28 +97,18 @@ void syscall_arch(machine_state_t* isf)
+>  
+>      } else {
+>          uint32_t eax, edx;
+> -        dword stack_backup;
+>  
+> -
+> -        // 512 Bytes Sicherheitsabstand auf dem Stack, denn wenn der Kernel
+> -        // hier einen Stack Overflow produziert, haben wir ein Problem.
+> -        if ((void*) (isf->esp - 0x200) < current_thread->user_stack_bottom) {
+> -            increase_user_stack_size(current_thread, 1);
+> -        }
+> -
+> -         // Die Syscallhandler werden mit dem Userspace-Stack aufgerufen, damit
+> -        // keine Parameter kopiert werden muessen.
+> -        asm("pusha;"
+> -            // Den original-Stackpointer retten
+> -            "movl %%esp, %3;"
+> -            // Stack wechseln
+> -            "movl %2, %%esp;"
+> +        asm volatile(
+> +            "sub %%ecx, %%esp;"
+> +            "shr $0x2, %%ecx;"
+> +            "mov %%esp, %%edi;"
+> +            "rep movsd;"
+>              "call *%4;"
+> -            "movl %%eax, %0;"
+> -            "movl %%edx, %1;"
+> -            "movl %3, %%esp;"
+> -            "popa;"
+> -            : "=m" (eax), "=m" (edx) : "r" (stack), "m" (stack_backup), "r" (handler));
+> +            "shl $0x2, %%ecx;"
+> +            "add %%ecx, %%esp;"
+> +            : "=a" (eax), "=d" (edx), "=S" (stack)
+> +            : "S" (stack), "r" (handler), "c" (syscalls[number].arg_count * 4)
+> +            : "edi");
+>  
+>          isf->eax = eax;
+>          if (handler == syscall_get_tick_count) {
+
+Ich glaube das sieht brauchbar aus.
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100103/63cae9bf/attachment.pgp>
+
+From toni at tyndur.org  Sun Jan  3 17:33:20 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Sun, 3 Jan 2010 17:33:20 +0100
+Subject: [tyndur-devel] [PATCH v2 6/7] kernel2: Richtige Flags fuer Page
+ Directories
+In-Reply-To: <20100103160603.GA16371@silvanus>
+References: <1262534601-14194-1-git-send-email-kevin@tyndur.org>
+	<1262534601-14194-7-git-send-email-kevin@tyndur.org>
+	<20100103160603.GA16371@silvanus>
+Message-ID: <20100103163320.GD31714@neo.geekcave.lan>
+
+On Sun, Jan 03 17:06, Kevin Wolf wrote:
+> On Sun, Jan 03, 2010 at 05:03:20PM +0100, Kevin Wolf wrote:
+> > ! kernel2: Die richtigen Flags fuer ein Page Directory sind nicht
+> >   unbedingt die Flags der ersten zu mappenden Page. (Bei mir war das
+> >   sogar ein unmap und flags entsprechend 0 - fragt mich nicht...)
+> > 
+> > Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+> > ---
+> >  src/kernel2/src/arch/i386/mm/mm_context.c |    3 ++-
+> >  1 files changed, 2 insertions(+), 1 deletions(-)
+> 
+> Ups, ich glaube, das ist die falsche Position, wenn es bisectable sein
+> soll. Stellt euch einfach vor, dieser Patch käme vor Patch 4.
+> 
+> > 
+> > diff --git a/src/kernel2/src/arch/i386/mm/mm_context.c b/src/kernel2/src/arch/i386/mm/mm_context.c
+> > index a9fc8eb..e4eb79b 100644
+> > --- a/src/kernel2/src/arch/i386/mm/mm_context.c
+> > +++ b/src/kernel2/src/arch/i386/mm/mm_context.c
+> > @@ -283,7 +283,8 @@ static bool map_page
+> >      {
+> >          page_table = (page_table_t) pmm_alloc(1);
+> >          // kprintf("Pagetable=0x%08x\n", page_table);
+> > -        page_directory[vpage / PAGE_TABLE_LENGTH] = (dword) page_table | flags;
+> > +        page_directory[vpage / PAGE_TABLE_LENGTH] =
+> > +            (dword) page_table | PTE_P | PTE_W | PTE_U;
+> >         
+> >          // An dieser Stelle kann die Page Table noch nicht initialisiert
+> >          // werden, weil sie noch nicht gemappt ist.
+> > -- 
+> > 1.6.0.2
+> > 
+
+Jo, an der richtigen Stelle:
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100103/8d91fa81/attachment.pgp>
+
+From toni at tyndur.org  Sun Jan  3 17:42:15 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Sun, 3 Jan 2010 17:42:15 +0100
+Subject: [tyndur-devel] [PATCH v2 7/7] kernel2: Page Directories
+ seltener kopieren
+In-Reply-To: <1262534601-14194-8-git-send-email-kevin@tyndur.org>
+References: <1262534601-14194-1-git-send-email-kevin@tyndur.org>
+	<1262534601-14194-8-git-send-email-kevin@tyndur.org>
+Message-ID: <20100103164215.GE31714@neo.geekcave.lan>
+
+On Sun, Jan 03 17:03, Kevin Wolf wrote:
+> ! kernel2: Page Directories muessen nur neu kopiert werden, wenn sie
+>   sich auch tatsaechlich geaendert haben. Wenn sich nur eine Page Table
+>   geaendert hat, ist das nicht noetig.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+> ---
+>  src/kernel2/src/arch/i386/mm/mm_context.c |   14 +++++++-------
+>  1 files changed, 7 insertions(+), 7 deletions(-)
+> 
+> diff --git a/src/kernel2/src/arch/i386/mm/mm_context.c b/src/kernel2/src/arch/i386/mm/mm_context.c
+> index e4eb79b..20edcfa 100644
+> --- a/src/kernel2/src/arch/i386/mm/mm_context.c
+> +++ b/src/kernel2/src/arch/i386/mm/mm_context.c
+> @@ -289,6 +289,13 @@ static bool map_page
+>          // An dieser Stelle kann die Page Table noch nicht initialisiert
+>          // werden, weil sie noch nicht gemappt ist.
+>          clear_page_table = TRUE;
+> +
+> +        if (((uintptr_t) vaddr >= KERNEL_MEM_START) && ((uintptr_t) vaddr <
+> +            KERNEL_MEM_END))
+> +        {
+> +            context->version = ++page_directory_version;
+> +            page_directory_current = context->page_directory_virt;
+> +        }
+>      } 
+>      else if (page_directory[vpage / PAGE_TABLE_LENGTH] & PTE_PS) 
+>      {
+> @@ -343,13 +350,6 @@ static bool map_page
+>          } else {
+>              mmc_unmap(&mmc_current_context(), page_table, 1);
+>          }
+> -        
+> -        if (((uintptr_t) vaddr >= KERNEL_MEM_START) && ((uintptr_t) vaddr <
+> -            KERNEL_MEM_END))
+> -        {
+> -            context->version = ++page_directory_version;
+> -            page_directory_current = context->page_directory_virt;
+> -        }
+>          unlock(&context->lock);
+>          return TRUE;
+>      }
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100103/f5ac22c4/attachment.pgp>
+
+From toni at tyndur.org  Sun Jan  3 17:45:12 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Sun, 3 Jan 2010 17:45:12 +0100
+Subject: [tyndur-devel] [PATCH v2 5/7] kernel2: Kernel-PD bei
+ Paging-Initialisierung richtig setzen
+In-Reply-To: <1262534601-14194-6-git-send-email-kevin@tyndur.org>
+References: <1262534601-14194-1-git-send-email-kevin@tyndur.org>
+	<1262534601-14194-6-git-send-email-kevin@tyndur.org>
+Message-ID: <20100103164512.GF31714@neo.geekcave.lan>
+
+On Sun, Jan 03 17:03, Kevin Wolf wrote:
+> ! kernel2: Nachdem Paging an ist, muessen wir auf die virtuelle Adresse
+>   des Kernel-PD zugreifen
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+> ---
+>  src/kernel2/src/arch/i386/mm/virt.c |    2 ++
+>  1 files changed, 2 insertions(+), 0 deletions(-)
+> 
+> diff --git a/src/kernel2/src/arch/i386/mm/virt.c b/src/kernel2/src/arch/i386/mm/virt.c
+> index 55ced12..065a0c7 100644
+> --- a/src/kernel2/src/arch/i386/mm/virt.c
+> +++ b/src/kernel2/src/arch/i386/mm/virt.c
+> @@ -42,6 +42,7 @@
+>  
+>  extern void pmm_set_bitmap_start(void* bitmap_start);
+>  extern bool use_phys_addr;
+> +extern page_directory_t page_directory_current;
+>  
+>  /**
+>   * Initialisiert die virtuelle Speicherverwaltung. Insbesondere wird ein
+> @@ -84,6 +85,7 @@ void vmm_init(mmc_context_t* kernel_context)
+>      use_phys_addr = FALSE;
+>  
+>      kernel_context->page_directory_virt = virtual_pd;
+> +    page_directory_current = virtual_pd;
+>  }
+>  
+>  /**
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100103/a891b383/attachment.pgp>
+
+From toni at tyndur.org  Sun Jan  3 17:48:55 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Sun, 3 Jan 2010 17:48:55 +0100
+Subject: [tyndur-devel] [PATCH v2 4/7] kernel2: mmc_destroy
+ implementieren
+In-Reply-To: <1262534601-14194-5-git-send-email-kevin@tyndur.org>
+References: <1262534601-14194-1-git-send-email-kevin@tyndur.org>
+	<1262534601-14194-5-git-send-email-kevin@tyndur.org>
+Message-ID: <20100103164855.GA26174@neo.geekcave.lan>
+
+On Sun, Jan 03 17:03, Kevin Wolf wrote:
+> + kernel2: mmc_destroy implementiert. Damit wird jetzt nach Prozessende
+>   der Speicher auch wieder freigegeben.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+> ---
+>  src/kernel2/src/arch/i386/mm/mm_context.c |   39 ++++++++++++++++++++++++++++-
+>  src/kernel2/src/tasks/pm.c                |    7 +++++
+>  2 files changed, 45 insertions(+), 1 deletions(-)
+> 
+> diff --git a/src/kernel2/src/arch/i386/mm/mm_context.c b/src/kernel2/src/arch/i386/mm/mm_context.c
+> index 34ac946..a9fc8eb 100644
+> --- a/src/kernel2/src/arch/i386/mm/mm_context.c
+> +++ b/src/kernel2/src/arch/i386/mm/mm_context.c
+> @@ -61,6 +61,9 @@ bool use_phys_addr = TRUE;
+>   */
+>  static void mmc_sync(mmc_context_t* context);
+>  
+> +static inline vaddr_t get_pagetable(mmc_context_t* context, size_t index);
+> +static inline void free_pagetable(mmc_context_t* context, vaddr_t page_table);
+> +
+>  /**
+>   * Erstellt einen neuen MM-Kontext (Page Directory)
+>   */
+> @@ -142,11 +145,41 @@ void mmc_activate(mmc_context_t* context)
+>  /**
+>   * Kontext zerstoeren und Userspace-Speicher freigeben
+>   *
+> + * Achtung: Der noch gemappte Speicher darf nur zu diesem Kontext gehoeren, er
+> + * wird physisch freigegeben! Shared Memory muss vorher freigegeben werden.
+> + *
+>   * @param context Kontext
+>   */
+>  void mmc_destroy(mmc_context_t* context)
+>  {
+> -    // TODO
+> +    page_directory_t page_directory = context->page_directory_virt;
+> +    page_table_t page_table;
+> +    int i, n;
+> +
+> +    for (i = (MM_USER_START >> PGDIR_SHIFT);
+> +         i < (MM_USER_END >> PGDIR_SHIFT);
+> +         i++)
+> +    {
+> +        page_table = get_pagetable(context, i);
+> +        if (page_table == NULL) {
+> +            continue;
+> +        }
+> +
+> +        // Alle Page-Table-Eintraege freigeben
+> +        for(n = 0; n < 1024; n++) {
+> +            if(page_table[n] & PTE_P) {
+> +                pmm_free((paddr_t) (page_table[n] & PAGE_MASK), 1);
+> +            }
+> +        }
+> +        free_pagetable(context, page_table);
+> +
+> +        // Page Table freigeben
+> +        pmm_free((paddr_t) (page_directory[i] & PAGE_MASK), 1);
+> +    }
+> +
+> +    // Page Directory freigeben
+> +    mmc_unmap(&mmc_current_context(), context->page_directory_virt, 1);
+> +    pmm_free(context->page_directory, 1);
+>  }
+>  
+>  /**
+> @@ -159,6 +192,10 @@ static inline vaddr_t get_pagetable(mmc_context_t* context, size_t index)
+>      page_directory_t pagedir = context->page_directory_virt;
+>      page_table_t page_table;
+>  
+> +    if ((pagedir[index] & PTE_P) == 0) {
+> +        return NULL;
+> +    }
+> +
+>      if (context->page_directory == mmc_current_context().page_directory) {
+>          if (!use_phys_addr) {
+>              page_table = (page_table_t) 
+> diff --git a/src/kernel2/src/tasks/pm.c b/src/kernel2/src/tasks/pm.c
+> index 8dc8f2b..dde8f33 100644
+> --- a/src/kernel2/src/tasks/pm.c
+> +++ b/src/kernel2/src/tasks/pm.c
+> @@ -58,6 +58,7 @@ static pid_t next_pid = 1;
+>  
+>  
+>  extern void scheduler_init(void);
+> +extern pm_process_t init_process;
+>  
+>  /**
+>   * Die Prozessverwaltung initialisieren
+> @@ -155,6 +156,12 @@ void pm_destroy(pm_process_t* process)
+>  {
+>      struct on_destroy_info* info;
+>  
+> +    // Der aktuelle Speicherkontext darf nicht zum zu zerstoerenden Task
+> +    // gehoeren, sonst kriegen wir Probleme beim freigeben des Page Directory
+> +    if (&process->context == &mmc_current_context()) {
+> +        mmc_activate(&init_process.context);
+> +    }
+> +
+>      // Den Prozess blockieren
+>      while (pm_block(process) == FALSE);
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100103/c7644cad/attachment-0001.pgp>
+
+From kevin at tyndur.org  Mon Jan  4 13:20:57 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Mon,  4 Jan 2010 13:20:57 +0100
+Subject: [tyndur-devel] [PATCH] kernel2: Syscalls sleep/exit vereinfacht
+Message-ID: <1262607657-30465-1-git-send-email-kevin@tyndur.org>
+
+* kernel2: Wenn die Syscallhandler schedulen wollen, muessen sie einfach
+  nur current_thread aendert. Um den Rest kuemmert sich schon der
+  Interrupthandler, der sie aufgerufen hat. Das muessen wir nicht
+  doppelt machen.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/src/syscalls/pm.c |   16 ++--------------
+ 1 files changed, 2 insertions(+), 14 deletions(-)
+
+diff --git a/src/kernel2/src/syscalls/pm.c b/src/kernel2/src/syscalls/pm.c
+index 486b030..71358f4 100644
+--- a/src/kernel2/src/syscalls/pm.c
++++ b/src/kernel2/src/syscalls/pm.c
+@@ -72,7 +72,6 @@ pid_t syscall_pm_create_process(vaddr_t start, uid_t uid, const char* cmdline,
+ void syscall_pm_exit_process(void)
+ {
+     pm_process_t* old_task = current_process;
+-    pm_thread_t* thread;
+ 
+     // Task abgeben
+     pm_scheduler_push(current_thread);
+@@ -82,13 +81,7 @@ void syscall_pm_exit_process(void)
+     pm_destroy(old_task);
+ 
+     // Einen neuen Task holen.
+-    // FIXME Da braucht es endlich eine Funktion dafuer
+-    thread = pm_scheduler_pop();
+-
+-    cpu_get_current()->tss.esp0 = (uintptr_t) thread->kernel_stack + sizeof(interrupt_stack_frame_t);
+-    cpu_get_current()->tss.ss0 = 2 << 3;
+-
+-    current_thread = thread;
++    current_thread = pm_scheduler_pop();
+ }
+ 
+ /**
+@@ -218,12 +211,7 @@ void syscall_pm_sleep(void)
+     pm_scheduler_push(thread);
+ 
+     // Einen neuen Thread holen.
+-    thread = pm_scheduler_pop();
+-
+-    cpu_get_current()->tss.esp0 = (uintptr_t) thread->kernel_stack + sizeof(interrupt_stack_frame_t);
+-    cpu_get_current()->tss.ss0 = 2 << 3;
+-
+-    current_thread = thread;
++    current_thread = pm_scheduler_pop();
+ }
+ 
+ /**
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Mon Jan  4 18:46:08 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Mon,  4 Jan 2010 18:46:08 +0100
+Subject: [tyndur-devel] [PATCH 0/3] servmgr-Fixes
+Message-ID: <1262627171-20632-1-git-send-email-kevin@tyndur.org>
+
+Damit sind hoffentlich ein paar potentielle Deadlocks wÃ¤hrend dem
+Booten weg...
+
+Kevin Wolf (3):
+  servmgr: Fehlendes v() nachruesten
+  servmgr: Nicht dauerpollen
+  servmgr: Race bei der Initialisierung fixen
+
+ src/modules/servmgr/main.c   |   14 +++++++++++---
+ src/modules/servmgr/servio.c |    2 +-
+ 2 files changed, 12 insertions(+), 4 deletions(-)
+
+
+From kevin at tyndur.org  Mon Jan  4 18:46:09 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Mon,  4 Jan 2010 18:46:09 +0100
+Subject: [tyndur-devel] [PATCH 1/3] servmgr: Fehlendes v() nachruesten
+In-Reply-To: <1262627171-20632-1-git-send-email-kevin@tyndur.org>
+References: <1262627171-20632-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1262627171-20632-2-git-send-email-kevin@tyndur.org>
+
+! servmgr: Beim Oeffnen der Konsole ist im Fehlerfall das v() vergessen
+  worden und servmgr hat kompeltt blockiert
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/servmgr/servio.c |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/src/modules/servmgr/servio.c b/src/modules/servmgr/servio.c
+index 5537002..ae46d54 100644
+--- a/src/modules/servmgr/servio.c
++++ b/src/modules/servmgr/servio.c
+@@ -123,9 +123,9 @@ void service_io_flush(void)
+     free(out_buffer);
+     out_buffer = NULL;
+     out_buffer_pos = 0;
+-    v();
+ 
+ out:
++    v();
+     servterm = f;
+ }
+ 
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Mon Jan  4 18:46:10 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Mon,  4 Jan 2010 18:46:10 +0100
+Subject: [tyndur-devel] [PATCH 2/3] servmgr: Nicht dauerpollen
+In-Reply-To: <1262627171-20632-1-git-send-email-kevin@tyndur.org>
+References: <1262627171-20632-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1262627171-20632-3-git-send-email-kevin@tyndur.org>
+
+! servmgr: Das aggressive Pollen nach Startup-Services hat manchmal init
+  geDoSt. Lieber ab und zu mal eine Pause einlegen.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/servmgr/main.c |    8 ++++++++
+ 1 files changed, 8 insertions(+), 0 deletions(-)
+
+diff --git a/src/modules/servmgr/main.c b/src/modules/servmgr/main.c
+index 7c5afcc..f89d16a 100644
+--- a/src/modules/servmgr/main.c
++++ b/src/modules/servmgr/main.c
+@@ -39,6 +39,7 @@
+ #include <unistd.h>
+ #include <stdlib.h>
+ #include <init.h>
++#include <rpc.h>
+ 
+ #include "servmgr.h"
+ 
+@@ -85,6 +86,9 @@ static void parse_params(int argc, char* argv[])
+     }
+ }
+ 
++/** Dummy-Handle fuer Timer */
++static void do_nothing(void) {}
++
+ /**
+  * Auf Statup-Services warten
+  *
+@@ -105,6 +109,10 @@ static bool wait_startup_services(void)
+                 list_remove(startup_services, i--);
+             }
+         }
++
++        // Das System nicht mit Dauerpolling verstopfen
++        timer_register(do_nothing, 50000);
++        wait_for_rpc();
+     }
+ 
+     return (list_size(startup_services) == 0);
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Mon Jan  4 18:46:11 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Mon,  4 Jan 2010 18:46:11 +0100
+Subject: [tyndur-devel] [PATCH 3/3] servmgr: Race bei der Initialisierung
+	fixen
+In-Reply-To: <1262627171-20632-1-git-send-email-kevin@tyndur.org>
+References: <1262627171-20632-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1262627171-20632-4-git-send-email-kevin@tyndur.org>
+
+! servmgr: Beim init_service_register muss LIO schon fertig
+  initialisiert sein, sonst bekommt wer auch immer eine Datei oeffnen
+  wollte keine Antwort
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/servmgr/main.c |    6 +++---
+ 1 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/src/modules/servmgr/main.c b/src/modules/servmgr/main.c
+index f89d16a..29a184b 100644
+--- a/src/modules/servmgr/main.c
++++ b/src/modules/servmgr/main.c
+@@ -143,15 +143,15 @@ int main(int argc, char* argv[])
+     // Parameter verarbeiten
+     parse_params(argc, argv);
+ 
+-    // RPC-Interface vorbereiten
+-    rpcif_init();
+-
+     // LostIO-Interfacee vorbereiten
+     lioif_init();
+ 
+     // IO fuer die Services initialisieren
+     service_io_init();
+ 
++    // RPC-Interface vorbereiten
++    rpcif_init();
++
+     // Auf startup-services warten
+     if (!wait_startup_services()) {
+         failed_startup_services();
+-- 
+1.6.0.2
+
+
+From swl at go4more.de  Mon Jan  4 19:05:01 2010
+From: swl at go4more.de (swl at go4more.de)
+Date: Mon,  4 Jan 2010 19:05:01 +0100
+Subject: [tyndur-devel] [PATCH] Signed-off-by: Johannes Pfeiffer
+	<johannes@Jump4Eva.(none)>
+Message-ID: <1262628301-4757-1-git-send-email-swl@go4more.de>
+
+From: Johannes Pfeiffer <johannes at Jump4Eva.(none)>
+
++Tastatureingaben
++Witzwahl
++Witze(10 Stück)
+---
+ src/modules/c/joke/Makefile     |   38 +++++++++++++++++++++++
+ src/modules/c/joke/Makefile.all |    7 ++++
+ src/modules/c/joke/joke.c       |   64 +++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 109 insertions(+), 0 deletions(-)
+ create mode 100644 src/modules/c/joke/Makefile
+ create mode 100644 src/modules/c/joke/Makefile.all
+ create mode 100644 src/modules/c/joke/joke.c
+
+diff --git a/src/modules/c/joke/Makefile b/src/modules/c/joke/Makefile
+new file mode 100644
+index 0000000..140703d
+--- /dev/null
++++ b/src/modules/c/joke/Makefile
+@@ -0,0 +1,38 @@
++CC=gcc -m32 -g -c -fno-stack-protector -nostdinc -fno-leading-underscore -fno-omit-frame-pointer -Wall -Werror -Wstrict-prototypes -fno-strict-aliasing -O2 -fno-builtin -I .  -I ../../include -I ../../../include/arch/i386 -I ../../../include 
++CPP=g++ -m32 -g -c -fno-stack-protector -fno-leading-underscore -fno-omit-frame-pointer -Wall -fno-strict-aliasing -nostdlib -fno-builtin -fno-rtti -fno-exceptions -fno-use-cxa-atexit -O0 -I ../../include -I ../../../include/arch/i386 -I ../../../include
++PPC=fpc -n -Cn -CX -Ttyndur -Fi../../include -Fi../../../include/arch/i386 -Fi../../../include -Fu../lib/units -Fu../units
++
++ASM_ELF=nasm -felf -O99 -I ../../include/ -I ../../../include/arch/i386/ -I ../../../include/
++ASM_BIN=nasm -fbin -O99
++
++BUILD_ROOT=/home/johannes/tyndur/build/output
++BUILD_DIR=$(BUILD_ROOT)/src/modules/c/joke
++
++AS=as -32
++
++all:
++	$(MAKE) --no-print-directory -s makefiles
++	$(MAKE) --no-print-directory -s subdirs
++	$(MAKE) --no-print-directory -s obj 
++	LOST_BUILDMK_ROOT=/home/johannes/tyndur bash Makefile.all $(BUILD_ROOT) '/home/johannes/tyndur/src/modules/lib/library.a /home/johannes/tyndur/src/modules/lib/crt0.o /home/johannes/tyndur/src/lib/library.a /usr/lib/gcc/i486-linux-gnu/4.4.2/libgcc.a' '/home/johannes/tyndur'
++
++makefiles:
++	if [ -f buildmk.sh ]; then bash ./buildmk.sh; fi
++
++pwdline:
++	echo
++	echo '---- /home/johannes/tyndur/src/modules/c/joke'
++
++obj: pwdline joke.o
++
++subdirs:
++
++joke.o: joke.c
++	echo 'CC   joke.c:  '
++	$(CC) joke.c
++
++clean:
++	rm -f *.o *.a *.mod *.ppu link.res ppas.sh joke
++	for file in *; do if [ -f "$$file/Makefile" -a \( ! -f "$$file/.nobuild" -o -f "$$file/.ignorenobuild" \) ]; then $(MAKE) -sC "$$file" clean; rm "$$file/Makefile"; fi done  
++
++.SILENT: all makefiles subdirs obj clean clean_root updateroot image-floppy image-hd test-qemu test-qemu-hd
+diff --git a/src/modules/c/joke/Makefile.all b/src/modules/c/joke/Makefile.all
+new file mode 100644
+index 0000000..de08d6c
+--- /dev/null
++++ b/src/modules/c/joke/Makefile.all
+@@ -0,0 +1,7 @@
++shopt -s extglob
++source $LOST_BUILDMK_ROOT/config.sh
++
++echo "LD   $1/apps/joke"
++$LOST_TOOLS_LD -o joke -Ttext=0x40000000 *.o --start-group $2 --end-group
++
++mv joke $1/apps/joke
+diff --git a/src/modules/c/joke/joke.c b/src/modules/c/joke/joke.c
+new file mode 100644
+index 0000000..854d769
+--- /dev/null
++++ b/src/modules/c/joke/joke.c
+@@ -0,0 +1,64 @@
++/*Jokeprogramm Version 1.0
++  Von Johannes Pfeiffer (tecgod)
++  veröffentlicht unter der Creative Commons Zero*/
++//Includedateien
++#include "stdio.h"
++int main(void)
++{
++//Variablen
++char nummer=-1;
++    printf("Bitte Zahl eingeben[0-9]:\n");
++    while(nummer==-1){
++        nummer=fgetc(stdin);
++    }
++    //Witzen Nummern zuweisen
++        if(nummer==57){//Nummer "9"
++           printf("\nWas haben Windows und ein U-Boot gemeinsam?\n");
++           printf("Wenn man ein Fenster öffnet fangen die Probleme an\n\n");
++        }
++        if(nummer==56){//Nummer "8"
++            printf("\n\"Mutti ,wie lange bist du schon mit Papi verheiratet?\"\n");
++            printf("\"Zehn Jahre.\"\n");
++            printf("\"Wie lange musst du noch?\"\n\n");
++        }
++        if(nummer==55){//Nummer "7"
++            printf("\nUnterhalten sich zwei Männer:\n");
++            printf("\"Ich baue für meine Frau einen Stuhl.\"\n");
++            printf("\"Und?\"\n");
++            printf("\"Bis auf die Elektrik bin ich fertig.\"\n\n");
++        }
++        if(nummer==54){//Nummer "6"
++            printf("\nIm Religionsunterricht:\"Kinder ,was müsst ihr tun ,damit\n");
++            printf("euch eure Sünden vergeben werden?\"\n");
++            printf("Elfriede meldet sich:\"Zuerst mal sündigen\"\n\n");
++        }
++        if(nummer==53){//Nummer "5"
++            printf("\n\"Mein Vater hat mich sehr musikalisch erzogen.\"\n");
++            printf("\"Welches Musikinstrument hast du denn gelernt?\"\n");
++            printf("\"Wieso gelernt? Mein Vater hat mich immer mit einer Geige verprügelt.\"\n\n");
++        }
++        if(nummer==52){//Nummer "4"
++            printf("\nFrau Bierendoil blättert in der Tageszeitung und sagt\n");
++            printf("zu ihrem Mann:\"Liebling, hör` mal ,hier steht ,dass die\n");
++            printf("meisten Unfälle in der Küche passieren.\"\n");
++            printf("\"Ja ,ich weiß.Ich muss sie ja essen!\"\n\n");
++        }
++        if(nummer==51){//Nummer "3"
++            printf("\n\"Sag mal bist du abergläubisch?\"\n");
++            printf("\"Natürlich nicht!\"\n");
++            printf("\"Dann kannst du mir ja dreizehn Euro leihen!\"\n\n");
++        }
++        if(nummer==50){//Nummer "2"
++            printf("\n\"Wieviel wiegen Sie ,Frau Bieldrühler?\"\n");
++            printf("\"189 Pfund mit Brille.\"\n");
++            printf("\"Wieso mit Brille?\"\n");
++            printf("\"Ohne Brille kann ich nicht lesen ,was die Waage anzeigt!\"\n\n");
++        }
++        if(nummer==49){//Nummer "1"
++            printf("\nAllen steht das Wasser bis zum Hals ,\nnur nicht Rainer ,der ist kleiner.\n\n");
++        }
++        if(nummer==48){//Nummer "0"
++            printf("\nZieh ich meine Beine ein ,könnt` ich eine Murmel sein.\n\n");
++        }
++    return 0;
++}
+-- 
+1.6.5
+
+
+From toni at tyndur.org  Mon Jan  4 21:56:54 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Mon, 4 Jan 2010 21:56:54 +0100
+Subject: [tyndur-devel] [PATCH] kernel2: Syscalls sleep/exit vereinfacht
+In-Reply-To: <1262607657-30465-1-git-send-email-kevin@tyndur.org>
+References: <1262607657-30465-1-git-send-email-kevin@tyndur.org>
+Message-ID: <20100104205556.GA12544@neo.geekcave.lan>
+
+On Mon, Jan 04 13:20, Kevin Wolf wrote:
+> * kernel2: Wenn die Syscallhandler schedulen wollen, muessen sie einfach
+>   nur current_thread aendert. Um den Rest kuemmert sich schon der
+>   Interrupthandler, der sie aufgerufen hat. Das muessen wir nicht
+>   doppelt machen.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100104/a8c8818d/attachment.pgp>
+
+From toni at tyndur.org  Tue Jan  5 22:00:23 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Tue, 5 Jan 2010 22:00:23 +0100
+Subject: [tyndur-devel] [PATCH 1/3] servmgr: Fehlendes v() nachruesten
+In-Reply-To: <1262627171-20632-2-git-send-email-kevin@tyndur.org>
+References: <1262627171-20632-1-git-send-email-kevin@tyndur.org>
+	<1262627171-20632-2-git-send-email-kevin@tyndur.org>
+Message-ID: <20100105210022.GB12544@neo.geekcave.lan>
+
+On Mon, Jan 04 18:46, Kevin Wolf wrote:
+> ! servmgr: Beim Oeffnen der Konsole ist im Fehlerfall das v() vergessen
+>   worden und servmgr hat kompeltt blockiert
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100105/a08c40b3/attachment.pgp>
+
+From toni at tyndur.org  Tue Jan  5 23:51:57 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Tue, 5 Jan 2010 23:51:57 +0100
+Subject: [tyndur-devel] [PATCH 2/3] servmgr: Nicht dauerpollen
+In-Reply-To: <1262627171-20632-3-git-send-email-kevin@tyndur.org>
+References: <1262627171-20632-1-git-send-email-kevin@tyndur.org>
+	<1262627171-20632-3-git-send-email-kevin@tyndur.org>
+Message-ID: <20100105225157.GC12544@neo.geekcave.lan>
+
+On Mon, Jan 04 18:46, Kevin Wolf wrote:
+> ! servmgr: Das aggressive Pollen nach Startup-Services hat manchmal init
+>   geDoSt. Lieber ab und zu mal eine Pause einlegen.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100105/9372e832/attachment.pgp>
+
+From toni at tyndur.org  Wed Jan  6 00:53:16 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Wed, 6 Jan 2010 00:53:16 +0100
+Subject: [tyndur-devel] [PATCH 3/3] servmgr: Race bei der
+ Initialisierung fixen
+In-Reply-To: <1262627171-20632-4-git-send-email-kevin@tyndur.org>
+References: <1262627171-20632-1-git-send-email-kevin@tyndur.org>
+	<1262627171-20632-4-git-send-email-kevin@tyndur.org>
+Message-ID: <20100105235316.GD12544@neo.geekcave.lan>
+
+On Mon, Jan 04 18:46, Kevin Wolf wrote:
+> ! servmgr: Beim init_service_register muss LIO schon fertig
+>   initialisiert sein, sonst bekommt wer auch immer eine Datei oeffnen
+>   wollte keine Antwort
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100106/f37e7419/attachment.pgp>
+
+From max at tyndur.org  Thu Jan  7 20:56:35 2010
+From: max at tyndur.org (max at tyndur.org)
+Date: Thu,  7 Jan 2010 20:56:35 +0100
+Subject: [tyndur-devel] [PATCH] SMP: An den richtigen Stellen nach der FPS
+	suchen
+Message-ID: <1262894195-6299-1-git-send-email-max@tyndur.org>
+
+From: Max Reitz <max at tyndur.org>
+
+* Die Floating Point Structure liegt nicht im Kilobyte ab NULL,
+  sondern in der EBDA (deren Adresse in der BDA steht) und es ist
+  vermutlich sicherer, die genaue Größe des konventionellen
+  Speichers ebenfalls aus der BDA zu lesen als sie zu erraten
+
+Signed-off-by: Max Reitz <max at tyndur.org>
+---
+ src/kernel2/src/smp/smp.c |   15 ++++++++++-----
+ 1 files changed, 10 insertions(+), 5 deletions(-)
+
+diff --git a/src/kernel2/src/smp/smp.c b/src/kernel2/src/smp/smp.c
+index 3c22a41..f1c3d58 100644
+--- a/src/kernel2/src/smp/smp.c
++++ b/src/kernel2/src/smp/smp.c
+@@ -153,17 +153,22 @@ static struct MP_floating_pointer* find_floating_pointer(void)
+     // Die Adresse dieser Struktur ist nicht genau festgelegt. In der Intel
+     // Multiprozessor-Spezifikation sind drei Bereiche festgelegt, in denen sie
+     // sich befinden kann. Hier wird versucht sie zu finden.
+-    
+-    floating_pointer = find_floating_pointer_in(0, 0x400);
++
++    // EBDA (Real-Mode-Segment steht im Word am Offset 0x0E der BIOS Data Area)
++    floating_pointer = find_floating_pointer_in(*((uint16_t*) 0x040E) << 4,
++        0x400);
+     if (floating_pointer != NULL) {
+         return floating_pointer;
+     }
+-    
+-    floating_pointer = find_floating_pointer_in(0x9FC00, 0x400);
++
++    // Letztes Kilobyte des konventionellen Speichers (Größe des Speichers in
++    // Kilobyte steht im Word am Offset 0x13 der BIOS Data Area)
++    floating_pointer =
++        find_floating_pointer_in((*((uint16_t*) 0x0413) - 1) << 10, 0x400);
+     if (floating_pointer != NULL) {
+         return floating_pointer;
+     }
+-    
++
+     floating_pointer = find_floating_pointer_in(0xE0000, 0x20000);
+ 
+     return floating_pointer;
+-- 
+1.6.4.2
+
+
+From kevin at tyndur.org  Sun Jan 17 18:37:53 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 17 Jan 2010 18:37:53 +0100
+Subject: [tyndur-devel] [PATCH] cdi: Behanndlung von Parititionen in
+	CDI-Bibliothek verschoben
+Message-ID: <1263749873-2817-1-git-send-email-kevin@tyndur.org>
+
+* cdi: Die Erkennung von Partitionen hat in ata nichts zu suchen. ata
+  stellt jetzt nur noch ein Geraet bereit und die CDI-Bibliothek erkennt
+  Paritionen darauf und erstellt die entsprechenden LostIO-Knoten.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/cdi/ata/device.c       |   57 --------------
+ src/modules/cdi/ata/libpartition.c |   86 ----------------------
+ src/modules/cdi/ata/libpartition.h |   58 ---------------
+ src/modules/cdi/lib/libpartition.c |  142 ++++++++++++++++++++++++++++++++++++
+ src/modules/cdi/lib/libpartition.h |   64 ++++++++++++++++
+ src/modules/cdi/lib/scsi/disk.c    |    8 +-
+ src/modules/cdi/lib/storage.c      |   92 ++++++++++++++---------
+ 7 files changed, 267 insertions(+), 240 deletions(-)
+ delete mode 100644 src/modules/cdi/ata/libpartition.c
+ delete mode 100644 src/modules/cdi/ata/libpartition.h
+ create mode 100644 src/modules/cdi/lib/libpartition.c
+ create mode 100644 src/modules/cdi/lib/libpartition.h
+
+diff --git a/src/modules/cdi/ata/device.c b/src/modules/cdi/ata/device.c
+index 7339d65..dd087c3 100644
+--- a/src/modules/cdi/ata/device.c
++++ b/src/modules/cdi/ata/device.c
+@@ -36,7 +36,6 @@
+ #include "cdi/scsi.h"
+ 
+ #include "device.h"
+-#include "libpartition.h"
+ 
+ // IRQ-Handler
+ static inline void ata_controller_irq(struct cdi_device* dev);
+@@ -157,59 +156,6 @@ int ata_wait_irq(struct ata_controller* controller, uint32_t timeout)
+     return 1;
+ }
+ 
+-/**
+- * Partitionstabelle auf einem ATA-Geraet verarbeiten
+- */
+-void ata_parse_partitions(struct ata_device* dev)
+-{
+-    struct partition_table partition_table;
+-    uint8_t mbr[ATA_SECTOR_SIZE];
+-    int i;
+-
+-    // Die Partitionstabelle liegt im MBR
+-    if (!dev->read_sectors(dev, 0, 1, mbr)) {
+-        DEBUG("Fehler beim Einlesen der Partitionstabelle");
+-        return;
+-    }
+-
+-    // Partitionstabelle Verarbeiten
+-    if (!partition_table_fill(&partition_table, mbr)) {
+-        DEBUG("Fehler beim Verarbeiten der Partitionstabelle");
+-        return;
+-    }
+-
+-    // Ansonsten wird die Tabelle jetzt verarbeitet
+-    for (i = 0; i < 4; i++) {
+-        if (partition_table.entries[i].used) {
+-            // Erweiterter Eintrag => ueberspringen
+-            if (partition_table.entries[i].type == PARTITION_TYPE_EXTENDED) {
+-                DEBUG("TODO Erweiterte Partitionstabelleneintraege\n");
+-                continue;
+-            }
+-            
+-            struct ata_partition* partition = malloc(sizeof(*partition));
+-            partition->realdev = dev;
+-            partition->null = NULL;
+-            partition->start = partition_table.entries[i].start;
+-            partition->dev.storage.block_size = ATA_SECTOR_SIZE;
+-            partition->dev.storage.block_count = partition_table.entries[i].size;
+-            DEBUG("Partition von %d bis %d\n", partition->start, partition->dev.storage.block_count + partition->start - 1);
+-            asprintf((char**) &(partition->dev.storage.dev.name), "ata%01d%01d_p%01d",
+-                (uint32_t) dev->controller->id, dev->id, cdi_list_size(dev->
+-                partition_list));
+-
+-            // Geraet registrieren
+-            partition->dev.storage.dev.driver = &dev->controller->storage->drv;
+-            ata_init_device((struct ata_device*) partition);
+-            cdi_list_push(dev->controller->storage->drv.devices, partition);
+-
+-            // An Partitionsliste fuer das aktuelle Geraet anhaengen
+-            cdi_list_push(dev->partition_list, partition);
+-        }
+-    }
+-}
+-
+-
+ 
+ 
+ /**
+@@ -296,9 +242,6 @@ void ata_init_controller(struct ata_controller* controller)
+                 asprintf((char**) &(dev->dev.storage.dev.name), "ata%01d%01d",
+                     (uint32_t) controller->id, i);
+ 
+-                // Partitionen parsen
+-                ata_parse_partitions(dev);
+-
+                 // Geraet registrieren
+                 dev->dev.storage.dev.driver = &controller->storage->drv;
+                 ata_init_device(dev);
+diff --git a/src/modules/cdi/ata/libpartition.c b/src/modules/cdi/ata/libpartition.c
+deleted file mode 100644
+index 17c41e1..0000000
+--- a/src/modules/cdi/ata/libpartition.c
++++ /dev/null
+@@ -1,86 +0,0 @@
+-/*
+- * Copyright (c) 2007 The tyndur Project. All rights reserved.
+- *
+- * This code is derived from software contributed to the tyndur Project
+- * by Antoine Kaufmann.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+- * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+- * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
+- * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+- * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+- * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+- * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+- * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+- * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+- */
+-
+-#include "libpartition.h"
+-#include <stdint.h>
+-
+-/**
+- * Roher Partitionstabelleneintrag
+- */
+-struct raw_entry {
+-    uint8_t active;
+-    uint8_t begin_chs[3];
+-    uint8_t type;
+-    uint8_t end_chs[3];
+-    uint32_t start;
+-    uint32_t size;
+-} PACKED;
+-
+-/**
+- * Uebergebene Partitionstabelle anhand des Sektors fuellen
+- *
+- * @return 1 wenn die Tabelle erfolgreich gefuellt wurde, 0 sonst
+- */
+-int partition_table_fill(struct partition_table* table, void* sector)
+-{
+-    struct raw_entry* entry = (struct raw_entry*) (sector +
+-        PARTITION_TABLE_OFFSET);
+-    uint16_t* signature = sector + PARTITION_TABLE_SIG_OFFSET;
+-    int i;
+-
+-    // Zuerst die Signatur pruefen, denn ohne die muss garnicht weiter gesucht
+-    // werden.
+-    if (*signature != PARTITION_TABLE_SIGNATURE) {
+-        return 0;
+-    }
+-    
+-    // Wenn die Signatur existiert koennen die einzelnen Eintraege ausgelesen
+-    // werden
+-    for (i = 0; i < 4; i++) {
+-        // Wenn 0 als Groesse eingetragen ist, ist der Eintrag unbenutzt
+-        if (entry->size == 0) {
+-            table->entries[i].used = 0;
+-        } else {
+-            table->entries[i].used = 1;
+-
+-            // Fuer erweiterte Partitionen wollen wir generell Typ 0x5, die
+-            // anderen aus Windows und Linux werden deshalb ausgetauscht.
+-            if ((entry->type == 0x0F) || (entry->type == 0x85)) {
+-                table->entries[i].type = PARTITION_TYPE_EXTENDED;
+-            } else {
+-                table->entries[i].type = entry->type;
+-            }
+-
+-            table->entries[i].start = entry->start;
+-            table->entries[i].size = entry->size;
+-        }
+-        entry++;
+-    }
+-    return 1;
+-}
+-
+diff --git a/src/modules/cdi/ata/libpartition.h b/src/modules/cdi/ata/libpartition.h
+deleted file mode 100644
+index e8d2837..0000000
+--- a/src/modules/cdi/ata/libpartition.h
++++ /dev/null
+@@ -1,58 +0,0 @@
+-/*
+- * Copyright (c) 2007 The tyndur Project. All rights reserved.
+- *
+- * This code is derived from software contributed to the tyndur Project
+- * by Antoine Kaufmann.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+- * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+- * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
+- * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+- * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+- * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+- * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+- * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+- * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+- */
+-
+-#ifndef _LIBPARTITION_H_
+-#define _LIBPARTITION_H_
+-
+-#include <stdint.h>
+-
+-#define PACKED __attribute__((packed))
+-#define PARTITION_TABLE_OFFSET 446
+-#define PARTITION_TABLE_SIG_OFFSET 510;
+-#define PARTITION_TABLE_SIGNATURE 0xAA55
+-
+-// Typ fuer eine Erweiterte Partition, deren Startsektor wieder eine
+-// Partitionstabelle beinhaltet.
+-#define PARTITION_TYPE_EXTENDED 0x05
+-
+-struct partition {
+-    uint8_t     used;
+-    uint8_t     type;
+-    uint32_t    start;
+-    uint32_t    size;
+-};
+-
+-struct partition_table {
+-    struct partition entries[4];
+-};
+-
+-// Fuellt die Angegebene Partitionstabelle anhand des uebergebenen Sektors auf
+-int partition_table_fill(struct partition_table* table, void* sector);
+-
+-#endif // ifndef _LIBPARTITION_H_
+-
+diff --git a/src/modules/cdi/lib/libpartition.c b/src/modules/cdi/lib/libpartition.c
+new file mode 100644
+index 0000000..2ecd23c
+--- /dev/null
++++ b/src/modules/cdi/lib/libpartition.c
+@@ -0,0 +1,142 @@
++/*
++ * Copyright (c) 2007 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Antoine Kaufmann.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <stdint.h>
++#include <stdlib.h>
++
++#include "cdi/lists.h"
++#include "cdi/storage.h"
++#include "libpartition.h"
++
++#define DEBUG(x)
++
++/**
++ * Roher Partitionstabelleneintrag
++ */
++struct raw_entry {
++    uint8_t active;
++    uint8_t begin_chs[3];
++    uint8_t type;
++    uint8_t end_chs[3];
++    uint32_t start;
++    uint32_t size;
++} PACKED;
++
++struct partition_table {
++    struct partition entries[4];
++};
++
++extern int cdi_storage_read(struct cdi_storage_device* device, uint64_t pos,
++    size_t size, void* dest);
++/**
++ * Uebergebene Partitionstabelle anhand des Sektors fuellen
++ *
++ * @return 1 wenn die Tabelle erfolgreich gefuellt wurde, 0 sonst
++ */
++static int partition_table_fill(struct partition_table* table, void* sector)
++{
++    struct raw_entry* entry = (struct raw_entry*) (sector +
++        PARTITION_TABLE_OFFSET);
++    uint16_t* signature = sector + PARTITION_TABLE_SIG_OFFSET;
++    int i;
++
++    // Zuerst die Signatur pruefen, denn ohne die muss garnicht weiter gesucht
++    // werden.
++    if (*signature != PARTITION_TABLE_SIGNATURE) {
++        return 0;
++    }
++
++    // Wenn die Signatur existiert koennen die einzelnen Eintraege ausgelesen
++    // werden
++    for (i = 0; i < 4; i++) {
++        // Wenn 0 als Groesse eingetragen ist, ist der Eintrag unbenutzt
++        if (entry->size == 0) {
++            table->entries[i].used = 0;
++        } else {
++            table->entries[i].used = 1;
++
++            // Fuer erweiterte Partitionen wollen wir generell Typ 0x5, die
++            // anderen aus Windows und Linux werden deshalb ausgetauscht.
++            if ((entry->type == 0x0F) || (entry->type == 0x85)) {
++                table->entries[i].type = PARTITION_TYPE_EXTENDED;
++            } else {
++                table->entries[i].type = entry->type;
++            }
++
++            table->entries[i].start = entry->start * 512;
++            table->entries[i].size = entry->size * 512;
++        }
++        entry++;
++    }
++    return 1;
++}
++
++/**
++ * Partitionstabelle auf einem Massenspeichergeraet verarbeiten
++ *
++ * @param dev Geraet, auf dem nach Partitionen gesucht werden soll
++ * @param partitions Liste, in die gefundene Partitionen eingefuegt werden
++ * sollen (als struct partition)
++ */
++void cdi_tyndur_parse_partitions(struct cdi_storage_device* dev,
++    cdi_list_t partitions)
++{
++    struct partition_table partition_table;
++    uint8_t mbr[512];
++    int i;
++
++    // Die Partitionstabelle liegt im MBR
++    if (cdi_storage_read(dev, 0, 512, mbr) != 0) {
++        DEBUG("Fehler beim Einlesen der Partitionstabelle");
++        return;
++    }
++
++    // Partitionstabelle Verarbeiten
++    if (!partition_table_fill(&partition_table, mbr)) {
++        DEBUG("Fehler beim Verarbeiten der Partitionstabelle");
++        return;
++    }
++
++    // Ansonsten wird die Tabelle jetzt verarbeitet
++    for (i = 0; i < 4; i++) {
++        if (partition_table.entries[i].used) {
++            // Erweiterter Eintrag => ueberspringen
++            if (partition_table.entries[i].type == PARTITION_TYPE_EXTENDED) {
++                DEBUG("TODO Erweiterte Partitionstabelleneintraege\n");
++                continue;
++            }
++
++            struct partition* part = malloc(sizeof(*part));
++            *part = partition_table.entries[i];
++            part->dev = dev;
++            part->number = i;
++
++            cdi_list_push(partitions, part);
++        }
++    }
++}
+diff --git a/src/modules/cdi/lib/libpartition.h b/src/modules/cdi/lib/libpartition.h
+new file mode 100644
+index 0000000..35685b9
+--- /dev/null
++++ b/src/modules/cdi/lib/libpartition.h
+@@ -0,0 +1,64 @@
++/*
++ * Copyright (c) 2007 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Antoine Kaufmann.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef _LIBPARTITION_H_
++#define _LIBPARTITION_H_
++
++#include <stdint.h>
++
++#define PACKED __attribute__((packed))
++#define PARTITION_TABLE_OFFSET 446
++#define PARTITION_TABLE_SIG_OFFSET 510;
++#define PARTITION_TABLE_SIGNATURE 0xAA55
++
++// Typ fuer eine Erweiterte Partition, deren Startsektor wieder eine
++// Partitionstabelle beinhaltet.
++#define PARTITION_TYPE_EXTENDED 0x05
++
++struct partition {
++    struct cdi_storage_device* dev;
++
++    uint8_t     used;
++    uint8_t     type;
++    uint16_t    number;
++    uint64_t    start;
++    uint64_t    size;
++};
++
++/**
++ * Partitionstabelle auf einem Massenspeichergeraet verarbeiten
++ *
++ * @param dev Geraet, auf dem nach Partitionen gesucht werden soll
++ * @param partitions Liste, in die gefundene Partitionen eingefuegt werden
++ * sollen (als struct partition)
++ */
++void cdi_tyndur_parse_partitions(struct cdi_storage_device* dev,
++    cdi_list_t partitions);
++
++#endif // ifndef _LIBPARTITION_H_
++
+diff --git a/src/modules/cdi/lib/scsi/disk.c b/src/modules/cdi/lib/scsi/disk.c
+index bd9e18f..e0eca2e 100644
+--- a/src/modules/cdi/lib/scsi/disk.c
++++ b/src/modules/cdi/lib/scsi/disk.c
+@@ -29,8 +29,6 @@
+ #include <cdi/scsi.h>
+ #include <cdi/storage.h>
+ 
+-extern int lostio_mst_if_newdev(struct cdi_storage_device* device);
+-
+ #define big_endian_word(x) ((((x) & 0xFF) << 8) | (((x) & 0xFF00) >> 8))
+ #define big_endian_dword(x) \
+     ((big_endian_word((x) & 0xFFFF) << 16) | \
+@@ -241,15 +239,17 @@ int cdi_scsi_disk_init(struct cdi_scsi_device* device)
+     frontdev->dev.driver = (struct cdi_driver*) &cdi_scsi_disk_driver;
+     frontdev->dev.name = device->dev.name;
+ 
++    // Groesse des Mediums bestimmen. Falls keins eingelegt ist, brauchen wir
++    // trotzdem zumindest eine Sektorgroesse.
+     cdrom_capacity(device, &num_sectors, &sector_size);
+-    frontdev->block_size = sector_size;
++    frontdev->block_size = sector_size ? sector_size : 2048;
+     frontdev->block_count = num_sectors;
+ 
+     frontdev->dev.backdev = device;
+     device->frontdev = frontdev;
+ 
+     // LostIO-Verzeichnisknoten anlegen
+-    lostio_mst_if_newdev(frontdev);
++    cdi_storage_device_init(frontdev);
+ 
+     return 0;
+ }
+diff --git a/src/modules/cdi/lib/storage.c b/src/modules/cdi/lib/storage.c
+index be846cd..4d2e656 100644
+--- a/src/modules/cdi/lib/storage.c
++++ b/src/modules/cdi/lib/storage.c
+@@ -2,11 +2,11 @@
+  * Copyright (c) 2007 Antoine Kaufmann
+  *
+  * This program is free software. It comes without any warranty, to
+- * the extent permitted by applicable law. You can redistribute it 
+- * and/or modify it under the terms of the Do What The Fuck You Want 
++ * the extent permitted by applicable law. You can redistribute it
++ * and/or modify it under the terms of the Do What The Fuck You Want
+  * To Public License, Version 2, as published by Sam Hocevar. See
+  * http://sam.zoy.org/projects/COPYING.WTFPL for more details.
+- */  
++ */
+ 
+ #include <stdio.h>
+ #include <stdint.h>
+@@ -15,9 +15,10 @@
+ #include <lostio.h>
+ 
+ #include "cdi/storage.h"
++#include "libpartition.h"
+ 
+ static void lostio_mst_if_init(void);
+-int lostio_mst_if_newdev(struct cdi_storage_device* device);
++int lostio_mst_if_newdev(struct partition* part);
+ 
+ static size_t lostio_mst_read_handler(lostio_filehandle_t* fh,
+     void* buf, size_t blocksize, size_t blockcount);
+@@ -29,7 +30,7 @@ static int lostio_mst_seek_handler(lostio_filehandle_t* fh, uint64_t offset,
+ #define CDI_LOSTIO_TYPE_MST 255
+ static typehandle_t lostio_mst_typehandle = {
+     .id = CDI_LOSTIO_TYPE_MST,
+-    
++
+     .pre_open = NULL,
+     .post_open = NULL,
+     .not_found = NULL,
+@@ -75,8 +76,25 @@ void cdi_storage_driver_register(struct cdi_storage_driver* driver)
+  */
+ void cdi_storage_device_init(struct cdi_storage_device* device)
+ {
++    cdi_list_t partitions;
++    struct partition* part;
++
+     // Geraeteknoten fuer LostIO erstellen
+-    lostio_mst_if_newdev(device);
++    part = calloc(1, sizeof(*part));
++    part->dev       = device;
++    part->number    = (uint16_t) -1;
++    part->start     = 0;
++    part->size      = device->block_size * device->block_count;
++
++    lostio_mst_if_newdev(part);
++
++    // Partitionen suchen und Knoten erstellen
++    partitions = cdi_list_create();
++    cdi_tyndur_parse_partitions(device, partitions);
++    while ((part = cdi_list_pop(partitions))) {
++        lostio_mst_if_newdev(part);
++    }
++    cdi_list_destroy(partitions);
+ }
+ 
+ /**
+@@ -97,7 +115,7 @@ int cdi_storage_read(struct cdi_storage_device* device, uint64_t pos,
+     uint64_t block_read_end = (pos + size) / block_size;
+     // Anzahl der Blocks die gelesen werden sollen
+     uint64_t block_read_count = block_read_end - block_read_start;
+-    
++
+     // Wenn nur ganze Bloecke gelesen werden sollen, geht das etwas effizienter
+     if (((pos % block_size) == 0) && (((pos + size) %  block_size) == 0)) {
+         // Nur ganze Bloecke
+@@ -107,14 +125,14 @@ int cdi_storage_read(struct cdi_storage_device* device, uint64_t pos,
+         // FIXME: Das laesst sich garantiert etwas effizienter loesen
+         block_read_count++;
+         uint8_t buffer[block_read_count * block_size];
+-        
++
+         // In Zwischenspeicher einlesen
+         if (driver->read_blocks(device, block_read_start, block_read_count,
+             buffer) != 0)
+         {
+             return -1;
+         }
+-        
++
+         // Bereich aus dem Zwischenspeicher kopieren
+         memcpy(dest, buffer + (pos % block_size), size);
+     }
+@@ -133,7 +151,7 @@ int cdi_storage_write(struct cdi_storage_device* device, uint64_t pos,
+ {
+     struct cdi_storage_driver* driver = (struct cdi_storage_driver*) device->
+         dev.driver;
+-    
++
+     size_t block_size = device->block_size;
+     uint64_t block_write_start = pos / block_size;
+     uint8_t buffer[block_size];
+@@ -162,20 +180,20 @@ int cdi_storage_write(struct cdi_storage_device* device, uint64_t pos,
+         src += tmp_size;
+         block_write_start++;
+     }
+-    
++
+     // Jetzt wird die Menge der ganzen Blocks auf einmal geschrieben, falls
+     // welche existieren
+     tmp_size = size / block_size;
+     if (tmp_size != 0) {
+         // Buffer abspeichern
+         if (driver->write_blocks(device, block_write_start, tmp_size, src)
+-            != 0) 
++            != 0)
+         {
+             return -1;
+         }
+         size -= tmp_size * block_size;
+         src += tmp_size * block_size;
+-        block_write_start += block_size;        
++        block_write_start += block_size;
+     }
+ 
+     // Wenn der letzte Block nur teilweise beschrieben wird, geschieht das hier
+@@ -206,27 +224,33 @@ static void lostio_mst_if_init()
+ /**
+  * Erstellt den Dateisystemknoten fuer ein Geraet.
+  */
+-int lostio_mst_if_newdev(struct cdi_storage_device* device)
++int lostio_mst_if_newdev(struct partition* part)
+ {
+     static int has_cdrom = 0;
++    struct cdi_storage_device* device = part->dev;
+ 
+-    // Slash vor Pfad angaengen
+-    char path[strlen(device->dev.name) + 2];
+-    strcpy(path + 1, device->dev.name);
+-    *path = '/';
++    // Slash vor Pfad anhaengen
++    char* path;
++    if (part->number == (uint16_t) -1) {
++        asprintf(&path, "/%s", device->dev.name);
++    } else {
++        asprintf(&path, "/%s_p%d", device->dev.name, part->number);
++    }
+ 
+     if (vfstree_create_node(path, CDI_LOSTIO_TYPE_MST, device->block_size *
+-        device->block_count, (void*) device, 0) == FALSE)
++        device->block_count, (void*) part, 0) == FALSE)
+     {
++        free(path);
+         return -1;
+     }
+ 
+     if (!has_cdrom && !strncmp(device->dev.name, "atapi", strlen("atapi"))) {
+         has_cdrom = 1;
+         vfstree_create_node("/cdrom", CDI_LOSTIO_TYPE_MST, device->block_size *
+-            device->block_count, (void*) device, 0);
++            device->block_count, (void*) part, 0);
+     }
+ 
++    free(path);
+     return 0;
+ }
+ 
+@@ -236,13 +260,13 @@ int lostio_mst_if_newdev(struct cdi_storage_device* device)
+ static size_t lostio_mst_read_handler(lostio_filehandle_t* fh,
+     void* buf, size_t blocksize, size_t blockcount)
+ {
+-    struct cdi_storage_device* device = (struct cdi_storage_device*) fh->node->
+-        data;
++    struct partition* part = (struct partition*) fh->node->data;
++    struct cdi_storage_device* device = part->dev;
+     size_t size = blocksize * blockcount;
+ 
+     // Groesse anpassen, wenn ueber das Medium hinaus gelesen werden soll
+-    if (size > (device->block_count * device->block_size - fh->pos)) {
+-        size = device->block_count * device->block_size - fh->pos;
++    if (size > (part->size - fh->pos)) {
++        size = part->size - fh->pos;
+         if (size == 0) {
+             fh->flags |= LOSTIO_FLAG_EOF;
+             return 0;
+@@ -250,8 +274,7 @@ static size_t lostio_mst_read_handler(lostio_filehandle_t* fh,
+     }
+ 
+     // In den uebergebenen Buffer einlesen
+-    if (cdi_storage_read(device, fh->pos, size, buf) != 0) {
+-        printf("read_error");
++    if (cdi_storage_read(device, fh->pos + part->start, size, buf) != 0) {
+         return 0;
+     }
+ 
+@@ -266,18 +289,18 @@ static size_t lostio_mst_read_handler(lostio_filehandle_t* fh,
+ static size_t lostio_mst_write_handler(lostio_filehandle_t* fh,
+     size_t blocksize, size_t blockcount, void* data)
+ {
+-    struct cdi_storage_device* device = (struct cdi_storage_device*) fh->node->
+-        data;
++    struct partition* part = (struct partition*) fh->node->data;
++    struct cdi_storage_device* device = part->dev;
+     size_t size = blocksize * blockcount;
+     size_t result = size;
+ 
+     // Groesse anpassen, wenn ueber das Medium hinaus geschrieben werden soll
+-    if (size > (device->block_count * device->block_size - fh->pos)) {
+-        size = device->block_count * device->block_size - fh->pos;
++    if (size > (part->size - fh->pos)) {
++        size = part->size - fh->pos;
+     }
+ 
+     // Daten schreiben
+-    if (cdi_storage_write(device, fh->pos, size, data) != 0) {
++    if (cdi_storage_write(device, fh->pos + part->start, size, data) != 0) {
+         result = 0;
+     } else {
+         fh->pos += size;
+@@ -292,16 +315,15 @@ static size_t lostio_mst_write_handler(lostio_filehandle_t* fh,
+ static int lostio_mst_seek_handler(lostio_filehandle_t* fh, uint64_t offset,
+     int origin)
+ {
+-    struct cdi_storage_device* device = (struct cdi_storage_device*) fh->node->
+-        data;
++    struct partition* part = (struct partition*) fh->node->data;
+     uint64_t new_pos = fh->pos;
+-    uint64_t size = device->block_size * device->block_count;
++    uint64_t size = part->size;
+ 
+     switch (origin)  {
+         case SEEK_SET:
+             new_pos = offset;
+             break;
+-        
++
+         case SEEK_CUR:
+             new_pos += offset;
+             break;
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Fri Jan 22 21:26:34 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Fri, 22 Jan 2010 21:26:34 +0100
+Subject: [tyndur-devel] [PATCH] kernel: Kooperatives Multitasking repariert
+Message-ID: <1264191994-25077-1-git-send-email-kevin@tyndur.org>
+
+! kernel: Um tyndur mit kooperativem Multitasking zumindest booten zu
+  koennen, muessen Timer funktionieren. Also loesen wir das FIXME besser
+  mal.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel/src/schedule.c |   13 +++++++------
+ 1 files changed, 7 insertions(+), 6 deletions(-)
+
+diff --git a/src/kernel/src/schedule.c b/src/kernel/src/schedule.c
+index 55aa5be..f7a2b84 100644
+--- a/src/kernel/src/schedule.c
++++ b/src/kernel/src/schedule.c
+@@ -71,19 +71,20 @@ void timer_irq(int irq, dword* esp)
+ {
+     timer_ticks += 1000000 / CONFIG_TIMER_HZ;
+ 
+-    // FIXME Kooperatives Multitasking zählt timer_ticks nicht hoch
+-    #ifdef CONFIG_COOPERATIVE_MULTITASKING
+-        release_irq(0);
+-        request_irq(0, do_nothing);
+-    #endif
+-    
+     //Ueberpruefen, ob der aktuelle Task alle seine Zeit verbraucht hat. Wenn
+     // ja, wird ein neuer Task ausgewaehlt
++    #ifndef CONFIG_COOPERATIVE_MULTITASKING
+     if ((current_task == NULL) ||
+         (--(current_task->schedule_ticks_left) >= 0))
+     {
+         schedule(esp);
+     }
++    #else
++    if (current_task == NULL) {
++        schedule(esp);
++    }
++    #endif
++
+ 
+     // Ueberpruefen, ob ein Timer abgelaufen ist.
+     // Dies muss nach dem schedule() kommen, da der Timer mit current_task ==
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sat Jan 23 10:57:59 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 23 Jan 2010 10:57:59 +0100
+Subject: [tyndur-devel] [PATCH] kernel2: Fix fuer Timer
+Message-ID: <1264240679-18710-1-git-send-email-kevin@tyndur.org>
+
+! kernel2: Timer muessen initialisiert werden, damit sie auch
+  tatsaechlich funktionieren
+! kernel2: Rueckgabewert von syscall_fastrpc ist 0/-errno
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/src/init.c  |    4 ++++
+ src/kernel2/src/timer.c |    2 +-
+ 2 files changed, 5 insertions(+), 1 deletions(-)
+
+diff --git a/src/kernel2/src/init.c b/src/kernel2/src/init.c
+index e169fac..6b9b202 100644
+--- a/src/kernel2/src/init.c
++++ b/src/kernel2/src/init.c
+@@ -49,6 +49,7 @@
+ #include "apic.h"
+ #include "lock.h"
+ #include "gdt.h"
++#include "timer.h"
+ 
+ struct multiboot_info multiboot_info;
+ 
+@@ -202,6 +203,9 @@ void init(int multiboot_magic, struct multiboot_info *boot_info, bool bsp)
+         // Shared Memory initialisieren
+         shm_init();
+ 
++        // Timer initialisieren
++        timer_init();
++
+         // Init-Modul laden
+         load_init_module(&multiboot_info);
+ 
+diff --git a/src/kernel2/src/timer.c b/src/kernel2/src/timer.c
+index c9c58eb..64c13e9 100644
+--- a/src/kernel2/src/timer.c
++++ b/src/kernel2/src/timer.c
+@@ -121,7 +121,7 @@ void timer_notify(uint64_t microtime)
+         // Task per RPC informieren, dass der Timer abgelaufen ist.
+         // Im Fehlerfall ueberspringen und es beim naechsten Mal nochmal
+         // versuchen.
+-        if (!syscall_fastrpc(item->task->pid,
++        if (syscall_fastrpc(item->task->pid,
+                 4, (char*) &rpc_timer_function,
+                 4, (char*) &item->timer_id))
+         {
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sun Jan 24 09:29:34 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 24 Jan 2010 09:29:34 +0100
+Subject: [tyndur-devel] [PATCH 0/3] kernel2: RPC-Optimierung
+Message-ID: <1264321777-14808-1-git-send-email-kevin@tyndur.org>
+
+Diese Serie enthÃ¤lt als eigentliche Optimierung Taskwechsel beim RPC
+(netter Testfall fÃ¼r die Reaktionsfreudigkeit: Netzwerkeinstellungen
+in setup Ã¤ndern). Um das ohne Rot Ã¼ber die BÃ¼hne zu bekommen, sind
+noch zwei Fixes nÃ¶tig.
+
+Kevin Wolf (3):
+  kernel2: Temporaeres Mapping fuer RPC gefixt
+  kernel2: rpc_destroy_task_backlinks von kernel1 portiert
+  kernel2: Taskwechsel beim RPC
+
+ src/kernel2/include/tasks.h    |    2 +
+ src/kernel2/src/syscalls/rpc.c |   49 ++++++++++++++++++++-------------------
+ src/kernel2/src/tasks/pm.c     |    2 +
+ 3 files changed, 29 insertions(+), 24 deletions(-)
+
+
+From kevin at tyndur.org  Sun Jan 24 09:29:35 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 24 Jan 2010 09:29:35 +0100
+Subject: [tyndur-devel] [PATCH 1/3] kernel2: Temporaeres Mapping fuer RPC
+	gefixt
+In-Reply-To: <1264321777-14808-1-git-send-email-kevin@tyndur.org>
+References: <1264321777-14808-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1264321777-14808-2-git-send-email-kevin@tyndur.org>
+
+! kernel2: Der aktuelle Speicherkontext muss nicht zwingend der
+  Speicherkontext des aktuellen Prozesses sein
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/src/syscalls/rpc.c |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/src/kernel2/src/syscalls/rpc.c b/src/kernel2/src/syscalls/rpc.c
+index 515ad80..a8ec30b 100644
+--- a/src/kernel2/src/syscalls/rpc.c
++++ b/src/kernel2/src/syscalls/rpc.c
+@@ -245,7 +245,7 @@ static int do_fastrpc(pid_t callee_pid, size_t metadata_size, void* metadata,
+     callee_isf->esp -= rounded_data_size;
+ 
+     void* first_stack_page = mmc_automap_user(
+-        &current_process->context,
++        &mmc_current_context(),
+         &callee->process->context,
+         (vaddr_t) PAGE_ALIGN_ROUND_DOWN(callee_isf->esp),
+         NUM_PAGES(rounded_data_size + ((uintptr_t) callee_isf->esp % PAGE_SIZE)),
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sun Jan 24 09:29:36 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 24 Jan 2010 09:29:36 +0100
+Subject: [tyndur-devel] [PATCH 2/3] kernel2: rpc_destroy_task_backlinks von
+	kernel1 portiert
+In-Reply-To: <1264321777-14808-1-git-send-email-kevin@tyndur.org>
+References: <1264321777-14808-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1264321777-14808-3-git-send-email-kevin@tyndur.org>
+
++ kernel2: Damit beim Rueckkehr von einem RPC sicher auf den
+  Aufrufer-Task zugegriffen werden kann, muss ein beendeter Task aus
+  allen RPC-Backlinks gestrichen werden.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/include/tasks.h    |    2 ++
+ src/kernel2/src/syscalls/rpc.c |   17 ++++++++---------
+ src/kernel2/src/tasks/pm.c     |    2 ++
+ 3 files changed, 12 insertions(+), 9 deletions(-)
+
+diff --git a/src/kernel2/include/tasks.h b/src/kernel2/include/tasks.h
+index 55e6614..1d3b6de 100644
+--- a/src/kernel2/include/tasks.h
++++ b/src/kernel2/include/tasks.h
+@@ -153,6 +153,8 @@ bool pm_unblock_rpc(pm_process_t* task, pid_t blocked_by);
+ void pm_register_on_destroy(pm_process_t* process,
+     pm_process_destroy_handler handler, void* prv);
+ 
++/// Entfernt den gegebenen Task aus allen RPC-Backlinks
++void rpc_destroy_task_backlinks(pm_process_t* destroyed_process);
+ 
+ /**
+  * Threadverwaltung
+diff --git a/src/kernel2/src/syscalls/rpc.c b/src/kernel2/src/syscalls/rpc.c
+index a8ec30b..e6ffd1a 100644
+--- a/src/kernel2/src/syscalls/rpc.c
++++ b/src/kernel2/src/syscalls/rpc.c
+@@ -400,7 +400,6 @@ void syscall_fastrpc_ret(void)
+     free(rpc);
+ }
+ 
+-#if 0
+ /**
+  * Entfernt den gegebenen Task aus allen RPC-Backlinks.
+  *
+@@ -408,22 +407,22 @@ void syscall_fastrpc_ret(void)
+  * wird, bevor der RPC fertig ist. Ansonsten zeigt rpc->caller ins Leere,
+  * was in return_from_rpc() zur Katastrophe fÃ¼hrt.
+  */
+-void rpc_destroy_task_backlinks(struct task* destroyed_task)
++void rpc_destroy_task_backlinks(pm_process_t* destroyed_process)
+ {
+-    struct task* task;
+-    for (task = first_task; task != NULL; task = task->next_task) {
+-        int i;
++    pm_process_t* proc;
++    int i;
++
++    for (i = 0; (proc = list_get_element_at(process_list, i)); i++) {
++        int j;
+         rpc_t* rpc;
+-        for (i = 0; (rpc = list_get_element_at(task->rpcs, i)); i++) {
+-            if (rpc->caller == destroyed_task) {
++        for (j = 0; (rpc = list_get_element_at(proc->rpcs, j)); j++) {
++            if (rpc->caller->process == destroyed_process) {
+                 rpc->caller = NULL;
+             }
+         }
+     }
+ }
+ 
+-#endif
+-
+ void syscall_add_interrupt_handler(uint32_t intr)
+ {
+     im_add_handler(intr, current_process);
+diff --git a/src/kernel2/src/tasks/pm.c b/src/kernel2/src/tasks/pm.c
+index dde8f33..4d70e4f 100644
+--- a/src/kernel2/src/tasks/pm.c
++++ b/src/kernel2/src/tasks/pm.c
+@@ -178,6 +178,8 @@ void pm_destroy(pm_process_t* process)
+     // RPC-Strukturen freigeben
+     // TODO Die einzelnen Listenglieder freigeben
+     list_destroy(process->rpcs);
++    process->rpcs = NULL;
++    rpc_destroy_task_backlinks(process);
+ 
+     // TODO Alle SHMs freigeben
+ 
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sun Jan 24 09:29:37 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 24 Jan 2010 09:29:37 +0100
+Subject: [tyndur-devel] [PATCH 3/3] kernel2: Taskwechsel beim RPC
+In-Reply-To: <1264321777-14808-1-git-send-email-kevin@tyndur.org>
+References: <1264321777-14808-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1264321777-14808-4-git-send-email-kevin@tyndur.org>
+
+* kernel2: Beim erfolgreichen Senden eines RPC wird sofort zum
+  aufgerufenen Task gewechselt
+* kernel2: Bei der Rueckkehr von einem RPC wird zum Aufrufer
+  zurueckgewechselt
+* kernel2: Wenn ein RPC ausgefuehrt werden soll, der aufzurufende Task
+  aber blockiert ist (EAGAIN), wird der naechste Task geschedult
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/src/syscalls/rpc.c |   30 ++++++++++++++++--------------
+ 1 files changed, 16 insertions(+), 14 deletions(-)
+
+diff --git a/src/kernel2/src/syscalls/rpc.c b/src/kernel2/src/syscalls/rpc.c
+index e6ffd1a..7fc887f 100644
+--- a/src/kernel2/src/syscalls/rpc.c
++++ b/src/kernel2/src/syscalls/rpc.c
+@@ -200,7 +200,7 @@ static int do_fastrpc(pid_t callee_pid, size_t metadata_size, void* metadata,
+         ((callee->process->blocked_by_pid) ||
+         !pm_block_rpc(callee->process, syscall_pm_get_pid())))
+     {
+-        return -EAGAIN;
++        goto fail_retry;
+     }
+ 
+     // Interrupt Stack Frame des aufgerufenen Tasks mappen
+@@ -292,17 +292,19 @@ static int do_fastrpc(pid_t callee_pid, size_t metadata_size, void* metadata,
+         pm_unblock_rpc(callee->process, syscall_pm_get_pid());
+     }
+ 
+-
+-#if 0
+-        {
+-            schedule_to_task(callee, (dword*) esp);
+-        } else {
+-            isf->eax = -1;
+-            schedule((dword*)esp);
+-        }
+-#endif
++    // Zum aufgerufenen Task wechseln
++    pm_scheduler_push(current_thread);
++    pm_scheduler_get(callee);
++    current_thread = callee;
+ 
+     return 0;
++
++fail_retry:
++    // Jetzt direkt nochmal probieren ist nicht sinnvoll, lassen wir erstmal
++    // einen anderen Task vor
++    pm_scheduler_push(current_thread);
++    current_thread = pm_scheduler_pop();
++    return -EAGAIN;
+ }
+ 
+ int syscall_fastrpc(pid_t callee_pid, size_t metadata_size, void* metadata,
+@@ -384,12 +386,12 @@ void syscall_fastrpc_ret(void)
+ //        rpc->caller->process->pid,
+ //        current_process->pid);
+ 
+-    // TODO Wechsel zum aufrufenden Task
+-#if 0
++    // Wechsel zum aufrufenden Task
+     if (rpc->caller) {
+-        schedule_to_task(rpc->caller, (dword*) esp);
++        pm_scheduler_push(current_thread);
++        pm_scheduler_get(rpc->caller);
++        current_thread = rpc->caller;
+     }
+-#endif
+ 
+     // Wenn es ein IRQ-verarbeitender RPC war, den Interrupt jetzt
+     // wieder aktivieren
+-- 
+1.6.0.2
+
+
+From toni at tyndur.org  Mon Jan 25 22:50:55 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Mon, 25 Jan 2010 22:50:55 +0100
+Subject: [tyndur-devel] [PATCH 1/3] kernel2: Temporaeres Mapping fuer
+ RPC gefixt
+In-Reply-To: <1264321777-14808-2-git-send-email-kevin@tyndur.org>
+References: <1264321777-14808-1-git-send-email-kevin@tyndur.org>
+	<1264321777-14808-2-git-send-email-kevin@tyndur.org>
+Message-ID: <20100125215055.GA5868@neo.geekcave.lan>
+
+On Sun, Jan 24 09:29, Kevin Wolf wrote:
+> ! kernel2: Der aktuelle Speicherkontext muss nicht zwingend der
+>   Speicherkontext des aktuellen Prozesses sein
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100125/f9ab0372/attachment.pgp>
+
+From toni at tyndur.org  Mon Jan 25 22:56:43 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Mon, 25 Jan 2010 22:56:43 +0100
+Subject: [tyndur-devel] [PATCH 2/3] kernel2: rpc_destroy_task_backlinks
+ von kernel1 portiert
+In-Reply-To: <1264321777-14808-3-git-send-email-kevin@tyndur.org>
+References: <1264321777-14808-1-git-send-email-kevin@tyndur.org>
+	<1264321777-14808-3-git-send-email-kevin@tyndur.org>
+Message-ID: <20100125215643.GB5868@neo.geekcave.lan>
+
+On Sun, Jan 24 09:29, Kevin Wolf wrote:
+> + kernel2: Damit beim Rueckkehr von einem RPC sicher auf den
+>   Aufrufer-Task zugegriffen werden kann, muss ein beendeter Task aus
+>   allen RPC-Backlinks gestrichen werden.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100125/318b9bfb/attachment.pgp>
+
+From kevin at tyndur.org  Mon Jan 25 23:13:28 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Mon, 25 Jan 2010 23:13:28 +0100
+Subject: [tyndur-devel] [PATCH 2.5/3] kernel2: pm_scheduler_get
+In-Reply-To: <1264321777-14808-1-git-send-email-kevin@tyndur.org>
+References: <1264321777-14808-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1264457608-16358-1-git-send-email-kevin@tyndur.org>
+
++ kernel2: Neue Funktion pm_scheduler_get, um einen bestimmten Task aus
+  der Scheduling-Queue zu holen
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/include/tasks.h       |    3 +++
+ src/kernel2/src/tasks/scheduler.c |   19 +++++++++++++++++++
+ 2 files changed, 22 insertions(+), 0 deletions(-)
+
+diff --git a/src/kernel2/include/tasks.h b/src/kernel2/include/tasks.h
+index 37d9714..55e6614 100644
+--- a/src/kernel2/include/tasks.h
++++ b/src/kernel2/include/tasks.h
+@@ -184,6 +184,9 @@ void pm_scheduler_refresh(void);
+ /// Einen Thread zum ausfuehren holen
+ pm_thread_t* pm_scheduler_pop(void);
+ 
++/// Einen bestimmten Thread zum Ausfuehren holen
++void pm_scheduler_get(pm_thread_t* thread);
++
+ /// Einen ausgefuerten Thread wieder zurueck an den Scheduler geben
+ void pm_scheduler_push(pm_thread_t* thread);
+ 
+diff --git a/src/kernel2/src/tasks/scheduler.c b/src/kernel2/src/tasks/scheduler.c
+index 975412a..1b85450 100644
+--- a/src/kernel2/src/tasks/scheduler.c
++++ b/src/kernel2/src/tasks/scheduler.c
+@@ -38,6 +38,7 @@
+ #include <stdlib.h>
+ #include <collections.h>
+ 
++#include "kernel.h"
+ #include "tasks.h"
+ #include "lock.h"
+ 
+@@ -180,6 +181,24 @@ pm_thread_t* pm_scheduler_pop()
+ }
+ 
+ /**
++ * Holt einen bestimmten Thread zum Ausfuehren
++ */
++void pm_scheduler_get(pm_thread_t* thread)
++{
++    int i;
++    pm_thread_t* p;
++
++    // Falls der Thread in der Liste der zu schedulenden Tasks ist, muessen wir
++    // ihn rausloeschen. Ansonsten brauchen wir nichts zu machen.
++    for (i = 0; (p = list_get_element_at(threads_scheduled, i)); i++) {
++        if (p == thread) {
++            list_remove(threads_scheduled, i);
++            return;
++        }
++    }
++}
++
++/**
+  * Einen ausgefuerten Thread wieder zurueck an den Scheduler geben
+  *
+  * @param thread Pointer auf eine Thread-Struktur
+-- 
+1.6.0.2
+
+
+From toni at tyndur.org  Mon Jan 25 23:15:56 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Mon, 25 Jan 2010 23:15:56 +0100
+Subject: [tyndur-devel] [PATCH 2.5/3] kernel2: pm_scheduler_get
+In-Reply-To: <1264457608-16358-1-git-send-email-kevin@tyndur.org>
+References: <1264321777-14808-1-git-send-email-kevin@tyndur.org>
+	<1264457608-16358-1-git-send-email-kevin@tyndur.org>
+Message-ID: <20100125221556.GC5868@neo.geekcave.lan>
+
+On Mon, Jan 25 23:13, Kevin Wolf wrote:
+> + kernel2: Neue Funktion pm_scheduler_get, um einen bestimmten Task aus
+>   der Scheduling-Queue zu holen
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100125/fe76ad0c/attachment.pgp>
+
+From toni at tyndur.org  Mon Jan 25 23:17:08 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Mon, 25 Jan 2010 23:17:08 +0100
+Subject: [tyndur-devel] [PATCH 3/3] kernel2: Taskwechsel beim RPC
+In-Reply-To: <1264321777-14808-4-git-send-email-kevin@tyndur.org>
+References: <1264321777-14808-1-git-send-email-kevin@tyndur.org>
+	<1264321777-14808-4-git-send-email-kevin@tyndur.org>
+Message-ID: <20100125221708.GD5868@neo.geekcave.lan>
+
+On Sun, Jan 24 09:29, Kevin Wolf wrote:
+> * kernel2: Beim erfolgreichen Senden eines RPC wird sofort zum
+>   aufgerufenen Task gewechselt
+> * kernel2: Bei der Rueckkehr von einem RPC wird zum Aufrufer
+>   zurueckgewechselt
+> * kernel2: Wenn ein RPC ausgefuehrt werden soll, der aufzurufende Task
+>   aber blockiert ist (EAGAIN), wird der naechste Task geschedult
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Sieht gefährlich aus, aber wenns tut... ;-)
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100125/83220b65/attachment.pgp>
+
+From toni at tyndur.org  Tue Jan 26 21:46:06 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Tue, 26 Jan 2010 21:46:06 +0100
+Subject: [tyndur-devel] [PATCH] kernel2: Fix fuer Timer
+In-Reply-To: <1264240679-18710-1-git-send-email-kevin@tyndur.org>
+References: <1264240679-18710-1-git-send-email-kevin@tyndur.org>
+Message-ID: <20100126204605.GE5868@neo.geekcave.lan>
+
+On Sat, Jan 23 10:57, Kevin Wolf wrote:
+> ! kernel2: Timer muessen initialisiert werden, damit sie auch
+>   tatsaechlich funktionieren
+> ! kernel2: Rueckgabewert von syscall_fastrpc ist 0/-errno
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100126/214652f6/attachment.pgp>
+
+From toni at tyndur.org  Tue Jan 26 21:56:34 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Tue, 26 Jan 2010 21:56:34 +0100
+Subject: [tyndur-devel] [PATCH] kernel: Kooperatives Multitasking
+ repariert
+In-Reply-To: <1264191994-25077-1-git-send-email-kevin@tyndur.org>
+References: <1264191994-25077-1-git-send-email-kevin@tyndur.org>
+Message-ID: <20100126205634.GF5868@neo.geekcave.lan>
+
+On Fri, Jan 22 21:26, Kevin Wolf wrote:
+> ! kernel: Um tyndur mit kooperativem Multitasking zumindest booten zu
+>   koennen, muessen Timer funktionieren. Also loesen wir das FIXME besser
+>   mal.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100126/c864756e/attachment.pgp>
+
+From toni at tyndur.org  Sat Jan 30 14:51:45 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Sat, 30 Jan 2010 14:51:45 +0100
+Subject: [tyndur-devel] [PATCH] kernel2: Stack fuers Aufrufen der
+	Syscallhandler richtig sichern
+Message-ID: <1264859505-8156-1-git-send-email-toni@tyndur.org>
+
+! kernel2: Stack fuers Aufrufen der Syscallhandler richtig sichern. Der
+           aktuelle Code kann so nicht funktionieren. Das Register ecx,
+           das die Differenz zum original-esp sichert, ist erstens nicht
+           callee-save und zweitens eh 0 nach dem rep. Wir speichern
+           also besser den original esp in einem Vernuenftigen Register.
+
+Signed-off-by: Antoine Kaufmann <toni at tyndur.org>
+---
+ src/kernel2/src/arch/i386/syscall.c |    6 +++---
+ 1 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/src/kernel2/src/arch/i386/syscall.c b/src/kernel2/src/arch/i386/syscall.c
+index 7d5724e..04c3f4c 100644
+--- a/src/kernel2/src/arch/i386/syscall.c
++++ b/src/kernel2/src/arch/i386/syscall.c
+@@ -99,16 +99,16 @@ void syscall_arch(machine_state_t* isf)
+         uint32_t eax, edx;
+ 
+         asm volatile(
++            "mov %%esp, %%ebx;"
+             "sub %%ecx, %%esp;"
+             "shr $0x2, %%ecx;"
+             "mov %%esp, %%edi;"
+             "rep movsd;"
+             "call *%4;"
+-            "shl $0x2, %%ecx;"
+-            "add %%ecx, %%esp;"
++            "mov %%ebx, %%esp;"
+             : "=a" (eax), "=d" (edx), "=S" (stack)
+             : "S" (stack), "r" (handler), "c" (syscalls[number].arg_count * 4)
+-            : "edi");
++            : "edi", "ebx");
+ 
+         isf->eax = eax;
+         if (handler == syscall_get_tick_count) {
+-- 
+1.6.3.3
+
+
+From kevin at tyndur.org  Sat Jan 30 17:54:28 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 30 Jan 2010 17:54:28 +0100
+Subject: [tyndur-devel] [PATCH] kernel2: Stack fuers Aufrufen der
+ Syscallhandler richtig sichern
+In-Reply-To: <1264859505-8156-1-git-send-email-toni@tyndur.org>
+References: <1264859505-8156-1-git-send-email-toni@tyndur.org>
+Message-ID: <20100130135924.GA12527@silvanus>
+
+On Sat, Jan 30, 2010 at 02:51:45PM +0100, Antoine Kaufmann wrote:
+> ! kernel2: Stack fuers Aufrufen der Syscallhandler richtig sichern. Der
+>            aktuelle Code kann so nicht funktionieren. Das Register ecx,
+>            das die Differenz zum original-esp sichert, ist erstens nicht
+>            callee-save und zweitens eh 0 nach dem rep. Wir speichern
+>            also besser den original esp in einem Vernuenftigen Register.
+> 
+> Signed-off-by: Antoine Kaufmann <toni at tyndur.org>
+
+Könnte so wohl funktionieren. Schieb rein.
+
+From kevin at tyndur.org  Sun Jan 31 01:20:17 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 31 Jan 2010 01:20:17 +0100
+Subject: [tyndur-devel] [PATCH] kernel2: Fix fuer Unmapping beim RPC
+Message-ID: <1264897217-27083-1-git-send-email-kevin@tyndur.org>
+
+! kernel2: Der aktuelle Speicherkontext muss auch beim Unmappen immer
+  noch nicht zwingend der Kontext des aktuellen Prozesses sein
++ kernel2: Panic wenn versucht wird, das Mapping einer Kernelpage in
+  einem inaktiven Kontext zu aendern
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/src/arch/i386/mm/mm_context.c |   12 +++++++++++-
+ src/kernel2/src/syscalls/rpc.c            |    2 +-
+ 2 files changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/src/kernel2/src/arch/i386/mm/mm_context.c b/src/kernel2/src/arch/i386/mm/mm_context.c
+index 20edcfa..07a5be8 100644
+--- a/src/kernel2/src/arch/i386/mm/mm_context.c
++++ b/src/kernel2/src/arch/i386/mm/mm_context.c
+@@ -271,7 +271,17 @@ static bool map_page
+         panic("Adressen sind nicht 4K-aligned (virt = %x, phys = %x)", 
+             vaddr, paddr);
+     }
+-    
++
++    // Kernelpages duerfen immer nur im gerade aktiven Kontext gemappt werden.
++    // Ales andere ergibt keinen Sinn, weil diese Bereiche ohnehin zwischen
++    // allen Kontexten synchron gehalten werden muessen.
++    if ((context != &mmc_current_context()) &&
++        ((uintptr_t) vaddr >= KERNEL_MEM_START) &&
++        ((uintptr_t) vaddr <  KERNEL_MEM_END))
++    {
++        panic("Versuch, Kernelpages in inaktivem Kontext zu mappen");
++    }
++
+     // Falls es sich im den aktuellen Kontext handelt, muss das Page directory
+     // nicht gemappt werden, sonst schon.
+ 
+diff --git a/src/kernel2/src/syscalls/rpc.c b/src/kernel2/src/syscalls/rpc.c
+index 53f5396..70e0920 100644
+--- a/src/kernel2/src/syscalls/rpc.c
++++ b/src/kernel2/src/syscalls/rpc.c
+@@ -282,7 +282,7 @@ static int do_fastrpc(pid_t callee_pid, size_t metadata_size, void* metadata,
+     callee_isf->eip = (uintptr_t) callee->process->rpc_handler;
+ 
+     // Temporaere Mappings wieder aufheben
+-    mmc_unmap(&current_process->context, first_stack_page,
++    mmc_unmap(&mmc_current_context(), first_stack_page,
+         NUM_PAGES(rounded_data_size));
+ 
+     vmm_kernel_unmap(callee_isf, sizeof(*callee_isf));
+-- 
+1.6.0.2
+
+
+From toni at tyndur.org  Sun Jan 31 11:22:25 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Sun, 31 Jan 2010 11:22:25 +0100
+Subject: [tyndur-devel] [PATCH] kernel2: Fix fuer Unmapping beim RPC
+In-Reply-To: <1264897217-27083-1-git-send-email-kevin@tyndur.org>
+References: <1264897217-27083-1-git-send-email-kevin@tyndur.org>
+Message-ID: <20100131102225.GA4770@neo.geekcave.lan>
+
+On Sun, Jan 31 01:20, Kevin Wolf wrote:
+> ! kernel2: Der aktuelle Speicherkontext muss auch beim Unmappen immer
+>   noch nicht zwingend der Kontext des aktuellen Prozesses sein
+> + kernel2: Panic wenn versucht wird, das Mapping einer Kernelpage in
+>   einem inaktiven Kontext zu aendern
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+> ---
+>  src/kernel2/src/arch/i386/mm/mm_context.c |   12 +++++++++++-
+>  src/kernel2/src/syscalls/rpc.c            |    2 +-
+>  2 files changed, 12 insertions(+), 2 deletions(-)
+> 
+> diff --git a/src/kernel2/src/arch/i386/mm/mm_context.c b/src/kernel2/src/arch/i386/mm/mm_context.c
+> index 20edcfa..07a5be8 100644
+> --- a/src/kernel2/src/arch/i386/mm/mm_context.c
+> +++ b/src/kernel2/src/arch/i386/mm/mm_context.c
+> @@ -271,7 +271,17 @@ static bool map_page
+>          panic("Adressen sind nicht 4K-aligned (virt = %x, phys = %x)", 
+>              vaddr, paddr);
+>      }
+> -    
+> +
+> +    // Kernelpages duerfen immer nur im gerade aktiven Kontext gemappt werden.
+> +    // Ales andere ergibt keinen Sinn, weil diese Bereiche ohnehin zwischen
+> +    // allen Kontexten synchron gehalten werden muessen.
+> +    if ((context != &mmc_current_context()) &&
+> +        ((uintptr_t) vaddr >= KERNEL_MEM_START) &&
+> +        ((uintptr_t) vaddr <  KERNEL_MEM_END))
+> +    {
+> +        panic("Versuch, Kernelpages in inaktivem Kontext zu mappen");
+> +    }
+> +
+>      // Falls es sich im den aktuellen Kontext handelt, muss das Page directory
+>      // nicht gemappt werden, sonst schon.
+>  
+> diff --git a/src/kernel2/src/syscalls/rpc.c b/src/kernel2/src/syscalls/rpc.c
+> index 53f5396..70e0920 100644
+> --- a/src/kernel2/src/syscalls/rpc.c
+> +++ b/src/kernel2/src/syscalls/rpc.c
+> @@ -282,7 +282,7 @@ static int do_fastrpc(pid_t callee_pid, size_t metadata_size, void* metadata,
+>      callee_isf->eip = (uintptr_t) callee->process->rpc_handler;
+>  
+>      // Temporaere Mappings wieder aufheben
+> -    mmc_unmap(&current_process->context, first_stack_page,
+> +    mmc_unmap(&mmc_current_context(), first_stack_page,
+>          NUM_PAGES(rounded_data_size));
+>  
+>      vmm_kernel_unmap(callee_isf, sizeof(*callee_isf));
+
+Wenn du mit der Panic-Meldung so zufrieden bist, dann rein damit. ;-)
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100131/c5c9b782/attachment.pgp>
+
+From kevin at tyndur.org  Sun Jan 31 20:51:26 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 31 Jan 2010 20:51:26 +0100
+Subject: [tyndur-devel] [PATCH] kernel2: Timer duerfen eax nicht kaputtmachen
+Message-ID: <1264967486-7761-1-git-send-email-kevin@tyndur.org>
+
+! kernel2: Timer fuehren einen RPC zum Prozess mit dem abgelaufenen
+  Timer aus und haben sich wie ein Syscall verhalten - das geht so weit,
+  dass sie in eax 0 als Rueckgabewert abgelegt haben. Das ist natuerlich
+  eher ungeschickt, wenn der Prozess eigentlich gar nicht selber nach
+  einem RPC gefragt hat, sondern sein eax noch braucht...
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/src/syscalls/rpc.c |   17 +++++++++--------
+ src/kernel2/src/timer.c        |    6 ++++--
+ 2 files changed, 13 insertions(+), 10 deletions(-)
+
+diff --git a/src/kernel2/src/syscalls/rpc.c b/src/kernel2/src/syscalls/rpc.c
+index c9328e7..0157f51 100644
+--- a/src/kernel2/src/syscalls/rpc.c
++++ b/src/kernel2/src/syscalls/rpc.c
+@@ -124,14 +124,14 @@ static void adjust_stack_size(pm_thread_t* callee,
+  * @param metadata      Pointer auf die Metadaten
+  * @param data_size     LÃ¤nger der Daten in Bytes
+  * @param data          Pointer auf die Daten
+- * @param irq           TRUE wenn es sich um einen IRQ handelt, FALSE sonst
++ * @param syscall       TRUE wenn es sich um einen Syscall handelt, FALSE sonst
+  *
+  * @return TRUE, wenn der Aufruf erfolgreich durchgefÃ¼hrt wurde, FALSE
+  * sonst. Bei FALSE als RÃ¼ckgabe sollte der aufrufende Task den RPC-Syscall
+  * wiederholen.
+  */
+-static int do_fastrpc(pid_t callee_pid, size_t metadata_size, void* metadata,
+-    size_t data_size, void* data, bool irq)
++int do_fastrpc(pid_t callee_pid, size_t metadata_size, void* metadata,
++    size_t data_size, void* data, bool syscall)
+ {
+     pm_process_t* process = pm_get(callee_pid);
+     pm_thread_t* callee;
+@@ -220,9 +220,10 @@ static int do_fastrpc(pid_t callee_pid, size_t metadata_size, void* metadata,
+     rpc->eflags  = callee_isf->eflags;
+     rpc->caller  = current_thread;
+ 
+-    if ((callee == current_thread) && !irq) {
+-        // Bei einem Self-RPC, der kein IRQ war, muss hinterher der
+-        // Rueckgabewert des RPC-Syscalls in eax stehen. Ein IRQ erscheint auch
++    if ((callee == current_thread) && syscall) {
++        // Bei einem Self-RPC, der ein Syscall war (kein kernelinterner Aufruf
++        // wie z.B. fuer  IRQ oder Timer), muss hinterher der Rueckgabewert
++        // des RPC-Syscalls in eax stehen. Ein IRQ erscheint auch
+         // als Self-RPC, darf aber eax nicht kaputt machen, da dort kein
+         // Rueckgabewert erwartet wird, sondern der vorherige Wert.
+         rpc->eax = 0;
+@@ -311,7 +312,7 @@ int syscall_fastrpc(pid_t callee_pid, size_t metadata_size, void* metadata,
+     size_t data_size, void* data)
+ {
+     return do_fastrpc(callee_pid, metadata_size, metadata, data_size, data,
+-        FALSE);
++        TRUE);
+ }
+ 
+ /**
+@@ -332,7 +333,7 @@ bool fastrpc_irq(pm_process_t* callee, size_t metadata_size, void* metadata,
+     }
+ 
+     ret = do_fastrpc(
+-        callee->pid, metadata_size, metadata, data_size, data, TRUE);
++        callee->pid, metadata_size, metadata, data_size, data, FALSE);
+ 
+     if (ret < 0) {
+         return FALSE;
+diff --git a/src/kernel2/src/timer.c b/src/kernel2/src/timer.c
+index 64c13e9..9aea68d 100644
+--- a/src/kernel2/src/timer.c
++++ b/src/kernel2/src/timer.c
+@@ -40,6 +40,8 @@
+ #include "syscall.h"
+ 
+ extern uint64_t timer_ticks;
++extern int do_fastrpc(pid_t callee_pid, size_t metadata_size, void* metadata,
++    size_t data_size, void* data, bool syscall);
+ 
+ /**
+  * Liste aller registrierten Timer
+@@ -121,9 +123,9 @@ void timer_notify(uint64_t microtime)
+         // Task per RPC informieren, dass der Timer abgelaufen ist.
+         // Im Fehlerfall ueberspringen und es beim naechsten Mal nochmal
+         // versuchen.
+-        if (syscall_fastrpc(item->task->pid,
++        if (do_fastrpc(item->task->pid,
+                 4, (char*) &rpc_timer_function,
+-                4, (char*) &item->timer_id))
++                4, (char*) &item->timer_id, FALSE))
+         {
+             i++;
+             continue;
+-- 
+1.6.0.2
+
+

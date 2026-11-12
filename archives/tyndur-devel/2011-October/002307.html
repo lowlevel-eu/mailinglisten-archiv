@@ -1,0 +1,150 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] kernel2: Kommandozeilenoption &quot;smp&quot;
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20kernel2%3A%20Kommandozeilenoption%20%22smp%22&In-Reply-To=%3C1319834908-21601-1-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002306.html">
+   <LINK REL="Next"  HREF="002308.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] kernel2: Kommandozeilenoption &quot;smp&quot;</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20kernel2%3A%20Kommandozeilenoption%20%22smp%22&In-Reply-To=%3C1319834908-21601-1-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH] kernel2: Kommandozeilenoption &quot;smp&quot;">kevin at tyndur.org
+                  </A><BR>
+    <I>Fr Okt 28 22:48:28 CEST 2011</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002306.html">[tyndur-devel] [PATCH 1/2] libc: Binäresuche für bsearch
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002308.html">[tyndur-devel] [PATCH] kernel2: Kommandozeilenoption &quot;smp&quot;
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2307">[ Datum ]</a>
+              <a href="thread.html#2307">[ Thema ]</a>
+              <a href="subject.html#2307">[ Betreff (Subject) ]</a>
+              <a href="author.html#2307">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* kernel2: SMP wird nur initialisiert, wenn die Kernelkommandozeile
+  die Option &quot;smp&quot; enthält. Standardmäßig bootet das System damit auch
+  auf einem Mehrprozessorsystem wieder, wenn auch mit nur einem aktiven
+  Prozessor.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/kernel2/src/init.c    |   32 +++++++++++++++++++++++++++++++-
+ src/kernel2/src/smp/smp.c |    6 +++++-
+ 2 files changed, 36 insertions(+), 2 deletions(-)
+
+diff --git a/src/kernel2/src/init.c b/src/kernel2/src/init.c
+index 1e9c1b3..359af08 100644
+--- a/src/kernel2/src/init.c
++++ b/src/kernel2/src/init.c
+@@ -68,6 +68,36 @@ void gdt_init(void);
+ void vm86_init(void);
+ void panic(char* message, ...);
+ 
++/**
++ * Liest die Kernelkommandozeile ein
++ *
++ * Als erster Teilstring wird einfach irgendwas akzeptiert, weil davon
++ * auszugehen ist, dass das der Kernelname ist. GRUB 2 übergibt den
++ * Kernelnamen allerdings nicht, deswegen werden auch an erster Position
++ * Parameter ausgewertet, wenn sie bekannt sind.
++ */
++static void parse_cmdline(char* cmdline)
++{
++    char* p;
++    extern bool enable_smp;
++    bool kernel_name = true;
++
++    p = strtok(cmdline, &quot; &quot;);
++
++    while (p) {
++        if (!strncmp(p, &quot;debug=&quot;, 6)) {
++            debug_parse_cmdline(multiboot_info.mi_cmdline);
++        } else if (!strcmp(p, &quot;smp&quot;)) {
++            enable_smp = true;
++        } else if (kernel_name) {
++            kernel_name = false;
++        } else {
++            kprintf(&quot;Unbekannte Option: '%s'\n&quot;, p);
++        }
++
++        p = strtok(NULL, &quot; &quot;);
++    }
++}
+ 
+ /**
+  * Kernel-Initialisierung erfolgt hier,
+@@ -98,7 +128,7 @@ void init(int multiboot_magic, struct multiboot_info *boot_info, bool bsp)
+         // Debugparameter verarbeiten, das ist aber nur moeglich, wenn eine
+         // Kernelkommandozeile existiert.
+         if ((multiboot_info.mi_flags &amp; MULTIBOOT_INFO_HAS_CMDLINE) != 0) {
+-            debug_parse_cmdline(multiboot_info.mi_cmdline);
++            parse_cmdline(multiboot_info.mi_cmdline);
+         }
+ 
+ #if CONFIG_ARCH == ARCH_I386
+diff --git a/src/kernel2/src/smp/smp.c b/src/kernel2/src/smp/smp.c
+index 0954960..732282b 100644
+--- a/src/kernel2/src/smp/smp.c
++++ b/src/kernel2/src/smp/smp.c
+@@ -35,6 +35,7 @@
+ #include &lt;types.h&gt;
+ #include &lt;string.h&gt;
+ #include &lt;stdint.h&gt;
++#include &lt;stdbool.h&gt;
+ #include &lt;lost/config.h&gt;
+ 
+ #include &quot;lock.h&quot;
+@@ -100,6 +101,9 @@ extern lock_t init_lock;
+ /// Anzahl der Installierten CPUs
+ extern size_t cpu_count;
+ 
++/// Weitere Prozessoren werden nur mit enable_smp = true initialisiert
++bool enable_smp = false;
++
+ /**
+  * Suchen des MP-Floating pointers in einem festgelegten Bereich. Diese
+  * Struktur wird anhand der Signatur gesucht. Wenn die Signatur uebereinstimmt,
+@@ -203,7 +207,7 @@ void smp_init(void)
+     // Wenn der Floating-Pointer nicht gefunden wurde, wird abgebrochen, denn
+     // dann wurde er entweder ueberschrieben, oder oder aber kein SMP wird
+     // unterstuetzt.
+-    if ((floating_pointer == NULL) || (!CONFIG_SMP)) {
++    if ((floating_pointer == NULL) || (!CONFIG_SMP) || !enable_smp) {
+         // Wenn kein SMP aktiviert ist, muss der Bootstrapprozessor manuell in
+         // die CPU-Liste eingetragen werden, damit im Rest des Codes nicht
+         // unterschieden werden muss.
+-- 
+1.6.0.2
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002306.html">[tyndur-devel] [PATCH 1/2] libc: Binäresuche für bsearch
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002308.html">[tyndur-devel] [PATCH] kernel2: Kommandozeilenoption &quot;smp&quot;
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2307">[ Datum ]</a>
+              <a href="thread.html#2307">[ Thema ]</a>
+              <a href="subject.html#2307">[ Betreff (Subject)]</a>
+              <a href="author.html#2307">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

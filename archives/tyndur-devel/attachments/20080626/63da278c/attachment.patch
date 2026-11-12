@@ -1,0 +1,697 @@
+Index: trunk/buildmk.sh
+===================================================================
+--- trunk.orig/buildmk.sh
++++ trunk/buildmk.sh
+@@ -37,7 +37,8 @@ shopt -s extglob
+ 
+ INCLUDES=`echo $1 | sed -e 's#-I \?\([^ ]\+\)#-I ../\1#g'`
+ NASMINCLUDES=`echo $1 | sed -e 's#-I \?\([^ ]\+\)#-I ../\1/#g'`
+-LIBDIRS=`echo $2 | sed -e 's#lib/#../lib/#g'`
++LIBDIRS="$2"
++
+ 
+ if [ -z $LOST_BUILDMK_ROOT ]; then
+   export LOST_BUILDMK_ROOT="`pwd`"
+@@ -59,20 +60,21 @@ FPCINCLUDES=`echo $INCLUDES | sed -e 's#
+ 
+ if [ -d lib ]; then
+     if [ -f lib/prt0.asm ]; then
+-        LIBDIRS="lib/prt0.o $LIBDIRS"
++        LIBDIRS="`pwd`/lib/prt0.o $LIBDIRS"
+     fi
+-    LIBDIRS="lib/library.a $LIBDIRS"
++    LIBDIRS="`pwd`/lib/library.a $LIBDIRS"
+ fi
+ 
+ CC_FLAGS=
++CC_FLAGS_APPEND=
+ if [ -f Makefile.conf ]; then
+     source Makefile.conf
+ fi
+ 
+ cat <<EOF > Makefile
+-CC=$LOST_TOOLS_GCC $CC_FLAGS $INCLUDES
++CC=$LOST_TOOLS_GCC $CC_FLAGS $INCLUDES $CC_FLAGS_APPEND
+ CPP=$LOST_TOOLS_GPP $INCLUDES
+-PPC=fpc -n -Cn -CX -Tlost $FPCINCLUDES -Fu../lib/units -Fu../units
++PPC=$LOST_TOOLS_PPC -n -Cn -CX -Tlost $FPCINCLUDES -Fu../lib/units -Fu../units
+ 
+ ASM_ELF=nasm -felf -O99 $NASMINCLUDES
+ ASM_BIN=nasm -fbin -O99
+@@ -215,7 +217,7 @@ clean:
+ 	rm -f *.o *.a *.mod
+ 	for file in *; do if [ -f "\$\$file/Makefile" -a ! -f "\$\$file/.nobuild" ]; then make -sC "\$\$file" clean; rm "\$\$file/Makefile"; fi done  
+ 
+-.SILENT: all makefiles subdirs obj clean image
++.SILENT: all makefiles subdirs obj clean clean_root updateroot image-floppy image-hd test-qemu test-qemu-hd
+ EOF
+ 
+ if [ "$LOST_BUILDMK_ROOT" == "`pwd`" ]; then
+@@ -223,59 +225,27 @@ cat <<EOF >> Makefile
+ clean: clean_root
+ 
+ clean_root:
+-	@rm -f build/lost.img
+-	@rm -f build/output/apps/* build/output/modules/* build/output/kernel/* build/output/gz/*/*
++	rm -rf build/images/* build/root/*
++	rm -f build/output/apps/* build/output/modules/* build/output/kernel/* build/output/gz/*/*
++	rm -f qemu.log
+ 
+-internal_image:
+-	if ! [ -f build/lost.img ]; then \
+-        PATH=\$\$PATH:/sbin:/usr/sbin:/usr/local/sbin ;\
+-		dd if=/dev/zero of=build/lost.img bs=1024 count=1440 ;\
+-		mkfs.msdos build/lost.img ;\
+-		mmd -i build/lost.img ::/boot ;\
+-		mmd -i build/lost.img ::/boot/grub ;\
+-		mmd -i build/lost.img ::/modules ;\
+-		mmd -i build/lost.img ::/apps ;\
+-		mcopy -i build/lost.img /boot/grub/stage? ::/boot/grub ;\
+-		mcopy -i build/lost.img build/default.cfg ::/boot/grub/menu.lst ;\
+-		echo device '(fd0)' build/lost.img > build/grub.txt ;\
+-		echo root '(fd0)' >> build/grub.txt ;\
+-		echo setup '(fd0)' >> build/grub.txt ;\
+-		grub --batch < build/grub.txt ;\
+-		rm build/grub.txt ;\
+-	fi
+-	
+-	for i in build/output/kernel/*; do \
+-		gzip -c \$\$i > build/output/gz/kernel/\`basename \$\$i\` ;\
+-	done
+-	
+-	for i in build/output/modules/*; do \
+-		gzip -c \$\$i > build/output/gz/modules/\`basename \$\$i\` ;\
+-	done
+-
+-	for i in build/output/apps/*; do \
+-		gzip -c \$\$i > build/output/gz/apps/\`basename \$\$i\` ;\
+-	done
+-	
+-	
+-	mcopy -D o -i build/lost.img build/default.cfg ::/boot/grub/menu.lst
+-	
+-	mcopy -D o -i build/lost.img build/output/gz/kernel/* ::/boot/
+-	mcopy -D o -i build/lost.img build/output/gz/modules/* ::/modules/
+-	mcopy -D o -i build/lost.img build/output/gz/apps/* ::/apps/
+-	mcopy -D o -i build/lost.img build/root/* ::/
+-
+-image:
+-	make --no-print-directory -s all
+-	make --no-print-directory -s internal_image 
++updateroot: subdirs
++	build/scripts/updateroot
+ 
+-simage:
+-	make --no-print-directory -s subdirs
+-	make --no-print-directory -s internal_image 
++image-floppy: updateroot
++	build/scripts/image_floppy
++
++image-hd: updateroot
++	build/scripts/image_hd
+ 	
+-test-qemu: image
+-	qemu -serial stdio -fda build/lost.img -boot a
++test-qemu: image-floppy
++	qemu -serial stdio -fda build/images/floppy.img -boot a -net user -net nic,model=rtl8139 | tee qemu-serial.log
++
++test-qemu-hd: image-hd
++	rm -f qemu.log
++	qemu -serial stdio -hda build/images/hd.img -net user -net nic,model=rtl8139 | tee qemu.log
+ 
+-test-bochs: image
++test-bochs: image-floppy
+ 	bochs -f bochs.config
+ 
+ menuconfig:
+Index: trunk/config.sh
+===================================================================
+--- trunk.orig/config.sh
++++ trunk/config.sh
+@@ -1,6 +1,12 @@
+ # Ab hier anpassen
+ COMPILER_PREFIX_AMD64=
+ COMPILER_PREFIX_I386=
++LOST_TOOLS_PPC=fpc
++LOST_GRUB_STAGESDIR=/boot/grub
++LOST_TOOLS_GRUB=/sbin/grub
++LOST_TOOLS_MKE2FS=/sbin/mke2fs
++
++[ -f  $LOST_BUILDMK_ROOT/myconf.sh ] && source  $LOST_BUILDMK_ROOT/myconf.sh
+ 
+ # Ab hier nicht mehr anpassen
+ CONFIG_ARCH=`grep CONFIG_ARCH $LOST_BUILDMK_ROOT/src/include/config.h | awk '{ print $3 }'`
+Index: trunk/build/config/grub_floppy.cfg
+===================================================================
+--- /dev/null
++++ trunk/build/config/grub_floppy.cfg
+@@ -0,0 +1,9 @@
++title LOST
++kernel /boot/lost debug=s
++module /modules/init boot=file:/
++module /modules/cmos
++module /modules/floppy
++module /modules/dma
++module /modules/fat
++module /modules/servmgr floppy:/devices/fd0|fat:/ cmos floppy fat dma
++boot
+Index: trunk/build/config/grub_hd.cfg
+===================================================================
+--- /dev/null
++++ trunk/build/config/grub_hd.cfg
+@@ -0,0 +1,7 @@
++title LOST
++kernel /boot/lost debug=s
++module /modules/init boot=file:/
++module /modules/ata
++module /modules/next2
++module /modules/servmgr ata:/ata00_p0|next2:/ ata next2
++boot
+Index: trunk/build/config/image_floppy.sh
+===================================================================
+--- /dev/null
++++ trunk/build/config/image_floppy.sh
+@@ -0,0 +1 @@
++IMAGE_PATH="build/images/floppy.img"
+Index: trunk/build/config/image_hd.sh
+===================================================================
+--- /dev/null
++++ trunk/build/config/image_hd.sh
+@@ -0,0 +1,3 @@
++IMAGE_PATH="build/images/hd.img"
++# Imagegroesse in Megabytes
++IMAGE_SIZE=10
+Index: trunk/build/default.cfg
+===================================================================
+--- trunk.orig/build/default.cfg
++++ /dev/null
+@@ -1,19 +0,0 @@
+-title LOST
+-kernel /boot/lost debug=s
+-module /modules/init
+-module /modules/vterm
+-module /modules/console vterm:/vterm0/out vterm:/vterm0/in
+-module /modules/tcpip ns=192.168.1.1
+-module /modules/dma
+-module /modules/floppy
+-module /modules/fat
+-module /modules/file
+-module /modules/kbc
+-module /modules/cmos
+-module /modules/pci
+-module /modules/ata
+-module /modules/next2
+-module /modules/file mount file:/ ata:/ata00|next2:/
+-module /modules/rtl8139
+-module /apps/sh
+-boot
+Index: trunk/build/makeimage.sh
+===================================================================
+--- trunk.orig/build/makeimage.sh
++++ /dev/null
+@@ -1,28 +0,0 @@
+-dd if=/dev/zero of=$1 bs=1024 count=1440
+-mkfs.msdos $1
+-mkdir -p mnt
+-mount -oloop $1 mnt
+-
+-mkdir mnt/grub
+-cp /boot/grub/stage? mnt/grub
+-
+-echo timeout 2 >> mnt/grub/menu.lst
+-echo title LOST >> mnt/grub/menu.lst
+-echo kernel /lost.krn >> mnt/grub/menu.lst
+-echo module /init.mod >> mnt/grub/menu.lst
+-for i in *.mod; do 
+-    [ "$i" != "init.mod" ] && echo module /"$i" >> mnt/grub/menu.lst
+-done
+-
+-echo boot >> mnt/grub/menu.lst
+-
+-cp *.krn mnt
+-cp *.mod mnt
+-umount mnt
+-rmdir mnt
+-
+-echo device '(fd0)' lost.img > grub.txt
+-echo root '(fd0)' >> grub.txt
+-echo setup '(fd0)' >> grub.txt
+-grub --batch < grub.txt
+-rm grub.txt
+Index: trunk/build/scripts/create_partition
+===================================================================
+--- /dev/null
++++ trunk/build/scripts/create_partition
+@@ -0,0 +1,111 @@
++#!/usr/bin/python
++
++# Copyright (c) 2008 The LOST Project. All rights reserved.
++#
++# This code is derived from software contributed to the LOST Project
++# by Antoine Kaufmann.
++#
++# Redistribution and use in source and binary forms, with or without
++# modification, are permitted provided that the following conditions
++# are met:
++# 1. Redistributions of source code must retain the above copyright
++#    notice, this list of conditions and the following disclaimer.
++# 2. Redistributions in binary form must reproduce the above copyright
++#    notice, this list of conditions and the following disclaimer in the
++#    documentation and/or other materials provided with the distribution.
++# 3. All advertising materials mentioning features or use of this software
++#    must display the following acknowledgement:
++#     This product includes software developed by the LOST Project
++#     and its contributors.
++# 4. Neither the name of the LOST Project nor the names of its
++#    contributors may be used to endorse or promote products derived
++#    from this software without specific prior written permission.
++#
++# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++# ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++# TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++# PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++# CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++# EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++# PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++# OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++# WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++# OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++# ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++import sys
++import array
++import stat
++import os
++
++sectors_per_track = 63
++head_count = 16
++
++# Berechnet die CHS-Adresse zur LBA und wandelt sie in das passende Format fuer
++# die Partitionstabelle um.
++# Zurueckgegeben wird ein Tupel mit den 3 Bytes fuer die
++# Partitionstabelleneintraege.
++def lba2chs(lba):
++    # CHS Berechnen
++    cylinder = lba / (sectors_per_track * head_count)
++    temp = lba % (head_count * sectors_per_track)
++    head = temp / sectors_per_track;
++    sector = (temp % sectors_per_track) + 1;
++
++    # Fuer Partitionstabelle Formatieren
++    a = head
++    b = ((cylinder & 0x300) >> 2) + sector
++    c = cylinder & 0xFF
++    return a, b, c
++
++# DWORD in 4 Bytes umrechenen (Little Endian)
++# Zurueckgegeben wird ein Tupel mit den Bytes
++def le_dword(dword):
++    return (dword >>  0) & 255, (dword >>  8) & 255, (dword >> 16) & 255, (dword >> 24) & 255
++
++
++# Abrrechen wenn kein Argument mit dem Pfad gefunden werden konnte
++if len(sys.argv) <= 1:
++    print 'Bitte Imagepfad angeben'
++    sys.exit(-1)
++
++# Ansonsten wird der Pfad gespeichert
++image_path = sys.argv[1]
++
++# Image oeffnen
++image_file = open(image_path, mode='r+b')
++if image_file == 0:
++    print 'Image konnte nicht geoeffnet werden.'
++    sys.exit(-1)
++stat_info = os.lstat(image_path)
++image_size = stat_info[stat.ST_SIZE]
++
++# Partitionstabelle vorbereiten
++part_table = array.array('B')
++for i in range(0, 66):
++    part_table.insert(i, 0)
++# Signatur setzen
++part_table[64] = int('55', 16)
++part_table[65] = int('aa', 16)
++
++
++# Daten fuer Eintrag vorbereiten
++sector_size = 512
++partition_start = 63
++partition_end = image_size / sector_size
++# Das Partitionsende muss auf einer Zylindergrenze liegen
++partition_end -= partition_end % (63 * 16)
++
++
++# In Partitionstabelle eintragen
++part_table[1], part_table[2], part_table[3] = lba2chs(partition_start)
++part_table[4] = int('83', 16)
++part_table[5], part_table[6], part_table[7] = lba2chs(partition_end - 1)
++part_table[8], part_table[9], part_table[10], part_table[11] = le_dword(partition_start)
++part_table[12], part_table[13], part_table[14], part_table[15] = le_dword(partition_end - partition_start)
++
++
++# Partitionstabelle apspeichern
++image_file.seek(446)
++part_table.tofile(image_file)
++
++image_file.close()
+Index: trunk/build/scripts/get_partition
+===================================================================
+--- /dev/null
++++ trunk/build/scripts/get_partition
+@@ -0,0 +1,68 @@
++#!/usr/bin/python
++
++# Copyright (c) 2008 The LOST Project. All rights reserved.
++#
++# This code is derived from software contributed to the LOST Project
++# by Antoine Kaufmann.
++#
++# Redistribution and use in source and binary forms, with or without
++# modification, are permitted provided that the following conditions
++# are met:
++# 1. Redistributions of source code must retain the above copyright
++#    notice, this list of conditions and the following disclaimer.
++# 2. Redistributions in binary form must reproduce the above copyright
++#    notice, this list of conditions and the following disclaimer in the
++#    documentation and/or other materials provided with the distribution.
++# 3. All advertising materials mentioning features or use of this software
++#    must display the following acknowledgement:
++#     This product includes software developed by the LOST Project
++#     and its contributors.
++# 4. Neither the name of the LOST Project nor the names of its
++#    contributors may be used to endorse or promote products derived
++#    from this software without specific prior written permission.
++#
++# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++# ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++# TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++# PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++# CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++# EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++# PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++# OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++# WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++# OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++# ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++import sys
++import array
++import os
++
++# 4 Bytes in ein dword umwandeln (Little endian)
++# Zurueckgegeben wird ein Tuppel mit den Bytes
++def le_dword(a, b, c, d):
++    return ((a << 0) | (b << 8) | (c << 16) | (d << 24))
++
++
++# Abrrechen wenn kein Argument mit dem Pfad gefunden werden konnte
++if len(sys.argv) <= 1:
++    print 'Bitte Imagepfad angeben'
++    sys.exit(-1)
++
++# Ansonsten wird der Pfad gespeichert
++image_path = sys.argv[1]
++
++# Image oeffnen
++image_file = open(image_path, mode='rb')
++if image_file == 0:
++    print 'Image konnte nicht geoeffnet werden.'
++    sys.exit(-1)
++
++# Partitionstabelle vorbereiten und einlesen
++part_table = array.array('B')
++image_file.seek(446)
++part_table.fromfile(image_file, 63)
++
++# Werte anzeigen
++print le_dword(part_table[8], part_table[9], part_table[10], part_table[11]), le_dword(part_table[12], part_table[13], part_table[14], part_table[15])
++
++image_file.close()
++
+Index: trunk/build/scripts/image_floppy
+===================================================================
+--- /dev/null
++++ trunk/build/scripts/image_floppy
+@@ -0,0 +1,83 @@
++#!/bin/bash
++
++# Copyright (c) 2008 The LOST Project. All rights reserved.
++#
++# This code is derived from software contributed to the LOST Project
++# by Antoine Kaufmann.
++#
++# Redistribution and use in source and binary forms, with or without
++# modification, are permitted provided that the following conditions
++# are met:
++# 1. Redistributions of source code must retain the above copyright
++#    notice, this list of conditions and the following disclaimer.
++# 2. Redistributions in binary form must reproduce the above copyright
++#    notice, this list of conditions and the following disclaimer in the
++#    documentation and/or other materials provided with the distribution.
++# 3. All advertising materials mentioning features or use of this software
++#    must display the following acknowledgement:
++#     This product includes software developed by the LOST Project
++#     and its contributors.
++# 4. Neither the name of the LOST Project nor the names of its
++#    contributors may be used to endorse or promote products derived
++#    from this software without specific prior written permission.
++#
++# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++# ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++# TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++# PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++# CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++# EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++# PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++# OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++# WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++# OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++# ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++
++ROOT=build/root
++ROOT_COMMON=build/root-common
++ROOT_FLOPPY=build/root-floppy
++source build/config/image_floppy.sh
++
++export PATH="/sbin:/usr/sbin:$PATH"
++export MTOOLSRC=lostmtools.conf
++
++# Konfigurationsdatei fuer mtools generieren
++cat << EOF > $MTOOLSRC
++drive l:
++    file="$IMAGE_PATH" cylinders=80 heads=2 sectors=18 filter
++EOF
++
++# Wenn das Image neu erstellt werden muss, kommen noch ein paar schritte mehr
++# dazu.
++NEW=0
++if ! [ -f $IMAGE_PATH ]; then
++    # Leeres Image erstellen und formatieren
++    dd if=/dev/zero of=$IMAGE_PATH bs=1024 count=1440
++    mformat l:
++    NEW=1
++fi
++
++
++mcopy -D o -s $ROOT/* $ROOT_COMMON/* $ROOT_FLOPPY/* l:/
++
++# Grub-Konfiguration kopieren
++mcopy -D o build/config/grub_floppy.cfg l:/boot/grub/menu.lst
++
++if [ $NEW -ne 0 ]; then
++    # Grub kopieren und installieren
++    mmd -D s l:/boot/grub
++    mcopy -D o $LOST_GRUB_STAGESDIR/stage? l:/boot/grub/
++
++    echo device '(fd0)' $IMAGE_PATH > build/grub.txt
++    echo root '(fd0)' >> build/grub.txt
++    echo setup '(fd0)' >> build/grub.txt
++    $LOST_TOOLS_GRUB --batch < build/grub.txt <<EOF
++    device (fd0) $IMAGE_PATH
++    root (fd0)
++    setup (fd0)
++EOF
++    rm build/grub.txt
++fi
++
++# Konfigurationsdatei fuer mtools wieder loeschen
++rm -f $MTOOLSRC
+Index: trunk/build/scripts/image_hd
+===================================================================
+--- /dev/null
++++ trunk/build/scripts/image_hd
+@@ -0,0 +1,110 @@
++#!/bin/bash
++
++# Copyright (c) 2008 The LOST Project. All rights reserved.
++#
++# This code is derived from software contributed to the LOST Project
++# by Antoine Kaufmann.
++#
++# Redistribution and use in source and binary forms, with or without
++# modification, are permitted provided that the following conditions
++# are met:
++# 1. Redistributions of source code must retain the above copyright
++#    notice, this list of conditions and the following disclaimer.
++# 2. Redistributions in binary form must reproduce the above copyright
++#    notice, this list of conditions and the following disclaimer in the
++#    documentation and/or other materials provided with the distribution.
++# 3. All advertising materials mentioning features or use of this software
++#    must display the following acknowledgement:
++#     This product includes software developed by the LOST Project
++#     and its contributors.
++# 4. Neither the name of the LOST Project nor the names of its
++#    contributors may be used to endorse or promote products derived
++#    from this software without specific prior written permission.
++#
++# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++# ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++# TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++# PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++# CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++# EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++# PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++# OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++# WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++# OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++# ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++
++ROOT=build/root
++ROOT_COMMON=build/root-common
++ROOT_HD=build/root-hd
++MOUNT=build/mnt
++SUDO=sudo
++
++export LOST_BUILDMK_ROOT="`pwd`"
++source build/config/image_hd.sh
++source config.sh
++
++die()
++{
++    echo $1
++    exit -1
++}
++
++# Wenn das Image neu erstellt werden muss, kommen noch ein paar schritte mehr
++# dazu.
++NEW=0
++if ! [ -f $IMAGE_PATH ]; then
++    # Leeres Image erstellen und formatieren
++    dd if=/dev/zero of=$IMAGE_PATH bs=$((1024*1024)) count=$IMAGE_SIZE 2> /dev/null
++    build/scripts/create_partition $IMAGE_PATH
++    NEW=1
++fi
++
++
++# Start und Ende der Partition einlesen
++PARTITIONS="`build/scripts/get_partition $IMAGE_PATH`"
++PART_START=`echo $PARTITIONS | awk '{print $1}'`
++PART_SIZE=`echo $PARTITIONS | awk '{print $2}'`
++
++if [ $NEW -ne 0 ]; then
++    PART_IMAGE=`tempfile`
++    dd if=$IMAGE_PATH of=$PART_IMAGE bs=512 skip=$PART_START count=$PART_SIZE
++
++    # Dateisystem erstellen
++    $LOST_TOOLS_MKE2FS -F -q -r0 $PART_IMAGE || die "Dateisystem konnte nicht erstellt werden"
++
++    dd if=$PART_IMAGE of=$IMAGE_PATH bs=512 seek=$PART_START count=$PART_SIZE
++    rm $PART_IMAGE
++fi
++
++# Partition mounten
++mkdir -p $MOUNT
++$SUDO mount $IMAGE_PATH $MOUNT -o loop,offset=$((${PART_START} * 512))
++$SUDO chmod 777 -R $MOUNT
++
++# Daten Kopieren
++cp -rP --preserve=links,timestamps $ROOT/* $ROOT_COMMON/* $ROOT_HD/* $MOUNT/
++
++# GRUB-Konfiguration kopieren
++mkdir -p $MOUNT/boot/grub
++cp build/config/grub_hd.cfg $MOUNT/boot/grub/menu.lst
++
++
++# Grub kopieren
++if [ $NEW -ne 0 ]; then
++    cp $LOST_GRUB_STAGESDIR/stage? $MOUNT/boot/grub/
++fi
++
++# Partition unmounten und loopback-Device freigeben
++$SUDO umount $MOUNT
++rmdir $MOUNT
++
++
++# Grub installieren
++if [ $NEW -ne 0 ]; then
++    $LOST_TOOLS_GRUB --no-floppy --batch > /dev/null <<EOF
++    device (hd0) $IMAGE_PATH
++    root (hd0,0)
++    setup (hd0)
++EOF
++fi
++
+Index: trunk/build/scripts/updateroot
+===================================================================
+--- /dev/null
++++ trunk/build/scripts/updateroot
+@@ -0,0 +1,60 @@
++#!/bin/bash
++
++# Copyright (c) 2006 The LOST Project. All rights reserved.
++#
++# This code is derived from software contributed to the LOST Project
++# by Kevin Wolf.
++#
++# Redistribution and use in source and binary forms, with or without
++# modification, are permitted provided that the following conditions
++# are met:
++# 1. Redistributions of source code must retain the above copyright
++#    notice, this list of conditions and the following disclaimer.
++# 2. Redistributions in binary form must reproduce the above copyright
++#    notice, this list of conditions and the following disclaimer in the
++#    documentation and/or other materials provided with the distribution.
++# 3. All advertising materials mentioning features or use of this software
++#    must display the following acknowledgement:
++#     This product includes software developed by the LOST Project
++#     and its contributors.
++# 4. Neither the name of the LOST Project nor the names of its
++#    contributors may be used to endorse or promote products derived
++#    from this software without specific prior written permission.
++#
++# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++# ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++# TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++# PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++# CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++# EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++# PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++# OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++# WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++# OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++# ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++
++
++ROOT=build/root
++OUTPUT=build/output
++
++# Verzeichnisstruktur anlegen
++mkdir -p $ROOT/boot/grub
++mkdir -p $ROOT/apps
++mkdir -p $ROOT/modules
++
++# Module Komprimieren und auf Image kopieren
++for f in $OUTPUT/modules/*; do
++    gzip -c $f > $ROOT/modules/`basename $f .mod`
++done
++
++# Anwendungen komprimieren und auf Image kopieren
++for f in $OUTPUT/apps/*; do
++    gzip -c $f > $ROOT/apps/`basename $f`
++done
++
++# Kernel komprimieren und auf Image kopieren
++for f in $OUTPUT/kernel/*; do
++    gzip -c $f > $ROOT/boot/`basename $f .krn`
++done
++
++

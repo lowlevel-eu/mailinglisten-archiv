@@ -1,0 +1,231 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 3/7] init: loader_get_library() implementiert
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%203/7%5D%20init%3A%20loader_get_library%28%29%20implementiert&In-Reply-To=%3C1483310141-25674-4-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002608.html">
+   <LINK REL="Next"  HREF="002610.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 3/7] init: loader_get_library() implementiert</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%203/7%5D%20init%3A%20loader_get_library%28%29%20implementiert&In-Reply-To=%3C1483310141-25674-4-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 3/7] init: loader_get_library() implementiert">kevin at tyndur.org
+                  </A><BR>
+    <I>So Jan  1 23:35:37 CET 2017</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002608.html">[tyndur-devel] [PATCH 2/7] libc: ELF-32-Loader ein bisschen umgebaut
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002610.html">[tyndur-devel] [PATCH 4/7] libc: Einfacher dynmaischer Linker für den ELF-Loader
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2609">[ Datum ]</a>
+              <a href="thread.html#2609">[ Thema ]</a>
+              <a href="subject.html#2609">[ Betreff (Subject) ]</a>
+              <a href="author.html#2609">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ libc: Ein neuer Callback loader_get_library() für den ELF-Loader, der
+  ein ELF-Image einer Shared Library in den Speicher lädt
+
++ init: Implementierung von loader_get_library()
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/include/loader.h            | 11 ++++++
+ src/kernel2/src/tasks/modules.c |  9 +++++
+ src/modules/init/loader.c       | 82 +++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 102 insertions(+)
+
+diff --git a/src/include/loader.h b/src/include/loader.h
+index 55c982b..0084613 100644
+--- a/src/include/loader.h
++++ b/src/include/loader.h
+@@ -88,6 +88,17 @@ bool loader_assign_mem(pid_t process, vaddr_t dest_address,
+     vaddr_t src_address, size_t size);
+ 
+ /**
++ * Lädt eine Shared Library in den Speicher.
++ *
++ * @param name Name der Shared Library
++ * @param image Enthält bei Erfolg einen Pointer auf ein Binärimage
++ * @param size Enthält bei Erfolg die Größe des Binärimages in Bytes
++ *
++ * @return 0 bei Erfolg, -errno im Fehlerfall
++ */
++int loader_get_library(const char* name, void** image, size_t* size);
++
++/**
+  * Erstellt einen neuen Thread.
+  *
+  * @param process PID
+diff --git a/src/kernel2/src/tasks/modules.c b/src/kernel2/src/tasks/modules.c
+index 610498c..8d3c090 100644
+--- a/src/kernel2/src/tasks/modules.c
++++ b/src/kernel2/src/tasks/modules.c
+@@ -40,6 +40,7 @@
+ #include &lt;stdlib.h&gt;
+ #include &lt;string.h&gt;
+ #include &lt;loader.h&gt;
++#include &lt;errno.h&gt;
+ #include &lt;syscall_structs.h&gt;
+ 
+ #include &quot;multiboot.h&quot;
+@@ -275,6 +276,14 @@ bool loader_assign_mem(pid_t pid, vaddr_t dest_address,
+ }
+ 
+ /**
++ * Lädt eine Shared Library in den Speicher.
++ */
++int loader_get_library(const char* name, void** image, size_t* size)
++{
++    return -ENOSYS;
++}
++
++/**
+  * Erstellt einen Thread in einem Prozess der anhand seiner PID gefunden wird.
+  */
+ bool loader_create_thread(pid_t pid, vaddr_t address) {
+diff --git a/src/modules/init/loader.c b/src/modules/init/loader.c
+index 58649e2..e3d67ba 100644
+--- a/src/modules/init/loader.c
++++ b/src/modules/init/loader.c
+@@ -38,6 +38,9 @@
+ #include &lt;loader.h&gt;
+ #include &lt;lock.h&gt;
+ #include &lt;init.h&gt;
++#include &lt;errno.h&gt;
++#include &lt;lostio.h&gt;
++#include &lt;stdlib.h&gt;
+ 
+ static struct {
+     pid_t   pid;
+@@ -46,6 +49,8 @@ static struct {
+     lock_t  lock;
+ } loader_state;
+ 
++size_t ainflate(void* src, size_t len, void** dest_ptr);
++
+ /**
+  * Speicher allozieren um ihn spaeter in einen neuen Prozess zu mappen. Diese
+  * Funktion sollte nicht fuer &quot;normale&quot; Allokationen benutzt werden, da immer
+@@ -80,6 +85,83 @@ bool loader_assign_mem(pid_t process, vaddr_t dest_address,
+     return true;
+ }
+ 
++/**
++ * Lädt eine Shared Library in den Speicher.
++ *
++ * @param name Name der Shared Library
++ * @param image Enthält bei Erfolg einen Pointer auf ein Binärimage
++ * @param size Enthält bei Erfolg die Größe des Binärimages in Bytes
++ *
++ * @return 0 bei Erfolg, -errno im Fehlerfall
++ */
++int loader_get_library(const char* name, void** image, size_t* size)
++{
++    io_resource_t* fd;
++    char* path;
++    void* p;
++    int ret;
++
++    ret = asprintf(&amp;path, &quot;file:/system/%s.so&quot;, name);
++    if (ret &lt; 0) {
++        return -ENOMEM;
++    }
++
++    fd = lio_compat_open(path, IO_OPEN_MODE_READ);
++    free(path);
++    if (fd == NULL) {
++        return -ENOENT;
++    }
++
++    if (!lio_compat_seek(fd, 0, SEEK_END)) {
++        ret = -EIO;
++        goto fail;
++    }
++
++    ret = lio_compat_tell(fd);
++    if (ret &lt; 0) {
++        goto fail;
++    }
++    *size = ret;
++
++    if (!lio_compat_seek(fd, 0, SEEK_SET)) {
++        ret = -EIO;
++        goto fail;
++    }
++
++    p = malloc(*size);
++    if (p == NULL) {
++        ret = -ENOMEM;
++        goto fail;
++    }
++
++    ret = lio_compat_read(p, 1, *size, fd);
++    if (ret &lt; 0) {
++        free(p);
++        goto fail;
++    }
++
++    if (*(uint16_t*) p == 0x8b1f) {
++        /* gzip, erstmal entpacken */
++        void* buf;
++        size_t buf_len;
++
++        buf_len = ainflate(p, *size, &amp;buf);
++        if (buf_len == 0) {
++            ret = -EINVAL;
++            goto fail;
++        }
++
++        free(p);
++        p = buf;
++        *size = buf_len;
++    }
++
++    *image = p;
++    ret = 0;
++fail:
++    lio_compat_close(fd);
++    return ret;
++}
+ 
+ /**
+  * Erstellt einen neuen Thread.
+-- 
+2.1.4
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002608.html">[tyndur-devel] [PATCH 2/7] libc: ELF-32-Loader ein bisschen umgebaut
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002610.html">[tyndur-devel] [PATCH 4/7] libc: Einfacher dynmaischer Linker für den ELF-Loader
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2609">[ Datum ]</a>
+              <a href="thread.html#2609">[ Thema ]</a>
+              <a href="subject.html#2609">[ Betreff (Subject)]</a>
+              <a href="author.html#2609">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

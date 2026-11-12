@@ -1,0 +1,3316 @@
+From kevin at tyndur.org  Mon Dec 29 18:23:36 2014
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Mon, 29 Dec 2014 18:23:36 +0100
+Subject: [tyndur-devel] [PATCH 0/3] cdi/fs auf LIOv2 konvertieren
+Message-ID: <1419873819-23365-1-git-send-email-kevin@tyndur.org>
+
+$SUBJECT says it all.
+
+Außer vielleicht, dass die CDI-Dateisystemtreiber genauso wie das Interface
+alle irgendwie... - ich glaube, man nennt das heute verhaltenskreativ - sind.
+Nein, es ist keine gute Idee, vorsichtshalber alle verfügbaren Flags zu setzen
+und anzuzeigen, dass eine Ressource Datei, Verzeichnis und Link gleichzeitig
+ist (Patch auf cdi-devel). Und nein, es ist auch keine gute Idee, Requests
+blockweise aufzusplitten, wenn die Datei nicht fragmentiert ist (Das wird
+vermutlich etwas aufwendiger zu fixen, weil der CDI-Cache so designt ist...)
+
+Na gut, genug am Thema vorbeigeredet, hier sind LIOv2-Patches.
+
+Kevin Wolf (3):
+  file: Auf LIOv2 umstellen
+  cdi/fs: Auf LIOv2 umstellen
+  tests: LIOv2-Testfälle, die konvertiertes ext2 brauchen
+
+ build/root-hd/config/servmgr/mount/deps |    1 -
+ src/kernel2/src/lostio/lostio.c         |    2 +
+ src/kernel2/src/lostio/modules/file.c   |  121 ++++++
+ src/modules/cdi/include/cdi-osdep.h     |    2 +-
+ src/modules/cdi/lib/fs/fs.c             |  136 ++----
+ src/modules/cdi/lib/fs/lostio_if.c      |  712 ++++++++++++-------------------
+ src/modules/file/client.c               |   33 ++-
+ src/modules/file/main.c                 |    2 +-
+ tests/lostio/002.c                      |  188 ++++++++
+ tests/lostio/003.c                      |  205 +++++++++
+ tests/lostio/Makefile                   |   10 +-
+ tests/lostio/run_test.sh                |   18 +
+ 12 files changed, 893 insertions(+), 537 deletions(-)
+ delete mode 100644 build/root-hd/config/servmgr/mount/deps
+ create mode 100644 src/kernel2/src/lostio/modules/file.c
+ create mode 100644 tests/lostio/002.c
+ create mode 100644 tests/lostio/003.c
+
+-- 
+1.7.7
+
+
+From kevin at tyndur.org  Mon Dec 29 18:23:37 2014
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Mon, 29 Dec 2014 18:23:37 +0100
+Subject: [tyndur-devel] [PATCH 1/3] file: Auf LIOv2 umstellen
+In-Reply-To: <1419873819-23365-1-git-send-email-kevin@tyndur.org>
+References: <1419873819-23365-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1419873819-23365-2-git-send-email-kevin@tyndur.org>
+
++ file: Es werden jetzt zwei Möglichkeiten unterstützt, file:/ zu
+  implementieren. Wenn der file-Service gestartet wird, dann wird die
+  alte Methode verwendet, die für LIOv1-Services (z.B. FAT bei der
+  Floppy-Variante) benötigt wird. Für einen LIOv2-Service auf file:/
+  darf der Service dagegen nicht gestartet werden, dann wird der Symlink
+  im kerneleigenen file-Service gesetzt (z.B. für ext2 nach dem
+  nächsten Patch).
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/src/lostio/lostio.c       |    2 +
+ src/kernel2/src/lostio/modules/file.c |  121 +++++++++++++++++++++++++++++++++
+ src/modules/file/client.c             |   33 +++++++--
+ src/modules/file/main.c               |    2 +-
+ 4 files changed, 149 insertions(+), 9 deletions(-)
+ create mode 100644 src/kernel2/src/lostio/modules/file.c
+
+diff --git a/src/kernel2/src/lostio/lostio.c b/src/kernel2/src/lostio/lostio.c
+index 54e2182..a9eb2d3 100644
+--- a/src/kernel2/src/lostio/lostio.c
++++ b/src/kernel2/src/lostio/lostio.c
+@@ -39,6 +39,7 @@
+ #include "lostio_int.h"
+ 
+ extern void lio_init_tmp(void);
++extern void lio_init_file(void);
+ 
+ void lio_init(void)
+ {
+@@ -46,4 +47,5 @@ void lio_init(void)
+     lio_init_userspace();
+ 
+     lio_init_tmp();
++    lio_init_file();
+ }
+diff --git a/src/kernel2/src/lostio/modules/file.c b/src/kernel2/src/lostio/modules/file.c
+new file mode 100644
+index 0000000..708d969
+--- /dev/null
++++ b/src/kernel2/src/lostio/modules/file.c
+@@ -0,0 +1,121 @@
++/*
++ * Copyright (c) 2010 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Antoine Kaufmann.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the tyndur Project
++ *     and its contributors.
++ * 4. Neither the name of the tyndur Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <string.h>
++#include <stdlib.h>
++
++#include "lostio_int.h"
++#include "kprintf.h"
++
++#define BLOCKSIZE 128
++
++static struct lio_resource* load_root(struct lio_tree* tree);
++static int file_read(struct lio_resource* res, uint64_t offset,
++    size_t bytes, void* buf);
++static int file_write(struct lio_resource* res, uint64_t offset,
++    size_t bytes, void* buf);
++static int truncate(struct lio_resource* res, uint64_t size);
++
++static struct lio_resource root_res = {
++    .size = 0,
++    .blocksize = BLOCKSIZE,
++    .resolvable = 1,
++    .retargetable = 1,
++    .opaque = NULL,
++};
++
++static char* link = NULL;
++static size_t link_len = 0;
++
++static struct lio_resource* load_root(struct lio_tree* tree)
++{
++    if (tree->source) {
++        return NULL;
++    }
++
++    lio_init_resource(&root_res);
++    return &root_res;
++}
++
++static int file_read(struct lio_resource* res, uint64_t offset,
++    size_t bytes, void* buf)
++{
++    if (link) {
++        if (bytes > link_len) {
++            memset(buf + link_len, 0, bytes - link_len);
++            bytes = link_len;
++        }
++        memcpy(buf, link + offset, bytes);
++    }
++
++    return 0;
++}
++
++static int file_write(struct lio_resource* res, uint64_t offset,
++    size_t bytes, void* buf)
++{
++    if (offset + bytes >= link_len) {
++        truncate(res, offset + bytes);
++    }
++
++    if (link) {
++        memcpy(link + offset, buf, bytes);
++    }
++
++    return 0;
++}
++
++static int truncate(struct lio_resource* res, uint64_t size)
++{
++    link_len = size;
++    link = realloc(link, size);
++    memset(link, 0, size);
++    return 0;
++}
++
++static struct lio_service service = {
++    .name = "file",
++    .lio_ops = {
++        .load_root  = load_root,
++        .read       = file_read,
++        .write      = file_write,
++        .truncate   = truncate,
++    },
++};
++
++void lio_init_file(void)
++{
++    lio_add_service(&service);
++}
+diff --git a/src/modules/file/client.c b/src/modules/file/client.c
+index f15e416..988df70 100644
+--- a/src/modules/file/client.c
++++ b/src/modules/file/client.c
+@@ -56,16 +56,33 @@ int client(int argc, char* argv[], pid_t file_service)
+     if (!strcmp(argv[1], "mount") && (argc == 4)) {
+         size_t len_src = strlen(argv[2]) + 1;
+         size_t len_dst = strlen(argv[3]) + 1;
+-        size_t len = RPC_FUNCTION_NAME_LENGTH + len_src + len_dst;
+ 
+-        char data[len];
+-        memset(data, 0, RPC_FUNCTION_NAME_LENGTH);
+-        strncpy(data, "MOUNT", RPC_FUNCTION_NAME_LENGTH);
+-        strncpy(data + RPC_FUNCTION_NAME_LENGTH, argv[2], len_src);
+-        strncpy(data + RPC_FUNCTION_NAME_LENGTH + len_src, argv[3], len_dst);
++        if (file_service) {
++            size_t len = RPC_FUNCTION_NAME_LENGTH + len_src + len_dst;
++            char data[len];
++
++            memset(data, 0, RPC_FUNCTION_NAME_LENGTH);
++            strncpy(data, "MOUNT", RPC_FUNCTION_NAME_LENGTH);
++            strncpy(data + RPC_FUNCTION_NAME_LENGTH, argv[2], len_src);
++            strncpy(data + RPC_FUNCTION_NAME_LENGTH + len_src, argv[3],
++                len_dst);
++
++            send_message(file_service, RPC_MESSAGE, 0, len, data);
++        } else {
++            lio_resource_t res = -2;
++            lio_stream_t s = -2;
++
++            if (strcmp(argv[2], "file:/") ||
++                ((res = lio_resource("file:/", 0)) < 0) ||
++                ((s = lio_open(res, LIO_SYMLINK | LIO_WRITE | LIO_TRUNC)) < 0))
++            {
++                printf("Err: (%s) %llx %llx\n", argv[2], res, s);
++                return EXIT_FAILURE;
++            }
++            lio_write(s, len_dst - 1, argv[3]);
++            lio_close(s);
++        }
+ 
+-        send_message(file_service, RPC_MESSAGE, 0, len, data);
+-        
+         return EXIT_SUCCESS;
+     } else {
+         client_print_usage();
+diff --git a/src/modules/file/main.c b/src/modules/file/main.c
+index 6ff34bc..da12bb7 100644
+--- a/src/modules/file/main.c
++++ b/src/modules/file/main.c
+@@ -41,7 +41,7 @@
+ int main(int argc, char* argv[])
+ {
+     pid_t file_service = init_service_get(SERVICE_NAME);
+-    if (file_service) {
++    if (argc > 1 || file_service) {
+         return client(argc, argv, file_service);
+     } else {
+         return server();
+-- 
+1.7.7
+
+
+From kevin at tyndur.org  Mon Dec 29 18:23:38 2014
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Mon, 29 Dec 2014 18:23:38 +0100
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH_2/3=5D_cdi/fs=3A_Auf_LIOv2_umst?=
+	=?utf-8?q?ellen?=
+In-Reply-To: <1419873819-23365-1-git-send-email-kevin@tyndur.org>
+References: <1419873819-23365-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1419873819-23365-3-git-send-email-kevin@tyndur.org>
+
+* cdi/fs: Das alte RPC-Interface durch einen LIOv2-Userspace-Service
+  ersetzt.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ build/root-hd/config/servmgr/mount/deps |    1 -
+ src/modules/cdi/include/cdi-osdep.h     |    2 +-
+ src/modules/cdi/lib/fs/fs.c             |  136 ++----
+ src/modules/cdi/lib/fs/lostio_if.c      |  712 ++++++++++++-------------------
+ 4 files changed, 325 insertions(+), 526 deletions(-)
+ delete mode 100644 build/root-hd/config/servmgr/mount/deps
+
+diff --git a/build/root-hd/config/servmgr/mount/deps b/build/root-hd/config/servmgr/mount/deps
+deleted file mode 100644
+index f73f309..0000000
+--- a/build/root-hd/config/servmgr/mount/deps
++++ /dev/null
+@@ -1 +0,0 @@
+-file
+diff --git a/src/modules/cdi/include/cdi-osdep.h b/src/modules/cdi/include/cdi-osdep.h
+index ed8cc5d..94eba73 100644
+--- a/src/modules/cdi/include/cdi-osdep.h
++++ b/src/modules/cdi/include/cdi-osdep.h
+@@ -90,7 +90,7 @@ typedef struct {
+  * \endenglish
+  */
+ typedef struct {
+-    FILE* device;
++    struct lio_tree* tree;
+ } cdi_fs_osdep;
+ 
+ struct storage_drv_osdep {
+diff --git a/src/modules/cdi/lib/fs/fs.c b/src/modules/cdi/lib/fs/fs.c
+index 1ac1ab4..aeca3ea 100644
+--- a/src/modules/cdi/lib/fs/fs.c
++++ b/src/modules/cdi/lib/fs/fs.c
+@@ -36,105 +36,57 @@
+ 
+ #include <stdint.h>
+ #include <lostio.h>
++#include <stdlib.h>
+ 
+ #include "cdi/fs.h"
+ 
+-#define CDI_TYPEHANDLE 200
+-#define CDI_TYPEHANDLE_SYMLINK 201
+-
+-
+-struct cdi_fs_driver* the_one_and_only_driver = NULL;
+-
+-bool lostio_not_found_handler(char** path, uint8_t args, pid_t pid,
+-    FILE* source);
+-bool lostio_pre_open_handler(char** path, uint8_t args, pid_t pid,
+-    FILE* source);
+-size_t lostio_readahead_handler(lostio_filehandle_t* fh, void* buf,
+-    size_t bs, size_t bc);
+-size_t lostio_read_handler(lostio_filehandle_t* fh, void* buf,
+-    size_t bs, size_t bc);
+-size_t lostio_write_handler(lostio_filehandle_t* fh, size_t bs, size_t bc,
+-    void* data);
+-int lostio_seek_handler(lostio_filehandle_t* fh, uint64_t offset, int origin);
+-int lostio_unlink_handler(lostio_filehandle_t* fh, const char* name);
+-size_t lostio_symlink_read_handler(lostio_filehandle_t* fh, void* buf,
+-    size_t bs, size_t bc);
+-size_t lostio_symlink_write_handler(lostio_filehandle_t* fh, size_t bs,
+-    size_t bc, void* data);
+-
+-typehandle_t cdi_typehandle = {
+-    .id = CDI_TYPEHANDLE,
+-    .not_found = &lostio_not_found_handler,
+-    .pre_open = &lostio_pre_open_handler,
+-    .post_open = NULL,
+-    .read = &lostio_read_handler,
+-    .readahead = &lostio_readahead_handler,
+-    .write = &lostio_write_handler,
+-    .seek = &lostio_seek_handler,
+-    .unlink = &lostio_unlink_handler,
+-    .close = NULL
+-};
+-
+-typehandle_t cdi_symlink_typehandle = {
+-    .id = CDI_TYPEHANDLE_SYMLINK,
+-    .not_found = &lostio_not_found_handler,
+-    .pre_open = &lostio_pre_open_handler,
+-    .post_open = NULL,
+-    .read = &lostio_symlink_read_handler,
+-    .write = &lostio_symlink_write_handler,
+-    .seek = &lostio_seek_handler,
+-    .unlink = &lostio_unlink_handler,
+-    .close = NULL
+-};
+-
+-
+-typehandle_t cdi_null_typehandle = {
+-    .id = 0,
+-    .not_found = &lostio_not_found_handler,
+-    .pre_open = NULL,
+-    .post_open = NULL,
+-    .read = NULL,
+-    .write = NULL,
+-    .seek = NULL,
+-    .close = NULL
+-};
++struct lio_resource* cdi_fs_lio_load_root(struct lio_tree* tree);
++int cdi_fs_lio_load_children(struct lio_resource* res);
++int cdi_fs_lio_read(struct lio_resource* res, uint64_t offset,
++    size_t bytes, void* buf);
++int cdi_fs_lio_write(struct lio_resource* res, uint64_t offset,
++    size_t bytes, void* buf);
++int cdi_fs_lio_resize(struct lio_resource* res, uint64_t size);
++struct lio_resource* cdi_fs_lio_make_file(struct lio_resource* parent,
++    const char* name);
++struct lio_resource* cdi_fs_lio_make_dir(struct lio_resource* parent,
++    const char* name);
++struct lio_resource* cdi_fs_lio_make_symlink(struct lio_resource* parent,
++    const char* name, const char* target);
++int cdi_fs_lio_unlink(struct lio_resource* parent, const char* name);
++int cdi_fs_lio_sync(struct lio_resource* res);
+ 
+ 
+ void cdi_fs_driver_init(struct cdi_fs_driver* driver)
+ {
+-    static int initialized = 0;
+-
+-    if (!initialized) {
+-
+-        lostio_init();
+-        lostio_type_directory_use();
+-        lostio_register_typehandle(&cdi_typehandle);
+-        lostio_register_typehandle(&cdi_symlink_typehandle);
+-        lostio_register_typehandle(&cdi_null_typehandle);
+-
+-
+-        // Preopen-Handler fuer Verzeichnisse setzen
+-        typehandle_t* typehandle = get_typehandle(LOSTIO_TYPES_DIRECTORY);
+-        typehandle->pre_open = &lostio_pre_open_handler;
+-        typehandle->not_found = &lostio_not_found_handler;
+-        typehandle->post_open = NULL;
+-        typehandle->unlink = &lostio_unlink_handler;
+-
+-        initialized = 1;
+-    }
+ }
+ 
+ void cdi_fs_driver_destroy(struct cdi_fs_driver* driver)
+ {
++    // TODO
+ }
+ 
+ void cdi_fs_driver_register(struct cdi_fs_driver* driver)
+ {
+-    if (the_one_and_only_driver) {
+-        return;
+-    }
++    struct lio_service* service;
++
++    service = malloc(sizeof(*service));
++    service->name = driver->drv.name;
++    service->opaque = driver;
++    service->lio_ops = (struct lio_driver) {
++        .load_root      = cdi_fs_lio_load_root,
++        .load_children  = cdi_fs_lio_load_children,
++        .read           = cdi_fs_lio_read,
++        .write          = cdi_fs_lio_write,
++        .resize         = cdi_fs_lio_resize,
++        .make_file      = cdi_fs_lio_make_file,
++        .make_dir       = cdi_fs_lio_make_dir,
++        .make_symlink   = cdi_fs_lio_make_symlink,
++        .unlink         = cdi_fs_lio_unlink,
++        .sync           = cdi_fs_lio_sync,
++    };
+ 
+-    the_one_and_only_driver = driver;
++    lio_add_service(service);
+ }
+ 
+ 
+@@ -152,11 +104,14 @@ void cdi_fs_driver_register(struct cdi_fs_driver* driver)
+ size_t cdi_fs_data_read(struct cdi_fs_filesystem* fs, uint64_t start,
+     size_t size, void* buffer)
+ {
+-    if (fseek(fs->osdep.device, start, SEEK_SET) != 0) {
+-        return -1;
++    ssize_t result;
++
++    if ((result = lio_pread(fs->osdep.tree->source, start, size, buffer)) < 0) {
++        // FIXME: Das ist irgendwie ein bescheiden
++        return 0;
+     }
+ 
+-    return fread(buffer, 1, size, fs->osdep.device);
++    return result;
+ }
+ 
+ /**
+@@ -173,9 +128,12 @@ size_t cdi_fs_data_read(struct cdi_fs_filesystem* fs, uint64_t start,
+ size_t cdi_fs_data_write(struct cdi_fs_filesystem* fs, uint64_t start,
+     size_t size, const void* buffer)
+ {
+-    if (fseek(fs->osdep.device, start, SEEK_SET) != 0) {
+-        return -1;
++    ssize_t result;
++
++    if ((result = lio_pwrite(fs->osdep.tree->source, start, size, buffer)) < 0) {
++        // FIXME: Das ist irgendwie ein bescheiden
++        return 0;
+     }
+ 
+-    return fwrite(buffer, 1, size, fs->osdep.device);
++    return result;
+ }
+diff --git a/src/modules/cdi/lib/fs/lostio_if.c b/src/modules/cdi/lib/fs/lostio_if.c
+index ef0f5e6..2823c5f 100644
+--- a/src/modules/cdi/lib/fs/lostio_if.c
++++ b/src/modules/cdi/lib/fs/lostio_if.c
+@@ -44,472 +44,368 @@
+ 
+ #include "cdi/fs.h"
+ 
+-// FIXME -- doppelt mit fs.c
+-#define CDI_TYPEHANDLE 200
+-#define CDI_TYPEHANDLE_SYMLINK 201
++#define BLOCKSIZE 1024
+ 
+-#define debug_print(x) puts(x)
+ 
+-// So lang kann der Root-Pfad maximal werden
+-#define ROOT_PATH_SIZE 27
+-#define FULL_PATH_SIZE(x) (strlen(x) + ROOT_PATH_SIZE)
+-
+-static bool fs_fill_dir(vfstree_node_t* node);
+-
+-
+-extern struct cdi_fs_driver* the_one_and_only_driver;
+-
+-/**
+- * Diese Funktion generiert den Root-Pfad zu einem Source-Handle
+- *
+- * @param source Source-Handle
+- * @param buffer Puffer, in dem der Pfad abgelegt werden soll (muss mindestens
+- *               MAX_ROOT_PATH_SIZE Bytes lang sein.
+- */
+-static inline void get_root_path(io_resource_t* source, char* buffer)
+-{
+-    snprintf(buffer, ROOT_PATH_SIZE, "/%08d_%016d", source->pid, (uint32_t)
+-        source->resid);
+-}
+-
+-/**
+- * Diese Funktion generiert den vollen Pfad zu einem Source-Handle
+- *
+- * @param source Source-Handle
+- * @param path Pfad
+- * @param buffer Puffer, in dem der Pfad abgelegt werden soll (muss mindestens
+- *               FULL_PATH_SIZE Bytes lang sein.
+- */
+-static inline void get_full_path(io_resource_t* source, char* path,
+-    char* buffer)
++static int ensure_loaded(struct cdi_fs_stream* s)
+ {
+-    size_t size = FULL_PATH_SIZE(path);
+-    // Abschliessender Slash rauswerfen
+-    if (path[strlen(path) - 1] == '/') {
+-        size--;
++    if (s->res->loaded || s->res->res->load(s)) {
++        return 1;
+     }
+ 
+-    snprintf(buffer, size, "/%08d_%016d%s", source->pid,
+-        (uint32_t) source->resid, path);
++    return 0;
+ }
+ 
+-static int handle_dirent(struct cdi_fs_res* res, vfstree_node_t* node)
++static struct lio_resource* create_liores(struct cdi_fs_filesystem* fs,
++    struct cdi_fs_res* cdires)
+ {
+-    char* name;
+-    struct cdi_fs_stream* parent_stream = node->data;
+-    struct cdi_fs_stream* s;
+-    int flags;
+-    int type;
+-    uint64_t size;
++    struct lio_resource* liores;
++    struct cdi_fs_stream s;
+ 
+-    name = res->name;
++    s.res = cdires;
++    s.fs = fs;
++    s.error = 0;
+ 
+-    if (!strcmp(name, ".") || !strcmp(name, "..")) {
+-        return 0;
++    if (!ensure_loaded(&s)) {
++        return NULL;
+     }
+ 
+-    s = malloc(sizeof(*s));
+-    s->fs = parent_stream->fs;
+-    s->res = res;
++    liores = lio_resource_create(fs->osdep.tree);
++    liores->opaque = cdires;
+ 
++    liores->moredata = 0;
+ 
+-    if (!res->loaded) {
+-        res->res->load(s);
++    /*
++     * CDI-Ressourcen können mehrere Klassen haben. Einige Kombinationen
++     * sind semantischer Müll, z.B. Datei und Symlink gleichzeitig. Wir geben
++     * Dateien den Vorzug. Gleichzeitig ein Verzeichnis zu sein ist vermutlich
++     * auch keine gute Idee, aber theoretisch irgendwie denkbar.
++     *
++     * Außerdem prüfen wir noch, ob die Flags überhaupt zu den Klassen
++     * passen.
++     */
++    if (cdires->file) {
++        liores->readable = liores->seekable = cdires->flags.read;
++        liores->writable = (cdires->flags.write && !fs->read_only);
++    } else if (cdires->link) {
++        liores->resolvable = cdires->flags.read_link;
++        liores->retargetable = cdires->flags.write_link;
+     }
+-
+-    flags = 0;
+-    size = 0;
+-    type = CDI_TYPEHANDLE;
+-    if (res->dir) {
+-        flags |= LOSTIO_FLAG_BROWSABLE;
+-        type = LOSTIO_TYPES_DIRECTORY;
+-    } else if (res->link) {
+-        flags |= LOSTIO_FLAG_SYMLINK;
+-        type = CDI_TYPEHANDLE_SYMLINK;
+-    } else {
+-        type = CDI_TYPEHANDLE;
+-
+-        if (res->file) {
+-            size = res->res->meta_read(s, CDI_FS_META_SIZE);
+-            flags |= LOSTIO_FLAG_READAHEAD;
+-        }
++    if (cdires->dir) {
++        liores->browsable = cdires->flags.browse;
++        liores->changeable = cdires->flags.create_child;
+     }
+ 
++    liores->size = cdires->res->meta_read(&s, CDI_FS_META_SIZE);
++    liores->blocksize = BLOCKSIZE;
+ 
+-    vfstree_create_child(node, name, type, size, s, flags);
++    lio_resource_modified(liores);
+ 
+-    if (res->dir) {
+-        fs_fill_dir(vfstree_get_node_by_name(node, name));
+-    }
+-
+-    return 0;
++    return liores;
+ }
+ 
+-static bool fs_fill_dir(vfstree_node_t* node)
++struct lio_resource* cdi_fs_lio_load_root(struct lio_tree* tree)
+ {
+-    struct cdi_fs_stream* stream = node->data;
+-
+-    cdi_list_t children;
+-    struct cdi_fs_res* cres;
+-    int i;
++    struct cdi_fs_driver* driver = tree->service->opaque;
++    struct cdi_fs_filesystem* fs;
+ 
+-    if (!stream->res->loaded) {
+-        stream->res->res->load(stream);
++    if (tree->source == -1ULL) {
++        return NULL;
+     }
+ 
+-    if (stream->res->dir) {
+-        children = stream->res->dir->list(stream);
++    fs = calloc(1, sizeof(*fs));
++    fs->driver = driver;
++    fs->osdep.tree = tree;
++    tree->opaque = fs;
+ 
+-        for (i = 0; (cres = cdi_list_get(children, i)); i++) {
+-            handle_dirent(cres, node);
+-        }
++    if (!driver->fs_init(fs)) {
++        free(fs);
++        return NULL;
+     }
+ 
+-    return true;
++    return create_liores(fs, fs->root_res);
+ }
+ 
+-static bool fs_read_tree(struct cdi_fs_filesystem* fs)
++int cdi_fs_lio_load_children(struct lio_resource* res)
+ {
+-    char rp[ROOT_PATH_SIZE];
+-    vfstree_node_t* node;
+-    struct cdi_fs_stream* dh;
++    struct cdi_fs_filesystem* fs = res->tree->opaque;
++    struct cdi_fs_res* cdires = res->opaque;
++    struct cdi_fs_stream s;
++    cdi_list_t children;
++    struct cdi_fs_res* child;
++    struct lio_resource* liochild;
++    size_t i;
+ 
+-    // Dirhandle = Verknuepfung zwischen LIO und Treiber
+-    // FIXME Dahinter kommen eigentlich noch private Daten des Treibers...
+-    dh = malloc(sizeof(*dh));
+-    dh->fs = fs;
+-    dh->res = fs->root_res;
++    s.fs = fs;
++    s.res = cdires;
++    s.error = 0;
+ 
+-    get_root_path(fs->osdep.device->res, rp);
+-    if ((!vfstree_create_node(rp, LOSTIO_TYPES_DIRECTORY, 0, dh,
+-        LOSTIO_FLAG_BROWSABLE)) || (!(node = vfstree_get_node_by_path(rp))))
+-    {
+-        goto out_err;
++    if (!ensure_loaded(&s) || !cdires->dir) {
++        return -1;
+     }
+ 
+-    if (!fs_fill_dir(node)) {
+-        goto out_err;
++    children = cdires->dir->list(&s);
++    for (i = 0; (child = cdi_list_get(children, i)); i++) {
++        liochild = create_liores(fs, child);
++        if (!liochild) {
++            return -1;
++        }
++        lio_node_create(res, liochild, child->name);
+     }
+ 
+-    return true;
+-
+-out_err:
+-    free(dh);
+-    return false;
++    return 0;
+ }
+ 
+-static bool fs_mount(FILE* source)
++int cdi_fs_lio_read_file(struct lio_resource* res, uint64_t offset,
++    size_t bytes, void *buf)
+ {
+-    struct cdi_fs_filesystem* fs = malloc(sizeof(*fs));
+-    struct cdi_fs_driver* drv = the_one_and_only_driver;
++    struct cdi_fs_filesystem* fs = res->tree->opaque;
++    struct cdi_fs_res* cdires = res->opaque;
++    struct cdi_fs_stream s;
++    int result;
+ 
+-    // FIXME ;-)
+-    fs->osdep.device = calloc(1, sizeof(*fs->osdep.device));
+-    *fs->osdep.device = *source;
++    s.fs = fs;
++    s.res = cdires;
++    s.error = 0;
+ 
+-    if (!drv->fs_init(fs)) {
+-        goto out_err;
++    if (!ensure_loaded(&s) || !cdires->file || !cdires->file->read) {
++        return -1;
+     }
+ 
+-    if (!fs_read_tree(fs)) {
+-        goto out_err;
++    if (offset + bytes > res->size) {
++        /* TODO Das ist grosszuegig */
++        memset(buf, 0, bytes);
++
++        if (res->size > offset) {
++            bytes = res->size - offset;
++        } else {
++            bytes = 0;
++        }
+     }
+ 
+-    return true;
++    if (bytes) {
++        result = -!(cdires->file->read(&s, offset, bytes, buf) == bytes);
++    } else {
++        result = 0;
++    }
+ 
+-out_err:
+-    free(fs->osdep.device);
+-    free(fs);
+-    return false;
++    return result;
+ }
+ 
+-/**
+- * Dieser Handler wird bei jedem fopen() aufgerufen, da das immer
+- * schief gehen wird weil ja die daten nicht direkt auf Root liegen. Dabei
+- * werden nur die Pfade richtig umgebeogen und es wird geprueft ob alle
+- * notwendigen Verzeichnisse geladen sind
+- */
+-bool lostio_not_found_handler(char** path, uint8_t args, pid_t pid,
+-    FILE* source)
++int cdi_fs_lio_read_symlink(struct lio_resource* res, uint64_t offset,
++    size_t bytes, void* buf)
+ {
+-    char root_path[ROOT_PATH_SIZE + 1];
+-    char full_path[FULL_PATH_SIZE(*path) + 1];
+-    vfstree_node_t* root_node;
+-    cdi_fs_res_class_t type;
++    struct cdi_fs_filesystem* fs = res->tree->opaque;
++    struct cdi_fs_res* cdires = res->opaque;
++    struct cdi_fs_stream s;
++    const char* str;
++    size_t str_len;
+ 
++    s.fs = fs;
++    s.res = cdires;
++    s.error = 0;
+ 
+-    p();
+-    get_root_path(source->res, root_path);
+-    get_full_path(source->res, *path, full_path);
+-
+-    // Wenn der Knoten nicht existiert muss gemountet werden
+-    root_node = vfstree_get_node_by_path(root_path);
++    if (!ensure_loaded(&s) || !cdires->link || !cdires->link->read_link) {
++        return -1;
++    }
+ 
+-    if (!root_node) {
+-        if (!fs_mount(source)) {
+-            // Wenn das mounten nicht klappt wird abgebrochen
+-            puts("Fehler beim Mount!");
+-            goto out_err;
+-        }
++    str = cdires->link->read_link(&s);
++    str_len = strlen(str);
+ 
+-        root_node = vfstree_get_node_by_path(root_path);
++    if (offset + bytes > str_len) {
++        bytes = str_len - offset;
+     }
+ 
+-    // Testen ob ein Verzeichnis oder eine Datei geoeffnet werden soll
+-    if ((args & IO_OPEN_MODE_DIRECTORY) != 0) {
+-        type = CDI_FS_CLASS_DIR;
+-    } else if ((args & IO_OPEN_MODE_LINK) != 0) {
+-        type = CDI_FS_CLASS_LINK;
++    memcpy(buf, str + offset, bytes);
++
++    return 0;
++}
++
++int cdi_fs_lio_read(struct lio_resource* res, uint64_t offset,
++    size_t bytes, void* buf)
++{
++    if (res->resolvable) {
++        return cdi_fs_lio_read_symlink(res, offset, bytes, buf);
+     } else {
+-        type = CDI_FS_CLASS_FILE;
++        return cdi_fs_lio_read_file(res, offset, bytes, buf);
+     }
++}
+ 
+-    // Pfad aendern
+-    *path = malloc(strlen(full_path) + 1);
+-    memcpy(*path, full_path, strlen(full_path) + 1);
++int cdi_fs_lio_write_file(struct lio_resource* res, uint64_t offset,
++    size_t bytes, void* buf)
++{
++    struct cdi_fs_filesystem* fs = res->tree->opaque;
++    struct cdi_fs_res* cdires = res->opaque;
++    struct cdi_fs_stream s;
++    int result;
+ 
+-    // Jetzt wird der Knoten geholt, damit geprueft werden kann, ob auch kein
+-    // Verzeichnis als Datei geoeffnet werden soll und sowas ;-)
+-    vfstree_node_t* node = vfstree_get_node_by_path(*path);
+-    struct cdi_fs_stream* stream;
++    s.fs = fs;
++    s.res = cdires;
++    s.error = 0;
+ 
+-    // Abbrechen falls der Knoten nicht existiert und auch nicht erstellt
+-    // werden soll
+-    if ((node == NULL) && ((args & IO_OPEN_MODE_CREATE) == 0)) {
+-        goto out_err;
+-    } else if ((node == NULL)) {
+-        // Der Knoten exisitiert nicht, soll aber erstellt werden
+-        char* parent_path = vfstree_dirname(*path);
+-        char* child_name = vfstree_basename(*path);
+-        vfstree_node_t* parent = vfstree_get_node_by_path(parent_path);
+-        free(parent_path);
++    if (offset + bytes > res->size) {
++        bytes = res->size - offset;
++    }
+ 
+-        if (parent == NULL) {
+-            goto out_err;
+-        }
++    if (!ensure_loaded(&s) || !cdires->file || !cdires->file->write
++        || fs->read_only)
++    {
++        return -1;
++    }
+ 
+-        // Kindeintraege koennen nur in Verzeichnissen angelegt werden
+-        struct cdi_fs_stream* parent_stream = parent->data;
+-        if (parent_stream->res->dir == NULL) {
+-            goto out_err;
+-        }
++    result = -!(cdires->file->write(&s, offset, bytes, buf) == bytes);
+ 
+-        // Stream erstellen fuer die neue Ressource
+-        struct cdi_fs_stream stream;;
+-        memset(&stream, 0, sizeof(stream));
+-        stream.fs = parent_stream->fs;
++    return result;
++}
+ 
+-        if(!parent_stream->res->flags.create_child) {
+-            goto out_err;
+-        }
+-        if (!parent_stream->res->dir->create_child(&stream, child_name,
+-            parent_stream->res))
+-        {
+-            puts("cdi_fs: Fehler beim Anlegen der Kindressource");
+-            goto out_err;
+-        }
++int cdi_fs_lio_write_symlink(struct lio_resource* res, uint64_t offset,
++    size_t bytes, void* buf)
++{
++    struct cdi_fs_filesystem* fs = res->tree->opaque;
++    struct cdi_fs_res* cdires = res->opaque;
++    struct cdi_fs_stream s;
++    int result;
++    char* path;
++    size_t path_len;
+ 
+-        if (!stream.res->res->assign_class(&stream, type)) {
+-            puts("cdi_fs: Fehler beim Zuweisen der Klasse fuer die neue"
+-                "Ressource");
+-            goto out_err;
+-        }
++    s.fs = fs;
++    s.res = cdires;
++    s.error = 0;
+ 
+-        handle_dirent(stream.res, parent);
+-        node = vfstree_get_node_by_name(parent, child_name);
++    if (offset + bytes > res->size) {
++        bytes = res->size - offset;
+     }
+ 
+-    stream = node->data;
+-
+-    if (stream->res->link) {
+-        type = CDI_FS_CLASS_LINK;
++    if (!ensure_loaded(&s) || !cdires->link || !cdires->link->write_link
++        || fs->read_only)
++    {
++        return -1;
+     }
+ 
+-    switch (type) {
+-        case CDI_FS_CLASS_FILE:
+-            if (stream->res->file == NULL) {
+-                goto out_err;
+-            }
+-
+-            if ((args & IO_OPEN_MODE_TRUNC)) {
+-                if (!stream->res->file->truncate(stream, 0)) {
+-                    puts("cdi_fs: Truncate fehlgeschlagen!");
+-                    goto out_err;
+-                }
+-                node->size = 0;
+-            }
+-            break;
+-
+-        case CDI_FS_CLASS_DIR:
+-            if (stream->res->dir == NULL) {
+-                goto out_err;
+-            }
+-            break;
+-
+-        case CDI_FS_CLASS_LINK:
+-            if (stream->res->link == NULL) {
+-                goto out_err;
+-            }
+-            break;
+-
+-        default:
+-            goto out_err;
++    path = strdup(cdires->link->read_link(&s));
++    path_len = strlen(path);
++    if (path_len < offset + bytes) {
++        path = realloc(path, offset + bytes + 1);
++        path[offset + bytes] = '\0';
+     }
+ 
+-    v();
+-    return true;
++    memcpy(path + offset, buf, bytes);
++    result = -cdires->link->write_link(&s, path);
+ 
+-out_err:
+-    v();
+-    return false;
++    return result;
+ }
+ 
+-/**
+- * Handler der dazu benutzt wird, die Pfade umzubiegen
+- */
+-bool lostio_pre_open_handler(char** path, uint8_t args, pid_t pid,
+-    FILE* source)
++int cdi_fs_lio_write(struct lio_resource* res, uint64_t offset,
++    size_t bytes, void* buf)
+ {
+-    if ((strcmp(*path, "/") == 0) || (vfstree_get_node_by_path(*path) == NULL))
+-    {
+-        if (lostio_not_found_handler(path, args, pid, source) == false) {
+-            return false;
+-        }
++    if (res->retargetable) {
++        return cdi_fs_lio_write_symlink(res, offset, bytes, buf);
++    } else {
++        return cdi_fs_lio_write_file(res, offset, bytes, buf);
+     }
+-    return true;
+ }
+ 
+-size_t lostio_readahead_handler(lostio_filehandle_t* fh, void* buf,
+-    size_t bs, size_t bc)
++extern void caches_sync_all(void);
++int cdi_fs_lio_sync(struct lio_resource* res)
+ {
+-    size_t size = 0;
+-    struct cdi_fs_stream* dh = fh->node->data;
+-
+-    p();
+-
+-    if (dh->res->file == NULL) {
+-        goto out;
+-    }
+-
+-    if (!dh->res->flags.read) {
+-        goto out;
+-    }
+-
+-    if (fh->pos > fh->node->size) {
+-        goto out;
+-    }
++    struct cdi_fs_filesystem* fs = res->tree->opaque;
+ 
+-    size = bs * bc;
+-    if (size > fh->node->size - fh->pos) {
+-        size = fh->node->size - fh->pos;
+-    }
+-    if (size == 0) {
+-        goto out;
+-    }
++    // FIXME Rückgabewert
++    caches_sync_all();
+ 
+-    size = dh->res->file->read(dh, fh->pos, size, buf);
+-
+-out:
+-    v();
+-    return size;
++    return lio_sync(fs->osdep.tree->source);
+ }
+ 
+-size_t lostio_read_handler(lostio_filehandle_t* fh, void* buf,
+-    size_t bs, size_t bc)
++int cdi_fs_lio_resize(struct lio_resource* res, uint64_t size)
+ {
+-    size_t ret;
++    struct cdi_fs_filesystem* fs = res->tree->opaque;
++    struct cdi_fs_res* cdires = res->opaque;
++    struct cdi_fs_stream s;
+ 
+-    p();
+-    ret = lostio_readahead_handler(fh, buf, bs, bc);
+-    fh->pos += ret;
+-    if(fh->pos >= fh->node->size) {
+-        fh->flags |= LOSTIO_FLAG_EOF;
+-    } else {
+-        fh->flags &= ~LOSTIO_FLAG_EOF;
++    s.fs = fs;
++    s.res = cdires;
++    s.error = 0;
++
++    if (cdires->file) {
++        if (!cdires->file->truncate || !cdires->file->truncate(&s, size)) {
++            return -1;
++        }
++    } else if (!cdires->link) {
++        return -1;
+     }
+-    v();
+ 
+-    return ret;
++    res->size = size;
++    return 0;
+ }
+ 
+-size_t lostio_write_handler(lostio_filehandle_t* fh, size_t bs, size_t bc,
+-    void* data)
++static struct lio_resource* make_object(struct lio_resource* parent,
++    const char* name, cdi_fs_res_class_t cls)
+ {
+-    size_t size = bs * bc;
+-    struct cdi_fs_stream* stream = fh->node->data;
+-    size_t result = 0;
++    struct cdi_fs_filesystem* fs = parent->tree->opaque;
++    struct cdi_fs_res* cdiparent = parent->opaque;
++    struct cdi_fs_stream s;
++    struct lio_resource* res;
+ 
+-    p();
++    s.fs = fs;
++    s.res = NULL;
++    s.error = 0;
+ 
+-    if (!size) {
+-        goto out;
++    if (fs->read_only || !cdiparent->dir || !cdiparent->dir->create_child ||
++        !cdiparent->dir->create_child(&s, name, cdiparent))
++    {
++        return NULL;
+     }
+ 
+-    if(!stream->res->flags.write) {
+-        goto out;
++    if (!ensure_loaded(&s)) {
++        return NULL;
+     }
+ 
+-    result = stream->res->file->write(stream, fh->pos, size, data);
+-    fh->pos += size;
+-
+-    if (fh->pos > fh->node->size) {
+-        fh->node->size = fh->pos;
++    if (!s.res->res->assign_class(&s, cls)) {
++        return NULL;
+     }
+ 
+-    if(fh->pos >= fh->node->size) {
+-        fh->flags |= LOSTIO_FLAG_EOF;
+-    } else {
+-        fh->flags &= ~LOSTIO_FLAG_EOF;
++    res = create_liores(fs, s.res);
++    if (res) {
++        lio_node_create(parent, res, name);
+     }
+ 
+-out:
+-    v();
+-    return result;
++    return res;
+ }
+ 
+-
+-
+-int lostio_seek_handler(lostio_filehandle_t* fh, uint64_t offset, int origin)
++struct lio_resource* cdi_fs_lio_make_file(struct lio_resource* parent,
++    const char* name)
+ {
+-    uint64_t new_pos;
+-
+-    p();
++    return make_object(parent, name, CDI_FS_CLASS_FILE);
++}
+ 
+-    switch(origin)
+-    {
+-        case SEEK_SET:
+-            new_pos = offset;
+-            break;
++struct lio_resource* cdi_fs_lio_make_dir(struct lio_resource* parent,
++    const char* name)
++{
++    return make_object(parent, name, CDI_FS_CLASS_DIR);
++}
+ 
+-        case SEEK_CUR:
+-            new_pos = fh->pos + offset;
+-            break;
++struct lio_resource* cdi_fs_lio_make_symlink(struct lio_resource* parent,
++    const char* name, const char* target)
++{
++    struct lio_resource* res;
++    struct cdi_fs_res* cdires;
++    struct cdi_fs_filesystem* fs = parent->tree->opaque;
++    struct cdi_fs_stream s;
+ 
+-        case SEEK_END:
+-            new_pos = fh->node->size + offset;
+-            break;
++    res = make_object(parent, name, CDI_FS_CLASS_LINK);
++    if (res) {
++        cdires = res->opaque;
++        s.fs = fs;
++        s.res = cdires;
++        s.error = 0;
+ 
+-        default:
+-            return -1;
+-    }
++        cdires->link->write_link(&s, target);
+ 
+-    if ((new_pos > fh->node->size) && ((origin == SEEK_SET) ||
+-        (origin == SEEK_CUR)) && ((fh->flags & IO_OPEN_MODE_WRITE) == 0))
+-    {
+-        v();
+-        return -1;
++        res->size = strlen(target);
++        lio_resource_modified(res);
+     }
+ 
+-    fh->pos = new_pos;
+-
+-    if(fh->pos >= fh->node->size) {
+-        fh->flags |= LOSTIO_FLAG_EOF;
+-    } else {
+-        fh->flags &= ~LOSTIO_FLAG_EOF;
+-    }
+-
+-    v();
+-    return 0;
++    return res;
+ }
+ 
+ /**
+@@ -545,100 +441,46 @@ static int cdi_remove_res(struct cdi_fs_stream* stream)
+     return 0;
+ }
+ 
+-int lostio_unlink_handler(lostio_filehandle_t* fh, const char* name)
++int cdi_fs_lio_unlink(struct lio_resource* parent, const char* name)
+ {
+-    struct cdi_fs_stream* stream;
+-    vfstree_node_t* node;
+-    int i;
+-    int result = 0;
+-
+-    p();
+-
+-    // Passender Kindknoten finden
+-    for (i = 0; (node = list_get_element_at(fh->node->children, i)); i++) {
+-        if (!strcmp(node->name, name)) {
+-            goto found;
+-        }
+-    }
+-
+-    result = -1;
+-    goto out;
++    struct cdi_fs_filesystem* fs = parent->tree->opaque;
++    struct cdi_fs_res* cdiparent = parent->opaque;
++    struct cdi_fs_res* child;
++    struct cdi_fs_stream s;
++    struct lio_node* node;
+ 
+-found:
+-    stream = node->data;
+-
+-    // Spezialfall: Es handelt sich um ein Verzeichnis. Das heisst es darf
+-    // nur geloescht werden wenn es keine Kind-Eintraege mehr hat.
+-    if (stream->res->dir && list_size(node->children)) {
+-        result = -1;
+-        goto out;
+-    }
+-
+-    // Sonst kann die Ressource geloescht werden.
+-    if (cdi_remove_res(stream) || !vfstree_delete_child(fh->node, name)) {
+-        result = -1;
+-    }
+-
+-out:
+-    v();
+-    return result;
+-}
+-
+-size_t lostio_symlink_read_handler(lostio_filehandle_t* fh, void* buf,
+-    size_t bs, size_t bc)
+-{
+-    size_t size = bs*bc;
+-    struct cdi_fs_stream* dh = fh->node->data;
+-    const char* link;
+-
+-    p();
+-
+-    if (dh->res->link == NULL) {
+-        goto out;
+-    }
+-
+-    if (!dh->res->flags.read_link) {
+-        goto out;
++    if (fs->read_only) {
++        return -1;
+     }
+ 
+-    link = dh->res->link->read_link(dh);
+-    if (size > strlen(link) + 1) {
+-        size = strlen(link) + 1;
++    s.fs = fs;
++    s.res = cdiparent;
++    s.error = 0;
++    if (!ensure_loaded(&s)) {
++        return -1;
+     }
+-    strncpy(buf, link, size);
+-
+-out:
+-    v();
+-    return size;
+-}
+ 
+-size_t lostio_symlink_write_handler(lostio_filehandle_t* fh, size_t bs,
+-    size_t bc, void* data)
+-{
+-    size_t size = bs * bc;
+-    struct cdi_fs_stream* stream = fh->node->data;
+-    size_t result = 0;
+-
+-    p();
+-
+-    if ((stream->res->link == NULL) || (((char*) data)[size - 1] != 0)) {
+-        goto out;
++    if (!(node = lio_resource_get_child(parent, name))) {
++        return -1;
+     }
++    child = node->res->opaque;
+ 
+-    if (!size) {
+-        goto out;
++    s.res = child;
++    if (!ensure_loaded(&s)) {
++        return -1;
+     }
+ 
+-    if (!stream->res->flags.write_link) {
+-        goto out;
++    // Wir haben es mit einem Verzeichnis zu tun, das duerfen wir nur loeschen
++    // wenn es keine Kindeintraege mehr hat.
++    if (child->dir && cdi_list_size(child->children)) {
++        return -1;
+     }
+ 
+-    if (stream->res->link->write_link(stream, data)) {
+-        result = size;
++    if (cdi_remove_res(&s)) {
++        return -1;
+     }
++    lio_resource_remove_child(parent, node);
+ 
+-out:
+-    v();
+-    return result;
++    return 0;
+ }
+ 
+-- 
+1.7.7
+
+
+From kevin at tyndur.org  Mon Dec 29 18:23:39 2014
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Mon, 29 Dec 2014 18:23:39 +0100
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH_3/3=5D_tests=3A_LIOv2-Testf?=
+	=?utf-8?q?=C3=A4lle=2C_die_konvertiertes_ext2_brauchen?=
+In-Reply-To: <1419873819-23365-1-git-send-email-kevin@tyndur.org>
+References: <1419873819-23365-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1419873819-23365-4-git-send-email-kevin@tyndur.org>
+
++ tests: Jetzt, nachdem cdi/fs und damit auch ext2 nach LIOv2
+  konvertiert ist, können auch die entsprechenden Testfälle gemergt
+  werden.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ tests/lostio/002.c       |  188 ++++++++++++++++++++++++++++++++++++++++++
+ tests/lostio/003.c       |  205 ++++++++++++++++++++++++++++++++++++++++++++++
+ tests/lostio/Makefile    |   10 ++-
+ tests/lostio/run_test.sh |   18 ++++
+ 4 files changed, 419 insertions(+), 2 deletions(-)
+ create mode 100644 tests/lostio/002.c
+ create mode 100644 tests/lostio/003.c
+
+diff --git a/tests/lostio/002.c b/tests/lostio/002.c
+new file mode 100644
+index 0000000..a987481
+--- /dev/null
++++ b/tests/lostio/002.c
+@@ -0,0 +1,188 @@
++/*
++ * Copyright (c) 2011 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <syscall.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <ports.h>
++#include <services.h>
++#include <errno.h>
++
++static const char* test_name;
++
++static void __attribute__((noreturn)) quit_qemu(void)
++{
++    request_ports(0xb000, 8);
++    outw(0xb004, 0x2000);
++
++    /* Wird nie erreicht */
++    while(1) {
++        asm volatile("ud2");
++    }
++}
++
++static void _test_assert(bool expr, const char* text, int line)
++{
++    if (!expr) {
++        printf("* FAIL %s: %s [" __FILE__ ":%d]\n", test_name, text, line);
++        quit_qemu();
++    }
++}
++
++#define test_assert(x) \
++    _test_assert((x), #x, __LINE__)
++
++static void rw(lio_stream_t s, int64_t offset, size_t size, void* buf,
++    void *rbuf, bool write)
++{
++    int ret;
++
++    if (write) {
++        ret = lio_pwrite(s, offset, size, buf);
++        test_assert(ret == size);
++    } else {
++        ret = lio_pread(s, offset, size, rbuf);
++        printf("read: %llx + %x:'%d [%llx...]\n",
++            offset, size, ret, *(uint64_t*)rbuf);
++        test_assert(ret == size);
++        test_assert(memcmp(buf, rbuf, size) == 0);
++
++    }
++}
++
++static void test_1_2_rw(bool write, const char* _test_name)
++{
++    lio_resource_t tmp_root;
++    lio_resource_t tmp_file;
++    lio_stream_t s;
++    uint8_t* buf = malloc(512 * 1024);
++    uint8_t* rbuf = malloc(512 * 1024);
++    int ret;
++    int i;
++
++    test_name = _test_name;
++    printf("start %s\n", test_name);
++
++    /* Testdatei anlegen und öffnen */
++    if (write) {
++        tmp_root = lio_resource("ata:/ata00|ext2:/", false);
++        test_assert(tmp_root >= 0);
++
++        tmp_file = lio_mkfile(tmp_root, "test");
++        test_assert(tmp_file >= 0);
++    } else {
++        tmp_file = lio_resource("ata:/ata00|ext2:/test", false);
++        test_assert(tmp_file >= 0);
++    }
++    printf("have res\n");
++
++    s = lio_open(tmp_file, LIO_READ | LIO_WRITE);
++    test_assert(s >= 0);
++
++    printf("starte rw...\n");
++    /* Puffer befuellen */
++    for (i = 0; i < 512 * 1024; i++) {
++        buf[i] = (19 + i) % 43;
++    }
++
++    /* 1. Durchlauf */
++    for (i = 0; i < 16; i++) {
++        rw(s,
++            384 + i * 1536 * 1024,
++            512 * 1024,
++            buf, rbuf, write);
++    }
++
++    /* 2. Durchlauf */
++    for (i = 0; i < 16; i++) {
++        rw(s,
++            384 + 1024 * 1024 + i * 1536 * 1024,
++            512 * 1024,
++            buf, rbuf, write);
++    }
++
++    /* 3. Durchlauf */
++    for (i = 0; i < 16; i++) {
++        rw(s,
++            384 + 512 * 1024 + i * 1536 * 1024,
++            512 * 1024,
++            buf, rbuf, write);
++    }
++
++    /* FIXME lio_sync_all() sollte das erledigen. Tut's aber nicht. */
++    ret = lio_sync(s);
++    test_assert(ret >= 0);
++
++    ret = lio_close(s);
++    test_assert(ret >= 0);
++
++    ret = lio_sync_all();
++    test_assert(ret >= 0);
++
++    free(buf);
++    free(rbuf);
++
++    printf("* PASS %s\n", test_name);
++}
++
++static void test1(void)
++{
++    test_1_2_rw(true, "ext2: Ganz viel write");
++}
++
++static void test2(void)
++{
++    test_1_2_rw(false, "ext2: Ganz viel read nach Reboot");
++}
++
++int main(int argc, char* argv[])
++{
++    if (argc < 2) {
++        printf("* ERROR Zu wenige Parameter\n");
++        quit_qemu();
++    }
++
++    servmgr_need("ata");
++    servmgr_need("ext2");
++
++    switch (atoi(argv[1])) {
++        case 1:
++            test1();
++            break;
++        case 2:
++            test2();
++            break;
++
++        default:
++            printf("* ERROR Unbekannter Testfall\n");
++            break;
++    }
++
++    quit_qemu();
++}
+diff --git a/tests/lostio/003.c b/tests/lostio/003.c
+new file mode 100644
+index 0000000..00e5922
+--- /dev/null
++++ b/tests/lostio/003.c
+@@ -0,0 +1,205 @@
++/*
++ * Copyright (c) 2011 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "testlib.h"
++
++#include <syscall.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <ports.h>
++#include <services.h>
++#include <errno.h>
++
++const char* test_name;
++
++static void rw(lio_stream_t s, int64_t offset, size_t size, void* buf,
++    void *rbuf, bool write)
++{
++    int ret;
++
++    if (write) {
++        ret = lio_pwrite(s, offset, size, buf);
++        printf("write: %llx + %x: %d\n", offset, size, ret);
++        test_assert(ret == size);
++    } else {
++        ret = lio_pread(s, offset, size, rbuf);
++        printf("read: %llx + %x:'%d [%llx..., expected %llx...]\n",
++            offset, size, ret, *(uint64_t*)rbuf, *(uint64_t*)buf);
++        test_assert(ret == size);
++        test_assert(memcmp(buf, rbuf, size) == 0);
++
++    }
++}
++
++static void test_2_3_rw(bool write, const char* _test_name)
++{
++    lio_resource_t tmp_root;
++    lio_resource_t tmp_file;
++    lio_stream_t s;
++    uint8_t* buf = malloc(512 * 1024);
++    uint8_t* rbuf = malloc(512 * 1024);
++    int ret;
++    int i;
++
++    test_name = _test_name;
++    printf("start %s\n", test_name);
++
++    /* Testdatei anlegen und öffnen */
++    if (write) {
++        tmp_root = lio_resource("ata:/ata00|ext2:/inner.ext2|ext2:/", false);
++        test_assert(tmp_root >= 0);
++
++        tmp_file = lio_mkfile(tmp_root, "test");
++        test_assert(tmp_file >= 0);
++    } else {
++        tmp_file = lio_resource("ata:/ata00|ext2:/inner.ext2|ext2:/test", false);
++        test_assert(tmp_file >= 0);
++    }
++    printf("have res\n");
++
++    s = lio_open(tmp_file, LIO_READ | LIO_WRITE);
++    test_assert(s >= 0);
++
++    printf("starte rw...\n");
++    /* Puffer befuellen */
++    for (i = 0; i < 512 * 1024; i++) {
++        buf[i] = (19 + i) % 43;
++    }
++
++    /* 1. Durchlauf */
++    for (i = 0; i < 16; i++) {
++        rw(s,
++            384 + i * 1536 * 1024,
++            512 * 1024,
++            buf, rbuf, write);
++    }
++
++    /* 2. Durchlauf */
++    for (i = 0; i < 16; i++) {
++        rw(s,
++            384 + 1024 * 1024 + i * 1536 * 1024,
++            512 * 1024,
++            buf, rbuf, write);
++    }
++
++    /* 3. Durchlauf */
++    for (i = 0; i < 16; i++) {
++        rw(s,
++            384 + 512 * 1024 + i * 1536 * 1024,
++            512 * 1024,
++            buf, rbuf, write);
++    }
++
++    /* FIXME lio_sync_all() sollte das erledigen. Tut's aber nicht. */
++    ret = lio_sync(s);
++    test_assert(ret >= 0);
++
++    ret = lio_close(s);
++    test_assert(ret >= 0);
++
++    ret = lio_sync_all();
++    test_assert(ret >= 0);
++
++    free(buf);
++    free(rbuf);
++
++    printf("* PASS %s\n", test_name);
++}
++
++
++static void test1(void)
++{
++    lio_resource_t file;
++    lio_stream_t s;
++    int ret;
++
++    uint8_t* buf = malloc(1024);
++    char text[] = "Ein Testtext zum Texten des Tests und zum Testen "
++                  "des Texts.";
++
++    test_name = "Geschachteltes ext2: Einfaches Lesen";
++
++    file = lio_resource("ata:/ata00|ext2:/inner.ext2|ext2:/test.txt", false);
++    test_assert(file >= 0);
++
++    s = lio_open(file, LIO_READ);
++    test_assert(s >= 0);
++
++    ret = lio_pread(s, 0, 1024, buf);
++    test_assert(ret == sizeof(text));
++    test_assert(memcmp(buf, text, sizeof(text) - 1) == 0);
++
++    ret = lio_close(s);
++    test_assert(ret >= 0);
++
++    ret = lio_pread(s, 0, 1024, buf);
++    test_assert(ret == -EBADF);
++
++    free(buf);
++    printf("* PASS %s\n", test_name);
++}
++
++static void test2(void)
++{
++    test_2_3_rw(true, "Geschachteltes ext2: Ganz viel write");
++}
++
++static void test3(void)
++{
++    test_2_3_rw(false, "Geschachteltes ext2: Ganz viel read nach Reboot");
++}
++
++int main(int argc, char* argv[])
++{
++    if (argc < 2) {
++        printf("* ERROR Zu wenige Parameter\n");
++        quit_qemu();
++    }
++
++    servmgr_need("ata");
++    servmgr_need("ext2");
++
++    switch (atoi(argv[1])) {
++        case 1:
++            test1();
++            break;
++        case 2:
++            test2();
++            break;
++        case 3:
++            test3();
++            break;
++
++        default:
++            printf("* ERROR Unbekannter Testfall\n");
++            break;
++    }
++
++    quit_qemu();
++}
+diff --git a/tests/lostio/Makefile b/tests/lostio/Makefile
+index 8a4536a..03f4d13 100644
+--- a/tests/lostio/Makefile
++++ b/tests/lostio/Makefile
+@@ -6,17 +6,23 @@ QEMU=$(QEMU_BINARY)
+ 
+ LIBGCC=$(shell $(CC) -print-libgcc-file-name)
+ 
+-CFLAGS=-I ../../src/include -I../../src/modules/include -I ../../src/include/arch/i386 -I../../src/modules/include/arch/i386
++CFLAGS=-I ../include -I ../../src/include -I../../src/modules/include -I ../../src/include/arch/i386 -I../../src/modules/include/arch/i386
+ LDFLAGS=-T ../../src/modules/user-i386.ld --start-group ../../src/lib/library.a ../../src/modules/lib/library.a ../../src/modules/lib/crt0.o $(LIBGCC) --end-group
+ 
+ export QEMU
+ 
+-qemu: 001
++qemu: 001 002 003
+ 	@./run_test.sh
+ 
+ 001: 001.o
+ 	@$(LD) $^ $(LDFLAGS) -o $@
+ 
++002: 002.o
++	@$(LD) $^ $(LDFLAGS) -o $@
++
++003: 003.o ../lib/testlib.o
++	@$(LD) $^ $(LDFLAGS) -o $@
++
+ %.o: %.c
+ 	@$(CC) $(CFLAGS) -o $@ $^
+ 
+diff --git a/tests/lostio/run_test.sh b/tests/lostio/run_test.sh
+index 1add91f..3bbb00c 100755
+--- a/tests/lostio/run_test.sh
++++ b/tests/lostio/run_test.sh
+@@ -34,3 +34,21 @@ run_test 001 7
+ run_test 001 8
+ run_test 001 9
+ run_test 001 10
++
++dd if=/dev/zero of=scratch.img bs=1M count=32
++mke2fs -Fq scratch.img
++
++run_test 002 1
++run_test 002 2
++
++dd if=/dev/zero of=scratch.img bs=1M count=32
++mke2fs -Fq scratch.img
++dd if=/dev/zero of=inner.ext2 bs=1M count=28
++mke2fs -Fq inner.ext2
++echo "Ein Testtext zum Texten des Tests und zum Testen des Texts." > test.txt
++debugfs -wR "write test.txt test.txt" inner.ext2
++debugfs -wR "write inner.ext2 inner.ext2" scratch.img
++
++run_test 003 1
++run_test 003 2
++run_test 003 3
+-- 
+1.7.7
+
+
+From kevin at tyndur.org  Tue Dec 30 13:37:52 2014
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Tue, 30 Dec 2014 13:37:52 +0100
+Subject: [tyndur-devel] [PATCH 0/3] vm86: Nochmal anders machen
+Message-ID: <1419943075-8940-1-git-send-email-kevin@tyndur.org>
+
+Merke: Tief in die Protected-Mode-Trickkiste zu greifen funktioniert zwar mit
+echter Hardware, aber tyndur wird vor allem auf Emulatoren benutzt und da ist
+es keine so gute Idee und geht ständig kaputt.
+
+Also wieder weg mit den ganzen schönen Task Gates und - was soll's - das
+virtuell erste MB einfach immer freihalten falls mal ein VM86-Syscall
+vorbeikommt.
+
+Die erste PT ist jetzt pro Prozess und wird vom Kernel verwaltet. Auch nett,
+das kann man sicher für was gebrauchen.
+
+Kevin Wolf (3):
+  kernel2: UTF-8 und Trailing Whitespace
+  kernel2/i386: Nach 4 MB mappen, erste PT ist Userspace
+  kernel2: VM86 wieder ohne Task-Gate-Tricksereien
+
+ src/include/arch/i386/page.h                     |    2 +-
+ src/kernel2/include/arch/i386/mm_arch.h          |    3 +
+ src/kernel2/include/mm.h                         |    4 -
+ src/kernel2/src/arch/i386/cpu.c                  |    5 +
+ src/kernel2/src/arch/i386/interrupts/int_stubs.S |   23 --
+ src/kernel2/src/arch/i386/kernel.ld              |    4 +-
+ src/kernel2/src/arch/i386/mm/mm_context.c        |  229 ++++++-------
+ src/kernel2/src/arch/i386/mm/virt.c              |   11 +-
+ src/kernel2/src/arch/i386/vm86.c                 |  393 +++++-----------------
+ src/kernel2/src/arch/i386/vm86_asm.S             |   15 -
+ src/kernel2/src/console.c                        |    2 +-
+ 11 files changed, 221 insertions(+), 470 deletions(-)
+ delete mode 100644 src/kernel2/src/arch/i386/vm86_asm.S
+
+-- 
+1.7.7
+
+
+From kevin at tyndur.org  Tue Dec 30 13:37:53 2014
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Tue, 30 Dec 2014 13:37:53 +0100
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH_1/3=5D_kernel2=3A_UTF-8_und_Tra?=
+	=?utf-8?q?iling_Whitespace?=
+In-Reply-To: <1419943075-8940-1-git-send-email-kevin@tyndur.org>
+References: <1419943075-8940-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1419943075-8940-2-git-send-email-kevin@tyndur.org>
+
+! kernel2: Codeformatierung in arch/i386/mm/mm_context.c gefixt
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/src/arch/i386/mm/mm_context.c |  180 ++++++++++++++--------------
+ 1 files changed, 90 insertions(+), 90 deletions(-)
+
+diff --git a/src/kernel2/src/arch/i386/mm/mm_context.c b/src/kernel2/src/arch/i386/mm/mm_context.c
+index 46fab94..7f40312 100644
+--- a/src/kernel2/src/arch/i386/mm/mm_context.c
++++ b/src/kernel2/src/arch/i386/mm/mm_context.c
+@@ -1,4 +1,4 @@
+-/*  
++/*
+  * Copyright (c) 2006-2007 The tyndur Project. All rights reserved.
+  *
+  * This code is derived from software contributed to the tyndur Project
+@@ -20,18 +20,18 @@
+  *    contributors may be used to endorse or promote products derived
+  *    from this software without specific prior written permission.
+  *
+- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS 
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+  * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+  * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR 
+- * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, 
+- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, 
+- * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; 
+- * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
+- * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR 
+- * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+  * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+- */  
++ */
+ 
+ #include <string.h>
+ #include <stdint.h>
+@@ -52,8 +52,8 @@
+ uint32_t page_directory_version = 0;
+ page_directory_t page_directory_current;
+ 
+-/** 
+- * Zur Initialisierung: Wenn gesetzt, wird mit nicht mit Paging, sondern 
++/**
++ * Zur Initialisierung: Wenn gesetzt, wird mit nicht mit Paging, sondern
+  * physischen Adressen gearbeitet
+  */
+ bool use_phys_addr = true;
+@@ -81,18 +81,18 @@ mmc_context_t mmc_create()
+         context.page_directory, PAGE_SIZE);
+ 
+     memset(context.page_directory_virt, 0, PAGE_SIZE);
+-    
++
+     // Kernel Page Tables mappen
+-    context.page_directory_virt[PAGETABLES_MEM_START >> PGDIR_SHIFT] = 
++    context.page_directory_virt[PAGETABLES_MEM_START >> PGDIR_SHIFT] =
+         (uintptr_t) context.page_directory | PTE_W | PTE_P;
+-    
++
+     mmc_sync(&context);
+-    
++
+     return context;
+ }
+ 
+ /**
+- * Erstellt einen komplett neuen und unabhängigen MM-Kontext
++ * Erstellt einen komplett neuen und unabhÃ¤ngigen MM-Kontext
+  */
+ mmc_context_t mmc_create_empty()
+ {
+@@ -111,7 +111,7 @@ mmc_context_t mmc_create_empty()
+ }
+ 
+ /**
+- * Erstellt einen neuen MM-Kontext (Page Directory) für den Kernel.
++ * Erstellt einen neuen MM-Kontext (Page Directory) fÃ¼r den Kernel.
+  * Diese Funktion wird nur zur Initialisierung benutzt, solange Paging
+  * noch nicht aktiviert ist.
+  */
+@@ -129,7 +129,7 @@ mmc_context_t mmc_create_kernel_context()
+     memset(page_directory, 0, PAGE_SIZE);
+ 
+     // Kernel Page Tables mappen
+-    page_directory[PAGETABLES_MEM_START >> PGDIR_SHIFT] = 
++    page_directory[PAGETABLES_MEM_START >> PGDIR_SHIFT] =
+         (uintptr_t)  page_directory | PTE_W | PTE_P;
+ 
+     // Die Rueckgabe von mmc_current_context muss von Anfang an korrekt sein
+@@ -149,7 +149,7 @@ static void mmc_sync(mmc_context_t* context)
+         context->version = page_directory_version;
+     }
+ 
+-    // Wenn wir hier das neu synchronisierte PD setzen, können wir Probleme
++    // Wenn wir hier das neu synchronisierte PD setzen, kÃ¶nnen wir Probleme
+     // beim zerstoeren von Kontexten umgehen, falls der zu loeschende
+     // Kontext auch der aktuellste war.
+     page_directory_current = context->page_directory_virt;
+@@ -213,9 +213,9 @@ void mmc_destroy(mmc_context_t* context)
+ }
+ 
+ /**
+- * Führt ein temporäres Mapping einer Page Table durch, falls sie nicht zum
+- * aktuellen Page Directory gehört. Ansonsten wird ein Pointer auf die 
+- * Page Table in den oberen 4 MB des Kernelspeichers zurückgegeben
++ * FÃ¼hrt ein temporÃ¤res Mapping einer Page Table durch, falls sie nicht zum
++ * aktuellen Page Directory gehÃ¶rt. Ansonsten wird ein Pointer auf die
++ * Page Table in den oberen 4 MB des Kernelspeichers zurÃ¼ckgegeben
+  */
+ vaddr_t get_pagetable(mmc_context_t* context, size_t index)
+ {
+@@ -228,7 +228,7 @@ vaddr_t get_pagetable(mmc_context_t* context, size_t index)
+ 
+     if (context->page_directory == mmc_current_context().page_directory) {
+         if (!use_phys_addr) {
+-            page_table = (page_table_t) 
++            page_table = (page_table_t)
+                 (PAGETABLES_MEM_START + (PAGE_TABLE_LENGTH * 4 * index));
+         } else {
+             page_table = (vaddr_t) (pagedir[index] & PAGE_MASK);
+@@ -243,7 +243,7 @@ vaddr_t get_pagetable(mmc_context_t* context, size_t index)
+ 
+ /**
+  * Gibt eine mit get_pagetable angeforderte Page Table wieder frei, falls sie
+- * nicht zum aktuellen Page Directory gehört.
++ * nicht zum aktuellen Page Directory gehÃ¶rt.
+  */
+ void free_pagetable(mmc_context_t* context, vaddr_t page_table)
+ {
+@@ -257,27 +257,27 @@ void free_pagetable(mmc_context_t* context, vaddr_t page_table)
+  * Mappt eine virtuelle Adresse auf eine physische.
+  * Beide Adressen muessen dazu 4K-aligned sein.
+  *
+- * @param page_directory Page Directory, auf das sich die virtuelle 
++ * @param page_directory Page Directory, auf das sich die virtuelle
+  *    Adresse bezieht
+  *
+  * @param vaddr Virtuelle Speicheradresse
+  * @param paddr Physische Speicheradresse
+  * @param flags Flags, die in der Page Table gesetzt werden sollen
+- * 
+- * @return true, wenn die virtuelle Seite erfolgreich gemappt werden konnte, 
++ *
++ * @return true, wenn die virtuelle Seite erfolgreich gemappt werden konnte,
+  *    false sonst
+  */
+ static bool map_page
+-    (mmc_context_t* context, vaddr_t vaddr, paddr_t paddr, int flags) 
++    (mmc_context_t* context, vaddr_t vaddr, paddr_t paddr, int flags)
+ {
+ 
+ 
+     page_table_t page_table;
+     bool clear_page_table = false;
+     page_directory_t page_directory = context->page_directory_virt;
+-    
++
+     uint32_t vpage = (uint32_t) vaddr / PAGE_SIZE;
+-    
++
+     // kprintf("map_page %x => %x   PD:0x%08x (virt:0x%08x) CPU %u\n", vaddr,
+     //     paddr, context->page_directory, context->page_directory_virt,
+     //     cpu_get_current()->id);
+@@ -287,7 +287,7 @@ static bool map_page
+         panic("Versuchtes Mapping nach virtuell NULL");
+         return false;
+     }
+-  
++
+     // Wenn boese Flags die Adresse manipulieren wollen, fliegt
+     // das entsprechende Programm eben beim naechsten Zugriff
+     // auf die Schnauze.
+@@ -295,10 +295,10 @@ static bool map_page
+         return false;
+     }
+ 
+-    // Umgekehrt müssen die Adressen 4K-aligned sein und nicht 
++    // Umgekehrt mÃ¼ssen die Adressen 4K-aligned sein und nicht
+     // irgendwelche Flags enthalten
+     if (((uint32_t) vaddr | (uint32_t) paddr) & 0xFFF) {
+-        panic("Adressen sind nicht 4K-aligned (virt = %x, phys = %x)", 
++        panic("Adressen sind nicht 4K-aligned (virt = %x, phys = %x)",
+             vaddr, paddr);
+     }
+ 
+@@ -306,7 +306,7 @@ static bool map_page
+     // Ales andere ergibt keinen Sinn, weil diese Bereiche ohnehin zwischen
+     // allen Kontexten synchron gehalten werden muessen.
+     //
+-    // TODO: Ergibt sehr wohl Sinn, wenn man nämlich IDT und GDT von einem
++    // TODO: Ergibt sehr wohl Sinn, wenn man nÃ¤mlich IDT und GDT von einem
+     // vm86-Task erstellen will.
+ #if 0
+     if ((context != &mmc_current_context()) &&
+@@ -324,13 +324,13 @@ static bool map_page
+     // ansonsten nehmen wir diese. Und wenn es sich bei dem Eintrag
+     // um eine 4M-Seite handelt, laeuft was schief.
+     lock(&context->lock);
+-    if ((page_directory[vpage / PAGE_TABLE_LENGTH] & PTE_P) == 0) 
++    if ((page_directory[vpage / PAGE_TABLE_LENGTH] & PTE_P) == 0)
+     {
+         page_table = (page_table_t) pmm_alloc(1);
+         // kprintf("Pagetable=0x%08x\n", page_table);
+         page_directory[vpage / PAGE_TABLE_LENGTH] =
+             (uint32_t) page_table | PTE_P | PTE_W | PTE_U;
+-       
++
+         // An dieser Stelle kann die Page Table noch nicht initialisiert
+         // werden, weil sie noch nicht gemappt ist.
+         clear_page_table = true;
+@@ -341,33 +341,33 @@ static bool map_page
+             context->version = ++page_directory_version;
+             page_directory_current = context->page_directory_virt;
+         }
+-    } 
+-    else if (page_directory[vpage / PAGE_TABLE_LENGTH] & PTE_PS) 
++    }
++    else if (page_directory[vpage / PAGE_TABLE_LENGTH] & PTE_PS)
+     {
+         // 4M-Page
+         panic("Doppelbelegung im Page Directory. (virt = 0x%x, phys = 0x%x)", vaddr, paddr);
+-    } 
++    }
+     unlock(&context->lock);
+ 
+     // Virtuelle Adresse der Page Table holen
+     page_table = get_pagetable(context, vpage / PAGE_TABLE_LENGTH);
+-    
++
+     lock(&context->lock);
+     // Jetzt ist die Page Table gemappt und kann initialisiert werden, falls es
+     // sich um eine neu angelegte Page Table handelt.
+     if (clear_page_table) {
+         memset(page_table, 0, PAGE_SIZE);
+     }
+-    
++
+     // Wenn der Eintrag in der Pagetable noch nicht gesetzt ist, setzen.
+     // Ansonsten stehen wir vor einer Doppelbelegung.
+     //
+-    // Wenn genau dasselbe Mapping doppelt gemacht wird, wird darüber 
++    // Wenn genau dasselbe Mapping doppelt gemacht wird, wird darÃ¼ber
+     // hinweggesehen.
+     //
+-    // Und wenn das Mapping aufgehoben werden soll, sollte man sich auch nicht 
+-    // darüber beschweren, dass der Eintrag schon besteht.
+-    
++    // Und wenn das Mapping aufgehoben werden soll, sollte man sich auch nicht
++    // darÃ¼ber beschweren, dass der Eintrag schon besteht.
++
+     bool page_is_present = (page_table[vpage % PAGE_TABLE_LENGTH] & PTE_P);
+     bool unmap_page = ! (flags & PTE_P);
+     bool mapping_changed =
+@@ -380,15 +380,15 @@ static bool map_page
+         panic("Doppelbelegung in einer Page Table.");
+         unlock(&context->lock);
+         return false;
+-    } 
+-    else 
++    }
++    else
+     {
+         // Setze den Page-Table-Eintrag
+         page_table[vpage % PAGE_TABLE_LENGTH] = ((uint32_t) paddr) | flags;
+ 
+-        // Falls es um das aktive Page Directory geht, wäre jetzt ein
++        // Falls es um das aktive Page Directory geht, wÃ¤re jetzt ein
+         // guter Zeitpunkt, den TLB zu invalidieren.
+-        // Falls wir die Page Table extra in den Kerneladressraum gemappt 
++        // Falls wir die Page Table extra in den Kerneladressraum gemappt
+         // haben, den Speicher wieder freigeben.
+         if (context->page_directory == mmc_current_context().page_directory) {
+             __asm__ __volatile__("invlpg %0" : : "m" (* (char*) vaddr));
+@@ -401,22 +401,22 @@ static bool map_page
+ }
+ 
+ /**
+- * Mappt mehrere zusammenhängende virtuelle Seiten auf einen physischen
++ * Mappt mehrere zusammenhÃ¤ngende virtuelle Seiten auf einen physischen
+  * Speicherbereich. Beide Adressen muessen dazu 4K-aligned sein.
+  *
+- * @param page_directory Page Directory, auf das sich die virtuelle 
++ * @param page_directory Page Directory, auf das sich die virtuelle
+  *    Adresse bezieht
+  *
+  * @param vaddr Virtuelle Speicheradresse der ersten Page
+  * @param paddr Physische Speicheradresse der ersten Page
+  * @param flags Flags, die in der Page Table gesetzt werden sollen
+  * @param num Anzahl der Seiten
+- * 
+- * @return true, wenn der bereich erfolgreich gemappt werden konnte, 
++ *
++ * @return true, wenn der bereich erfolgreich gemappt werden konnte,
+  *    false sonst
+  */
+-bool mmc_map(mmc_context_t* context, vaddr_t vaddr, paddr_t paddr, 
+-    int flags, size_t num_pages) 
++bool mmc_map(mmc_context_t* context, vaddr_t vaddr, paddr_t paddr,
++    int flags, size_t num_pages)
+ {
+     // kprintf("vaddr = %x, paddr = %x\n", vaddr, paddr);
+     size_t i;
+@@ -430,7 +430,7 @@ bool mmc_map(mmc_context_t* context, vaddr_t vaddr, paddr_t paddr,
+ 
+         if(map_page(context, va, pa, flags) != true)
+         {
+-            // TODO: Das bereits geschehene Mapping rückgängig machen
++            // TODO: Das bereits geschehene Mapping rÃ¼ckgÃ¤ngig machen
+             return false;
+         }
+     }
+@@ -441,14 +441,14 @@ bool mmc_map(mmc_context_t* context, vaddr_t vaddr, paddr_t paddr,
+ /**
+  * Entfernt das Mapping einer virtuellen Adresse.
+  *
+- * @param page_directory Page Directory, auf das sich die virtuelle 
++ * @param page_directory Page Directory, auf das sich die virtuelle
+  *    Adresse bezieht
+  * @param vaddr Virtuelle Speicheradresse
+- * 
+- * @return true, wenn die virtuelle Seite erfolgreich ungemappt werden konnte, 
++ *
++ * @return true, wenn die virtuelle Seite erfolgreich ungemappt werden konnte,
+  *    false sonst
+  */
+-bool mmc_unmap(mmc_context_t* context, vaddr_t vaddr, size_t count) 
++bool mmc_unmap(mmc_context_t* context, vaddr_t vaddr, size_t count)
+ {
+     size_t i;
+ 
+@@ -473,39 +473,39 @@ paddr_t mmc_resolve(mmc_context_t* context, vaddr_t vaddr)
+     page_directory_t page_directory = context->page_directory_virt;
+     page_table_t page_table;
+     paddr_t result;
+-    
++
+     uint32_t vpage = (uint32_t) vaddr / PAGE_SIZE;
+     //kprintf("[Resolv: %x in PD %x]", vaddr, page_directory);
+ 
+     // Passende Page Table suchen
+     // Bei einer 4M-Page sind wir eigentlich schon am Ziel
+-    if ((page_directory[vpage / PAGE_TABLE_LENGTH] & PTE_P) == 0) 
++    if ((page_directory[vpage / PAGE_TABLE_LENGTH] & PTE_P) == 0)
+     {
+         return (paddr_t) NULL;
+-    } 
+-    else if (page_directory[vpage / PAGE_TABLE_LENGTH] & PTE_PS) 
++    }
++    else if (page_directory[vpage / PAGE_TABLE_LENGTH] & PTE_PS)
+     {
+         return (paddr_t) (
+             (page_directory[vpage / PAGE_TABLE_LENGTH] & ~0x3FFFFF)
+           | ((uint32_t) vaddr & 0x3FFFFF));
+-        
+-    } 
++
++    }
+ 
+     // Die Page-Table-Adresse ist eine physische Adresse. Am sichersten ist es,
+     // die Adresse einfach noch einmal zu mappen.
+     page_table = get_pagetable(context, vpage / PAGE_TABLE_LENGTH);
+-    
++
+     // Adresse zusammenbasteln und fertig
+     if (page_table[vpage % PAGE_TABLE_LENGTH] & PTE_P) {
+-        
++
+         result = (paddr_t) (
+-            (page_table[vpage % PAGE_TABLE_LENGTH] & ~0xFFF) 
++            (page_table[vpage % PAGE_TABLE_LENGTH] & ~0xFFF)
+           | ((uint32_t) vaddr & 0xFFF));
+-        
++
+     } else {
+         result = (paddr_t) NULL;
+     }
+-        
++
+     // Falls wir die Page Table extra in den Kerneladressraum gemappt haben,
+     // den Speicher wieder freigeben
+     free_pagetable(context, page_table);
+@@ -525,34 +525,34 @@ vaddr_t mmc_find_free_pages(mmc_context_t* context, size_t num,
+     uint32_t cur_page;
+     uint32_t cur_page_table;
+     page_directory_t page_directory = context->page_directory_virt;
+-    
++
+     // Die NULL-Page bleibt ungemappt
+     if (lower_limit < PAGE_SIZE) {
+         lower_limit = PAGE_SIZE;
+     }
+ 
+-    // cur_page ist die Schleifenvariable für die Suche.
++    // cur_page ist die Schleifenvariable fÃ¼r die Suche.
+     // Initialisierung auf die niedrigste erlaubte Page.
+     cur_page = (lower_limit >> PAGE_SHIFT) % PAGE_TABLE_LENGTH;
+     cur_page_table = (lower_limit >> PGDIR_SHIFT);
+ 
+     // Suche
+-    while ((free_pages < num) 
+-        && ((cur_page_table << PGDIR_SHIFT) < upper_limit)) 
++    while ((free_pages < num)
++        && ((cur_page_table << PGDIR_SHIFT) < upper_limit))
+     {
+-        if (page_directory[cur_page_table] & PTE_P) 
++        if (page_directory[cur_page_table] & PTE_P)
+         {
+-            // Die Page Table ist vorhanden. Wir müssen die einzelnen Einträge
++            // Die Page Table ist vorhanden. Wir mÃ¼ssen die einzelnen EintrÃ¤ge
+             // durchsuchen, um festzustellen, ob und wieviel Platz darin frei
+             // ist.
+-            page_table_t page_table 
++            page_table_t page_table
+                 = get_pagetable(context, cur_page_table);
+ 
+             while (cur_page < PAGE_TABLE_LENGTH) {
+-                // Wenn der Eintrag frei ist, haben wir Glück und unseren
+-                // gefundenen Bereich um eine Page vergrößtert. Wenn nicht, war
++                // Wenn der Eintrag frei ist, haben wir GlÃ¼ck und unseren
++                // gefundenen Bereich um eine Page vergrÃ¶ÃŸtert. Wenn nicht, war
+                 // alles, was wir bisher gefunden haben, umsonst, unnd wir
+-                // müssen nochmal bei Null anfangen.
++                // mÃ¼ssen nochmal bei Null anfangen.
+                 if ((page_table[cur_page++] & PTE_P) == 0) {
+                     free_pages++;
+                     if (free_pages >= num) {
+@@ -560,14 +560,14 @@ vaddr_t mmc_find_free_pages(mmc_context_t* context, size_t num,
+                     }
+                 } else {
+                     free_pages = 0;
+-                    lower_limit = (cur_page_table << PGDIR_SHIFT) 
++                    lower_limit = (cur_page_table << PGDIR_SHIFT)
+                                 + (cur_page << PAGE_SHIFT);
+                 }
+             }
+ 
+             free_pagetable(context, page_table);
+-        } 
+-        else 
++        }
++        else
+         {
+             // Die ganze Page Table ist frei und wir haben auf einen Schlag
+             // eine ganze Menge freie Seiten gefunden
+@@ -592,16 +592,16 @@ vaddr_t mmc_find_free_pages(mmc_context_t* context, size_t num,
+  * @param context Kontext, in den gemappt werden soll
+  * @param start Physische Startadresse des zu mappenden Speicherbereichs
+  * @param count Anzahl der zu mappenden Seiten
+- * @param lower_limit Niedrigste zulässige virtuelle Adresse
+- * @param upper_limit Höchste zulässige virtuelle Adresse
+- * @param flags Flags für die Pagetable
++ * @param lower_limit Niedrigste zulÃ¤ssige virtuelle Adresse
++ * @param upper_limit HÃ¶chste zulÃ¤ssige virtuelle Adresse
++ * @param flags Flags fÃ¼r die Pagetable
+  */
+ vaddr_t mmc_automap(mmc_context_t* context, paddr_t start, size_t count,
+     uintptr_t lower_limit, uintptr_t upper_limit, int flags)
+ {
+-    vaddr_t free_page = 
++    vaddr_t free_page =
+         mmc_find_free_pages(context, count, lower_limit, upper_limit);
+-    
++
+     if (free_page == NULL) {
+         return NULL;
+     }
+-- 
+1.7.7
+
+
+From kevin at tyndur.org  Tue Dec 30 13:37:54 2014
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Tue, 30 Dec 2014 13:37:54 +0100
+Subject: [tyndur-devel] [PATCH 2/3] kernel2/i386: Nach 4 MB mappen,
+	erste PT ist Userspace
+In-Reply-To: <1419943075-8940-1-git-send-email-kevin@tyndur.org>
+References: <1419943075-8940-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1419943075-8940-3-git-send-email-kevin@tyndur.org>
+
+* kernel2: Erste PT für Userspace freiräumen, damit sich VM86 dort
+  breitmachen kann. Da wir am Anfang ein 1:1-Mapping haben, heißt das,
+  dass tyndur jetzt mehr als 4 MB RAM braucht. Schade.
+* kernel2: Der Videospeicher hat kein 1:1-Mapping mehr, sonst würde er
+  im Userspace landen.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/include/arch/i386/page.h              |    2 +-
+ src/kernel2/src/arch/i386/kernel.ld       |    4 ++--
+ src/kernel2/src/arch/i386/mm/mm_context.c |   17 +++++++++++------
+ src/kernel2/src/arch/i386/mm/virt.c       |   11 +++++++----
+ src/kernel2/src/console.c                 |    2 +-
+ 5 files changed, 22 insertions(+), 14 deletions(-)
+
+diff --git a/src/include/arch/i386/page.h b/src/include/arch/i386/page.h
+index 19d3dc3..c37f15e 100644
+--- a/src/include/arch/i386/page.h
++++ b/src/include/arch/i386/page.h
+@@ -41,7 +41,7 @@
+ 
+ // TODO: Muss das Kernelzeug wirklich hier sein? :/
+ // Die Adresse, an der der Kernel-Adressraum beginnt
+-#define KERNEL_MEM_START    0x00000000
++#define KERNEL_MEM_START    0x00400000
+ #define KERNEL_MEM_END      0x40000000
+ 
+ #define PAGETABLES_MEM_START 0x3fc00000
+diff --git a/src/kernel2/src/arch/i386/kernel.ld b/src/kernel2/src/arch/i386/kernel.ld
+index d9dcd48..10f9d2d 100644
+--- a/src/kernel2/src/arch/i386/kernel.ld
++++ b/src/kernel2/src/arch/i386/kernel.ld
+@@ -1,5 +1,5 @@
+-LOAD_ADDR = 0x100000;
+-LINK_ADDR = 0x100000;
++LOAD_ADDR = 0x400000;
++LINK_ADDR = 0x400000;
+ VIRT_TO_PHYS = LINK_ADDR - LOAD_ADDR;
+ 
+ ENTRY(_start)
+diff --git a/src/kernel2/src/arch/i386/mm/mm_context.c b/src/kernel2/src/arch/i386/mm/mm_context.c
+index 7f40312..9192142 100644
+--- a/src/kernel2/src/arch/i386/mm/mm_context.c
++++ b/src/kernel2/src/arch/i386/mm/mm_context.c
+@@ -145,7 +145,8 @@ mmc_context_t mmc_create_kernel_context()
+ static void mmc_sync(mmc_context_t* context)
+ {
+     if (context->version < page_directory_version) {
+-        memcpy(context->page_directory_virt, page_directory_current, 0x3FC);
++        memcpy(&context->page_directory_virt[1],
++               &page_directory_current[1], 0x3FC - 4);
+         context->version = page_directory_version;
+     }
+ 
+@@ -305,17 +306,21 @@ static bool map_page
+     // Kernelpages duerfen immer nur im gerade aktiven Kontext gemappt werden.
+     // Ales andere ergibt keinen Sinn, weil diese Bereiche ohnehin zwischen
+     // allen Kontexten synchron gehalten werden muessen.
+-    //
+-    // TODO: Ergibt sehr wohl Sinn, wenn man nämlich IDT und GDT von einem
+-    // vm86-Task erstellen will.
+-#if 0
++    if ((flags & PTE_P) && !(flags & PTE_U) &&
++        !(((uintptr_t) vaddr >= KERNEL_MEM_START) &&
++          ((uintptr_t) vaddr <  KERNEL_MEM_END)))
++    {
++        panic("Versuch, Kernelpages in Userspace-Bereich zu mappen: %x",
++              vaddr);
++    }
++
++    // Außerdem müssen sie im richtigen Speicherbereic gemappt werden
+     if ((context != &mmc_current_context()) &&
+         ((uintptr_t) vaddr >= KERNEL_MEM_START) &&
+         ((uintptr_t) vaddr <  KERNEL_MEM_END))
+     {
+         panic("Versuch, Kernelpages in inaktivem Kontext zu mappen");
+     }
+-#endif
+ 
+     // Falls es sich im den aktuellen Kontext handelt, muss das Page directory
+     // nicht gemappt werden, sonst schon.
+diff --git a/src/kernel2/src/arch/i386/mm/virt.c b/src/kernel2/src/arch/i386/mm/virt.c
+index e4c08f2..18e8098 100644
+--- a/src/kernel2/src/arch/i386/mm/virt.c
++++ b/src/kernel2/src/arch/i386/mm/virt.c
+@@ -45,6 +45,9 @@ extern void pmm_set_bitmap_start(void* bitmap_start);
+ extern bool use_phys_addr;
+ extern page_directory_t page_directory_current;
+ 
++extern unsigned short* vidmem;
++unsigned short* paging_vidmem;
++
+ /**
+  * Initialisiert die virtuelle Speicherverwaltung. Insbesondere wird ein
+  * Page Directory fuer den Kernel angelegt und geladen.
+@@ -64,10 +67,8 @@ void vmm_init(mmc_context_t* kernel_context)
+         (paddr_t) kernel_phys_start + rosize, PTE_P | PTE_W, NUM_PAGES(rwsize));
+ 
+     // Videospeicher mappen
+-    // TODO Usermodus muss die momentan wegen VM86 sehen. Waere wohl besser,
+-    // wenn VM86 einen eigenen Adressraum haette.
+-    mmc_map(kernel_context, (vaddr_t) 0xB8000, (paddr_t) 0xB8000,
+-        PTE_U | PTE_W | PTE_P, 8);
++    paging_vidmem = mmc_automap(kernel_context, (paddr_t) 0xB8000, 8,
++        KERNEL_MEM_START, KERNEL_MEM_END, PTE_P | PTE_W);
+ 
+     // BIOS mappen
+     mmc_map(kernel_context, (vaddr_t) 0xC0000, (paddr_t) 0xC0000,
+@@ -108,6 +109,8 @@ void vmm_init(mmc_context_t* kernel_context)
+  */
+ void vmm_init_local(mmc_context_t* kernel_context)
+ {
++    vidmem = paging_vidmem;
++
+     // Und ab ins Verderben
+     asm volatile (
+         // Adresse des Page directories setzen
+diff --git a/src/kernel2/src/console.c b/src/kernel2/src/console.c
+index cf20352..1a6aea2 100644
+--- a/src/kernel2/src/console.c
++++ b/src/kernel2/src/console.c
+@@ -89,7 +89,7 @@
+ 
+ void con_set_hw_cursor(void);
+ 
+-static unsigned short * vidmem = (unsigned short*)0xb8000;
++unsigned short * vidmem = (unsigned short*)0xb8000;
+ 
+ // Aktuelle Cursor-Position
+ static unsigned int cursor_x;
+-- 
+1.7.7
+
+
+From kevin at tyndur.org  Tue Dec 30 13:37:55 2014
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Tue, 30 Dec 2014 13:37:55 +0100
+Subject: [tyndur-devel] [PATCH 3/3] kernel2: VM86 wieder ohne
+	Task-Gate-Tricksereien
+In-Reply-To: <1419943075-8940-1-git-send-email-kevin@tyndur.org>
+References: <1419943075-8940-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1419943075-8940-4-git-send-email-kevin@tyndur.org>
+
+- kernel2: Der vermutlich coolste Hack in ganz tyndur :-(
+  Aber anscheinend war er so exotisch, dass die meisten Emulatoren das
+  nicht richtig hinbekommen (und noch dazu die CPU in meinem
+  Hauptentwicklungsrechner so buggy ist, dass man das mit
+  Virtualisierung gar nicht hinbekommen _kann_), und auf Dauer ist das
+  ja kein Zustand.
++ kernel2: Jetzt da das virtuell erste MB immer frei ist, können wir
+  einfach direkt das für den VM86 nehmen. Das beschränkt uns auf einen
+  VM86-Task pro Prozess, aber das dürfte in Ordnung sein. Vereinfacht
+  den Code auch ein ganz kleines bisschen.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/include/arch/i386/mm_arch.h          |    3 +
+ src/kernel2/include/mm.h                         |    4 -
+ src/kernel2/src/arch/i386/cpu.c                  |    5 +
+ src/kernel2/src/arch/i386/interrupts/int_stubs.S |   23 --
+ src/kernel2/src/arch/i386/mm/mm_context.c        |   38 +--
+ src/kernel2/src/arch/i386/vm86.c                 |  393 +++++-----------------
+ src/kernel2/src/arch/i386/vm86_asm.S             |   15 -
+ 7 files changed, 112 insertions(+), 369 deletions(-)
+ delete mode 100644 src/kernel2/src/arch/i386/vm86_asm.S
+
+diff --git a/src/kernel2/include/arch/i386/mm_arch.h b/src/kernel2/include/arch/i386/mm_arch.h
+index cac9e9b..3d6116c 100644
+--- a/src/kernel2/include/arch/i386/mm_arch.h
++++ b/src/kernel2/include/arch/i386/mm_arch.h
+@@ -55,6 +55,9 @@
+ #define PTE_AVAIL2  0x400 // available for software use
+ #define PTE_AVAIL3  0x800 // available for software use
+ 
++// Kernelinterne Flagwerte, die rausmaskiert werden
++#define PTE_ALLOW_NULL 0x80000000 // Null-Mappings erlauben
++
+ typedef unsigned long* page_table_t;
+ typedef unsigned long* page_directory_t;
+ 
+diff --git a/src/kernel2/include/mm.h b/src/kernel2/include/mm.h
+index db5a318..0815573 100644
+--- a/src/kernel2/include/mm.h
++++ b/src/kernel2/include/mm.h
+@@ -85,7 +85,6 @@ void vmm_userstack_push(pm_thread_t* thread, void* data, size_t size);
+  */
+ 
+ mmc_context_t mmc_create(void);
+-mmc_context_t mmc_create_empty(void);
+ mmc_context_t mmc_create_kernel_context(void);
+ 
+ void mmc_destroy(mmc_context_t* context);
+@@ -126,9 +125,6 @@ vaddr_t mmc_automap_user(mmc_context_t* target_ctx, mmc_context_t* source_ctx,
+     vaddr_t start, size_t count, uintptr_t lower_limit, uintptr_t upper_limit,
+     int flags);
+ 
+-vaddr_t get_pagetable(mmc_context_t* context, size_t index);
+-void free_pagetable(mmc_context_t* context, vaddr_t page_table);
+-
+ /**
+  * Alloziert einen virtuell (aber nicht zwingend physisch) zusammenhaengenden
+  * Speicherbereich
+diff --git a/src/kernel2/src/arch/i386/cpu.c b/src/kernel2/src/arch/i386/cpu.c
+index 102c585..de2c23e 100644
+--- a/src/kernel2/src/arch/i386/cpu.c
++++ b/src/kernel2/src/arch/i386/cpu.c
+@@ -151,6 +151,11 @@ void cpu_dump(machine_state_t* machine_state)
+         "SS=0x%04x\n", 
+         machine_state->cs, machine_state->ds, machine_state->es,
+         machine_state->fs, machine_state->gs, machine_state->ss);
++
++    if (machine_state->eflags & 0x20000) {
++        struct vm86_isf* visf = (struct vm86_isf*) machine_state;
++        kprintf("VM86:        DS=0x%04x  ES=0x%04x\n", visf->ds, visf->es);
++    }
+ }
+ 
+ /**
+diff --git a/src/kernel2/src/arch/i386/interrupts/int_stubs.S b/src/kernel2/src/arch/i386/interrupts/int_stubs.S
+index 72dfebf..7243562 100644
+--- a/src/kernel2/src/arch/i386/interrupts/int_stubs.S
++++ b/src/kernel2/src/arch/i386/interrupts/int_stubs.S
+@@ -468,29 +468,6 @@ im_int_stub_8:
+     hlt
+     jmp .
+ 
+-.globl load_isf_and_return
+-load_isf_and_return:
+-    mov 4(%esp), %esp
+-
+-    pop %ebx
+-    pop %ecx
+-    pop %edx
+-    pop %esi
+-    pop %edi
+-    pop %ebp
+-
+-    pop %ds
+-    pop %es
+-    pop %fs
+-    pop %gs
+-
+-    pop %eax
+-
+-    add $8, %esp
+-
+-    iret
+-
+-
+ msg_double_fault:
+     .ascii "\033[1;41mPANIC: Double fault\n\0"
+ 
+diff --git a/src/kernel2/src/arch/i386/mm/mm_context.c b/src/kernel2/src/arch/i386/mm/mm_context.c
+index 9192142..850f4c5 100644
+--- a/src/kernel2/src/arch/i386/mm/mm_context.c
++++ b/src/kernel2/src/arch/i386/mm/mm_context.c
+@@ -63,8 +63,8 @@ bool use_phys_addr = true;
+  */
+ static void mmc_sync(mmc_context_t* context);
+ 
+-vaddr_t get_pagetable(mmc_context_t* context, size_t index);
+-void free_pagetable(mmc_context_t* context, vaddr_t page_table);
++static inline vaddr_t get_pagetable(mmc_context_t* context, size_t index);
++static inline void free_pagetable(mmc_context_t* context, vaddr_t page_table);
+ 
+ /**
+  * Erstellt einen neuen MM-Kontext (Page Directory)
+@@ -92,25 +92,6 @@ mmc_context_t mmc_create()
+ }
+ 
+ /**
+- * Erstellt einen komplett neuen und unabhängigen MM-Kontext
+- */
+-mmc_context_t mmc_create_empty()
+-{
+-    // Das Page Directory initialisieren
+-    paddr_t phys_page_directory = pmm_alloc(1);
+-    mmc_context_t context;
+-    context.version = 0xFFFFFFFF;
+-    context.lock = LOCK_UNLOCKED;
+-    context.page_directory = phys_page_directory;
+-    context.page_directory_virt = vmm_kernel_automap(
+-        context.page_directory, PAGE_SIZE);
+-
+-    memset(context.page_directory_virt, 0, PAGE_SIZE);
+-
+-    return context;
+-}
+-
+-/**
+  * Erstellt einen neuen MM-Kontext (Page Directory) für den Kernel.
+  * Diese Funktion wird nur zur Initialisierung benutzt, solange Paging
+  * noch nicht aktiviert ist.
+@@ -218,7 +199,7 @@ void mmc_destroy(mmc_context_t* context)
+  * aktuellen Page Directory gehört. Ansonsten wird ein Pointer auf die
+  * Page Table in den oberen 4 MB des Kernelspeichers zurückgegeben
+  */
+-vaddr_t get_pagetable(mmc_context_t* context, size_t index)
++static inline vaddr_t get_pagetable(mmc_context_t* context, size_t index)
+ {
+     page_directory_t pagedir = context->page_directory_virt;
+     page_table_t page_table;
+@@ -246,7 +227,7 @@ vaddr_t get_pagetable(mmc_context_t* context, size_t index)
+  * Gibt eine mit get_pagetable angeforderte Page Table wieder frei, falls sie
+  * nicht zum aktuellen Page Directory gehört.
+  */
+-void free_pagetable(mmc_context_t* context, vaddr_t page_table)
++static inline void free_pagetable(mmc_context_t* context, vaddr_t page_table)
+ {
+     if (context->page_directory != mmc_current_context().page_directory) {
+         mmc_unmap(&mmc_current_context(), page_table, 1);
+@@ -278,16 +259,18 @@ static bool map_page
+     page_directory_t page_directory = context->page_directory_virt;
+ 
+     uint32_t vpage = (uint32_t) vaddr / PAGE_SIZE;
++    bool unmap_page = ! (flags & PTE_P);
+ 
+     // kprintf("map_page %x => %x   PD:0x%08x (virt:0x%08x) CPU %u\n", vaddr,
+     //     paddr, context->page_directory, context->page_directory_virt,
+     //     cpu_get_current()->id);
+ 
+-    // Die NULL-Page bleibt ungemappt
+-    if (vaddr == NULL) {
++    // Die NULL-Page bleibt ungemappt (außer manchmal)
++    if (vaddr == NULL && !unmap_page && !(flags & PTE_ALLOW_NULL)) {
+         panic("Versuchtes Mapping nach virtuell NULL");
+         return false;
+     }
++    flags &= ~PTE_ALLOW_NULL;
+ 
+     // Wenn boese Flags die Adresse manipulieren wollen, fliegt
+     // das entsprechende Programm eben beim naechsten Zugriff
+@@ -374,7 +357,6 @@ static bool map_page
+     // darüber beschweren, dass der Eintrag schon besteht.
+ 
+     bool page_is_present = (page_table[vpage % PAGE_TABLE_LENGTH] & PTE_P);
+-    bool unmap_page = ! (flags & PTE_P);
+     bool mapping_changed =
+         ((page_table[vpage % PAGE_TABLE_LENGTH] & ~(PTE_A | PTE_D))
+         !=
+@@ -706,7 +688,9 @@ inline vaddr_t mmc_valloc_limits(mmc_context_t* context, size_t num_pages,
+     vaddr_t free_page = mmc_find_free_pages(context, num_pages,
+         virt_lower_limit, virt_upper_limit);
+ 
+-    if (free_page == NULL) {
++    if (free_page == NULL &&
++        !(virt_lower_limit == 0 && virt_upper_limit == num_pages * PAGE_SIZE))
++    {
+         return NULL;
+     }
+ 
+diff --git a/src/kernel2/src/arch/i386/vm86.c b/src/kernel2/src/arch/i386/vm86.c
+index 50cc9f3..5686667 100644
+--- a/src/kernel2/src/arch/i386/vm86.c
++++ b/src/kernel2/src/arch/i386/vm86.c
+@@ -89,27 +89,23 @@ static struct {
+ // FIXME Das darf eigentich nicht global sein
+ static struct {
+     bool            in_use;
+-    void*           first_mb;
+     uint32_t*       memory;
+     pm_thread_t*    caller;
+     vm86_regs_t*    regs;
+-    mmc_context_t   mmc;
+ } vm86_status = {
+     .in_use     =   false,
+ };
+ 
+-extern uint16_t next_entry_index;
+-extern lock_t gdt_lock;
+-extern uint64_t idt[256];
+-extern uint64_t gdt[255];
+-
+-extern void gdt_set_descriptor_byte_granularity(int segment, uint32_t size,
+-    uint32_t base, uint8_t access, int dpl);
+-extern void* gdt_get_descriptor_base(int segment);
+-extern void gdt_set_busy_flag(int segment, bool state);
+-
+-extern interrupt_stack_frame_t* im_handler(interrupt_stack_frame_t* isf);
+-extern void load_isf_and_return(uint32_t new_stack) __attribute__((noreturn));
++/*
++ * Ein VM86-Segment ist 4k groß (0x10000). Wir dürfen sp aber nicht ganz oben
++ * hinsetzen, weil der Interrupthandler davon ausgehen darf, dass er per INT
++ * aufgerufen wurde, und das legt sechs Bytes auf den Stack.
++ *
++ * SeaBIOS braucht das, weil es diese sechs Bytes wegsichert und später
++ * wiederherstellt. Wenn wir ganz oben anfangen, wird das ss-Segementlimit
++ * überschritten und wir bekommen eine #SS-Exception.
++ */
++#define INITIAL_SP 0xfffa
+ 
+ /**
+  * Speichert BIOS-Daten, um sie den VM86-Tasks später bereitstellen zu können
+@@ -119,93 +115,6 @@ void vm86_init(void)
+     memcpy(&bios_data, 0, 4096);
+ }
+ 
+-// Einsprungspunkt für den vm86-Thread nach jedem Taskwechsel (setzt das
+-// NT-Flag und biegt den Backlinkpointer vom aktuellen TSS um)
+-extern void vm86_task_entry(void);
+-
+-/**
+- * Gibt einen Pointer zum Backlink des Standard-TSS zurück
+- */
+-uint32_t vm86_get_backlink_pointer(void)
+-{
+-    return (uintptr_t) &cpu_get_current()->tss.backlink;
+-}
+-
+-static void vm86_gpf_entry(uint32_t above_error_code)
+-{
+-    // Der tatsächliche Fehlercode ist dort, wo normalerweise EIP für den
+-    // Rücksprung liegt, also genau ein uint32_t unter dem ersten Parameter
+-    uint32_t error_code = (&above_error_code)[-1];
+-    uint16_t tr;
+-
+-    asm volatile ("str %0" : "=r"(tr));
+-
+-    cpu_tss_t* gpf_tss = gdt_get_descriptor_base(tr >> 3);
+-    cpu_tss_t* vm86_tss = gdt_get_descriptor_base(gpf_tss->backlink >> 3);
+-
+-    // Originalen Busyflagzustand wiederherstellen
+-    gdt_set_busy_flag(tr >> 3, false);
+-    gdt_set_busy_flag(gpf_tss->backlink >> 3, true);
+-
+-    // Das Standard-TSS verwenden
+-    asm volatile ("ltr %0" :: "r"(cpu_get_current()->tss_selector));
+-
+-    asm volatile ("pushfl;"
+-        "pop %%eax;"
+-        "and $0xFFFFBFFF,%%eax;" // NT-Flag löschen
+-        "push %%eax;"
+-        "popfl" ::: "eax");
+-
+-    // Der ?künstliche? Stackframe hier enthält zum Teil Werte, die nichts mit
+-    // vm86 zu tun haben. Sollte der Thread unterbrochen werden, so wird die
+-    // Ausführung beim nächsten Mal bei vm86_task_entry fortgeführt.
+-    interrupt_stack_frame_t isf = {
+-        .eax = vm86_tss->eax,
+-        .ebx = gpf_tss->backlink,
+-        .ecx = vm86_tss->ecx,
+-        .edx = vm86_tss->edx,
+-        .esi = vm86_tss->esi,
+-        .edi = vm86_tss->edi,
+-        .ebp = (uintptr_t) vm86_tss,
+-        .esp = vm86_tss->esp,
+-        .ds = 0x10,
+-        .es = 0x10,
+-        .fs = 0x10,
+-        .gs = 0x10,
+-        .ss = 0x10,
+-        // Originale Interruptnummer wird aus dem Fehlercode bestimmt
+-        .interrupt_number = (error_code & (1 << 1)) ? (error_code >> 3) : 13,
+-        // Wenn dies ein reiner GPF ist, dann können wir den Fehlercode
+-        // übernehmen, sonst ist er unbekannt.
+-        .error_code = (error_code & (1 << 1)) ? 0 : error_code,
+-        .eip = (uintptr_t) &vm86_task_entry,
+-        .cs = 0x08,
+-        .eflags = 0x202
+-    };
+-
+-    if ((isf.interrupt_number < 0x20) && (isf.interrupt_number != 13)) {
+-        // Das wird eine Exception, die eher nicht abgefangen werden dürfte.
+-        // Also setzen wir die Registerwerte korrekt, damit man auch was vom
+-        // Rot hat.
+-        isf.ebx = vm86_tss->ebx;
+-        isf.ebp = vm86_tss->ebp;
+-        isf.eip = vm86_tss->eip;
+-        isf.cs = vm86_tss->cs;
+-        isf.ds = vm86_tss->ds;
+-        isf.es = vm86_tss->es;
+-        isf.fs = vm86_tss->fs;
+-        isf.gs = vm86_tss->gs;
+-        isf.ss = vm86_tss->ss;
+-        isf.eflags = vm86_tss->eflags;
+-    }
+-
+-    asm volatile ("mov %%cr0,%%eax;"
+-        "and $0xFFFFFFF7,%%eax;" // TS-Flag löschen (FPU sollte benutzbar bleiben)
+-        "mov %%eax,%%cr0" ::: "eax");
+-
+-    load_isf_and_return((uintptr_t) im_handler(&isf));
+-}
+-
+ /**
+  * Erstellt einen VM86-Thread im aktuellen Prozess. Der aktuell ausgefuehrte
+  * Thread wird pausiert und ein Taskwechsel zum neuen VM86-Task wird
+@@ -222,136 +131,36 @@ static int create_vm86_task(int intr, vm86_regs_t* regs, uintptr_t stack)
+ 
+     // Erst einmal einen ganz normalen Thread erzeugen
+     pm_thread_t* task = pm_thread_create(current_process,
+-        &vm86_task_entry);
++                                         (vaddr_t)(uintptr_t)ivt_entry[0]);
+ 
+     // Na ja... Fast normal.
+     task->vm86 = true;
+ 
+-    cpu_tss_t* vm86_tss = mmc_valloc_limits(&mmc_current_context(),
+-        NUM_PAGES(2 * sizeof(cpu_tss_t)), 0, 0,
+-        0x100000, KERNEL_MEM_END, MM_FLAGS_KERNEL_DATA);
+-    cpu_tss_t* gpf_tss = vm86_tss + 1;
+-
+-    memset(vm86_tss, 0, sizeof(*vm86_tss));
+-    memset(gpf_tss, 0, sizeof(*gpf_tss));
+-
+-    lock(&gdt_lock);
+-
+-    int vm86_tss_index = next_entry_index++;
+-    gdt_set_descriptor_byte_granularity(vm86_tss_index, 2 * sizeof(*vm86_tss)
+-        - 1, (uintptr_t) vm86_tss, 0x8B, 0);
+-
+-    int gpf_tss_index = next_entry_index++;
+-    gdt_set_descriptor_byte_granularity(gpf_tss_index, 2 * sizeof(*gpf_tss) - 1,
+-        (uintptr_t) gpf_tss, 0x89, 0);
+-
+-    unlock(&gdt_lock);
+-
+     interrupt_stack_frame_t* isf = task->user_isf;
+-    isf->cs = 0x08;
+-    isf->ds = isf->es = 0x10;
+-    isf->ebx = vm86_tss_index << 3;
+-
+-    vm86_tss->esp0 = (uintptr_t) isf;
+-    vm86_tss->ss0 = 0x10;
++    struct vm86_isf* visf = (struct vm86_isf*)
++        ((uintptr_t) task->kernel_stack_bottom +
++        task->kernel_stack_size - sizeof(struct vm86_isf));
++    task->kernel_stack = visf;
++    task->user_isf = visf;
+ 
+-    // TODO: Das Folgende ist sehr i386- und 4-kB-Page-lastig
+-    mmc_context_t vm86_mmc = mmc_create_empty();
+-    mmc_context_t crnt_mmc = mmc_current_context();
++    memmove(&visf->isf, isf, sizeof(*isf));
++    isf = &visf->isf;
+ 
+-    vm86_status.mmc = vm86_mmc;
+-
+-    // Sorgt dafür, dass die erste Pagetable vorhanden ist.
+-    mmc_map(&vm86_mmc, (vaddr_t) PAGE_SIZE, (paddr_t) 0, 0, 1);
+-
+-    page_table_t vm86_pt0 = get_pagetable(&vm86_mmc, 0);
+-
+-    uintptr_t first_mb = (uintptr_t) vm86_status.first_mb;
+-    int pde = first_mb >> 22;
+-
+-    page_table_t crnt_pt = get_pagetable(&crnt_mmc, pde);
+-
+-    int page, pte = (first_mb >> 12) & 0x3FF;
+-    for (page = 0; page < 256; page++) {
+-        vm86_pt0[page] = crnt_pt[pte];
+-
+-        if (++pte >= 1024) {
+-            free_pagetable(&crnt_mmc, crnt_pt);
+-            crnt_pt = get_pagetable(&crnt_mmc, ++pde);
+-            pte -= 1024;
+-        }
+-    }
+-
+-    free_pagetable(&crnt_mmc, crnt_pt);
+-    free_pagetable(&vm86_mmc, vm86_pt0);
+-
+-    // Wird auf i386 nicht größer (wenn wir hier einigermaßen unabhängig
+-    // sein wöllten, wirds spätestens beim uint64_t* schwierig
+-    paddr_t idt_phys = pmm_alloc(1);
+-    mmc_map(&vm86_mmc, idt, idt_phys, PTE_P | PTE_W, 1);
+-
+-    uint64_t* vm86_idt = vmm_kernel_automap(idt_phys, PAGE_SIZE);
+-    int i;
+-    for (i = 0; i < 256; i++) {
+-        switch (i) {
+-            case 13:
+-                vm86_idt[i] = (uint64_t)
+-                    (gpf_tss_index << 19) | (5LL << 40) | (1LL << 47);
+-                break;
+-            default:
+-                vm86_idt[i] = 0;
+-        }
+-    }
+-
+-    vmm_kernel_unmap(vm86_idt, PAGE_SIZE);
+-
+-    paddr_t gdt_phys = mmc_resolve(&crnt_mmc, gdt);
+-    mmc_map(&vm86_mmc, gdt, gdt_phys, PTE_P | PTE_W,
+-        (sizeof(gdt) + PAGE_SIZE - 1) / PAGE_SIZE);
+-
+-    vm86_tss->cr3 = (uintptr_t) vm86_mmc.page_directory;
+-    vm86_tss->eip = ivt_entry[0];
+-    vm86_tss->eflags = 0x20202;
+-    vm86_tss->eax = regs->ax;
+-    vm86_tss->ebx = regs->bx;
+-    vm86_tss->ecx = regs->cx;
+-    vm86_tss->edx = regs->dx;
+-    vm86_tss->esi = regs->si;
+-    vm86_tss->edi = regs->di;
+-    vm86_tss->esp = 0xFFFE;
+-    vm86_tss->ebp = 0;
+-    vm86_tss->cs = ivt_entry[1];
+-    vm86_tss->ds = regs->ds;
+-    vm86_tss->es = regs->es;
+-    vm86_tss->ss = (stack - 65536) >> 4;
+-
+-    gpf_tss->esp0 = (uintptr_t) task->user_isf;
+-    gpf_tss->ss0 = 0x10;
+-    gpf_tss->cr3 = (uintptr_t) crnt_mmc.page_directory;
+-    gpf_tss->eip = (uintptr_t) &vm86_gpf_entry;
+-    gpf_tss->eflags = 0x2;
+-    gpf_tss->esp = gpf_tss->esp0;
+-
+-    gpf_tss->cs = 0x08;
+-    gpf_tss->ds = 0x10;
+-    gpf_tss->es = 0x10;
+-    gpf_tss->fs = 0x10;
+-    gpf_tss->gs = 0x10;
+-    gpf_tss->ss = gpf_tss->ss0;
+-
+-    uint8_t* tss_base = (uint8_t*) vm86_tss;
+-    int base_offset = (uintptr_t) tss_base % PAGE_SIZE;
+-
+-    paddr_t tss_phys = mmc_resolve(&crnt_mmc, tss_base - base_offset);
+-    mmc_map(&vm86_mmc, tss_base - base_offset, tss_phys, PTE_P | PTE_W, 1);
+-
+-    i = PAGE_SIZE - base_offset;
+-    while (i < 2 * sizeof(cpu_tss_t)) {
+-        paddr_t tss_phys = mmc_resolve(&crnt_mmc, tss_base + i);
+-        mmc_map(&vm86_mmc, tss_base + i, tss_phys, PTE_P | PTE_W, 1);
+-
+-        i += PAGE_SIZE;
+-    }
++    isf->eflags = 0x20202;
++    isf->eax = regs->ax;
++    isf->ebx = regs->bx;
++    isf->ecx = regs->cx;
++    isf->edx = regs->dx;
++    isf->esi = regs->si;
++    isf->edi = regs->di;
++    isf->esp = INITIAL_SP;
++    isf->ebp = 0;
++    isf->cs = ivt_entry[1];
++    isf->ss = (stack - 65536) >> 4;
++    visf->ds = regs->ds;
++    visf->es = regs->es;
++    visf->fs = 0;
++    visf->gs = 0;
+ 
+     // Sofort in den VM86-Task wechseln. Der aufrufende Thread wird
+     // waehrenddessen nicht in den Scheduler zurueckgegeben und gestoppt.
+@@ -389,19 +198,14 @@ int arch_vm86(uint8_t intr, void* regs, uint32_t* memory)
+     }
+ 
+     mmc_valloc_limits(&mmc_current_context(),
+-        (0xA0000 + PAGE_SIZE - 1) / PAGE_SIZE, 0, 0,
+-        (uintptr_t) first_mb, (uintptr_t) first_mb + 0xa0000,
+-        PTE_P | PTE_W | PTE_U);
+-
+-    memcpy(first_mb, &bios_data, 4096);
++        0xA0000 / PAGE_SIZE, 0, 0,
++        0, 0xA0000, PTE_P | PTE_W | PTE_U | PTE_ALLOW_NULL);
+ 
+-    // Videospeicher mappen
+-    mmc_map(&mmc_current_context(), first_mb + 0xA0000, (paddr_t) 0xA0000,
+-        PTE_U | PTE_W | PTE_P, (0x20000 + PAGE_SIZE - 1) / PAGE_SIZE);
++    memcpy(0, &bios_data, 4096);
+ 
+-    // BIOS mappen
+-    mmc_map(&mmc_current_context(), first_mb + 0xC0000, (paddr_t) 0xC0000,
+-        PTE_U | PTE_W | PTE_P, (0x40000 + PAGE_SIZE - 1) / PAGE_SIZE);
++    // Videospeicher und BIOS mappen
++    mmc_map(&mmc_current_context(), (vaddr_t) 0xA0000, (paddr_t) 0xA0000,
++        PTE_U | PTE_W | PTE_P, (0x60000 + PAGE_SIZE - 1) / PAGE_SIZE);
+ 
+     // Speicherbereiche reinkopieren
+     if (memory != NULL) {
+@@ -413,7 +217,11 @@ int arch_vm86(uint8_t intr, void* regs, uint32_t* memory)
+             uint32_t src = memory[1 + i * 3 + 1];
+             uint32_t size = memory[1 + i * 3 + 2];
+ 
+-            memcpy(first_mb + addr, (void*) src, size);
++            if (addr >= 0xA0000) {
++                return -EFAULT;
++            }
++
++            memcpy((void*) addr, (void*) src, size);
+         }
+     }
+ 
+@@ -421,7 +229,6 @@ int arch_vm86(uint8_t intr, void* regs, uint32_t* memory)
+     // TODO Ordentliches Locking fuer SMP
+     vm86_status.in_use   = 1;
+     vm86_status.caller   = current_thread;
+-    vm86_status.first_mb = first_mb;
+     vm86_status.memory   = memory;
+     vm86_status.regs     = regs;
+ 
+@@ -438,7 +245,7 @@ int arch_vm86(uint8_t intr, void* regs, uint32_t* memory)
+  * Beendet einen VM86-Task, kopiert alle zu zurueckzugebenden Daten und setzt
+  * die Ausfuehrung des aufrufenden Tasks fort.
+  */
+-static void destroy_vm86_task(cpu_tss_t* tss)
++static void destroy_vm86_task(interrupt_stack_frame_t* isf)
+ {
+     pm_thread_t* vm86_task = current_thread;
+ 
+@@ -460,29 +267,25 @@ static void destroy_vm86_task(cpu_tss_t* tss)
+             uint32_t src = vm86_status.memory[1 + i * 3 + 1];
+             uint32_t size = vm86_status.memory[1 + i * 3 + 2];
+ 
+-            memcpy((void*) src, vm86_status.first_mb + addr, size);
++            memcpy((void*) src, (void*) addr, size);
+         }
+     }
+ 
+-    mmc_vfree(&mmc_current_context(), vm86_status.first_mb,
++    mmc_vfree(&mmc_current_context(), (vaddr_t) 0,
+         (0xA0000 + PAGE_SIZE - 1) / PAGE_SIZE);
+-    mmc_unmap(&mmc_current_context(), vm86_status.first_mb + 0xA0000,
++    mmc_unmap(&mmc_current_context(), (vaddr_t) 0xA0000,
+         (0x60000 + PAGE_SIZE - 1) / PAGE_SIZE);
+ 
+     // Register sichern
+     vm86_regs_t* regs = vm86_status.regs;
+-    regs->ax = tss->eax;
+-    regs->bx = tss->ebx;
+-    regs->cx = tss->ecx;
+-    regs->dx = tss->edx;
+-    regs->si = tss->esi;
+-    regs->di = tss->edi;
+-    regs->ds = tss->ds;
+-    regs->es = tss->es;
+-
+-    mmc_destroy(&vm86_status.mmc);
+-
+-    mmc_vfree(&mmc_current_context(), tss, NUM_PAGES(2 * sizeof(cpu_tss_t)));
++    regs->ax = isf->eax;
++    regs->bx = isf->ebx;
++    regs->cx = isf->ecx;
++    regs->dx = isf->edx;
++    regs->si = isf->esi;
++    regs->di = isf->edi;
++    regs->ds = isf->ds;
++    regs->es = isf->es;
+ 
+     // Wir sind fertig mit VM86 :-)
+     pm_unblock_rpc(current_process, current_process->pid);
+@@ -490,17 +293,17 @@ static void destroy_vm86_task(cpu_tss_t* tss)
+ }
+ 
+ /** Pusht einen Wert auf den Stack des VM86-Tasks */
+-static inline void emulator_push(cpu_tss_t* tss, uint16_t value)
++static inline void emulator_push(interrupt_stack_frame_t* isf, uint16_t value)
+ {
+-    tss->esp -= 2;
+-    ((uint16_t*)(vm86_status.first_mb + tss->esp + (tss->ss << 4)))[0] = value;
++    isf->esp -= 2;
++    ((uint16_t*)(isf->esp + (isf->ss << 4)))[0] = value;
+ }
+ 
+ /** Popt einen Wert vom Stack des VM86-Tasks */
+-static inline uint16_t emulator_pop(cpu_tss_t* tss)
++static inline uint16_t emulator_pop(interrupt_stack_frame_t* isf)
+ {
+-    uint16_t res = ((uint16_t*)(vm86_status.first_mb + tss->esp + (tss->ss << 4)))[0];
+-    tss->esp += 2;
++    uint16_t res = ((uint16_t*)(isf->esp + (isf->ss << 4)))[0];
++    isf->esp += 2;
+     return res;
+ }
+ 
+@@ -521,10 +324,8 @@ int vm86_exception(interrupt_stack_frame_t* isf)
+         return 0;
+     }
+ 
+-    cpu_tss_t* tss = (cpu_tss_t*) isf->ebp;
+-
+     // Ein toller Emulator fuer privilegierte Instruktionen
+-    uint8_t* ops = (uint8_t*)(vm86_status.first_mb + tss->eip + (tss->cs << 4));
++    uint8_t* ops = (uint8_t*)(isf->eip + (isf->cs << 4));
+     uint16_t opcode;
+ 
+     opcode = ops[0];
+@@ -535,15 +336,15 @@ int vm86_exception(interrupt_stack_frame_t* isf)
+     switch (opcode) {
+ 
+         case 0x9c: /* pushf */
+-            emulator_push(tss, tss->eflags);
+-            tss->eip++;
++            emulator_push(isf, isf->eflags);
++            isf->eip++;
+             break;
+ 
+         case 0x9d: /* popf */
+             // So tun, als würden wir die EFLAGS wiederherstellen.
+             // Das hier ist wohl alles andere als korrekt, aber funzt erstmal.
+-            emulator_pop(tss);
+-            tss->eip++;
++            emulator_pop(isf);
++            isf->eip++;
+             break;
+ 
+         case 0xcd: /* int */
+@@ -551,82 +352,74 @@ int vm86_exception(interrupt_stack_frame_t* isf)
+             uint16_t intr = ops[1] & 0xff;
+             uint16_t* ivt_entry = bios_data.ivt[intr];
+ 
+-            emulator_push(tss, tss->eip + 2);
+-            emulator_push(tss, tss->cs);
+-            emulator_push(tss, tss->eflags);
++            emulator_push(isf, isf->eip + 2);
++            emulator_push(isf, isf->cs);
++            emulator_push(isf, isf->eflags);
+ 
+-            tss->eip = ivt_entry[0];
+-            tss->cs  = ivt_entry[1];
++            isf->eip = ivt_entry[0];
++            isf->cs  = ivt_entry[1];
+             break;
+         }
+ 
+         case 0xcf: /* iret */
+ 
+             // Wenn es das finale iret ist, koennen wir den VM86-Task beenden
+-            if (tss->esp == 0xFFFE) {
+-                destroy_vm86_task(tss);
++            if (isf->esp == INITIAL_SP) {
++                destroy_vm86_task(isf);
+                 return 1;
+             }
+ 
+             // Ansonsten muss es ganz normal emuliert werden
+-            emulator_pop(tss);
+-            tss->cs  = emulator_pop(tss);
+-            tss->eip = emulator_pop(tss);
++            emulator_pop(isf);
++            isf->cs  = emulator_pop(isf);
++            isf->eip = emulator_pop(isf);
+             break;
+ 
+         case 0xec: /* inb al, dx */
+-            tss->eax &= ~0xFF;
+-            tss->eax |= inb(tss->edx);
+-            tss->eip++;
++            isf->eax &= ~0xFF;
++            isf->eax |= inb(isf->edx);
++            isf->eip++;
+             break;
+ 
+         case 0xed: /* inw ax, dx */
+-            tss->eax &= ~0xFFFF;
+-            tss->eax |= inw(tss->edx);
+-            tss->eip++;
++            isf->eax &= ~0xFFFF;
++            isf->eax |= inw(isf->edx);
++            isf->eip++;
+             break;
+ 
+         case 0x66ed: /* inl eax, dx */
+-            tss->eax = inl(tss->edx);
+-            tss->eip++;
++            isf->eax = inl(isf->edx);
++            isf->eip++;
+             break;
+ 
+         case 0xee: /* outb dx, al */
+-            outb(tss->edx, tss->eax);
+-            tss->eip++;
++            outb(isf->edx, isf->eax);
++            isf->eip++;
+             break;
+ 
+         case 0xef: /* outw dx, ax */
+-            outw(tss->edx, tss->eax);
+-            tss->eip++;
++            outw(isf->edx, isf->eax);
++            isf->eip++;
+             break;
+ 
+         case 0x66ef: /* outl dx, eax */
+-            outl(tss->edx, tss->eax);
+-            tss->eip++;
++            outl(isf->edx, isf->eax);
++            isf->eip++;
+             break;
+ 
+         case 0xfa: /* cli */
+             // Hoffentlich hatte der VM86-Code keinen guten Grund dafür, aber
+             // Interrupts wirklich ausschalten klingt gefährlich
+-            tss->eip++;
++            isf->eip++;
+             break;
+ 
+         case 0xfb: /* sti */
+-            tss->eip++;
++            isf->eip++;
+             break;
+ 
+         default:
+             kprintf("vm86: Unbekannte Opcodesequenz %02x %02x %02x %02x %02x "
+                 "%02x\n", ops[0], ops[1], ops[2], ops[3], ops[4], ops[5]);
+-
+-            // Für ordentliches Rot
+-            isf->eflags = tss->eflags;
+-            isf->eip = tss->eip;
+-            isf->esp = tss->esp;
+-            isf->cs = tss->cs;
+-            isf->ss = tss->cs;
+-
+             return 0;
+     }
+ 
+diff --git a/src/kernel2/src/arch/i386/vm86_asm.S b/src/kernel2/src/arch/i386/vm86_asm.S
+deleted file mode 100644
+index bcafbd2..0000000
+--- a/src/kernel2/src/arch/i386/vm86_asm.S
++++ /dev/null
+@@ -1,15 +0,0 @@
+-.code32
+-
+-.globl vm86_task_entry
+-.extern vm86_get_backlink_pointer
+-vm86_task_entry:
+-    call vm86_get_backlink_pointer
+-    mov %bx, (%eax)
+-
+-    pushfl
+-    pop %eax
+-    or $0x4000, %eax
+-    push %eax
+-    popfl
+-
+-    iret
+-- 
+1.7.7
+
+

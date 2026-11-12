@@ -1,0 +1,148 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 5/6] tcpip: Readahead-Unterstützung für TCP
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_5/6%3D5D_tcpip%3D3A_Readahead-Unter%3F%3D%0A%09%3D%3Futf-8%3Fb%3Fc3TDvHR6dW5nIGbDvHIgVENQ%3F%3D&In-Reply-To=%3C1336857589-6603-6-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002356.html">
+   <LINK REL="Next"  HREF="002358.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 5/6] tcpip: Readahead-Unterstützung für TCP</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_5/6%3D5D_tcpip%3D3A_Readahead-Unter%3F%3D%0A%09%3D%3Futf-8%3Fb%3Fc3TDvHR6dW5nIGbDvHIgVENQ%3F%3D&In-Reply-To=%3C1336857589-6603-6-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 5/6] tcpip: Readahead-Unterstützung für TCP">kevin at tyndur.org
+                  </A><BR>
+    <I>Sa Mai 12 23:19:48 CEST 2012</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002356.html">[tyndur-devel] [PATCH 4/6] cdi/fs: Readahead implementiert
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002358.html">[tyndur-devel] [PATCH 6/6] stdio.h: BUFSIZ auf 64k erhöht
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2357">[ Datum ]</a>
+              <a href="thread.html#2357">[ Thema ]</a>
+              <a href="subject.html#2357">[ Betreff (Subject) ]</a>
+              <a href="author.html#2357">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ tcpip: readahead-Callback für TCP implementiert
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/tcpip/lostio_if.c |   46 ++++++++++++++++++++++++++++++++++++++++-
+ 1 files changed, 45 insertions(+), 1 deletions(-)
+
+diff --git a/src/modules/tcpip/lostio_if.c b/src/modules/tcpip/lostio_if.c
+index 6269da9..367f682 100644
+--- a/src/modules/tcpip/lostio_if.c
++++ b/src/modules/tcpip/lostio_if.c
+@@ -79,6 +79,7 @@ typehandle_t typehandle3;
+ bool   lostio_tcp_not_found(char**, uint8_t, pid_t,FILE*);
+ bool   lostio_tcp_pre_open(char**, uint8_t, pid_t,FILE*);
+ size_t lostio_tcp_read(lostio_filehandle_t*,void*,size_t,size_t);
++size_t lostio_tcp_readahead(lostio_filehandle_t*,void*,size_t,size_t);
+ size_t lostio_tcp_write(lostio_filehandle_t*,size_t,size_t,void*);
+ int    lostio_tcp_close(lostio_filehandle_t*);
+ size_t lostio_netconfig_read(lostio_filehandle_t*,void*,size_t,size_t);
+@@ -99,6 +100,7 @@ void init_lostio_interface(void)
+     typehandle.pre_open    = &amp;lostio_tcp_pre_open;
+     typehandle.post_open   = NULL;
+     typehandle.read        = &amp;lostio_tcp_read;
++    typehandle.readahead   = &amp;lostio_tcp_readahead;
+     typehandle.write       = &amp;lostio_tcp_write;
+     typehandle.seek        = NULL;
+     typehandle.close       = &amp;lostio_tcp_close;;
+@@ -202,7 +204,8 @@ bool lostio_tcp_not_found(char** path, uint8_t flags, pid_t pid,
+         return vfstree_create_node(*path, LOSTIO_TYPES_RAMFILE,
+             16 * result-&gt;ip_count, data, 0);
+     } else {
+-        return vfstree_create_node(*path, LOSTIO_TYPES_TCPPORT, 0, NULL, 0);
++        return vfstree_create_node(*path, LOSTIO_TYPES_TCPPORT, 0, NULL,
++            LOSTIO_FLAG_READAHEAD);
+     }
+ }
+ 
+@@ -268,6 +271,47 @@ bool lostio_tcp_pre_open(char** path, uint8_t flags, pid_t pid,
+     return true;
+ }
+ 
++size_t lostio_tcp_readahead(lostio_filehandle_t* fh, void* buf,
++    size_t bs, size_t bc)
++{
++    struct tcp_connection* conn = fh-&gt;node-&gt;data;
++    size_t remaining = bs * bc;
++    struct tcp_in_buffer* src;
++    char* dest = buf;
++    size_t bytes_read = 0;
++    int bufidx = 0;
++
++    p();
++    if ((conn-&gt;status == TCPS_CLOSED) &amp;&amp; (list_is_empty(conn-&gt;to_lostio))) {
++        fh-&gt;flags |= LOSTIO_FLAG_EOF;
++    }
++
++    while (remaining &gt; 0) {
++        size_t cur_offset;
++        size_t cur_bytes;
++
++        src = list_get_element_at(conn-&gt;to_lostio, bufidx++);
++        if (src == NULL) {
++            break;
++        }
++
++        cur_offset = bufidx ? 0 : src-&gt;seq;
++        cur_bytes = src-&gt;size - src-&gt;seq;
++
++        if (cur_bytes &gt; remaining) {
++            cur_bytes = remaining;
++        }
++
++        memcpy(dest, src-&gt;data + cur_offset, cur_bytes);
++        remaining -= cur_bytes;
++        dest += cur_bytes;
++        bytes_read += cur_bytes;
++    }
++
++    v();
++    return bytes_read;
++}
++
+ size_t lostio_tcp_read(lostio_filehandle_t* fh, void* buf,
+     size_t blocksize, size_t count)
+ {
+-- 
+1.7.7
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002356.html">[tyndur-devel] [PATCH 4/6] cdi/fs: Readahead implementiert
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002358.html">[tyndur-devel] [PATCH 6/6] stdio.h: BUFSIZ auf 64k erhöht
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2357">[ Datum ]</a>
+              <a href="thread.html#2357">[ Thema ]</a>
+              <a href="subject.html#2357">[ Betreff (Subject)]</a>
+              <a href="author.html#2357">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

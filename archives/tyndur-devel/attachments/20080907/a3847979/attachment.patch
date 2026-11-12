@@ -1,0 +1,364 @@
+Index: trunk/src/kernel2/include/syscall.h
+===================================================================
+--- trunk.orig/src/kernel2/include/syscall.h
++++ trunk/src/kernel2/include/syscall.h
+@@ -128,6 +128,9 @@ int syscall_fastrpc(pid_t callee_pid, si
+ /// Von einem RPC zurueckkehren
+ void syscall_fastrpc_ret(void);
+ 
++/// Interrupt registrieren
++void syscall_add_interrupt_handler(uint32_t intr);
++
+ // Diverse
+ /// Textausgabe ueber den Kernel
+ void syscall_putsn(int char_count, char* source);
+Index: trunk/src/kernel2/src/syscall.c
+===================================================================
+--- trunk.orig/src/kernel2/src/syscall.c
++++ trunk/src/kernel2/src/syscall.c
+@@ -75,6 +75,8 @@ void syscall_init()
+ #endif
+ 
+     syscall_register(SYSCALL_PM_REQUEST_PORT, syscall_io_request_port, 2);
++    syscall_register(SYSCALL_ADD_INTERRUPT_HANDLER,
++        syscall_add_interrupt_handler, 1);
+ 
+     syscall_register(SYSCALL_PUTSN, (void*) &syscall_putsn, 2);
+ }
+Index: trunk/src/kernel2/src/syscalls/rpc.c
+===================================================================
+--- trunk.orig/src/kernel2/src/syscalls/rpc.c
++++ trunk/src/kernel2/src/syscalls/rpc.c
+@@ -41,6 +41,7 @@
+ #include "syscall.h"
+ #include "tasks.h"
+ #include "cpu.h"
++#include "im.h"
+ 
+ typedef struct {
+     uintptr_t   old_eip;
+@@ -50,7 +51,7 @@ typedef struct {
+     dword       eflags;
+     dword       eax;
+ 
+-    dword       reenable_irq;
++    uint8_t     reenable_irq;
+ 
+     pm_thread_t* caller;
+ } rpc_t;
+@@ -288,8 +289,6 @@ int syscall_fastrpc(pid_t callee_pid, si
+     return 0;
+ }
+ 
+-
+-#if 0
+ /**
+  * Führt einen RPC zur Behandlung eines IRQ durch. Der IRQ wird dabei
+  * deaktiviert, solange der Handler arbeitet und erst anschließend
+@@ -298,22 +297,23 @@ int syscall_fastrpc(pid_t callee_pid, si
+  *
+  * @see fastrpc
+  */
+-bool fastrpc_irq(struct task * callee, dword metadata_size, void* metadata,
+-    dword data_size, void* data, byte irq)
++bool fastrpc_irq(pm_process_t* callee, size_t metadata_size, void* metadata,
++    size_t data_size, void* data, uint8_t irq)
+ {
+-    if (callee->blocked_by_pid && (callee->status != TS_WAIT_FOR_RPC)) {
++    if (callee->blocked_by_pid && (callee->status != PM_STATUS_WAIT_FOR_RPC)) {
+         return FALSE;
+     }
+ 
+-    if (fastrpc(callee, metadata_size, metadata, data_size, data)) {
+-        rpc_t* rpc = list_get_element_at(current_task->rpcs, 0);
++    if (syscall_fastrpc(callee->pid, metadata_size, metadata, data_size, data))
++    {
++        rpc_t* rpc = list_get_element_at(
++            cpu_get_current()->thread->process->rpcs, 0);
+         rpc->reenable_irq = irq;
+         return TRUE;
+     } else {
+         return FALSE;
+     }
+ }
+-#endif
+ 
+ /**
+  * Wird nach der Ausführung eines RPC-Handlers aufgerufen.
+@@ -363,14 +363,13 @@ void syscall_fastrpc_ret(void)
+     if (rpc->caller) {
+         schedule_to_task(rpc->caller, (dword*) esp);
+     }
++#endif
+ 
+     // Wenn es ein IRQ-verarbeitender RPC war, den Interrupt jetzt
+     // wieder aktivieren
+     if (rpc->reenable_irq) {
+-        //printf("reenable IRQ %d\n", rpc->reenable_irq);
+-        enable_irq(rpc->reenable_irq);
++        im_enable_irq(rpc->reenable_irq);
+     }
+-#endif
+ 
+     free(rpc);
+ }
+@@ -399,4 +398,9 @@ void rpc_destroy_task_backlinks(struct t
+ 
+ #endif
+ 
++void syscall_add_interrupt_handler(uint32_t intr)
++{
++    im_add_handler(intr, cpu_get_current()->thread->process);
++}
++
+ #endif
+Index: trunk/src/kernel2/include/im.h
+===================================================================
+--- trunk.orig/src/kernel2/include/im.h
++++ trunk/src/kernel2/include/im.h
+@@ -39,8 +39,10 @@
+ #include <types.h>
+ 
+ #include "cpu.h"
++#include "tasks.h"
+ 
+ #define IM_IRQ_BASE 0x20
++#define IM_NUM_INTERRUPTS 256
+ 
+ void im_init();
+ void im_init_local();
+@@ -48,8 +50,13 @@ void im_init_local();
+ void im_enable();
+ void im_disable();
+ 
++void im_enable_irq(uint8_t irq);
++void im_disable_irq(uint8_t irq);
++
+ void im_end_of_interrupt(byte interrupt);
+ interrupt_stack_frame_t* im_handler(interrupt_stack_frame_t* isf);
+ 
++bool im_add_handler(uint32_t intr, pm_process_t* handler);
++
+ #endif //ifndef _IM_H_
+ 
+Index: trunk/src/kernel2/include/tasks.h
+===================================================================
+--- trunk.orig/src/kernel2/include/tasks.h
++++ trunk/src/kernel2/include/tasks.h
+@@ -83,8 +83,13 @@ typedef struct pm_process {
+ 
+     /// Eine Liste von RPC-Backlinks
+     list_t* rpcs;
+-} pm_process_t;
+ 
++    /**
++     * Eine Liste von Eventhandlern, die beim Loeschen des Prozesses
++     * aufgerufen werden
++     */
++    list_t* on_destroy;
++} pm_process_t;
+ 
+ typedef struct {
+     /// Adresse des Kernelstack-Pointers
+@@ -106,6 +111,7 @@ typedef struct {
+     lock_t lock;
+ } pm_thread_t;
+ 
++typedef void (*pm_process_destroy_handler)(pm_process_t* process, void* prv);
+ 
+ /**
+  * Prozessverwaltung
+@@ -135,6 +141,11 @@ bool pm_block_rpc(pm_process_t* task, pi
+ bool pm_unblock_rpc(pm_process_t* task, pid_t blocked_by);
+ 
+ 
++/// Handler fuer das Loeschen des Prozesses registrieren
++void pm_register_on_destroy(pm_process_t* process,
++    pm_process_destroy_handler handler, void* prv);
++
++
+ /**
+  * Threadverwaltung
+  */
+Index: trunk/src/kernel2/src/interrupts/im.c
+===================================================================
+--- trunk.orig/src/kernel2/src/interrupts/im.c
++++ trunk/src/kernel2/src/interrupts/im.c
+@@ -42,10 +42,17 @@
+ #include "tasks.h"
+ #include "debug.h"
+ #include "apic.h"
++#include "kernel.h"
+ #include "syscall.h"
+ 
+ extern size_t cpu_count;
+ 
++static pm_process_t* intr_handling_task[IM_NUM_INTERRUPTS];
++static uint32_t intr_to_send[IM_NUM_INTERRUPTS];
++
++bool fastrpc_irq(pm_process_t* callee, size_t metadata_size, void* metadata,
++    size_t data_size, void* data, uint8_t irq);
++
+ /**
+  * Behandelt alle Interrupts. Wird aus den Interrupt-Stubs aufgerufen.
+  * 
+@@ -101,6 +108,9 @@ interrupt_stack_frame_t* im_handler(inte
+ 
+             // Einen neuen Thread holen.
+             cpu_get_current()->thread = pm_scheduler_pop();
++        } else {
++            intr_to_send[int_num]++;
++            im_disable_irq(int_num - IM_IRQ_BASE);
+         }
+     } else if (int_num == 0x30) {
+         // Syscall
+@@ -131,3 +141,70 @@ interrupt_stack_frame_t* im_handler(inte
+     return (interrupt_stack_frame_t*) thread->kernel_stack;
+ }
+ 
++/**
++ * Wird beim Loeschen einen Prozesses aufgerufen. Entfernt den Prozess aus der
++ * Interrupthandlertabelle.
++ */
++static void on_process_destroy(pm_process_t* process, void* prv)
++{
++    uint32_t intr = (uint32_t) prv;
++
++    if (intr >= IM_NUM_INTERRUPTS) {
++        panic("im.c: on_process_destroy(): Korrupte Interruptnummer %d", intr);
++    }
++
++    if (intr_handling_task[intr] != process) {
++        panic("im.c: on_process_destroy(): Prozess nicht fuer Interrupt %d "
++            "zustaendig", intr);
++    }
++
++    intr_handling_task[intr] = NULL;
++}
++
++/**
++ * Registriert einen Prozess als fuer einen Interrupt zustandig
++ *
++ * @return TRUE falls der Interrupt registriert werden konnte, FALSE falls fuer
++ * ihn bereits einen Handler registriert war oder die Interruptnummer
++ * ausserhalb des zulaessigen Bereichs liegt.
++ *
++ * TODO Mehrere Handler fuer einen Interrupt unterstuetzen
++ */
++bool im_add_handler(uint32_t intr, pm_process_t* handler)
++{
++    if ((intr >= IM_NUM_INTERRUPTS) || intr_handling_task[intr]) {
++        return FALSE;
++    }
++
++    intr_handling_task[intr] = handler;
++    pm_register_on_destroy(handler, on_process_destroy, (void*) intr);
++
++    return TRUE;
++}
++
++/**
++ * Ruft die Handler ausstehender Interrupts auf
++ */
++void im_send_interrupts(void)
++{
++    uint32_t intr;
++
++    for (intr = 0; intr < IM_NUM_INTERRUPTS; intr++)
++    {
++        while (intr_to_send[intr] > 0) {
++            if (intr_handling_task[intr] == NULL) {
++                intr_to_send[intr] = 0;
++                break;
++            }
++
++            // TODO schedule_to_task(intr_handling_task[intr], esp);
++
++            if (!fastrpc_irq(intr_handling_task[intr], 0, 0,
++                sizeof(intr), (char*) &intr, intr - IM_IRQ_BASE))
++            {
++                break;
++            }
++            intr_to_send[intr]--;
++        }
++    }
++}
+Index: trunk/src/kernel2/src/tasks/pm.c
+===================================================================
+--- trunk.orig/src/kernel2/src/tasks/pm.c
++++ trunk/src/kernel2/src/tasks/pm.c
+@@ -41,6 +41,12 @@
+ #include "tasks.h"
+ #include "lock.h"
+ 
++
++struct on_destroy_info {
++    pm_process_destroy_handler handler;
++    void* prv;
++};
++
+ /// Liste mit allen Prozessen
+ static list_t* process_list;
+ 
+@@ -91,6 +97,9 @@ pm_process_t* pm_create(pm_process_t* pa
+         return NULL;
+     }
+ 
++    // Eventhandlerlisten anlegen
++    process->on_destroy = list_create();
++
+     // Dem Prozess eine ID zuordnen
+     process->pid = generate_pid();
+ 
+@@ -141,9 +150,18 @@ pm_process_t* pm_create(pm_process_t* pa
+  */
+ void pm_destroy(pm_process_t* process)
+ {
++    struct on_destroy_info* info;
++
+     // Den Prozess blockieren
+     while (pm_block(process) == FALSE);
+ 
++    // Eventhandler ausfuehren
++    while ((info = list_pop(process->on_destroy))) {
++        info->handler(process, info->prv);
++        free(info);
++    }
++    list_destroy(process->on_destroy);
++
+     // RPC-Strukturen freigeben
+     // TODO Die einzelnen Listenglieder freigeben
+     list_destroy(process->rpcs);
+@@ -296,3 +314,17 @@ bool pm_unblock_rpc(pm_process_t* task,
+         return FALSE;
+     }
+ }
++
++/**
++ * Handler fuer das Loeschen des Prozesses registrieren
++ */
++void pm_register_on_destroy(pm_process_t* process,
++    pm_process_destroy_handler handler, void* prv)
++{
++    struct on_destroy_info* info = malloc(sizeof(*info));
++
++    info->handler = handler;
++    info->prv = prv;
++
++    list_push(process->on_destroy, info);
++}
+Index: trunk/src/kernel2/include/pic.h
+===================================================================
+--- trunk.orig/src/kernel2/include/pic.h
++++ trunk/src/kernel2/include/pic.h
+@@ -39,8 +39,8 @@
+ #include <types.h>
+ 
+ void pic_init(byte irq_base);
+-void pic_mask(byte irq);
+-void pic_unmask(byte irq);
++void pic_enable_irq(byte irq);
++void pic_disable_irq(byte irq);
+ void pic_eoi(byte irq);
+ 
+ #endif //ifndef _PIC_H_

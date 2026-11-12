@@ -1,0 +1,200 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH 04/10] usb: Make descriptors inherit from a	common base
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%2004/10%5D%20usb%3A%20Make%20descriptors%20inherit%20from%20a%0A%09common%20base&In-Reply-To=%3C1451346799-23335-5-git-send-email-max%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000349.html">
+   <LINK REL="Next"  HREF="000351.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH 04/10] usb: Make descriptors inherit from a	common base</H1>
+    <B>Max Reitz</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%2004/10%5D%20usb%3A%20Make%20descriptors%20inherit%20from%20a%0A%09common%20base&In-Reply-To=%3C1451346799-23335-5-git-send-email-max%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH 04/10] usb: Make descriptors inherit from a	common base">max at tyndur.org
+       </A><BR>
+    <I>Tue Dec 29 00:53:13 CET 2015</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000349.html">[cdi-devel] [PATCH 03/10] usb: Ignore hub power switching errors
+</A></li>
+        <LI>Next message: <A HREF="000351.html">[cdi-devel] [PATCH 05/10] usb: Store hub and hub_port for each	usb_device
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#350">[ date ]</a>
+              <a href="thread.html#350">[ thread ]</a>
+              <a href="subject.html#350">[ subject ]</a>
+              <a href="author.html#350">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>* All USB descriptors share a common base which defines the length and
+  the type of the descriptor. In order to have code that does not
+  completely rely on fixed descriptor orderings (such as
+  &quot;configuration (interface (endpoint)*)*&quot;), we need this type to be
+  able to represent descriptors of undetermined type.
+
+Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+---
+ include/cdi/usb-structures.h | 18 +++++++++---------
+ usb/usb.c                    | 20 +++++++++++---------
+ 2 files changed, 20 insertions(+), 18 deletions(-)
+
+diff --git a/include/cdi/usb-structures.h b/include/cdi/usb-structures.h
+index fecb609..f894b9e 100644
+--- a/include/cdi/usb-structures.h
++++ b/include/cdi/usb-structures.h
+@@ -18,9 +18,13 @@
+ #include &lt;stdint.h&gt;
+ 
+ 
+-struct cdi_usb_device_descriptor {
++struct cdi_usb_descriptor {
+     uint8_t b_length;
+     uint8_t b_descriptor_type;
++} __attribute__((packed));
++
++struct cdi_usb_device_descriptor {
++    struct cdi_usb_descriptor base;
+     uint16_t bcd_usb;
+     uint8_t b_device_class;
+     uint8_t b_device_sub_class;
+@@ -36,8 +40,7 @@ struct cdi_usb_device_descriptor {
+ } __attribute__((packed));
+ 
+ struct cdi_usb_configuration_descriptor {
+-    uint8_t b_length;
+-    uint8_t b_descriptor_type;
++    struct cdi_usb_descriptor base;
+     uint16_t w_total_length;
+     uint8_t b_num_interfaces;
+     uint8_t b_configuration_value;
+@@ -47,14 +50,12 @@ struct cdi_usb_configuration_descriptor {
+ } __attribute__((packed));
+ 
+ struct cdi_usb_string_descriptor {
+-    uint8_t b_length;
+-    uint8_t b_descriptor_type;
++    struct cdi_usb_descriptor base;
+     uint16_t b_string[127];
+ } __attribute__((packed));
+ 
+ struct cdi_usb_interface_descriptor {
+-    uint8_t b_length;
+-    uint8_t b_descriptor_type;
++    struct cdi_usb_descriptor base;
+     uint8_t b_interface_number;
+     uint8_t b_alternate_setting;
+     uint8_t b_num_endpoints;
+@@ -66,8 +67,7 @@ struct cdi_usb_interface_descriptor {
+ 
+ 
+ struct cdi_usb_endpoint_descriptor {
+-    uint8_t b_length;
+-    uint8_t b_descriptor_type;
++    struct cdi_usb_descriptor base;
+     uint8_t b_endpoint_address;
+     uint8_t bm_attributes;
+     uint16_t w_max_packet_size;
+diff --git a/usb/usb.c b/usb/usb.c
+index 1f69c1b..489f362 100644
+--- a/usb/usb.c
++++ b/usb/usb.c
+@@ -223,8 +223,8 @@ static void get_string_descriptor(usb_device_t *dev, int index,
+             .w_value            = (CDI_USB_DESC_STRING &lt;&lt; 8) | index,
+             .w_length           = 1
+         }, dst);
+-    if (res != CDI_USB_OK || !dst-&gt;b_length) {
+-        dst-&gt;b_length = 0;
++    if (res != CDI_USB_OK || !dst-&gt;base.b_length) {
++        dst-&gt;base.b_length = 0;
+         return;
+     }
+ 
+@@ -232,10 +232,10 @@ static void get_string_descriptor(usb_device_t *dev, int index,
+             .bm_request_type    = CDI_USB_CREQ_DEVICE | CDI_USB_CREQ_IN,
+             .b_request          = CDI_USB_CREQ_GET_DESCRIPTOR,
+             .w_value            = (CDI_USB_DESC_STRING &lt;&lt; 8) | index,
+-            .w_length           = dst-&gt;b_length
++            .w_length           = dst-&gt;base.b_length
+         }, dst);
+     if (res != CDI_USB_OK) {
+-        dst-&gt;b_length = 0;
++        dst-&gt;base.b_length = 0;
+         return;
+     }
+ }
+@@ -348,7 +348,7 @@ static void debug_device(usb_device_t *dev)
+ 
+     if (dev-&gt;dev_desc.i_manufacturer) {
+         get_string_descriptor(dev, dev-&gt;dev_desc.i_manufacturer, &amp;str);
+-        for (int i = 0; i &lt; (str.b_length - 2) / 2; i++) {
++        for (int i = 0; i &lt; (str.base.b_length - 2) / 2; i++) {
+             putchar(str.b_string[i] &gt; 0x7f ? '?' : str.b_string[i]);
+         }
+         putchar(' ');
+@@ -356,7 +356,7 @@ static void debug_device(usb_device_t *dev)
+ 
+     if (dev-&gt;dev_desc.i_product) {
+         get_string_descriptor(dev, dev-&gt;dev_desc.i_product, &amp;str);
+-        for (int i = 0; i &lt; (str.b_length - 2) / 2; i++) {
++        for (int i = 0; i &lt; (str.base.b_length - 2) / 2; i++) {
+             putchar(str.b_string[i] &gt; 0x7f ? '?' : str.b_string[i]);
+         }
+         putchar(' ');
+@@ -374,7 +374,7 @@ static void debug_configuration(usb_device_t *dev)
+     if (dev-&gt;config-&gt;i_configuration) {
+         get_string_descriptor(dev, dev-&gt;config-&gt;i_configuration, &amp;str);
+         putchar('(');
+-        for (int i = 0; i &lt; (str.b_length - 2) / 2; i++) {
++        for (int i = 0; i &lt; (str.base.b_length - 2) / 2; i++) {
+             putchar(str.b_string[i] &gt; 0x7f ? '?' : str.b_string[i]);
+         }
+         putchar(')');
+@@ -616,8 +616,10 @@ void usb_get_endpoint_descriptor(struct cdi_usb_device *dev, int ep,
+         memcpy(desc, ep_info-&gt;desc, sizeof(*desc));
+     } else {
+         *desc = (struct cdi_usb_endpoint_descriptor){
+-            .b_length           = sizeof(*desc),
+-            .b_descriptor_type  = CDI_USB_DESC_ENDPOINT,
++            .base = {
++                .b_length           = sizeof(*desc),
++                .b_descriptor_type  = CDI_USB_DESC_ENDPOINT,
++            },
+             .b_endpoint_address = 0,
+             .bm_attributes      = 0x00,
+             .w_max_packet_size  = ep_info-&gt;mps,
+-- 
+2.6.4
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000349.html">[cdi-devel] [PATCH 03/10] usb: Ignore hub power switching errors
+</A></li>
+	<LI>Next message: <A HREF="000351.html">[cdi-devel] [PATCH 05/10] usb: Store hub and hub_port for each	usb_device
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#350">[ date ]</a>
+              <a href="thread.html#350">[ thread ]</a>
+              <a href="subject.html#350">[ subject ]</a>
+              <a href="author.html#350">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

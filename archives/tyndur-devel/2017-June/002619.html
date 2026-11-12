@@ -1,0 +1,156 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] Improves SDL input processing.
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20Improves%20SDL%20input%20processing.&In-Reply-To=%3C20170617211122.22787-1-felix%40ib-queissner.de%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   
+   
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] Improves SDL input processing.</H1>
+    <B>felix at ib-queissner.de</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20Improves%20SDL%20input%20processing.&In-Reply-To=%3C20170617211122.22787-1-felix%40ib-queissner.de%3E"
+           TITLE="[tyndur-devel] [PATCH] Improves SDL input processing.">felix at ib-queissner.de
+                  </A><BR>
+    <I>Sa Jun 17 23:11:22 CEST 2017</I>
+    <P><UL>
+        
+        
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2619">[ Datum ]</a>
+              <a href="thread.html#2619">[ Thema ]</a>
+              <a href="subject.html#2619">[ Betreff (Subject) ]</a>
+              <a href="author.html#2619">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>From: Felix Queißner &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">git at mq32.de</A>&gt;
+
+* keysym.scancode now contains the original tyndur keycode,
+* keysym.unicode now contains the translated keycode from vterm:/keymap when
+  SDL_EnableUNICODE is set.
+  Modifier priority is: AltGraph (or LAlt+LShift) &gt; LCtrl &gt; LShift.
+  RCtrl is not used.
+---
+ lbuilds/sdl/1.2.14/patches/tyndur-video.patch | 55 ++++++++++++++++++---------
+ 1 file changed, 38 insertions(+), 17 deletions(-)
+
+diff --git a/lbuilds/sdl/1.2.14/patches/tyndur-video.patch b/lbuilds/sdl/1.2.14/patches/tyndur-video.patch
+index f1af522..21f92f1 100644
+--- a/lbuilds/sdl/1.2.14/patches/tyndur-video.patch
++++ b/lbuilds/sdl/1.2.14/patches/tyndur-video.patch
+@@ -68,7 +68,7 @@ Index: src/SDL-1.2.14/src/video/tyndur/SDL_tyndurevents.c
+ ===================================================================
+ --- /dev/null
+ +++ src/SDL-1.2.14/src/video/tyndur/SDL_tyndurevents.c
+-@@ -0,0 +1,252 @@
++@@ -0,0 +1,273 @@
+ +/*
+ +    SDL - Simple DirectMedia Layer
+ +    Copyright (C) 1997-2009 Sam Lantinga
+@@ -108,21 +108,6 @@ Index: src/SDL-1.2.14/src/video/tyndur/SDL_tyndurevents.c
+ +#include &lt;lostio.h&gt;
+ +
+ +
+-+static SDL_keysym* get_keysym(int c)
+-+{
+-+    static SDL_keysym keysym;
+-+
+-+    keysym.scancode = c;
+-+    keysym.sym = c;
+-+    keysym.mod = KMOD_NONE;
+-+	keysym.unicode = 0;
+-+	if ( SDL_TranslateUNICODE ) {
+-+		/* Populate the unicode field with the ASCII value */
+-+		keysym.unicode = c;
+-+	}
+-+
+-+    return &keysym;
+-+}
+ +
+ +static pid_t kbc_pid;
+ +
+@@ -140,6 +125,42 @@ Index: src/SDL-1.2.14/src/video/tyndur/SDL_tyndurevents.c
+ +
+ +static struct keymap_entry keymap[128];
+ +
+++static SDL_keysym* get_keysym(int tyndurKey, int sdlKey, int release)
+++{
+++    static SDL_keysym keysym;
+++
+++    keysym.scancode = tyndurKey;
+++    keysym.sym = sdlKey;
+++    keysym.mod = KMOD_NONE;
+++		keysym.unicode = 0;
+++		if ( SDL_TranslateUNICODE &amp;&amp; release == 0 ) {
+++				
+++				/* translate the tyndur keycode to a unicode value */
+++				if(tyndurKey &gt;= 0 &amp;&amp; tyndurKey &lt; 128) {
+++					SDLMod modifiers = SDL_GetModState();
+++				
+++					// Right alt == AltGr
+++					if((modifiers &amp; KMOD_RALT) ||
+++						 ((modifiers &amp; KMOD_LALT) &amp;&amp; (modifiers &amp; KMOD_LSHIFT)))
+++					{
+++						// AltGraph or Shift+Alt kills them all
+++						keysym.unicode = keymap[tyndurKey].altgr;
+++					} else if(modifiers &amp; KMOD_LCTRL) {
+++						// Control is better than shift, i think...
+++						keysym.unicode = keymap[tyndurKey].ctrl;
+++					} else if(modifiers &amp; KMOD_LSHIFT) {
+++					  // When shift is pressed without alt, apply shift modifier
+++						keysym.unicode = keymap[tyndurKey].shift;
+++					} else {
+++						// Normal is &quot;lowest&quot; priority
+++						keysym.unicode = keymap[tyndurKey].normal;
+++					}
+++				}
+++    }
+++
+++    return &keysym;
+++}
+++
+ +static int get_sdl_keycode(uint8_t keycode)
+ +{
+ +    int c;
+@@ -227,7 +248,7 @@ Index: src/SDL-1.2.14/src/video/tyndur/SDL_tyndurevents.c
+ +    p();
+ +
+ +    keycode = get_sdl_keycode(kbd_data-&gt;keycode);
+-+    keysym = get_keysym(keycode);
+++    keysym = get_keysym(kbd_data-&gt;keycode, keycode, kbd_data-&gt;release);
+ +
+ +    if (kbd_data-&gt;release) {
+ +        SDL_PrivateKeyboard(SDL_RELEASED, keysym);
+-- 
+2.13.1
+
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	
+	
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2619">[ Datum ]</a>
+              <a href="thread.html#2619">[ Thema ]</a>
+              <a href="subject.html#2619">[ Betreff (Subject)]</a>
+              <a href="author.html#2619">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

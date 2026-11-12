@@ -1,0 +1,146 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] kernel2: Timer duerfen eax nicht kaputtmachen
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20kernel2%3A%20Timer%20duerfen%20eax%20nicht%20kaputtmachen&In-Reply-To=%3C1264967486-7761-1-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001659.html">
+   
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] kernel2: Timer duerfen eax nicht kaputtmachen</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20kernel2%3A%20Timer%20duerfen%20eax%20nicht%20kaputtmachen&In-Reply-To=%3C1264967486-7761-1-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH] kernel2: Timer duerfen eax nicht kaputtmachen">kevin at tyndur.org
+                  </A><BR>
+    <I>So Jan 31 20:51:26 CET 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001659.html">[tyndur-devel] [PATCH] kernel2: Fix fuer Unmapping beim RPC
+</A></li>
+        
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1660">[ Datum ]</a>
+              <a href="thread.html#1660">[ Thema ]</a>
+              <a href="subject.html#1660">[ Betreff (Subject) ]</a>
+              <a href="author.html#1660">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>! kernel2: Timer fuehren einen RPC zum Prozess mit dem abgelaufenen
+  Timer aus und haben sich wie ein Syscall verhalten - das geht so weit,
+  dass sie in eax 0 als Rueckgabewert abgelegt haben. Das ist natuerlich
+  eher ungeschickt, wenn der Prozess eigentlich gar nicht selber nach
+  einem RPC gefragt hat, sondern sein eax noch braucht...
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/kernel2/src/syscalls/rpc.c |   17 +++++++++--------
+ src/kernel2/src/timer.c        |    6 ++++--
+ 2 files changed, 13 insertions(+), 10 deletions(-)
+
+diff --git a/src/kernel2/src/syscalls/rpc.c b/src/kernel2/src/syscalls/rpc.c
+index c9328e7..0157f51 100644
+--- a/src/kernel2/src/syscalls/rpc.c
++++ b/src/kernel2/src/syscalls/rpc.c
+@@ -124,14 +124,14 @@ static void adjust_stack_size(pm_thread_t* callee,
+  * @param metadata      Pointer auf die Metadaten
+  * @param data_size     Länger der Daten in Bytes
+  * @param data          Pointer auf die Daten
+- * @param irq           TRUE wenn es sich um einen IRQ handelt, FALSE sonst
++ * @param syscall       TRUE wenn es sich um einen Syscall handelt, FALSE sonst
+  *
+  * @return TRUE, wenn der Aufruf erfolgreich durchgeführt wurde, FALSE
+  * sonst. Bei FALSE als Rückgabe sollte der aufrufende Task den RPC-Syscall
+  * wiederholen.
+  */
+-static int do_fastrpc(pid_t callee_pid, size_t metadata_size, void* metadata,
+-    size_t data_size, void* data, bool irq)
++int do_fastrpc(pid_t callee_pid, size_t metadata_size, void* metadata,
++    size_t data_size, void* data, bool syscall)
+ {
+     pm_process_t* process = pm_get(callee_pid);
+     pm_thread_t* callee;
+@@ -220,9 +220,10 @@ static int do_fastrpc(pid_t callee_pid, size_t metadata_size, void* metadata,
+     rpc-&gt;eflags  = callee_isf-&gt;eflags;
+     rpc-&gt;caller  = current_thread;
+ 
+-    if ((callee == current_thread) &amp;&amp; !irq) {
+-        // Bei einem Self-RPC, der kein IRQ war, muss hinterher der
+-        // Rueckgabewert des RPC-Syscalls in eax stehen. Ein IRQ erscheint auch
++    if ((callee == current_thread) &amp;&amp; syscall) {
++        // Bei einem Self-RPC, der ein Syscall war (kein kernelinterner Aufruf
++        // wie z.B. fuer  IRQ oder Timer), muss hinterher der Rueckgabewert
++        // des RPC-Syscalls in eax stehen. Ein IRQ erscheint auch
+         // als Self-RPC, darf aber eax nicht kaputt machen, da dort kein
+         // Rueckgabewert erwartet wird, sondern der vorherige Wert.
+         rpc-&gt;eax = 0;
+@@ -311,7 +312,7 @@ int syscall_fastrpc(pid_t callee_pid, size_t metadata_size, void* metadata,
+     size_t data_size, void* data)
+ {
+     return do_fastrpc(callee_pid, metadata_size, metadata, data_size, data,
+-        FALSE);
++        TRUE);
+ }
+ 
+ /**
+@@ -332,7 +333,7 @@ bool fastrpc_irq(pm_process_t* callee, size_t metadata_size, void* metadata,
+     }
+ 
+     ret = do_fastrpc(
+-        callee-&gt;pid, metadata_size, metadata, data_size, data, TRUE);
++        callee-&gt;pid, metadata_size, metadata, data_size, data, FALSE);
+ 
+     if (ret &lt; 0) {
+         return FALSE;
+diff --git a/src/kernel2/src/timer.c b/src/kernel2/src/timer.c
+index 64c13e9..9aea68d 100644
+--- a/src/kernel2/src/timer.c
++++ b/src/kernel2/src/timer.c
+@@ -40,6 +40,8 @@
+ #include &quot;syscall.h&quot;
+ 
+ extern uint64_t timer_ticks;
++extern int do_fastrpc(pid_t callee_pid, size_t metadata_size, void* metadata,
++    size_t data_size, void* data, bool syscall);
+ 
+ /**
+  * Liste aller registrierten Timer
+@@ -121,9 +123,9 @@ void timer_notify(uint64_t microtime)
+         // Task per RPC informieren, dass der Timer abgelaufen ist.
+         // Im Fehlerfall ueberspringen und es beim naechsten Mal nochmal
+         // versuchen.
+-        if (syscall_fastrpc(item-&gt;task-&gt;pid,
++        if (do_fastrpc(item-&gt;task-&gt;pid,
+                 4, (char*) &amp;rpc_timer_function,
+-                4, (char*) &amp;item-&gt;timer_id))
++                4, (char*) &amp;item-&gt;timer_id, FALSE))
+         {
+             i++;
+             continue;
+-- 
+1.6.0.2
+
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001659.html">[tyndur-devel] [PATCH] kernel2: Fix fuer Unmapping beim RPC
+</A></li>
+	
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1660">[ Datum ]</a>
+              <a href="thread.html#1660">[ Thema ]</a>
+              <a href="subject.html#1660">[ Betreff (Subject)]</a>
+              <a href="author.html#1660">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

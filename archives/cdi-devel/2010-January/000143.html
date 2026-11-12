@@ -1,0 +1,309 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH] ata: Remove partition handling
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%5D%20ata%3A%20Remove%20partition%20handling&In-Reply-To=%3C1264188495-25269-1-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000142.html">
+   <LINK REL="Next"  HREF="000144.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH] ata: Remove partition handling</H1>
+    <B>Kevin Wolf</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%5D%20ata%3A%20Remove%20partition%20handling&In-Reply-To=%3C1264188495-25269-1-git-send-email-kevin%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH] ata: Remove partition handling">kevin at tyndur.org
+       </A><BR>
+    <I>Fri Jan 22 20:28:15 CET 2010</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000142.html">[cdi-devel] Interrupts
+</A></li>
+        <LI>Next message: <A HREF="000144.html">[cdi-devel] [PATCH] ata: Remove partition handling
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#143">[ date ]</a>
+              <a href="thread.html#143">[ thread ]</a>
+              <a href="subject.html#143">[ subject ]</a>
+              <a href="author.html#143">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>Handling partitions is not the disk driver's job. Remove the
+corresponding code.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">kevin at tyndur.org</A>&gt;
+---
+ ata/device.c       |   57 ----------------------------------
+ ata/libpartition.c |   86 ----------------------------------------------------
+ ata/libpartition.h |   58 -----------------------------------
+ 3 files changed, 0 insertions(+), 201 deletions(-)
+ delete mode 100644 ata/libpartition.c
+ delete mode 100644 ata/libpartition.h
+
+diff --git a/ata/device.c b/ata/device.c
+index 7339d65..dd087c3 100644
+--- a/ata/device.c
++++ b/ata/device.c
+@@ -36,7 +36,6 @@
+ #include &quot;cdi/scsi.h&quot;
+ 
+ #include &quot;device.h&quot;
+-#include &quot;libpartition.h&quot;
+ 
+ // IRQ-Handler
+ static inline void ata_controller_irq(struct cdi_device* dev);
+@@ -157,59 +156,6 @@ int ata_wait_irq(struct ata_controller* controller, uint32_t timeout)
+     return 1;
+ }
+ 
+-/**
+- * Partitionstabelle auf einem ATA-Geraet verarbeiten
+- */
+-void ata_parse_partitions(struct ata_device* dev)
+-{
+-    struct partition_table partition_table;
+-    uint8_t mbr[ATA_SECTOR_SIZE];
+-    int i;
+-
+-    // Die Partitionstabelle liegt im MBR
+-    if (!dev-&gt;read_sectors(dev, 0, 1, mbr)) {
+-        DEBUG(&quot;Fehler beim Einlesen der Partitionstabelle&quot;);
+-        return;
+-    }
+-
+-    // Partitionstabelle Verarbeiten
+-    if (!partition_table_fill(&amp;partition_table, mbr)) {
+-        DEBUG(&quot;Fehler beim Verarbeiten der Partitionstabelle&quot;);
+-        return;
+-    }
+-
+-    // Ansonsten wird die Tabelle jetzt verarbeitet
+-    for (i = 0; i &lt; 4; i++) {
+-        if (partition_table.entries[i].used) {
+-            // Erweiterter Eintrag =&gt; ueberspringen
+-            if (partition_table.entries[i].type == PARTITION_TYPE_EXTENDED) {
+-                DEBUG(&quot;TODO Erweiterte Partitionstabelleneintraege\n&quot;);
+-                continue;
+-            }
+-            
+-            struct ata_partition* partition = malloc(sizeof(*partition));
+-            partition-&gt;realdev = dev;
+-            partition-&gt;null = NULL;
+-            partition-&gt;start = partition_table.entries[i].start;
+-            partition-&gt;dev.storage.block_size = ATA_SECTOR_SIZE;
+-            partition-&gt;dev.storage.block_count = partition_table.entries[i].size;
+-            DEBUG(&quot;Partition von %d bis %d\n&quot;, partition-&gt;start, partition-&gt;dev.storage.block_count + partition-&gt;start - 1);
+-            asprintf((char**) &amp;(partition-&gt;dev.storage.dev.name), &quot;ata%01d%01d_p%01d&quot;,
+-                (uint32_t) dev-&gt;controller-&gt;id, dev-&gt;id, cdi_list_size(dev-&gt;
+-                partition_list));
+-
+-            // Geraet registrieren
+-            partition-&gt;dev.storage.dev.driver = &amp;dev-&gt;controller-&gt;storage-&gt;drv;
+-            ata_init_device((struct ata_device*) partition);
+-            cdi_list_push(dev-&gt;controller-&gt;storage-&gt;drv.devices, partition);
+-
+-            // An Partitionsliste fuer das aktuelle Geraet anhaengen
+-            cdi_list_push(dev-&gt;partition_list, partition);
+-        }
+-    }
+-}
+-
+-
+ 
+ 
+ /**
+@@ -296,9 +242,6 @@ void ata_init_controller(struct ata_controller* controller)
+                 asprintf((char**) &amp;(dev-&gt;dev.storage.dev.name), &quot;ata%01d%01d&quot;,
+                     (uint32_t) controller-&gt;id, i);
+ 
+-                // Partitionen parsen
+-                ata_parse_partitions(dev);
+-
+                 // Geraet registrieren
+                 dev-&gt;dev.storage.dev.driver = &amp;controller-&gt;storage-&gt;drv;
+                 ata_init_device(dev);
+diff --git a/ata/libpartition.c b/ata/libpartition.c
+deleted file mode 100644
+index 17c41e1..0000000
+--- a/ata/libpartition.c
++++ /dev/null
+@@ -1,86 +0,0 @@
+-/*
+- * Copyright (c) 2007 The tyndur Project. All rights reserved.
+- *
+- * This code is derived from software contributed to the tyndur Project
+- * by Antoine Kaufmann.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+- * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+- * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
+- * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+- * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+- * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+- * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+- * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+- * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+- */
+-
+-#include &quot;libpartition.h&quot;
+-#include &lt;stdint.h&gt;
+-
+-/**
+- * Roher Partitionstabelleneintrag
+- */
+-struct raw_entry {
+-    uint8_t active;
+-    uint8_t begin_chs[3];
+-    uint8_t type;
+-    uint8_t end_chs[3];
+-    uint32_t start;
+-    uint32_t size;
+-} PACKED;
+-
+-/**
+- * Uebergebene Partitionstabelle anhand des Sektors fuellen
+- *
+- * @return 1 wenn die Tabelle erfolgreich gefuellt wurde, 0 sonst
+- */
+-int partition_table_fill(struct partition_table* table, void* sector)
+-{
+-    struct raw_entry* entry = (struct raw_entry*) (sector +
+-        PARTITION_TABLE_OFFSET);
+-    uint16_t* signature = sector + PARTITION_TABLE_SIG_OFFSET;
+-    int i;
+-
+-    // Zuerst die Signatur pruefen, denn ohne die muss garnicht weiter gesucht
+-    // werden.
+-    if (*signature != PARTITION_TABLE_SIGNATURE) {
+-        return 0;
+-    }
+-    
+-    // Wenn die Signatur existiert koennen die einzelnen Eintraege ausgelesen
+-    // werden
+-    for (i = 0; i &lt; 4; i++) {
+-        // Wenn 0 als Groesse eingetragen ist, ist der Eintrag unbenutzt
+-        if (entry-&gt;size == 0) {
+-            table-&gt;entries[i].used = 0;
+-        } else {
+-            table-&gt;entries[i].used = 1;
+-
+-            // Fuer erweiterte Partitionen wollen wir generell Typ 0x5, die
+-            // anderen aus Windows und Linux werden deshalb ausgetauscht.
+-            if ((entry-&gt;type == 0x0F) || (entry-&gt;type == 0x85)) {
+-                table-&gt;entries[i].type = PARTITION_TYPE_EXTENDED;
+-            } else {
+-                table-&gt;entries[i].type = entry-&gt;type;
+-            }
+-
+-            table-&gt;entries[i].start = entry-&gt;start;
+-            table-&gt;entries[i].size = entry-&gt;size;
+-        }
+-        entry++;
+-    }
+-    return 1;
+-}
+-
+diff --git a/ata/libpartition.h b/ata/libpartition.h
+deleted file mode 100644
+index e8d2837..0000000
+--- a/ata/libpartition.h
++++ /dev/null
+@@ -1,58 +0,0 @@
+-/*
+- * Copyright (c) 2007 The tyndur Project. All rights reserved.
+- *
+- * This code is derived from software contributed to the tyndur Project
+- * by Antoine Kaufmann.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+- * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+- * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
+- * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+- * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+- * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+- * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+- * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+- * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+- */
+-
+-#ifndef _LIBPARTITION_H_
+-#define _LIBPARTITION_H_
+-
+-#include &lt;stdint.h&gt;
+-
+-#define PACKED __attribute__((packed))
+-#define PARTITION_TABLE_OFFSET 446
+-#define PARTITION_TABLE_SIG_OFFSET 510;
+-#define PARTITION_TABLE_SIGNATURE 0xAA55
+-
+-// Typ fuer eine Erweiterte Partition, deren Startsektor wieder eine
+-// Partitionstabelle beinhaltet.
+-#define PARTITION_TYPE_EXTENDED 0x05
+-
+-struct partition {
+-    uint8_t     used;
+-    uint8_t     type;
+-    uint32_t    start;
+-    uint32_t    size;
+-};
+-
+-struct partition_table {
+-    struct partition entries[4];
+-};
+-
+-// Fuellt die Angegebene Partitionstabelle anhand des uebergebenen Sektors auf
+-int partition_table_fill(struct partition_table* table, void* sector);
+-
+-#endif // ifndef _LIBPARTITION_H_
+-
+-- 
+1.6.0.2
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000142.html">[cdi-devel] Interrupts
+</A></li>
+	<LI>Next message: <A HREF="000144.html">[cdi-devel] [PATCH] ata: Remove partition handling
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#143">[ date ]</a>
+              <a href="thread.html#143">[ thread ]</a>
+              <a href="subject.html#143">[ subject ]</a>
+              <a href="author.html#143">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

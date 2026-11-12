@@ -1,0 +1,881 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH v2 7/9] ehci: Add EHCI driver
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%20v2%207/9%5D%20ehci%3A%20Add%20EHCI%20driver&In-Reply-To=%3C553CEDA0.1000808%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000315.html">
+   <LINK REL="Next"  HREF="000300.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH v2 7/9] ehci: Add EHCI driver</H1>
+    <B>Max Reitz</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%20v2%207/9%5D%20ehci%3A%20Add%20EHCI%20driver&In-Reply-To=%3C553CEDA0.1000808%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH v2 7/9] ehci: Add EHCI driver">max at tyndur.org
+       </A><BR>
+    <I>Sun Apr 26 15:52:32 CEST 2015</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000315.html">[cdi-devel] [PATCH v2 7/9] ehci: Add EHCI driver
+</A></li>
+        <LI>Next message: <A HREF="000300.html">[cdi-devel] [PATCH v2 8/9] usb: Add USB 2.0 bus driver
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#316">[ date ]</a>
+              <a href="thread.html#316">[ thread ]</a>
+              <a href="subject.html#316">[ subject ]</a>
+              <a href="author.html#316">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>On 18.04.2015 15:31, Kevin Wolf wrote:
+&gt;<i> On Thu, Apr 16, 2015 at 12:13:56AM +0200, Max Reitz wrote:
+</I>&gt;&gt;<i> + This adds an EHCI USB host controller driver. It is missing support
+</I>&gt;&gt;<i>    for periodic schedule (interrupt and isochronous transfers),
+</I>&gt;&gt;<i>    hotplugging, suspend/resume, etc. pp..
+</I>&gt;&gt;<i>
+</I>&gt;&gt;<i> Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+</I>&gt;&gt;<i> ---
+</I>&gt;&gt;<i>   ehci/ehci.c | 661 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+</I>&gt;&gt;<i>   ehci/ehci.h | 170 ++++++++++++++++
+</I>&gt;&gt;<i>   ehci/main.c |  68 +++++++
+</I>&gt;&gt;<i>   3 files changed, 899 insertions(+)
+</I>&gt;&gt;<i>   create mode 100644 ehci/ehci.c
+</I>&gt;&gt;<i>   create mode 100644 ehci/ehci.h
+</I>&gt;&gt;<i>   create mode 100644 ehci/main.c
+</I>&gt;&gt;<i>
+</I>&gt;&gt;<i> diff --git a/ehci/ehci.c b/ehci/ehci.c
+</I>&gt;&gt;<i> new file mode 100644
+</I>&gt;&gt;<i> index 0000000..6da316e
+</I>&gt;&gt;<i> --- /dev/null
+</I>&gt;&gt;<i> +++ b/ehci/ehci.c
+</I>&gt;&gt;<i> @@ -0,0 +1,661 @@
+</I>&gt;&gt;<i> +/******************************************************************************
+</I>&gt;&gt;<i> + * Copyright (c) 2015 Max Reitz                                               *
+</I>&gt;&gt;<i> + *                                                                            *
+</I>&gt;&gt;<i> + * Permission is hereby granted,  free of charge,  to any person  obtaining a *
+</I>&gt;&gt;<i> + * copy of this software and associated documentation files (the &quot;Software&quot;), *
+</I>&gt;&gt;<i> + * to deal in the Software without restriction,  including without limitation *
+</I>&gt;&gt;<i> + * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
+</I>&gt;&gt;<i> + * and/or  sell copies of the  Software,  and to permit  persons to whom  the *
+</I>&gt;&gt;<i> + * Software is furnished to do so, subject to the following conditions:       *
+</I>&gt;&gt;<i> + *                                                                            *
+</I>&gt;&gt;<i> + * The above copyright notice and this permission notice shall be included in *
+</I>&gt;&gt;<i> + * all copies or substantial portions of the Software.                        *
+</I>&gt;&gt;<i> + *                                                                            *
+</I>&gt;&gt;<i> + * THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
+</I>&gt;&gt;<i> + * IMPLIED,  INCLUDING BUT NOT LIMITED TO THE WARRANTIES  OF MERCHANTABILITY, *
+</I>&gt;&gt;<i> + * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
+</I>&gt;&gt;<i> + * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
+</I>&gt;&gt;<i> + * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
+</I>&gt;&gt;<i> + * FROM,  OUT OF  OR IN CONNECTION  WITH  THE SOFTWARE  OR THE  USE OR  OTHER *
+</I>&gt;&gt;<i> + * DEALINGS IN THE SOFTWARE.                                                  *
+</I>&gt;&gt;<i> + ******************************************************************************/
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +#include &lt;assert.h&gt;
+</I>&gt;&gt;<i> +#include &lt;stdbool.h&gt;
+</I>&gt;&gt;<i> +#include &lt;stdio.h&gt;
+</I>&gt;&gt;<i> +#include &lt;stdlib.h&gt;
+</I>&gt;&gt;<i> +#include &lt;string.h&gt;
+</I>&gt;&gt;<i> +#include &lt;cdi.h&gt;
+</I>&gt;&gt;<i> +#include &lt;cdi/lists.h&gt;
+</I>&gt;&gt;<i> +#include &lt;cdi/misc.h&gt;
+</I>&gt;&gt;<i> +#include &lt;cdi/pci.h&gt;
+</I>&gt;&gt;<i> +#include &lt;cdi/usb.h&gt;
+</I>&gt;&gt;<i> +#include &lt;cdi/usb_hcd.h&gt;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +#include &quot;ehci.h&quot;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +#define EHCI_TIMEOUT 1000 // ms
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +static bool bios_handoff(struct cdi_pci_device *pci_dev, struct ehci *hc);
+</I>&gt;&gt;<i> +static void irq_handler(struct cdi_device *dev);
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +struct cdi_device *ehci_init_device(struct cdi_bus_data *bus_data)
+</I>&gt;&gt;<i> +{
+</I>&gt;&gt;<i> +    struct cdi_pci_device *pci_dev = (struct cdi_pci_device *)bus_data;
+</I>&gt;&gt;<i> +    static int dev_counter = 0;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    if (pci_dev-&gt;class_id     != 0x0c ||
+</I>&gt;&gt;<i> +        pci_dev-&gt;subclass_id  != 0x03 ||
+</I>&gt;&gt;<i> +        pci_dev-&gt;interface_id != 0x20)
+</I>&gt;&gt;<i> +    {
+</I>&gt;&gt;<i> +        return NULL;
+</I>&gt;&gt;<i> +    }
+</I>&gt;<i> Magic numbers?
+</I>
+Yes, because there's not enough magic in this code, so I'll have to make 
+up for it somewhere.
+
+&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    struct ehci *hc = calloc(1, sizeof(*hc));
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    hc-&gt;hc.dev.name = malloc(8);
+</I>&gt;&gt;<i> +    sprintf((char *)hc-&gt;hc.dev.name, &quot;ehci%i&quot;, dev_counter++);
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    hc-&gt;retired_qhs = cdi_list_create();
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    // Enable bus mastering
+</I>&gt;&gt;<i> +    cdi_pci_config_writew(pci_dev, 4, cdi_pci_config_readw(pci_dev, 4) | 0x6);
+</I>&gt;<i> This one as well.
+</I>&gt;<i>
+</I>&gt;<i> I also thought we had specified somewhere that bus mastering must be
+</I>&gt;<i> enabled by the CDI library, but I can't find it. Maybe we haven't.
+</I>
+Well, it doesn't only enable bus mastering but also the MMIO area. Both 
+are mostly a relic of the &quot;Eliminate all possible and impossible error 
+cases&quot; phase. Indeed, bus mastering should generally be enabled by the 
+CDI library, and the MMIO space needs to be enabled in the 
+cdi_pci_alloc_memory() function (same for I/O and cdi_pci_alloc_ioports()).
+
+&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    cdi_pci_alloc_memory(pci_dev);
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    struct cdi_pci_resource *res;
+</I>&gt;&gt;<i> +    for (int i = 0; (res = cdi_list_get(pci_dev-&gt;resources, i)); i++) {
+</I>&gt;&gt;<i> +        if (res-&gt;type == CDI_PCI_MEMORY &amp;&amp; !res-&gt;index) {
+</I>&gt;&gt;<i> +            hc-&gt;caps = res-&gt;address;
+</I>&gt;&gt;<i> +            hc-&gt;regs = (struct ehci_registers *)((uintptr_t)res-&gt;address +
+</I>&gt;&gt;<i> +                                                 hc-&gt;caps-&gt;caplength);
+</I>&gt;&gt;<i> +        }
+</I>&gt;&gt;<i> +    }
+</I>&gt;<i> Check that hc-&gt;caps is set and fail otherwise.
+</I>
+But the specification defines it this way! :-)
+
+Will fix.
+
+&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    if (!bios_handoff(pci_dev, hc)) {
+</I>&gt;&gt;<i> +        goto fail;
+</I>&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    // Stop operation
+</I>&gt;&gt;<i> +    hc-&gt;regs-&gt;usbcmd = (hc-&gt;regs-&gt;usbcmd &amp; 0xff00ff00u) | 0x00080010u;
+</I>&gt;<i> Right, because these are obvious and nice numbers. :-)
+</I>
+Of course. All you need to know is given in the comment above. ;-)
+
+&gt;<i> (Won't mention it everywhere, but there are _lots_ of magic numbers in
+</I>&gt;<i> this patch that should be replaced by defines.)
+</I>&gt;<i>
+</I>&gt;&gt;<i> +    // Wait until HCHALTED becomes true
+</I>&gt;&gt;<i> +    int timeout_counter = 0;
+</I>&gt;&gt;<i> +    while (!(hc-&gt;regs-&gt;usbsts &amp; (1 &lt;&lt; 12)) &amp;&amp; ++timeout_counter &lt; 50) {
+</I>&gt;&gt;<i> +        cdi_sleep_ms(1);
+</I>&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +    if (timeout_counter &gt;= 50) {
+</I>&gt;&gt;<i> +        goto fail;
+</I>&gt;&gt;<i> +    }
+</I>&gt;<i> This is pretty common pattern. Worth providing a function/macro for it,
+</I>&gt;<i> possiby even in the CDI headers?
+</I>
+Well, if I would have to add a function/macro for it, that probably 
+means I should do it right which means not relying on cdi_sleep_ms() to 
+be exact, but to introduce cdi_elapsed_ms() or something like that. That 
+would have the nice side-effect of not relying on the frame index as a 
+timer below in ehci_destroy_transaction(). I guess it should be simple 
+enough to introduce for both t&#253;ndur and &#181;xo&#181;cota, so I'd be fine with 
+that. What do you think?
+
+&gt;&gt;<i> +    hc-&gt;regs-&gt;usbcmd |= (1 &lt;&lt; 1); // Reset
+</I>&gt;&gt;<i> +    timeout_counter = 0;
+</I>&gt;&gt;<i> +    while ((hc-&gt;regs-&gt;usbcmd &amp; (1 &lt;&lt; 1)) &amp;&amp; ++timeout_counter &lt; 50) {
+</I>&gt;&gt;<i> +        cdi_sleep_ms(1);
+</I>&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +    if (timeout_counter &gt;= 50) {
+</I>&gt;&gt;<i> +        goto fail;
+</I>&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    if (hc-&gt;caps-&gt;hccparams &amp; 1) {
+</I>&gt;&gt;<i> +        // 64-bit addressing capability
+</I>&gt;&gt;<i> +        hc-&gt;regs-&gt;ctrldssegment = 0;
+</I>&gt;&gt;<i> +        mem_barrier();
+</I>&gt;<i> Make it cdi_barrier() and move it to cdi/misc.h (I would avoid calling
+</I>&gt;<i> it a &quot;memory&quot; barrier because that could imply that CPU caches are
+</I>&gt;<i> flushed, which is not the case; it's just a compiler barrier). This is
+</I>&gt;<i> definitely a function that other drivers can use.
+</I>&gt;<i>
+</I>&gt;<i> That said, with regs being volatile, what does the barrier achieve here?
+</I>&gt;<i> Except when it's really obvious, comments are appropriate to explain the
+</I>&gt;<i> purpose of each barrier.
+</I>
+I'll just drop all the barriers and hope it'll still work.
+
+&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    // async advance doorbell
+</I>&gt;&gt;<i> +    hc-&gt;regs-&gt;usbintr = (1 &lt;&lt; 5);
+</I>&gt;&gt;<i> +    hc-&gt;regs-&gt;usbsts  = hc-&gt;regs-&gt;usbsts;
+</I>&gt;&gt;<i> +    cdi_register_irq(pci_dev-&gt;irq, &amp;irq_handler, &amp;hc-&gt;hc.dev);
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    hc-&gt;periodic_list_mem = cdi_mem_alloc(4096, 12
+</I>&gt;&gt;<i> +                                                | CDI_MEM_PHYS_CONTIGUOUS
+</I>&gt;&gt;<i> +                                                | CDI_MEM_DMA_4G
+</I>&gt;&gt;<i> +                                                | CDI_MEM_NOINIT);
+</I>&gt;&gt;<i> +    hc-&gt;periodic_list = hc-&gt;periodic_list_mem-&gt;vaddr;
+</I>&gt;&gt;<i> +    for (int i = 0; i &lt; 1024; i++) {
+</I>&gt;&gt;<i> +        hc-&gt;periodic_list[i] = EHCI_T;
+</I>&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +    mem_barrier();
+</I>&gt;&gt;<i> +    hc-&gt;regs-&gt;periodiclistbase = hc-&gt;periodic_list_mem-&gt;paddr.items[0].start;
+</I>&gt;<i> The same question here because periodic_list is declared as volatile.
+</I>&gt;<i> The difference is that I'm actually not sure whether it should be
+</I>&gt;<i> volatile or whether relying on the barriers isn't better.
+</I>&gt;<i>
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    // Create anchor
+</I>&gt;&gt;<i> +    struct cdi_mem_area *anchor_qh;
+</I>&gt;&gt;<i> +    anchor_qh = cdi_mem_alloc(sizeof(ehci_fat_qh_t), 6
+</I>&gt;&gt;<i> +                                                     | CDI_MEM_PHYS_CONTIGUOUS
+</I>&gt;&gt;<i> +                                                     | CDI_MEM_DMA_4G
+</I>&gt;&gt;<i> +                                                     | CDI_MEM_NOINIT);
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    hc-&gt;async_start = anchor_qh-&gt;vaddr;
+</I>&gt;&gt;<i> +    memset(hc-&gt;async_start, 0, sizeof(*hc-&gt;async_start));
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    hc-&gt;async_start-&gt;cdi_mem_area = anchor_qh;
+</I>&gt;&gt;<i> +    hc-&gt;async_start-&gt;paddr = anchor_qh-&gt;paddr.items[0].start
+</I>&gt;&gt;<i> +                           + offsetof(ehci_fat_qh_t, qh);
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    hc-&gt;async_start-&gt;next = hc-&gt;async_start;
+</I>&gt;&gt;<i> +    hc-&gt;async_start-&gt;previous = hc-&gt;async_start;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    hc-&gt;async_start-&gt;qh.next_qh = hc-&gt;async_start-&gt;paddr | EHCI_QH;
+</I>&gt;&gt;<i> +    hc-&gt;async_start-&gt;qh.ep_state[0] = 0x0008e000u;
+</I>&gt;&gt;<i> +    hc-&gt;async_start-&gt;qh.ep_state[1] = 0x4000ff00u;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    hc-&gt;async_start-&gt;qh.overlay.next_qtd = EHCI_T;
+</I>&gt;&gt;<i> +    hc-&gt;async_start-&gt;qh.overlay.alt_next_qtd = EHCI_T;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    hc-&gt;regs-&gt;asynclistaddr = hc-&gt;async_start-&gt;paddr;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    mem_barrier();
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    // Start operation
+</I>&gt;&gt;<i> +    hc-&gt;regs-&gt;usbcmd = (hc-&gt;regs-&gt;usbcmd &amp; 0xff00ff00u) | 0x00080031u;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    // Wait until HCHalted becomes false and the schedules are running
+</I>&gt;&gt;<i> +    timeout_counter = 0;
+</I>&gt;&gt;<i> +    while ((hc-&gt;regs-&gt;usbsts &amp; 0xd000) != 0xc000 &amp;&amp; ++timeout_counter &lt; 50) {
+</I>&gt;&gt;<i> +        cdi_sleep_ms(1);
+</I>&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +    if (timeout_counter &gt;= 50) {
+</I>&gt;&gt;<i> +        goto fail;
+</I>&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    // Route everything to this HC
+</I>&gt;&gt;<i> +    hc-&gt;regs-&gt;configflag |= 1;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    mem_barrier();
+</I>&gt;&gt;<i> +    cdi_sleep_ms(5);
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    hc-&gt;hc.rh.ports = hc-&gt;caps-&gt;hcsparams &amp; 0xf;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    // Power up all ports
+</I>&gt;&gt;<i> +    for (int i = 0; i &lt; hc-&gt;hc.rh.ports; i++) {
+</I>&gt;&gt;<i> +        hc-&gt;regs-&gt;portsc[i] |= EHCI_PSC_PP;
+</I>&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    mem_barrier();
+</I>&gt;<i> This one looks really random.
+</I>&gt;<i>
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    return &amp;hc-&gt;hc.dev;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +fail:
+</I>&gt;&gt;<i> +    if (hc-&gt;async_start) {
+</I>&gt;&gt;<i> +        cdi_mem_free(hc-&gt;async_start-&gt;cdi_mem_area);
+</I>&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +    if (hc-&gt;periodic_list_mem) {
+</I>&gt;&gt;<i> +        cdi_mem_free(hc-&gt;periodic_list_mem);
+</I>&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +    free((void *)hc-&gt;hc.dev.name);
+</I>&gt;&gt;<i> +    free(hc);
+</I>&gt;&gt;<i> +    cdi_pci_free_memory(pci_dev);
+</I>&gt;<i> retired_qhs is leaked.
+</I>
+cdi_pci_free_memory() crashes t&#253;ndur anyway, so why would you care? :-)
+
+I'll fix it.
+
+&gt;<i> It seems that other drivers have the same problem, but it would be nice to
+</I>&gt;<i> unregister the IRQ. (For microkernels, the problem probably isn't serious
+</I>&gt;<i> because the process ends and the kernel should clean up, but for
+</I>&gt;<i> monolithic ones a system crash might not be far away.)
+</I>
+Or I'll just see to registering the IRQ only once everything is set up 
+and this path can no longer be reached.
+
+&gt;&gt;<i> +    return NULL;
+</I>&gt;&gt;<i> +}
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +static bool bios_handoff(struct cdi_pci_device *pci_dev, struct ehci *hc)
+</I>&gt;&gt;<i> +{
+</I>&gt;&gt;<i> +    int eecp = (hc-&gt;caps-&gt;hccparams &gt;&gt; 8) &amp; 0xff;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    // Iterate through the list of capabilities
+</I>&gt;&gt;<i> +    while (eecp &gt;= 0x40) {
+</I>&gt;&gt;<i> +        uint32_t cap = cdi_pci_config_readl(pci_dev, eecp);
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +        // Look for USBLEGSUP
+</I>&gt;&gt;<i> +        if ((cap &amp; 0xff) == 0x01) {
+</I>&gt;&gt;<i> +            // Set OS semaphore
+</I>&gt;&gt;<i> +            cdi_pci_config_writeb(pci_dev, eecp + 3, 1);
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +            // Wait for BIOS semaphore to get unset
+</I>&gt;&gt;<i> +            int timeout_counter = 0;
+</I>&gt;&gt;<i> +            while ((cdi_pci_config_readb(pci_dev, eecp + 2) &amp; 1) &amp;&amp;
+</I>&gt;&gt;<i> +                   ++timeout_counter &lt; 1000)
+</I>&gt;&gt;<i> +            {
+</I>&gt;&gt;<i> +                cdi_sleep_ms(1);
+</I>&gt;&gt;<i> +            }
+</I>&gt;&gt;<i> +            if (timeout_counter &gt;= 1000) {
+</I>&gt;&gt;<i> +                return false;
+</I>&gt;&gt;<i> +            }
+</I>&gt;&gt;<i> +        }
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +        eecp = (cap &gt;&gt; 8) &amp; 0xff;
+</I>&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    return true;
+</I>&gt;&gt;<i> +}
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +static void irq_handler(struct cdi_device *dev)
+</I>&gt;&gt;<i> +{
+</I>&gt;&gt;<i> +    struct cdi_usb_hc *cdi_hc = CDI_UPCAST(dev, dev, struct cdi_usb_hc);
+</I>&gt;&gt;<i> +    struct ehci *hc = CDI_UPCAST(cdi_hc, hc, struct ehci);
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    uint32_t usbsts = hc-&gt;regs-&gt;usbsts;
+</I>&gt;&gt;<i> +    mem_barrier();
+</I>&gt;&gt;<i> +    hc-&gt;regs-&gt;usbsts = usbsts;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    // async advance doorbell
+</I>&gt;&gt;<i> +    if (!(usbsts &amp; (1 &lt;&lt; 5))) {
+</I>&gt;&gt;<i> +        return;
+</I>&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    ehci_fat_qh_t *rqh;
+</I>&gt;&gt;<i> +    while ((rqh = cdi_list_pop(hc-&gt;retired_qhs))) {
+</I>&gt;&gt;<i> +        cdi_mem_free(rqh-&gt;cdi_mem_area);
+</I>&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +}
+</I>&gt;<i> As always, I don't really know what I'm doing, so let me ask a stupid
+</I>&gt;<i> question:
+</I>&gt;<i>
+</I>&gt;<i> You use a list here, so I assume that multiple QHs can be retired. You
+</I>&gt;<i> don't immediately free them but only after getting a doorbell IRQ, so I
+</I>&gt;<i> assume that they are still in use by the hardware until then.
+</I>&gt;<i>
+</I>&gt;<i> Does the hardware complete the use of all retired QHs at once, or what
+</I>&gt;<i> does ensure that we don't free all retired QHs when the hardware is only
+</I>&gt;<i> done with the first one?
+</I>&gt;<i>
+</I>&gt;<i> (Disclaimer: I don't really know what a QH is.)
+</I>
+I'll look into it, maybe it's wrong, maybe it isn't (as discussed on 
+IRC). I hope it isn't.
+
+&gt;&gt;<i> +
+</I>&gt;&gt;<i> +void ehci_rh_port_down(struct cdi_usb_hub *hub, int index)
+</I>&gt;&gt;<i> +{
+</I>&gt;&gt;<i> +    struct cdi_usb_hc *cdi_hc = CDI_UPCAST(hub, rh, struct cdi_usb_hc);
+</I>&gt;&gt;<i> +    struct ehci *hc = CDI_UPCAST(cdi_hc, hc, struct ehci);
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    hc-&gt;regs-&gt;portsc[index] &amp;= ~EHCI_PSC_PED;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    mem_barrier();
+</I>&gt;&gt;<i> +}
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +void ehci_rh_port_up(struct cdi_usb_hub *hub, int index)
+</I>&gt;&gt;<i> +{
+</I>&gt;&gt;<i> +    struct cdi_usb_hc *cdi_hc = CDI_UPCAST(hub, rh, struct cdi_usb_hc);
+</I>&gt;&gt;<i> +    struct ehci *hc = CDI_UPCAST(cdi_hc, hc, struct ehci);
+</I>&gt;&gt;<i> +    uint32_t portsc = hc-&gt;regs-&gt;portsc[index];
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    if ((portsc &amp; EHCI_PSC_LS_MASK) == EHCI_PSC_LS_K) {
+</I>&gt;&gt;<i> +        // Low-speed device, release ownership
+</I>&gt;&gt;<i> +        hc-&gt;regs-&gt;portsc[index] = portsc | EHCI_PSC_PO;
+</I>&gt;&gt;<i> +        mem_barrier();
+</I>&gt;&gt;<i> +        return;
+</I>&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    // Assert reset signal
+</I>&gt;&gt;<i> +    hc-&gt;regs-&gt;portsc[index] = ((portsc &amp; ~(EHCI_PSC_PO | EHCI_PSC_SUS |
+</I>&gt;&gt;<i> +                                           EHCI_PSC_FPR | EHCI_PSC_PED))
+</I>&gt;&gt;<i> +                                       | EHCI_PSC_RES);
+</I>&gt;&gt;<i> +    mem_barrier();
+</I>&gt;&gt;<i> +    cdi_sleep_ms(50);
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    // De-assert reset signal
+</I>&gt;&gt;<i> +    int timeout_counter = 0;
+</I>&gt;&gt;<i> +    hc-&gt;regs-&gt;portsc[index] = portsc &amp; ~EHCI_PSC_RES;
+</I>&gt;&gt;<i> +    do {
+</I>&gt;&gt;<i> +        portsc = hc-&gt;regs-&gt;portsc[index];
+</I>&gt;&gt;<i> +        cdi_sleep_ms(1);
+</I>&gt;&gt;<i> +    } while ((portsc &amp; EHCI_PSC_RES) &amp;&amp; ++timeout_counter &lt; 50);
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    if (portsc &amp; EHCI_PSC_RES) {
+</I>&gt;&gt;<i> +        // Disable port, route on to companion controller
+</I>&gt;&gt;<i> +        // (maybe it can do at least something with it)
+</I>&gt;&gt;<i> +        hc-&gt;regs-&gt;portsc[index] = (portsc &amp; ~EHCI_PSC_PED) | EHCI_PSC_PO;
+</I>&gt;&gt;<i> +    } else if ((portsc &amp; (EHCI_PSC_PED | EHCI_PSC_CCS)) == EHCI_PSC_CCS) {
+</I>&gt;&gt;<i> +        // Device connected but port disabled:
+</I>&gt;&gt;<i> +        // Full-speed device, release ownership
+</I>&gt;&gt;<i> +        hc-&gt;regs-&gt;portsc[index] = portsc | EHCI_PSC_PO;
+</I>&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    mem_barrier();
+</I>&gt;&gt;<i> +}
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +cdi_usb_port_status_t ehci_rh_port_status(struct cdi_usb_hub *hub, int index)
+</I>&gt;&gt;<i> +{
+</I>&gt;&gt;<i> +    struct cdi_usb_hc *cdi_hc = CDI_UPCAST(hub, rh, struct cdi_usb_hc);
+</I>&gt;&gt;<i> +    struct ehci *hc = CDI_UPCAST(cdi_hc, hc, struct ehci);
+</I>&gt;&gt;<i> +    uint32_t portsc = hc-&gt;regs-&gt;portsc[index];
+</I>&gt;&gt;<i> +    cdi_usb_port_status_t status = 0;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    if ((portsc &amp; (EHCI_PSC_PED | EHCI_PSC_CCS)) ==
+</I>&gt;&gt;<i> +                  (EHCI_PSC_PED | EHCI_PSC_CCS))
+</I>&gt;&gt;<i> +    {
+</I>&gt;&gt;<i> +        // Device connected and port enabled
+</I>&gt;&gt;<i> +        status |= CDI_USB_PORT_CONNECTED | CDI_USB_HIGH_SPEED;
+</I>&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    return status;
+</I>&gt;&gt;<i> +}
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +static void enter_async_qh(struct ehci *hc, ehci_fat_qh_t *qh)
+</I>&gt;&gt;<i> +{
+</I>&gt;&gt;<i> +    // Enter the new QH as last
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    qh-&gt;next = hc-&gt;async_start;
+</I>&gt;&gt;<i> +    qh-&gt;previous = hc-&gt;async_start-&gt;previous;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    qh-&gt;previous-&gt;next = qh;
+</I>&gt;&gt;<i> +    hc-&gt;async_start-&gt;previous = qh;
+</I>&gt;<i> Shouldn't the barrier actually be here so that the hardware is
+</I>&gt;<i> guaranteed to see the new links instead of some intermediate state when
+</I>&gt;<i> qh-&gt;qh.next_qh is updated?
+</I>
+Well, until here we haven't done anything the hardware can see, and the 
+hardware won't even see the QH at all until qh-&gt;previous-&gt;qh.next_qh is set.
+
+Anyway, I'll just drop the mem_barrier() calls...
+
+&gt;&gt;<i> +    qh-&gt;qh.next_qh = hc-&gt;async_start-&gt;paddr | EHCI_QH;
+</I>&gt;&gt;<i> +    mem_barrier();
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    qh-&gt;previous-&gt;qh.next_qh = qh-&gt;paddr | EHCI_QH;
+</I>&gt;&gt;<i> +    mem_barrier();
+</I>&gt;&gt;<i> +}
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +static void retire_qh(struct ehci *hc, ehci_fat_qh_t *qh)
+</I>&gt;&gt;<i> +{
+</I>&gt;&gt;<i> +    qh-&gt;previous-&gt;qh.next_qh = qh-&gt;qh.next_qh;
+</I>&gt;&gt;<i> +    mem_barrier();
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    qh-&gt;previous-&gt;next = qh-&gt;next;
+</I>&gt;&gt;<i> +    qh-&gt;next-&gt;previous = qh-&gt;previous;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    cdi_list_push(hc-&gt;retired_qhs, qh);
+</I>&gt;&gt;<i> +    // Request async advance doorbell
+</I>&gt;&gt;<i> +    hc-&gt;regs-&gt;usbcmd |= (1 &lt;&lt; 6);
+</I>&gt;&gt;<i> +}
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +static void retire_qtd(ehci_fat_qtd_t *qtd)
+</I>&gt;&gt;<i> +{
+</I>&gt;&gt;<i> +    ehci_fat_qh_t *qh = qtd-&gt;qh;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    if (qtd-&gt;qtd.status &amp; 0x7c) {
+</I>&gt;&gt;<i> +        if (qtd-&gt;qtd.status &amp; (1 &lt;&lt; 4)) {
+</I>&gt;&gt;<i> +            *qtd-&gt;result = CDI_USB_BABBLE;
+</I>&gt;&gt;<i> +        } else if (qtd-&gt;qtd.status &amp; (1 &lt;&lt; 3)) {
+</I>&gt;&gt;<i> +            *qtd-&gt;result = CDI_USB_BAD_RESPONSE;
+</I>&gt;&gt;<i> +        } else if (qtd-&gt;qtd.status &amp; ((1 &lt;&lt; 5) | (1 &lt;&lt; 2))) {
+</I>&gt;&gt;<i> +            *qtd-&gt;result = CDI_USB_HC_ERROR;
+</I>&gt;&gt;<i> +        } else if (qtd-&gt;qtd.status &amp; (1 &lt;&lt; 6)) {
+</I>&gt;&gt;<i> +            *qtd-&gt;result = CDI_USB_STALL;
+</I>&gt;&gt;<i> +        } else {
+</I>&gt;&gt;<i> +            *qtd-&gt;result = CDI_USB_HC_ERROR;
+</I>&gt;&gt;<i> +        }
+</I>&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    if (qtd-&gt;write_back) {
+</I>&gt;&gt;<i> +        size_t rem = qtd-&gt;write_back_size;
+</I>&gt;&gt;<i> +        for (int i = 0; i &lt; 5 &amp;&amp; rem; i++) {
+</I>&gt;&gt;<i> +            size_t sz = rem &gt; 4096 ? 4096 : rem;
+</I>&gt;&gt;<i> +            memcpy((void *)((uintptr_t)qtd-&gt;write_back + i * 4096),
+</I>&gt;&gt;<i> +                   qtd-&gt;buffers[i]-&gt;vaddr, sz);
+</I>&gt;&gt;<i> +            rem -= sz;
+</I>&gt;&gt;<i> +        }
+</I>&gt;&gt;<i> +        assert(!rem);
+</I>&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    qh-&gt;first_qtd = qtd-&gt;next;
+</I>&gt;&gt;<i> +    if (qh-&gt;last_qtd == qtd) {
+</I>&gt;&gt;<i> +        qh-&gt;last_qtd = NULL;
+</I>&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    for (int i = 0; i &lt; 5; i++) {
+</I>&gt;&gt;<i> +        if (qtd-&gt;buffers[i]) {
+</I>&gt;&gt;<i> +            cdi_mem_free(qtd-&gt;buffers[i]);
+</I>&gt;&gt;<i> +        }
+</I>&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    cdi_mem_free(qtd-&gt;cdi_mem_area);
+</I>&gt;&gt;<i> +}
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +static void enter_qtd(ehci_fat_qh_t *qh, ehci_fat_qtd_t *qtd)
+</I>&gt;&gt;<i> +{
+</I>&gt;&gt;<i> +    bool first;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    qtd-&gt;qh = qh;
+</I>&gt;&gt;<i> +    qtd-&gt;qtd.next_qtd = EHCI_T;
+</I>&gt;&gt;<i> +    qtd-&gt;qtd.alt_next_qtd = EHCI_T;
+</I>&gt;&gt;<i> +    mem_barrier();
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    while (qh-&gt;first_qtd) {
+</I>&gt;&gt;<i> +        /* Break if an active qTD is encountered */
+</I>&gt;&gt;<i> +        if (qh-&gt;first_qtd-&gt;qtd.status &amp; (1 &lt;&lt; 7)) {
+</I>&gt;&gt;<i> +            break;
+</I>&gt;&gt;<i> +        }
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +        retire_qtd(qh-&gt;first_qtd);
+</I>&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    first = !qh-&gt;first_qtd;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    // Note: Race condition (a qTD might retire here and we are thus appending
+</I>&gt;&gt;<i> +    // the one to be queued to an inactive qTD); it's fine as long as we are
+</I>&gt;&gt;<i> +    // constantly rescanning the queue (here and in ehci_wait_transaction())
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    if (first) {
+</I>&gt;&gt;<i> +        qh-&gt;first_qtd = qtd;
+</I>&gt;&gt;<i> +    } else {
+</I>&gt;&gt;<i> +        qh-&gt;last_qtd-&gt;next = qtd;
+</I>&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +    qh-&gt;last_qtd = qtd;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    if (!first) {
+</I>&gt;&gt;<i> +        qh-&gt;last_qtd-&gt;qtd.next_qtd = qtd-&gt;paddr;
+</I>&gt;&gt;<i> +        mem_barrier();
+</I>&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    // If the QH is not active, it's done with its queue of qTDs and we should
+</I>&gt;&gt;<i> +    // continue from this qTD
+</I>&gt;&gt;<i> +    if (!(qh-&gt;qh.overlay.status &amp; (1 &lt;&lt; 7))) {
+</I>&gt;&gt;<i> +        qh-&gt;qh.overlay.next_qtd = qh-&gt;first_qtd-&gt;paddr;
+</I>&gt;&gt;<i> +        mem_barrier();
+</I>&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +}
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +cdi_usb_hc_transaction_t ehci_create_transaction(struct cdi_usb_hc *cdi_hc,
+</I>&gt;&gt;<i> +    const struct cdi_usb_hc_ep_info *target)
+</I>&gt;&gt;<i> +{
+</I>&gt;&gt;<i> +    struct ehci *hc = CDI_UPCAST(cdi_hc, hc, struct ehci);
+</I>&gt;&gt;<i> +    struct cdi_mem_area *qh_mem;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    qh_mem = cdi_mem_alloc(sizeof(ehci_fat_qh_t), 6
+</I>&gt;&gt;<i> +                                                  | CDI_MEM_PHYS_CONTIGUOUS
+</I>&gt;&gt;<i> +                                                  | CDI_MEM_DMA_4G
+</I>&gt;&gt;<i> +                                                  | CDI_MEM_NOINIT);
+</I>&gt;&gt;<i> +    ehci_fat_qh_t *qh = qh_mem-&gt;vaddr;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    memset(qh, 0, sizeof(*qh));
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    int non_high_speed_control = target-&gt;speed != CDI_USB_HIGH_SPEED
+</I>&gt;&gt;<i> +                                 &amp;&amp; target-&gt;ep_type == CDI_USB_CONTROL;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    qh-&gt;qh.ep_state[0] = target-&gt;dev | (target-&gt;ep &lt;&lt; 8) | (1 &lt;&lt; 14)
+</I>&gt;&gt;<i> +                       | (target-&gt;mps &lt;&lt; 16) | (non_high_speed_control &lt;&lt; 27);
+</I>&gt;&gt;<i> +    switch (target-&gt;speed) {
+</I>&gt;&gt;<i> +        case CDI_USB_LOW_SPEED:  qh-&gt;qh.ep_state[0] |= (1 &lt;&lt; 12); break;
+</I>&gt;&gt;<i> +        case CDI_USB_FULL_SPEED: qh-&gt;qh.ep_state[0] |= (0 &lt;&lt; 12); break;
+</I>&gt;&gt;<i> +        case CDI_USB_HIGH_SPEED: qh-&gt;qh.ep_state[0] |= (2 &lt;&lt; 12); break;
+</I>&gt;&gt;<i> +        case CDI_USB_SUPERSPEED:
+</I>&gt;&gt;<i> +        default:
+</I>&gt;&gt;<i> +            abort();
+</I>&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    qh-&gt;qh.ep_state[1] = (0xff &lt;&lt; 8) | (1 &lt;&lt; 30) | (target-&gt;tt_addr &lt;&lt; 16)
+</I>&gt;&gt;<i> +                       | ((target-&gt;tt_port + 1) &lt;&lt; 23);
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    qh-&gt;qh.overlay.next_qtd = EHCI_T;
+</I>&gt;&gt;<i> +    qh-&gt;qh.overlay.alt_next_qtd = EHCI_T;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    qh-&gt;cdi_mem_area = qh_mem;
+</I>&gt;&gt;<i> +    qh-&gt;paddr = qh_mem-&gt;paddr.items[0].start + offsetof(ehci_fat_qh_t, qh);
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    mem_barrier();
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    enter_async_qh(hc, qh);
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    return qh;
+</I>&gt;&gt;<i> +}
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +static void create_qtd(ehci_fat_qh_t *qh, cdi_usb_transfer_token_t token,
+</I>&gt;&gt;<i> +                       int toggle, void *buffer, size_t size,
+</I>&gt;&gt;<i> +                       cdi_usb_transmission_result_t *result)
+</I>&gt;&gt;<i> +{
+</I>&gt;&gt;<i> +    struct cdi_mem_area *qtd_mem;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    qtd_mem = cdi_mem_alloc(sizeof(ehci_fat_qtd_t), 6
+</I>&gt;&gt;<i> +                                                    | CDI_MEM_PHYS_CONTIGUOUS
+</I>&gt;&gt;<i> +                                                    | CDI_MEM_DMA_4G
+</I>&gt;&gt;<i> +                                                    | CDI_MEM_NOINIT);
+</I>&gt;&gt;<i> +    ehci_fat_qtd_t *qtd = qtd_mem-&gt;vaddr;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    memset(qtd, 0, sizeof(*qtd));
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    qtd-&gt;qtd.status = (1 &lt;&lt; 7) | (3 &lt;&lt; 10) | (size &lt;&lt; 16)
+</I>&gt;&gt;<i> +                    | ((uint32_t)toggle &lt;&lt; 31);
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    switch (token) {
+</I>&gt;&gt;<i> +        case CDI_USB_IN:    qtd-&gt;qtd.status |= (1 &lt;&lt; 8); break;
+</I>&gt;&gt;<i> +        case CDI_USB_OUT:   qtd-&gt;qtd.status |= (0 &lt;&lt; 8); break;
+</I>&gt;&gt;<i> +        case CDI_USB_SETUP: qtd-&gt;qtd.status |= (2 &lt;&lt; 8); break;
+</I>&gt;&gt;<i> +        default:
+</I>&gt;&gt;<i> +            abort();
+</I>&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    if (token == CDI_USB_IN) {
+</I>&gt;&gt;<i> +        qtd-&gt;write_back = buffer;
+</I>&gt;&gt;<i> +        qtd-&gt;write_back_size = size;
+</I>&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    for (int i = 0; i &lt; 5 &amp;&amp; size; i++) {
+</I>&gt;&gt;<i> +        size_t sz = size &gt; 4096 ? 4096 : size;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +        qtd-&gt;buffers[i] = cdi_mem_alloc(4096, 12
+</I>&gt;&gt;<i> +                                              | CDI_MEM_PHYS_CONTIGUOUS
+</I>&gt;&gt;<i> +                                              | CDI_MEM_DMA_4G
+</I>&gt;&gt;<i> +                                              | CDI_MEM_NOINIT);
+</I>&gt;&gt;<i> +        qtd-&gt;qtd.buffers[i] = qtd-&gt;buffers[i]-&gt;paddr.items[0].start;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +        if (token == CDI_USB_OUT || token == CDI_USB_SETUP) {
+</I>&gt;&gt;<i> +            memcpy(qtd-&gt;buffers[i]-&gt;vaddr,
+</I>&gt;&gt;<i> +                   (void *)((uintptr_t)buffer + i * 4096), sz);
+</I>&gt;&gt;<i> +        }
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +        size -= sz;
+</I>&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    qtd-&gt;cdi_mem_area = qtd_mem;
+</I>&gt;&gt;<i> +    qtd-&gt;paddr = qtd_mem-&gt;paddr.items[0].start + offsetof(ehci_fat_qtd_t, qtd);
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    qtd-&gt;result = result;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    mem_barrier();
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    enter_qtd(qh, qtd);
+</I>&gt;&gt;<i> +}
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +void ehci_enqueue(struct cdi_usb_hc *cdi_hc,
+</I>&gt;&gt;<i> +                  const struct cdi_usb_hc_transmission *trans)
+</I>&gt;&gt;<i> +{
+</I>&gt;&gt;<i> +    (void)cdi_hc;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    ehci_fat_qh_t *qh = trans-&gt;ta;
+</I>&gt;&gt;<i> +    bool first = true;
+</I>&gt;&gt;<i> +    size_t sz = trans-&gt;size;
+</I>&gt;&gt;<i> +    void *buf = trans-&gt;buffer;
+</I>&gt;<i> Make it uint8_t* to save some casts?
+</I>
+I don't know... I don't like giving opaque pointers a type just without 
+it being really necessary (e.g. for a memcpy() implementation, it is 
+necessary). On the other hand, &quot;buf += iter_sz&quot; does look quite nice.
+
+&gt;&gt;<i> +    int toggle = trans-&gt;toggle;
+</I>&gt;&gt;<i> +    size_t mps = (qh-&gt;qh.ep_state[0] &gt;&gt; 16) &amp; 0x7ff;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    *trans-&gt;result = CDI_USB_OK;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    while (sz || first) {
+</I>&gt;&gt;<i> +        first = false;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +        size_t iter_sz = sz &gt; 4096 * 5 ? 4096 * 5 : sz;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +        create_qtd(qh, trans-&gt;token, toggle, buf, iter_sz, trans-&gt;result);
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +        buf = (void *)((uintptr_t)buf + iter_sz);
+</I>&gt;&gt;<i> +        sz -= iter_sz;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +        toggle ^= ((iter_sz + mps - 1) / mps) &amp; 1;
+</I>&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +}
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +void ehci_wait_transaction(struct cdi_usb_hc *cdi_hc,
+</I>&gt;&gt;<i> +                           cdi_usb_hc_transaction_t ta)
+</I>&gt;&gt;<i> +{
+</I>&gt;&gt;<i> +    struct ehci *hc = CDI_UPCAST(cdi_hc, hc, struct ehci);
+</I>&gt;&gt;<i> +    ehci_fat_qh_t *qh = ta;
+</I>&gt;&gt;<i> +    bool had_timeout = false;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    irq_handler(&amp;cdi_hc-&gt;dev);
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    while (qh-&gt;first_qtd) {
+</I>&gt;&gt;<i> +        if (!had_timeout) {
+</I>&gt;&gt;<i> +            if (!(qh-&gt;qh.overlay.status &amp; (1 &lt;&lt; 7))) {
+</I>&gt;&gt;<i> +                qh-&gt;qh.overlay.next_qtd = qh-&gt;first_qtd-&gt;paddr;
+</I>&gt;&gt;<i> +                mem_barrier();
+</I>&gt;&gt;<i> +            }
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +            int frame_counter = 0, lframe = (hc-&gt;regs-&gt;frindex &gt;&gt; 3) % 1024;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +            while ((qh-&gt;first_qtd-&gt;qtd.status &amp; (1 &lt;&lt; 7)) &amp;&amp;
+</I>&gt;&gt;<i> +                   frame_counter &lt; EHCI_TIMEOUT)
+</I>&gt;&gt;<i> +            {
+</I>&gt;&gt;<i> +                int cframe = (hc-&gt;regs-&gt;frindex &gt;&gt; 3) % 1024;
+</I>&gt;&gt;<i> +                frame_counter += (cframe + 1024 - lframe) % 1024;
+</I>&gt;&gt;<i> +                lframe = cframe;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +                // I don't really know who's to blame for this (qemu or
+</I>&gt;&gt;<i> +                // t&#253;ndur), and actually, I don't even want to know.
+</I>&gt;&gt;<i> +                // As a matter of fact, qemu will not work on the async
+</I>&gt;&gt;<i> +                // schedule if the async advance doorbell is set but the driver
+</I>&gt;&gt;<i> +                // has not acknowledged this; however, the interrupt handler
+</I>&gt;&gt;<i> +                // will always clear that bit and the interrupt handler is
+</I>&gt;&gt;<i> +                // active all the time, so something is apparently sometimes
+</I>&gt;&gt;<i> +                // blocking the handler from being executed. Force it here to
+</I>&gt;&gt;<i> +                // prevent qemu's HC from stalling.
+</I>&gt;&gt;<i> +                irq_handler(&amp;cdi_hc-&gt;dev);
+</I>&gt;&gt;<i> +            }
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +            had_timeout = frame_counter &gt;= EHCI_TIMEOUT;
+</I>&gt;&gt;<i> +        }
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +        if (had_timeout) {
+</I>&gt;&gt;<i> +            // Stop this queue
+</I>&gt;&gt;<i> +            qh-&gt;qh.overlay.next_qtd = EHCI_T;
+</I>&gt;&gt;<i> +            qh-&gt;qh.overlay.status &amp;= ~(1u &lt;&lt; 7);
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +            *qh-&gt;first_qtd-&gt;result = CDI_USB_TIMEOUT;
+</I>&gt;&gt;<i> +        }
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +        retire_qtd(qh-&gt;first_qtd);
+</I>&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +}
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +void ehci_destroy_transaction(struct cdi_usb_hc *cdi_hc,
+</I>&gt;&gt;<i> +                              cdi_usb_hc_transaction_t ta)
+</I>&gt;&gt;<i> +{
+</I>&gt;&gt;<i> +    struct ehci *hc = CDI_UPCAST(cdi_hc, hc, struct ehci);
+</I>&gt;&gt;<i> +    ehci_fat_qh_t *qh = ta;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    // TODO: Does this work without having called ehci_wait_transaction()
+</I>&gt;&gt;<i> +    // before?
+</I>&gt;<i> Is this TODO intentionally left unresolved?
+</I>
+Yes. Or do you want to resolve it? :-)
+
+I guess it works. It should work. But I haven't though really hard about 
+it. The EHCI specification does mention this case in the QH unlinking 
+section, and it states that the active bit must be cleared. This is 
+achieved here by...
+
+&gt;&gt;<i> +    qh-&gt;qh.overlay.next_qtd = EHCI_T;
+</I>
+...clearing the list of transfers, ...
+
+&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    int frame_counter = 0, lframe = (hc-&gt;regs-&gt;frindex &gt;&gt; 3) % 1024;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    while ((qh-&gt;qh.overlay.status &amp; (1 &lt;&lt; 7)) &amp;&amp; frame_counter &lt; EHCI_TIMEOUT) {
+</I>
+...waiting until either the active bit is cleared (by the HC, because 
+the transfer list is empty) or a second has passed, ...
+
+&gt;&gt;<i> +        int cframe = (hc-&gt;regs-&gt;frindex &gt;&gt; 3) % 1024;
+</I>&gt;&gt;<i> +        frame_counter += (cframe + 1024 - lframe) % 1024;
+</I>&gt;&gt;<i> +        lframe = cframe;
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +        // See above.
+</I>&gt;&gt;<i> +        irq_handler(&amp;cdi_hc-&gt;dev);
+</I>&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    if (frame_counter &gt;= EHCI_TIMEOUT) {
+</I>&gt;&gt;<i> +        qh-&gt;qh.overlay.status &amp;= ~(1 &lt;&lt; 7);
+</I>
+...and if the bit still isn't cleared after that second, we'll just 
+force-clear it and...
+
+&gt;&gt;<i> +        // Could probably be solved more elegantly, but we are in a timeout
+</I>&gt;&gt;<i> +        // already, so waiting a bit longer will not be that big of a problem
+</I>&gt;&gt;<i> +        // (the sleep is here to ensure that the HC is no longer trying to work
+</I>&gt;&gt;<i> +        // on the qTDs belonging to this QH)
+</I>&gt;&gt;<i> +        cdi_sleep_ms(100);
+</I>
+...wait a couple of milliseconds so the HC doesn't have any transfers in 
+flight relating to this QH.
+
+&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +
+</I>&gt;&gt;<i> +    while (qh-&gt;first_qtd) {
+</I>&gt;&gt;<i> +        retire_qtd(qh-&gt;first_qtd);
+</I>&gt;&gt;<i> +    }
+</I>&gt;&gt;<i> +    retire_qh(hc, qh);
+</I>
+And then we'll just retire the whole thing. The active bit is cleared at 
+this point, so the specification says we're good to do so.
+
+&gt;&gt;<i> +}
+</I>&gt;<i> Well, that's what I can say without actually understanding the hardware.
+</I>&gt;<i> I hope it's better than nothing.
+</I>
+Indeed it is. Thank you! :-)
+
+Max
+
+&gt;<i> Kevin
+</I>&gt;<i> _______________________________________________
+</I>&gt;<i> cdi-devel mailing list
+</I>&gt;<i> <A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">cdi-devel at tyndur.org</A>
+</I>&gt;<i> <A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel</A>
+</I>
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000315.html">[cdi-devel] [PATCH v2 7/9] ehci: Add EHCI driver
+</A></li>
+	<LI>Next message: <A HREF="000300.html">[cdi-devel] [PATCH v2 8/9] usb: Add USB 2.0 bus driver
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#316">[ date ]</a>
+              <a href="thread.html#316">[ thread ]</a>
+              <a href="subject.html#316">[ subject ]</a>
+              <a href="author.html#316">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

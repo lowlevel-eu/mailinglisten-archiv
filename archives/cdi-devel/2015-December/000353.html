@@ -1,0 +1,189 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH 07/10] usb: Fix and simplify debugging code
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%2007/10%5D%20usb%3A%20Fix%20and%20simplify%20debugging%20code&In-Reply-To=%3C1451346799-23335-8-git-send-email-max%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000352.html">
+   <LINK REL="Next"  HREF="000354.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH 07/10] usb: Fix and simplify debugging code</H1>
+    <B>Max Reitz</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%2007/10%5D%20usb%3A%20Fix%20and%20simplify%20debugging%20code&In-Reply-To=%3C1451346799-23335-8-git-send-email-max%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH 07/10] usb: Fix and simplify debugging code">max at tyndur.org
+       </A><BR>
+    <I>Tue Dec 29 00:53:16 CET 2015</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000352.html">[cdi-devel] [PATCH 06/10] usb: Create provide_virtual_devices()
+</A></li>
+        <LI>Next message: <A HREF="000354.html">[cdi-devel] [PATCH 08/10] usb: Clear ENDPOINT_HALT on stalling bulk	transfer
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#353">[ date ]</a>
+              <a href="thread.html#353">[ thread ]</a>
+              <a href="subject.html#353">[ subject ]</a>
+              <a href="author.html#353">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>+ emit_string_descriptor() makes debugging code simpler.
+  (Incidentally, this fixes a bug in debug_configuration(); the upper
+   limit of the for loop printing the interface name)
+! Just as the main code, the debugging code assumed a certain order of
+  descriptors with no gaps in between. Fix it.
+
+Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+---
+ usb/usb.c | 81 +++++++++++++++++++++++++++++++++------------------------------
+ 1 file changed, 42 insertions(+), 39 deletions(-)
+
+diff --git a/usb/usb.c b/usb/usb.c
+index a8366e0..374ba57 100644
+--- a/usb/usb.c
++++ b/usb/usb.c
+@@ -333,6 +333,25 @@ static int choose_configuration(usb_device_t *dev)
+ 
+ 
+ #ifdef DEBUG
++static void emit_string_descriptor(usb_device_t *dev, const char *format, int desc_i)
++{
++    if (!desc_i) {
++        return;
++    }
++
++    struct cdi_usb_string_descriptor str_desc;
++    get_string_descriptor(dev, desc_i, &amp;str_desc);
++    int str_length = (str_desc.base.b_length - 2) / 2;
++    char str[str_length + 1];
++
++    for (int i = 0; i &lt; str_length; i++) {
++        str[i] = str_desc.b_string[i] &gt; 0x7f ? '?' : str_desc.b_string[i];
++    }
++    str[str_length] = 0;
++
++    printf(format, str);
++}
++
+ static void debug_device(usb_device_t *dev)
+ {
+     printf(&quot;[usb] new %s device %04x:%04x (%x.%x.%x) &quot;,
+@@ -346,60 +365,44 @@ static void debug_device(usb_device_t *dev)
+            dev-&gt;dev_desc.b_device_sub_class,
+            dev-&gt;dev_desc.b_device_protocol);
+ 
+-    struct cdi_usb_string_descriptor str;
+-
+-    if (dev-&gt;dev_desc.i_manufacturer) {
+-        get_string_descriptor(dev, dev-&gt;dev_desc.i_manufacturer, &amp;str);
+-        for (int i = 0; i &lt; (str.base.b_length - 2) / 2; i++) {
+-            putchar(str.b_string[i] &gt; 0x7f ? '?' : str.b_string[i]);
+-        }
+-        putchar(' ');
+-    }
+-
+-    if (dev-&gt;dev_desc.i_product) {
+-        get_string_descriptor(dev, dev-&gt;dev_desc.i_product, &amp;str);
+-        for (int i = 0; i &lt; (str.base.b_length - 2) / 2; i++) {
+-            putchar(str.b_string[i] &gt; 0x7f ? '?' : str.b_string[i]);
+-        }
+-        putchar(' ');
+-    }
++    emit_string_descriptor(dev, &quot;%s &quot;, dev-&gt;dev_desc.i_manufacturer);
++    emit_string_descriptor(dev, &quot;%s &quot;, dev-&gt;dev_desc.i_product);
+ 
+     putchar('\n');
+ }
+ 
++static struct cdi_usb_descriptor *next_desc(struct cdi_usb_descriptor *desc);
++
+ static void debug_configuration(usb_device_t *dev)
+ {
+     printf(&quot;[usb] chose configuration %i &quot;, dev-&gt;config-&gt;b_configuration_value);
++    emit_string_descriptor(dev, &quot;(%s) &quot;, dev-&gt;config-&gt;i_configuration);
++    printf(&quot;with %i interface(s):\n&quot;, dev-&gt;config-&gt;b_num_interfaces);
+ 
+-    struct cdi_usb_string_descriptor str;
++    uintptr_t desc_end = (uintptr_t)dev-&gt;config + dev-&gt;config-&gt;w_total_length;
+ 
+-    if (dev-&gt;config-&gt;i_configuration) {
+-        get_string_descriptor(dev, dev-&gt;config-&gt;i_configuration, &amp;str);
+-        putchar('(');
+-        for (int i = 0; i &lt; (str.base.b_length - 2) / 2; i++) {
+-            putchar(str.b_string[i] &gt; 0x7f ? '?' : str.b_string[i]);
++    struct cdi_usb_descriptor *opaque_desc = next_desc(&amp;dev-&gt;config-&gt;base);
++    int i = 0;
++    while ((uintptr_t)next_desc(opaque_desc) &lt;= desc_end &amp;&amp;
++           i &lt; (int)dev-&gt;config-&gt;b_num_interfaces)
++    {
++        struct cdi_usb_interface_descriptor *ifc = NULL;
++
++        if (opaque_desc-&gt;b_descriptor_type == CDI_USB_DESC_INTERFACE) {
++            i++;
++            ifc = CDI_UPCAST(opaque_desc,
++                             struct cdi_usb_interface_descriptor, base);
+         }
+-        putchar(')');
+-        putchar(' ');
+-    }
+ 
+-    printf(&quot;with %i interface(s):\n&quot;, dev-&gt;config-&gt;b_num_interfaces);
++        opaque_desc = next_desc(opaque_desc);
++        if (!ifc) {
++            continue;
++        }
+ 
+-    struct cdi_usb_interface_descriptor *ifc = (void *)(dev-&gt;config + 1);
+-    for (int i = 0; i &lt; (int)dev-&gt;config-&gt;b_num_interfaces; i++) {
+         printf(&quot;[usb] &quot;);
+-        if (ifc-&gt;i_interface) {
+-            get_string_descriptor(dev, ifc-&gt;i_interface, &amp;str);
+-            for (int j = 0; j &lt; (int)dev-&gt;config-&gt;b_num_interfaces; j++) {
+-                putchar(str.b_string[j] &gt; 0x7f ? '?' : str.b_string[j]);
+-            }
+-            putchar(' ');
+-        }
++        emit_string_descriptor(dev, &quot;%s &quot;, ifc-&gt;i_interface);
+         printf(&quot;%x.%x.%x\n&quot;, ifc-&gt;b_interface_class,
+                ifc-&gt;b_interface_sub_class, ifc-&gt;b_interface_protocol);
+-
+-        ifc = (void *)((struct cdi_usb_endpoint_descriptor *)(ifc + 1)
+-                + ifc-&gt;b_num_endpoints);
+     }
+ }
+ #endif
+-- 
+2.6.4
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000352.html">[cdi-devel] [PATCH 06/10] usb: Create provide_virtual_devices()
+</A></li>
+	<LI>Next message: <A HREF="000354.html">[cdi-devel] [PATCH 08/10] usb: Clear ENDPOINT_HALT on stalling bulk	transfer
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#353">[ date ]</a>
+              <a href="thread.html#353">[ thread ]</a>
+              <a href="subject.html#353">[ subject ]</a>
+              <a href="author.html#353">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

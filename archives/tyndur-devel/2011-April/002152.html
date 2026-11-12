@@ -1,0 +1,156 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 1/2] ftp: fix behandlung von Servermeldungen mit Überlangen Zeilen
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_1/2%3D5D_ftp%3D3A_fix_behandlung_vo%3F%3D%0A%09%3D%3Futf-8%3Fq%3Fn_Servermeldungen_mit_%3DC3%3D9Cberlangen_Zeilen%3F%3D&In-Reply-To=%3C1301929939-32132-1-git-send-email-m.nemo%40gmx.net%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002156.html">
+   <LINK REL="Next"  HREF="002153.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 1/2] ftp: fix behandlung von Servermeldungen mit Überlangen Zeilen</H1>
+    <B>Andreas Freimuth</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_1/2%3D5D_ftp%3D3A_fix_behandlung_vo%3F%3D%0A%09%3D%3Futf-8%3Fq%3Fn_Servermeldungen_mit_%3DC3%3D9Cberlangen_Zeilen%3F%3D&In-Reply-To=%3C1301929939-32132-1-git-send-email-m.nemo%40gmx.net%3E"
+           TITLE="[tyndur-devel] [PATCH 1/2] ftp: fix behandlung von Servermeldungen mit Überlangen Zeilen">m.nemo at gmx.net
+                  </A><BR>
+    <I>Mo Apr  4 17:12:18 CEST 2011</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002156.html">[tyndur-devel] [PATCH] libc: Vorzeichen beachten in atol
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002153.html">[tyndur-devel] [PATCH 2/2] ftp: nur nach einem passwort fragen wenn	eins gefordert wird
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2152">[ Datum ]</a>
+              <a href="thread.html#2152">[ Thema ]</a>
+              <a href="subject.html#2152">[ Betreff (Subject) ]</a>
+              <a href="author.html#2152">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>! ftp.c/response: kann jetzt auch mit Zeilen länger als LINE_LENGTH
+  umgehen
+
+Signed-off-by: Andreas Freimuth &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">m.nemo at gmx.net</A>&gt;
+---
+ src/modules/c/ftp/ftp.c |   64 +++++++++++++++++++++-------------------------
+ 1 files changed, 29 insertions(+), 35 deletions(-)
+
+diff --git a/src/modules/c/ftp/ftp.c b/src/modules/c/ftp/ftp.c
+index 3346e56..824b389 100644
+--- a/src/modules/c/ftp/ftp.c
++++ b/src/modules/c/ftp/ftp.c
+@@ -75,29 +75,11 @@ char* parser(char* string)
+  */
+ void request(const char* command)
+ {
+-    char buffer;
+-    char response[LINE_LENGTH];
+-    bool line_end = true;
+-    int i = 0;
+ 
+     fprintf(handle, &quot;%s\r\n&quot;, command);
+     fflush(handle);
+ 
+-    while (line_end) {
+-        while (((buffer = fgetc(handle)) != '\n') &amp;&amp; i &lt; (LINE_LENGTH - 1)) {
+-            if (buffer != EOF) {
+-               response[i++] = buffer;
+-            }
+-        }
+-        response[i] = '\0';
+-        printf(&quot;%s\n&quot;, response);
+-        line_end = false;
+-
+-        if ((i &gt; 3) &amp;&amp; (response[3] == '-')) {
+-            line_end = true;
+-            i = 0;
+-        }
+-    }
++    response();
+ }
+ 
+ 
+@@ -106,26 +88,38 @@ void request(const char* command)
+  */
+ void response(void)
+ {
+-    char buffer;
+-    char response[LINE_LENGTH];
+-    bool line_end = true;
+-    int i = 0;
++    char code[5];
+ 
+-    while (line_end) {
+-        while (((buffer = fgetc(handle)) != '\n') &amp;&amp; i &lt; (LINE_LENGTH - 1)) {
+-            if (buffer != EOF) {
+-               response[i++] = buffer;
++    fgets(code, 5, handle);
++    printf(&quot;%s&quot;, code);
++
++    bool oneLine = code[3] == ' ';
++
++    code[3] = ' '; code[4] = '\0';
++
++    char buffer[LINE_LENGTH];
++
++    while(fgets(buffer, LINE_LENGTH, handle) != NULL) {
++        printf(&quot;%s&quot;, buffer);
++
++        bool lastLine = oneLine || strncmp(buffer, code, 4) == 0;
++
++        size_t resp_size = strlen(buffer);
++        while (buffer[resp_size-1] != '\n') {
++
++            if (fgets(buffer, LINE_LENGTH, handle) == NULL) {
++                lastLine = true;
++                break;
+             }
+-        }
+-        response[i] = '\0';
+-        printf(&quot;%s\n&quot;, response);
+-        line_end = false;
+ 
+-        if ((i &gt; 3) &amp;&amp; (response[3] == '-')) {
+-            line_end = true;
+-            i = 0;
++            resp_size = strlen(buffer);
++            printf(&quot;%s&quot;, buffer);
+         }
++
++        if (lastLine)
++            break;
+     }
++
+ }
+ 
+ 
+-- 
+1.7.4.2
+
+</PRE>
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002156.html">[tyndur-devel] [PATCH] libc: Vorzeichen beachten in atol
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002153.html">[tyndur-devel] [PATCH 2/2] ftp: nur nach einem passwort fragen wenn	eins gefordert wird
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2152">[ Datum ]</a>
+              <a href="thread.html#2152">[ Thema ]</a>
+              <a href="subject.html#2152">[ Betreff (Subject)]</a>
+              <a href="author.html#2152">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

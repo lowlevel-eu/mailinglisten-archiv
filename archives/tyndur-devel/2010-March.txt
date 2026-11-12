@@ -1,0 +1,2346 @@
+From kevin at tyndur.org  Tue Mar 16 20:45:57 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Tue, 16 Mar 2010 20:45:57 +0100
+Subject: [tyndur-devel] [PATCH] libc: liballoc holt erst kleinere
+	Speicherbereiche
+Message-ID: <1268768757-14514-1-git-send-email-kevin@tyndur.org>
+
+* libc: Anstatt bei jedem Speicherbedarf 64k Speicher vom Kernel
+  anzufordern, werden bei wenig genutztem Speicher zunaechst kleinere
+  Allokationen durchgefuehrt. Dadurch sinkt der Speicherbedarf von
+  kleinen Modulen deutlich von 64k auf 4k oder 8k.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/lib/stdlibc/liballoc.c |   16 ++++++++++++++--
+ 1 files changed, 14 insertions(+), 2 deletions(-)
+
+diff --git a/src/lib/stdlibc/liballoc.c b/src/lib/stdlibc/liballoc.c
+index da125b3..591cd88 100644
+--- a/src/lib/stdlibc/liballoc.c
++++ b/src/lib/stdlibc/liballoc.c
+@@ -99,7 +99,7 @@ static struct liballoc_major *l_memRoot = NULL;	//< The root memory block acquir
+ static struct liballoc_major *l_bestBet = NULL; //< The major with the most free memory.
+ 
+ static int l_pageSize  = 4096;			//< The size of an individual page. Set up in liballoc_init.
+-static int l_pageCount = 16;			//< The number of pages to request per chunk. Set up in liballoc_init.
++static int l_pageCount = 1;			//< The number of pages to request per chunk. Set up in liballoc_init.
+ static long long l_allocated = 0;		//< Running total of allocated memory.
+ static long long l_inuse	 = 0;		//< Running total of used memory.
+ 
+@@ -262,7 +262,19 @@ static struct liballoc_major *allocate_new_page( uintptr_t size )
+ 			st  = st / (l_pageSize) + 1;
+ 							// No, add the buffer. 
+ 
+-		
++        // Dynamically calculate minimum chunk size
++        if (l_allocated > 131072) {
++            l_pageCount = 16;
++        } else if (l_allocated > 65536) {
++            l_pageCount = 8;
++        } else if (l_allocated > 32768) {
++            l_pageCount = 4;
++        } else if (l_allocated > 16384) {
++            l_pageCount = 2;
++        } else {
++            l_pageCount = 1;
++        }
++
+ 		// Make sure it's >= the minimum size.
+ 		if ( st < l_pageCount ) st = l_pageCount;
+ 		
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Fri Mar 26 20:35:15 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Fri, 26 Mar 2010 20:35:15 +0100
+Subject: [tyndur-devel] [PATCH 0/4] kernel2: VM86
+Message-ID: <1269632119-22254-1-git-send-email-kevin@tyndur.org>
+
+Diese Serie fÃ¼gt VM86-UnterstÃ¼tzung fÃ¼r kernel2 hinzu. Neben dem
+eigentlichen VM86-Code gehÃ¶ren dazu auch noch ein paar Fixes fÃ¼r
+die Speicherverwaltung.
+
+Kevin Wolf (4):
+  kernel2: mmc_vfree
+  kernel2: Fix fuer find_contiguous_pages
+  kernel2: mem_allocate/mem_free richtig implementiert
+  kernel2: VM86
+
+ src/include/syscallno.h                   |    3 +-
+ src/kernel2/include/arch/i386/cpu.h       |   12 +
+ src/kernel2/include/mm.h                  |   10 +
+ src/kernel2/include/syscall.h             |    6 +
+ src/kernel2/include/vm86.h                |   43 +++
+ src/kernel2/src/arch/i386/mm/mm_context.c |   23 ++
+ src/kernel2/src/arch/i386/mm/virt.c       |   17 +-
+ src/kernel2/src/arch/i386/vm86.c          |  406 +++++++++++++++++++++++++++++
+ src/kernel2/src/init.c                    |    4 +
+ src/kernel2/src/interrupts/im.c           |   30 ++-
+ src/kernel2/src/syscall.c                 |    3 +
+ src/kernel2/src/syscalls/vm86.c           |   53 ++++
+ src/modules/include/syscall.h             |    1 +
+ src/modules/lib/syscalls/vm86.c           |   58 ++++-
+ 14 files changed, 654 insertions(+), 15 deletions(-)
+ create mode 100644 src/kernel2/include/vm86.h
+ create mode 100644 src/kernel2/src/arch/i386/vm86.c
+ create mode 100644 src/kernel2/src/syscalls/vm86.c
+
+
+From kevin at tyndur.org  Fri Mar 26 20:35:16 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Fri, 26 Mar 2010 20:35:16 +0100
+Subject: [tyndur-devel] [PATCH 1/4] kernel2: mmc_vfree
+In-Reply-To: <1269632119-22254-1-git-send-email-kevin@tyndur.org>
+References: <1269632119-22254-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1269632119-22254-2-git-send-email-kevin@tyndur.org>
+
++ kernel2: mmc_vfree gibt einen virtuellen Speicherbereich sowohl
+  virtuell als auch physisch frei
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/include/mm.h                  |   10 ++++++++++
+ src/kernel2/src/arch/i386/mm/mm_context.c |   20 ++++++++++++++++++++
+ 2 files changed, 30 insertions(+), 0 deletions(-)
+
+diff --git a/src/kernel2/include/mm.h b/src/kernel2/include/mm.h
+index 617713c..9ab51f0 100644
+--- a/src/kernel2/include/mm.h
++++ b/src/kernel2/include/mm.h
+@@ -125,6 +125,16 @@ vaddr_t mmc_valloc_limits(mmc_context_t* context, size_t num_pages,
+  */
+ vaddr_t mmc_valloc(mmc_context_t* context, size_t num_pages, int flags);
+ 
++/**
++ * Gibt einen virtuell (aber nicht zwingend physisch) zusammenhaengenden
++ * Speicherbereich sowohl virtuell als auch physisch frei.
++ *
++ * @param context Speicherkontext, aus dem die Seiten freigegeben werden sollen
++ * @param vaddr Virtuelle Adresse der ersten freizugebenden Seite
++ * @param num_pages Anzahl der freizugebenden Seiten
++ */
++void mmc_vfree(mmc_context_t* context, vaddr_t vaddr, size_t num_pages);
++
+ void mmc_activate(mmc_context_t* context);
+ 
+ #define mmc_current_context() (*cpu_get_current()->mm_context)
+diff --git a/src/kernel2/src/arch/i386/mm/mm_context.c b/src/kernel2/src/arch/i386/mm/mm_context.c
+index 07a5be8..261b8ea 100644
+--- a/src/kernel2/src/arch/i386/mm/mm_context.c
++++ b/src/kernel2/src/arch/i386/mm/mm_context.c
+@@ -686,3 +686,23 @@ vaddr_t mmc_valloc(mmc_context_t* context, size_t num_pages, int flags)
+             KERNEL_MEM_START, KERNEL_MEM_END, flags);
+     }
+ }
++
++/**
++ * Gibt einen virtuell (aber nicht zwingend physisch) zusammenhaengenden
++ * Speicherbereich sowohl virtuell als auch physisch frei.
++ *
++ * @param context Speicherkontext, aus dem die Seiten freigegeben werden sollen
++ * @param vaddr Virtuelle Adresse der ersten freizugebenden Seite
++ * @param num_pages Anzahl der freizugebenden Seiten
++ */
++void mmc_vfree(mmc_context_t* context, vaddr_t vaddr, size_t num_pages)
++{
++    int i;
++    paddr_t paddr;
++
++    for (i = 0; i < num_pages; i++) {
++        paddr = mmc_resolve(context, vaddr + (i * PAGE_SIZE));
++        pmm_free(paddr, 1);
++    }
++    mmc_unmap(context, vaddr, num_pages);
++}
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Fri Mar 26 20:35:17 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Fri, 26 Mar 2010 20:35:17 +0100
+Subject: [tyndur-devel] [PATCH 2/4] kernel2: Fix fuer find_contiguous_pages
+In-Reply-To: <1269632119-22254-1-git-send-email-kevin@tyndur.org>
+References: <1269632119-22254-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1269632119-22254-3-git-send-email-kevin@tyndur.org>
+
+! kernel2: find_contiguous_pages hat freie Pages nur dann gefunden, wenn
+  in derselben Page Table nicht noch belegte Pages gekommen sind. Wenn
+  genug freie Pages gefunden sind, einfach aufhoeren.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/src/arch/i386/mm/mm_context.c |    3 +++
+ 1 files changed, 3 insertions(+), 0 deletions(-)
+
+diff --git a/src/kernel2/src/arch/i386/mm/mm_context.c b/src/kernel2/src/arch/i386/mm/mm_context.c
+index 261b8ea..1429769 100644
+--- a/src/kernel2/src/arch/i386/mm/mm_context.c
++++ b/src/kernel2/src/arch/i386/mm/mm_context.c
+@@ -527,6 +527,9 @@ static vaddr_t find_contiguous_pages
+                 // müssen nochmal bei Null anfangen.
+                 if ((page_table[cur_page++] & PTE_P) == 0) {
+                     free_pages++;
++                    if (free_pages >= num) {
++                        break;
++                    }
+                 } else {
+                     free_pages = 0;
+                     lower_limit = (cur_page_table << PGDIR_SHIFT) 
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Fri Mar 26 20:35:18 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Fri, 26 Mar 2010 20:35:18 +0100
+Subject: [tyndur-devel] [PATCH 3/4] kernel2: mem_allocate/mem_free richtig
+	implementiert
+In-Reply-To: <1269632119-22254-1-git-send-email-kevin@tyndur.org>
+References: <1269632119-22254-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1269632119-22254-4-git-send-email-kevin@tyndur.org>
+
+* kernel2: mem_allocate braucht jetzt keinen physisch zusammenhaengenden
+  Speicher mehr
++ kernel2: Implementierung fuer mem_free
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/src/arch/i386/mm/virt.c |    7 +++----
+ 1 files changed, 3 insertions(+), 4 deletions(-)
+
+diff --git a/src/kernel2/src/arch/i386/mm/virt.c b/src/kernel2/src/arch/i386/mm/virt.c
+index 065a0c7..ecb889b 100644
+--- a/src/kernel2/src/arch/i386/mm/virt.c
++++ b/src/kernel2/src/arch/i386/mm/virt.c
+@@ -184,12 +184,11 @@ void increase_user_stack_size(pm_thread_t* thread, int pages)
+  */
+ void* mem_allocate(dword size, dword flags)
+ {
+-    vaddr_t vaddr = vmm_kernel_automap(pmm_alloc(NUM_PAGES(size)), size);
+-    return vaddr;
++    return mmc_valloc(&mmc_current_context(), NUM_PAGES(size), PTE_P | PTE_W);
+ }
+ 
+-void mem_free(vaddr_t vaddr, size_t pages)
++void mem_free(vaddr_t vaddr, dword size)
+ {
+-    // TODO
++    return mmc_vfree(&mmc_current_context(), vaddr, NUM_PAGES(size));
+ }
+ 
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Fri Mar 26 20:35:19 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Fri, 26 Mar 2010 20:35:19 +0100
+Subject: [tyndur-devel] [PATCH 4/4] kernel2: VM86
+In-Reply-To: <1269632119-22254-1-git-send-email-kevin@tyndur.org>
+References: <1269632119-22254-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1269632119-22254-5-git-send-email-kevin@tyndur.org>
+
++ SYSCALL_VM86_BIOS_INT fuehrt einen beliebigen BIOS-Interrupt aus
++ kernel2: Unterstuetzung fuer den VM86
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/include/syscallno.h             |    3 +-
+ src/kernel2/include/arch/i386/cpu.h |   12 +
+ src/kernel2/include/syscall.h       |    6 +
+ src/kernel2/include/vm86.h          |   43 ++++
+ src/kernel2/src/arch/i386/mm/virt.c |   10 +-
+ src/kernel2/src/arch/i386/vm86.c    |  406 +++++++++++++++++++++++++++++++++++
+ src/kernel2/src/init.c              |    4 +
+ src/kernel2/src/interrupts/im.c     |   30 +++-
+ src/kernel2/src/syscall.c           |    3 +
+ src/kernel2/src/syscalls/vm86.c     |   53 +++++
+ src/modules/include/syscall.h       |    1 +
+ src/modules/lib/syscalls/vm86.c     |   58 +++++-
+ 12 files changed, 618 insertions(+), 11 deletions(-)
+ create mode 100644 src/kernel2/include/vm86.h
+ create mode 100644 src/kernel2/src/arch/i386/vm86.c
+ create mode 100644 src/kernel2/src/syscalls/vm86.c
+
+diff --git a/src/include/syscallno.h b/src/include/syscallno.h
+index b56ad45..fe2b693 100644
+--- a/src/include/syscallno.h
++++ b/src/include/syscallno.h
+@@ -54,6 +54,7 @@
+ #define SYSCALL_PM_SLEEP 6
+ 
+ #define SYSCALL_VM86 81
++#define SYSCALL_VM86_BIOS_INT 83
+ 
+ #define SYSCALL_PM_P 11
+ #define SYSCALL_PM_V 12
+@@ -83,6 +84,6 @@
+ 
+ #define SYSCALL_DEBUG_STACKTRACE 80
+ //ACHTUNG: Muss eine Zahl groesser als die Groesste Syscall-Nummer sein
+-#define SYSCALL_MAX 83
++#define SYSCALL_MAX 84
+ 
+ #endif
+diff --git a/src/kernel2/include/arch/i386/cpu.h b/src/kernel2/include/arch/i386/cpu.h
+index 772546e..d215cbd 100644
+--- a/src/kernel2/include/arch/i386/cpu.h
++++ b/src/kernel2/include/arch/i386/cpu.h
+@@ -36,6 +36,7 @@
+ #define _CPU_H_
+ 
+ #include <types.h>
++#include <stdint.h>
+ 
+ #include "tasks.h"
+ 
+@@ -65,6 +66,17 @@ typedef struct {
+     dword ss;
+ } __attribute__((packed)) interrupt_stack_frame_t;
+ 
++/** Der erweiterte Interruptstackframe fuer VM86-Tasks */
++struct vm86_isf {
++    interrupt_stack_frame_t isf;
++
++    uint32_t    es;
++    uint32_t    ds;
++    uint32_t    fs;
++    uint32_t    gs;
++} __attribute__((packed));
++
++
+ 
+ #define CPU_IO_BITMAP_LENGTH 0xffff
+ 
+diff --git a/src/kernel2/include/syscall.h b/src/kernel2/include/syscall.h
+index ea182c4..39a6bfa 100644
+--- a/src/kernel2/include/syscall.h
++++ b/src/kernel2/include/syscall.h
+@@ -166,5 +166,11 @@ void syscall_add_interrupt_handler(uint32_t intr);
+ /// Textausgabe ueber den Kernel
+ void syscall_putsn(int char_count, char* source);
+ 
++/// -ENOSYS
++int syscall_vm86_old(void* regs, uint32_t* memory);
++
++/// BIOS-Interrupt ausfuehren
++int syscall_vm86(uint8_t intr, void* regs, uint32_t* memory);
++
+ #endif //ifndef _SYSCALL_H_
+ 
+diff --git a/src/kernel2/include/vm86.h b/src/kernel2/include/vm86.h
+new file mode 100644
+index 0000000..978f762
+--- /dev/null
++++ b/src/kernel2/include/vm86.h
+@@ -0,0 +1,43 @@
++/*
++ * Copyright (c) 2010 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the tyndur Project
++ *     and its contributors.
++ * 4. Neither the name of the tyndur Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef _VM86_H_
++#define _VM86_H_
++
++void vm86_init(void);
++int arch_vm86(uint8_t intr, void* regs, uint32_t* memory);
++
++#endif
++
+diff --git a/src/kernel2/src/arch/i386/mm/virt.c b/src/kernel2/src/arch/i386/mm/virt.c
+index ecb889b..ad4095b 100644
+--- a/src/kernel2/src/arch/i386/mm/virt.c
++++ b/src/kernel2/src/arch/i386/mm/virt.c
+@@ -58,8 +58,14 @@ void vmm_init(mmc_context_t* kernel_context)
+         NUM_PAGES((uintptr_t) kernel_end - (uintptr_t) kernel_start));
+     
+     // Videospeicher mappen
+-    mmc_map(kernel_context, (paddr_t) 0xB8000, (vaddr_t) 0xB8000, PTE_W | PTE_P, 
+-        NUM_PAGES(25*80*2));
++    // TODO Usermodus muss die momentan wegen VM86 sehen. Waere wohl besser,
++    // wenn VM86 einen eigenen Adressraum haette.
++    mmc_map(kernel_context, (vaddr_t) 0xB8000, (paddr_t) 0xB8000,
++        PTE_U | PTE_W | PTE_P, 0x10);
++
++    // BIOS mappen
++    mmc_map(kernel_context, (vaddr_t) 0xC0000, (paddr_t) 0xC0000,
++        PTE_U | PTE_P, 0x40);
+     
+     
+     //mmc_map(kernel_context, kernel_context->page_directory, kernel_context->page_directory, PTE_P | PTE_W, 1);
+diff --git a/src/kernel2/src/arch/i386/vm86.c b/src/kernel2/src/arch/i386/vm86.c
+new file mode 100644
+index 0000000..5d02f2b
+--- /dev/null
++++ b/src/kernel2/src/arch/i386/vm86.c
+@@ -0,0 +1,406 @@
++/*
++ * Copyright (c) 2010 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the tyndur Project
++ *     and its contributors.
++ * 4. Neither the name of the tyndur Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <stdint.h>
++#include <string.h>
++#include <syscall_structs.h>
++#include <errno.h>
++
++#include "kernel.h"
++#include "kprintf.h"
++#include "tasks.h"
++#include "cpu.h"
++#include "vm86.h"
++#include "mm.h"
++
++/*
++ * Grundsaetzliche Funktionsweise von VM86 in tyndur:
++ *
++ * Die VM86-Funktionalitaet wird ausschliesslich ueber den Syscall
++ * SYSCALL_VM86_BIOS_INT bereitgestellt. Beim Aufruf dieses Syscalls wird der
++ * aufrufende Thread blockiert und zu einem neu erstellten VM86-Thread
++ * desselben Prozesses gewechselt. Dieser Thread laeuft bis der BIOS-Interrupt
++ * ueber iret zurueckkehrt, dann wird der VM86-Thread beendet und der
++ * urspruengliche Thread fortgesetzt.
++ *
++ * Einsprung in den VM86:
++ *
++ *      Um in den VM86-Modus zu wechseln wird derselbe Mechanismus wie beim
++ *      normalen Multitasking verwendet (d.h. Softwaremultitasking). Beim
++ *      Sprung in den Task muss das VM-Flag in eflags gesetzt sein (0x20000),
++ *      damit der Prozessor in den VM86 wechselt. Zusaetzlich zu den normal
++ *      gesicherten Registern (esp, eflags, cs, eip) werden bei VM86-Tasks auch
++ *      die (Real-Mode-)Segmentregister auf den Stack gesichert und beim iret
++ *      wiederhergestellt.
++ *
++ * Behandlung privilegierter Instruktionen:
++ *
++ *      Wenn der VM86-Task auf privilegierte Instruktionen stoesst, wird ein
++ *      #GP ausgeloest. vm86_exception() faengt diese Exception vor den
++ *      normalen Exceptionhandlern ab und emuliert den aktuellen privilegierten
++ *      Befehl wenn moeglich.
++ *
++ *      Bei der Emulation von iret ist zu beachten, dass der VM86-Task beendet
++ *      werden muss, wenn sich der Stack wieder auf dem Anfangswert befindet;
++ *      der aufgerufene Interrupthandler ist dann fertig.
++ */
++
++/** Enthaelt eine Kopie der urspruenglichen ersten 4k im physischen Speicher */
++static struct {
++    uint16_t    ivt[256][2];
++    uint8_t     data[3072];
++} bios_data __attribute__ ((aligned (4096)));
++
++// FIXME Das darf eigentich nicht global sein
++static struct {
++    bool            in_use;
++    void*           stack;
++    void*           nullpage;
++    uint32_t*       memory;
++    pm_thread_t*    caller;
++    vm86_regs_t*    regs;
++} vm86_status = {
++    .in_use     =   FALSE,
++};
++
++/**
++ * Speichert BIOS-Daten, um sie den VM86-Tasks spÃ¤ter bereitstellen zu kÃ¶nnen
++ */
++void vm86_init(void)
++{
++    memcpy(&bios_data, 0, 4096);
++}
++
++/**
++ * Erstellt einen VM86-Thread im aktuellen Prozess. Der aktuell ausgefuehrte
++ * Thread wird pausiert und ein Taskwechsel zum neuen VM86-Task wird
++ * durchgefuehrt.
++ *
++ * @oaram int Aufzurufender BIOS-Interrupt
++ * @param regs Anfaengliche Registerbelegung
++ * @param stack Virtuelle Adresse der fuer den Stack des VM86-Tasks benutzten
++ * Seite
++ */
++static int create_vm86_task(int intr, vm86_regs_t* regs, uintptr_t stack)
++{
++    uint16_t* ivt_entry = bios_data.ivt[intr];
++
++    // Erst einmal einen ganz normalen Thread erzeugen
++    pm_thread_t* task = pm_thread_create(current_process,
++        (vaddr_t)(uintptr_t) ivt_entry[0]);
++
++    interrupt_stack_frame_t* isf = task->kernel_stack;
++
++    struct vm86_isf visf;
++
++
++    // Register setzen
++    isf->eflags = 0x20202;
++    isf->cs = ivt_entry[1];
++    isf->ss = stack / 16;
++
++    isf->eax = regs->ax;
++    isf->ebx = regs->bx;
++    isf->ecx = regs->cx;
++    isf->edx = regs->dx;
++    isf->esi = regs->si;
++    isf->edi = regs->di;
++    isf->esp = PAGE_SIZE - 16;
++    isf->ebp = 0;
++
++    // Segmentregister setzen
++    // Dabei wird der bisherige Kernelstack in die temporaere
++    // visf-Datenstruktur kopiert, denn er muss verschoben werden, damit die
++    // VM86-Segmentregister noch Platz auf dem Stack haben
++    visf.isf = *isf;
++    visf.ds = regs->ds;
++    visf.es = regs->es;
++
++    // Und das ganze auf den Stack
++    task->kernel_stack = ((uint8_t*) task->kernel_stack)
++        + sizeof(*isf) - sizeof(visf);
++    memcpy(task->kernel_stack, &visf, sizeof(visf));
++
++    // Sofort in den VM86-Task wechseln. Der aufrufende Thread wird
++    // waehrenddessen nicht in den Scheduler zurueckgegeben und gestoppt.
++    current_thread->status = PM_STATUS_BLOCKED;
++    current_thread = task;
++
++    return 0;
++}
++
++/**
++ * Implementiert den Syscall SYSCALL_VM86_BIOS_INT.
++ *
++ * @param intr BIOS-Interrupt, der aufgerufen werden soll
++ * @param regs Pointer auf die Struktur, die die anfaenglichen Registerwerte
++ * enthaelt und in die beim Ende des VM86-Tasks die dann aktuellen
++ * Registerwerte kopiert werden sollen.
++ * @param memory Array von Speicherbereichen, die in den VM86-Task gemappt
++ * werden sollen; NULL fuer keine.
++ *
++ * @return 0 bei Erfolg, -errno im Fehlerfall
++ */
++int arch_vm86(uint8_t intr, void* regs, uint32_t* memory)
++{
++    int res = 0;
++
++    // Wir koennen nur einen VM86-Task
++    if (vm86_status.in_use) {
++        return -EBUSY;
++    }
++
++    // Nullpage mappen
++    uint32_t* page_table = (uint32_t*) PAGETABLES_MEM_START;
++    void* nullpage = pmm_alloc(1);
++    page_table[0] = (uintptr_t) nullpage | PTE_U | PTE_W | PTE_P;
++    asm volatile("invlpg %0" :: "m" (*(char*)0x0));
++    memcpy(0, &bios_data, 4096);
++
++    // Stack mappen
++    void* stack = mmc_valloc_limits(&mmc_current_context(), 1, NULL, NULL,
++        0x0, 0x9fc00, PTE_U | PTE_W | PTE_P);
++    if (stack == NULL) {
++        kprintf("vm86: Kein Platz fuer den Stack\n");
++        res = -ENOMEM;
++        goto fail_stack;
++    }
++
++    // Videospeicher mappen
++    // FIXME Das tut nur durch Zufall
++    bool ret = mmc_map(&mmc_current_context(),
++        (vaddr_t) 0xa0000, (paddr_t) 0xa0000,
++        PTE_U | PTE_W | PTE_P, 0x10);
++    if (!ret) {
++        kprintf("vm86: Kein Platz fuer den Videospeicher\n");
++        res = -ENOMEM;
++        goto fail_video;
++    }
++
++    // Falls noetig, ein paar Pages mehr mappen
++    if (memory != NULL) {
++        uint32_t infosize = memory[0];
++        uint32_t i;
++
++        for (i = 0; i < infosize; i++) {
++            uint32_t addr = memory[1 + i * 3];
++            uint32_t src = memory[1 + i * 3 + 1];
++            uint32_t size = memory[1 + i * 3 + 2];
++
++            if (size > PAGE_SIZE) {
++                res = -EINVAL;
++                goto fail_memory;
++            }
++
++            paddr_t phys_mem = pmm_alloc(1);
++            if (!mmc_map(&mmc_current_context(), (vaddr_t)(addr & ~0xFFF),
++                phys_mem, PTE_W | PTE_P | PTE_U, 1))
++            {
++                res = -ENOMEM;
++                goto fail_memory;
++            }
++            memcpy((void*)addr, (void*)src, size);
++        }
++    }
++
++    // Informationen speichern
++    // TODO Ordentliches Locking fuer SMP
++    vm86_status.in_use   = 1;
++    vm86_status.caller   = current_thread;
++    vm86_status.stack    = stack;
++    vm86_status.nullpage = nullpage;
++    vm86_status.memory   = memory;
++    vm86_status.regs     = regs;
++
++    // Innerhalb vom VM86 einen RPC-Handler aufzurufen waere unklug
++    pm_block_rpc(current_process, current_process->pid);
++
++    // Task erstellen
++    create_vm86_task(intr, regs, (uintptr_t) stack);
++
++    return 0;
++
++fail_memory:
++    mmc_unmap(&mmc_current_context(), (vaddr_t) 0xa0000, 0x10);
++fail_video:
++    mmc_vfree(&mmc_current_context(), stack, 1);
++fail_stack:
++    pmm_free(nullpage, 1);
++    return res;
++}
++
++/**
++ * Beendet einen VM86-Task, kopiert alle zu zurueckzugebenden Daten und setzt
++ * die Ausfuehrung des aufrufenden Tasks fort.
++ */
++static void destroy_vm86_task(interrupt_stack_frame_t* isf)
++{
++    pm_thread_t* vm86_task = current_thread;
++    struct vm86_isf* visf = (struct vm86_isf*)
++        (((char*) isf) + (sizeof(*isf) - sizeof(*visf)));
++
++    // Den Thread loeschen und den Aufrufer wieder aktiv machen
++    vm86_task->status = PM_STATUS_BLOCKED;
++    pm_thread_destroy(vm86_task);
++
++    current_thread = vm86_status.caller;
++    current_thread->status = PM_STATUS_RUNNING;
++
++    // Temporaere Mappings rueckgaengig machen
++    mmc_unmap(&mmc_current_context(), (vaddr_t) 0xa0000, 0x10);
++    mmc_unmap(&mmc_current_context(), vm86_status.stack, 1);
++
++    uint32_t* page_table = (uint32_t*) PAGETABLES_MEM_START;
++    page_table[0] = 0;
++    asm volatile("invlpg %0" :: "m" (*(char*)0x0));
++
++    pmm_free(vm86_status.nullpage, 1);
++
++    // Vom Benutzer angeforderte Mappings rueckgaengig machen
++    if (vm86_status.memory != NULL) {
++        uint32_t infosize = vm86_status.memory[0];
++        uint32_t i;
++
++        for (i = 0; i < infosize; i++) {
++            uint32_t addr = vm86_status.memory[1 + i * 3];
++            uint32_t src = vm86_status.memory[1 + i * 3 + 1];
++            uint32_t size = vm86_status.memory[1 + i * 3 + 2];
++
++            memcpy((void*)src, (void*)addr, size);
++            pmm_free(mmc_resolve(&mmc_current_context(),
++                (vaddr_t) (addr & ~0xFFF)), 1);
++            mmc_unmap(&mmc_current_context(), (vaddr_t)(addr & ~0xFFF), 1);
++        }
++    }
++
++    // Register sichern
++    vm86_regs_t* regs = vm86_status.regs;
++    regs->ax = isf->eax;
++    regs->bx = isf->ebx;
++    regs->cx = isf->ecx;
++    regs->dx = isf->edx;
++    regs->si = isf->esi;
++    regs->di = isf->edi;
++    regs->ds = visf->ds;
++    regs->es = visf->es;
++
++    // Wir sind fertig mit VM86 :-)
++    pm_unblock_rpc(current_process, current_process->pid);
++    vm86_status.in_use = 0;
++}
++
++/** Pusht einen Wert auf den Stack des VM86-Tasks */
++static inline void emulator_push(interrupt_stack_frame_t* isf, uint16_t value)
++{
++    isf->esp -= 2;
++    ((uint16_t*)(isf->esp + (isf->ss << 4)))[0] = value;
++}
++
++/** Popt einen Wert vom Stack des VM86-Tasks */
++static inline uint16_t emulator_pop(interrupt_stack_frame_t* isf)
++{
++    uint16_t res = ((uint16_t*)(isf->esp + (isf->ss << 4)))[0];
++    isf->esp += 2;
++    return res;
++}
++
++/**
++ * Diese Funktion wird vom Interrupthandler bei Exceptions aufgerufen, wenn der
++ * aktuelle Task ein VM86-Task ist. Die Exception kann dann entweder hier
++ * behandelt werden oder an die allgemeinen Exceptionhandlern weitergegeben
++ * werden
++ *
++ * @return 1 wenn die Exception fertig behandelt ist; 0, wenn die normalen
++ * Exceptionhandler aufgerufen werden sollen.
++ */
++int vm86_exception(interrupt_stack_frame_t* isf)
++{
++    // Bei #GP muessen wir was emulieren, ansonsten koennen wir fuer den Task
++    // hier nichts tun
++    if (isf->interrupt_number != 13) {
++        return 0;
++    }
++
++    // Ein toller Emulator fuer privilegierte Instruktionen
++    uint8_t* ops = (uint8_t*)(isf->eip + (isf->cs << 4));
++    switch (ops[0]) {
++
++        case 0x9c: /* pushf */
++            emulator_push(isf, isf->eflags);
++            isf->eip++;
++            break;
++
++        case 0x9d: /* popf */
++            // So tun, als wÃ¼rden wir die EFLAGS wiederherstellen.
++            // Das hier ist wohl alles andere als korrekt, aber funzt erstmal.
++            emulator_pop(isf);
++            isf->eip++;
++            break;
++
++        case 0xcd: /* int */
++        {
++            uint16_t intr = ops[1] & 0xff;
++            uint16_t* ivt_entry = bios_data.ivt[intr];
++
++            emulator_push(isf, isf->eip + 2);
++            emulator_push(isf, isf->cs);
++            emulator_push(isf, isf->eflags);
++
++            isf->eip = ivt_entry[0];
++            isf->cs  = ivt_entry[1];
++            break;
++        }
++
++        case 0xcf: /* iret */
++
++            // Wenn es das finale iret ist, koennen wir den VM86-Task beenden
++            if (isf->esp == PAGE_SIZE - 16) {
++                destroy_vm86_task(isf);
++                return 1;
++            }
++
++            // Ansonsten muss es ganz normal emuliert werden
++            emulator_pop(isf);
++            isf->cs  = emulator_pop(isf);
++            isf->eip = emulator_pop(isf);
++            break;
++
++        default:
++            kprintf("vm86: Unbekannter Opcode %x\n", ops[0]);
++            return 0;
++    }
++
++    return 1;
++}
+diff --git a/src/kernel2/src/init.c b/src/kernel2/src/init.c
+index 6b9b202..1413b88 100644
+--- a/src/kernel2/src/init.c
++++ b/src/kernel2/src/init.c
+@@ -63,6 +63,7 @@ lock_t init_lock = 0;
+ 
+ void smp_init(void);
+ void gdt_init(void);
++void vm86_init(void);
+ 
+ /** 
+  * Kernel-Initialisierung erfolgt hier,
+@@ -97,6 +98,9 @@ void init(int multiboot_magic, struct multiboot_info *boot_info, bool bsp)
+             debug_parse_cmdline(multiboot_info.mi_cmdline);
+         }
+     #endif
++
++        // IVT fuer den VM86 sichern
++        vm86_init();
+         
+         debug_print(DEBUG_FLAG_INIT, "Initialisiere physikalische"
+             "Speicherverwaltung");
+diff --git a/src/kernel2/src/interrupts/im.c b/src/kernel2/src/interrupts/im.c
+index d7130bd..91f818d 100644
+--- a/src/kernel2/src/interrupts/im.c
++++ b/src/kernel2/src/interrupts/im.c
+@@ -59,6 +59,7 @@ bool fastrpc_irq(pm_process_t* callee, size_t metadata_size, void* metadata,
+     size_t data_size, void* data, uint8_t irq);
+ 
+ extern void increase_user_stack_size(pm_thread_t* task_ptr, int pages);
++extern int vm86_exception(interrupt_stack_frame_t* isf);
+ 
+ /**
+  * Verarbeitet eine CPU-Exception
+@@ -71,6 +72,14 @@ static void handle_exception(interrupt_stack_frame_t* isf, uint8_t int_num)
+ //    kprintf("user_stack_bottom = %x\n",
+ //        current_thread->user_stack_bottom);
+ 
++    // Pruefen, ob ein VM86-Task die Exception ausgeloest hat
++    // Falls ja lassen wir sie vom VM86-Code behandeln, wenn er kann
++    if (isf->eflags & 0x20000) {
++        if (vm86_exception(isf)) {
++            return;
++        }
++    }
++
+     if (int_num == 0x0e) {
+         // UeberprÃ¼fen ob der Pagefault durch einen Stackoverflow
+         // hervorgerufen wurde. Falls ja: Stack vergroessern und weitermachen
+@@ -97,7 +106,11 @@ static void handle_exception(interrupt_stack_frame_t* isf, uint8_t int_num)
+     // Ein Stacktrace duerfen wir nur ausgeben, wenn kein Pagefault wegen
+     // dem Stack aufgetreten ist!
+     if (!((cr2 < isf->esp + 800) && (cr2 >= isf->esp -0x20))) {
+-        stack_backtrace(isf->ebp, isf->eip);
++        // Und fuer VM86 muessten wir wenigstens noch das Segment
++        // beruecksichtigen, aber eigentlich brauchen wir ihn da gar nicht
++        if ((isf->eflags & 0x20000) == 0) {
++            stack_backtrace(isf->ebp, isf->eip);
++        }
+     }
+ 
+     // Hier werden alle Prozessoren zum halten gebracht
+@@ -166,10 +179,19 @@ interrupt_stack_frame_t* im_handler(interrupt_stack_frame_t* isf)
+ 
+     thread = current_thread;
+     if (thread != old_thread) {
++        interrupt_stack_frame_t* new_isf =
++            (interrupt_stack_frame_t*) thread->kernel_stack;
++
+         cpu_get_current()->tss.ss0 = 2 << 3;
+-        cpu_get_current()->tss.esp0 =
+-            (uintptr_t) thread->kernel_stack
+-            + sizeof(interrupt_stack_frame_t);
++        if (new_isf->eflags & 0x20000) {
++            cpu_get_current()->tss.esp0 =
++                (uintptr_t) thread->kernel_stack
++                + sizeof(struct vm86_isf);
++        } else {
++            cpu_get_current()->tss.esp0 =
++                (uintptr_t) thread->kernel_stack
++                + sizeof(interrupt_stack_frame_t);
++        }
+ 
+         mmc_activate(&thread->process->context);
+     }
+diff --git a/src/kernel2/src/syscall.c b/src/kernel2/src/syscall.c
+index 4292724..073fe9b 100644
+--- a/src/kernel2/src/syscall.c
++++ b/src/kernel2/src/syscall.c
+@@ -93,6 +93,9 @@ void syscall_init()
+     syscall_register(SYSCALL_SHM_CREATE, &syscall_shm_create, 1);
+     syscall_register(SYSCALL_SHM_ATTACH, &syscall_shm_attach, 1);
+     syscall_register(SYSCALL_SHM_DETACH, &syscall_shm_detach, 1);
++
++    syscall_register(SYSCALL_VM86, &syscall_vm86_old, 2);
++    syscall_register(SYSCALL_VM86_BIOS_INT, &syscall_vm86, 3);
+ }
+ 
+ /**
+diff --git a/src/kernel2/src/syscalls/vm86.c b/src/kernel2/src/syscalls/vm86.c
+new file mode 100644
+index 0000000..b105eca
+--- /dev/null
++++ b/src/kernel2/src/syscalls/vm86.c
+@@ -0,0 +1,53 @@
++/*
++ * Copyright (c) 2010 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the tyndur Project
++ *     and its contributors.
++ * 4. Neither the name of the tyndur Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <stdint.h>
++#include <errno.h>
++
++#include "kernel.h"
++#include "syscall.h"
++#include "vm86.h"
++
++/// -ENOSYS
++int syscall_vm86_old(void* regs, uint32_t* memory)
++{
++    return -ENOSYS;
++}
++
++/// BIOS-Interrupt ausfuehren
++int syscall_vm86(uint8_t intr, void* regs, uint32_t* memory)
++{
++    return arch_vm86(intr, regs, memory);
++}
+diff --git a/src/modules/include/syscall.h b/src/modules/include/syscall.h
+index 3759d4b..d86a232 100644
+--- a/src/modules/include/syscall.h
++++ b/src/modules/include/syscall.h
+@@ -91,6 +91,7 @@ void unblock_process(pid_t pid);
+ char* get_cmdline(void);
+ 
+ bool vm86_int(vm86_regs_t *regs, dword *shm);
++int bios_int(int intr, vm86_regs_t* regs, uint32_t* shm);
+ 
+ task_info_t* enumerate_tasks(void);
+ 
+diff --git a/src/modules/lib/syscalls/vm86.c b/src/modules/lib/syscalls/vm86.c
+index 570558b..39a6666 100644
+--- a/src/modules/lib/syscalls/vm86.c
++++ b/src/modules/lib/syscalls/vm86.c
+@@ -1,16 +1,66 @@
++/*
++ * Copyright (c) 2007-2010 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Mathias Gottschlag.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
+ 
+-#include "syscall.h"
++#include <syscall.h>
++#include <errno.h>
++
++int bios_int(int intr, vm86_regs_t* regs, uint32_t* shm)
++{
++    int result;
++
++    asm(
++        "pushl %4;"
++        "pushl %3;"
++        "pushl %2;"
++        "mov %1, %%eax;"
++        "int $0x30;"
++        "add $0xc, %%esp;"
++    : "=a"(result)
++    : "i" (SYSCALL_VM86_BIOS_INT), "r" (intr), "r"(regs), "r"(shm));
++
++    return result;
++}
+ 
+ bool vm86_int(vm86_regs_t *regs, dword *shm)
+ {
+-    dword result;
++    int result;
++
+     asm(
+         "pushl %3;"
+         "pushl %2;"
+         "mov %1, %%eax;"
+         "int $0x30;"
+         "add $0x8, %%esp;"
+-    : "=a"(result): "i" (SYSCALL_VM86), "r"(regs), "r"(shm) );
++    : "=a"(result): "i" (SYSCALL_VM86), "r"(regs), "r"(shm));
++
++    if (result == -ENOSYS) {
++        return bios_int(0x10, regs, shm);
++    }
++
+     return (bool)result;
+ }
+-
+-- 
+1.6.0.2
+
+
+From max at tyndur.org  Fri Mar 26 21:16:39 2010
+From: max at tyndur.org (Max Reitz)
+Date: Fri, 26 Mar 2010 21:16:39 +0100
+Subject: [tyndur-devel] [PATCH 4/4] kernel2: VM86
+In-Reply-To: <1269632119-22254-5-git-send-email-kevin@tyndur.org>
+References: <1269632119-22254-1-git-send-email-kevin@tyndur.org>
+	<1269632119-22254-5-git-send-email-kevin@tyndur.org>
+Message-ID: <4BAD1627.4090207@tyndur.org>
+
+Kevin Wolf schrieb:
+> + SYSCALL_VM86_BIOS_INT fuehrt einen beliebigen BIOS-Interrupt aus
+> + kernel2: Unterstuetzung fuer den VM86
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Zumindest der vm86-Teil sieht i. O. aus. ;-)
+
+Acked-by: Max Reitz <max at tyndur.org>
+
+From toni at tyndur.org  Sun Mar 28 15:11:27 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Sun, 28 Mar 2010 15:11:27 +0200
+Subject: [tyndur-devel] [PATCH 1/5] cdi: Verwaltung von Speicherbereichen
+In-Reply-To: <1266095541-6084-2-git-send-email-kevin@tyndur.org>
+References: <1266095541-6084-1-git-send-email-kevin@tyndur.org>
+	<1266095541-6084-2-git-send-email-kevin@tyndur.org>
+Message-ID: <20100328131126.GI9262@neo.geekcave.lan>
+
+On Sat, Feb 13 22:12, Kevin Wolf wrote:
+> + cdi: Neuer Header mem.h, der Funktionen zur Verwaltung von
+>   Speicherbereichen enthaelt
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+> ---
+>  src/modules/cdi/include/cdi-osdep.h |   11 ++
+>  src/modules/cdi/include/cdi/mem.h   |  255 +++++++++++++++++++++++++++++++++++
+>  2 files changed, 266 insertions(+), 0 deletions(-)
+>  create mode 100644 src/modules/cdi/include/cdi/mem.h
+> 
+> diff --git a/src/modules/cdi/include/cdi-osdep.h b/src/modules/cdi/include/cdi-osdep.h
+> index 6187c32..0d052fe 100644
+> --- a/src/modules/cdi/include/cdi-osdep.h
+> +++ b/src/modules/cdi/include/cdi-osdep.h
+> @@ -68,4 +68,15 @@ typedef struct
+>      FILE* file;
+>  } cdi_dma_osdep;
+>  
+> +/**
+> + * \german
+> + * OS-spezifische Daten fuer Speicherbereiche
+> + * \endgerman
+> + * \english
+> + * OS-specific data for memory areas.
+> + * \endenglish
+> + */
+> +typedef struct {
+> +} cdi_mem_osdep;
+> +
+>  #endif
+> diff --git a/src/modules/cdi/include/cdi/mem.h b/src/modules/cdi/include/cdi/mem.h
+> new file mode 100644
+> index 0000000..08837f7
+> --- /dev/null
+> +++ b/src/modules/cdi/include/cdi/mem.h
+> @@ -0,0 +1,255 @@
+> +/*
+> + * Copyright (c) 2010 Kevin Wolf
+> + *
+> + * This program is free software. It comes without any warranty, to
+> + * the extent permitted by applicable law. You can redistribute it
+> + * and/or modify it under the terms of the Do What The Fuck You Want
+> + * To Public License, Version 2, as published by Sam Hocevar. See
+> + * http://sam.zoy.org/projects/COPYING.WTFPL for more details.
+> + */
+> +
+> +#ifndef _CDI_MEM_H_
+> +#define _CDI_MEM_H_
+> +
+> +#include <stdint.h>
+> +#include "cdi.h"
+> +
+> +#ifdef __cplusplus
+> +extern "C" {
+> +#endif
+> +
+> +/**
+> + * \german
+> + * Beschreibt Anforderungen an einen Speicherbereich
+> + * \endgerman
+> + * \english
+> + * Describes requirements for a memory area
+> + * \endenglish
+> + */
+> +typedef enum {
+> +    /**
+> +     * \german
+> +     * Maske fuer ein Bitfeld, das das benoetige physische Alignment beschreibt
+> +     * (das geforderte Alignment ist 2^x Bytes)
+> +     * \endgerman
+> +     * \english
+> +     * Mask for a bit field which describes the required physical alignment
+> +     * (the required alignment is 2^x bytes)
+> +     * \endenglish
+> +     */
+> +    CDI_MEM_ALIGN_MASK      = 0x1f,
+> +
+> +    /**
+> +     * \german
+> +     * Physische Adresse muss nicht gueltig sein
+> +     * \endgerman
+> +     * \english
+> +     * Physical address isn't required to be valid
+> +     * \endenglish
+> +     */
+> +    CDI_MEM_VIRT_ONLY       = 0x20,
+> +
+> +    /**
+> +     * \german
+> +     * Physisch zusammenh??ngenden Speicher anfordern
+> +     * \endgerman
+> +     * \english
+> +     * Request physically contiguous memory
+> +     * \endenglish
+> +     */
+> +    CDI_MEM_PHYS_CONTIGUOUS = 0x40,
+> +
+> +    /**
+> +     * \german
+> +     * Physischen Speicher < 16 MB anfordern
+> +     * \endgerman
+> +     * \english
+> +     * Request physical memory < 16 MB
+> +     * \endenglish
+> +     */
+> +    CDI_MEM_DMA_16M         = 0x80,
+> +
+> +    /**
+> +     * \german
+> +     * Physischen Speicher < 4 GB anfordern
+> +     * \endgerman
+> +     * \english
+> +     * Request physical memory < 4 GB
+> +     * \endenglish
+> +     */
+> +    CDI_MEM_DMA_4G          = 0x100,
+> +
+> +    /**
+> +     * \german
+> +     * Speicher muss nicht initialisiert werden (verhindert Kopie bei
+> +     * cdi_mem_require_flags)
+> +     * \endgerman
+> +     * \english
+> +     * Memory doesn't need to be initialised (avoids copy in
+> +     * cdi_mem_require_flags)
+> +     * \endenglish
+> +     */
+> +    CDI_MEM_NOINIT          = 0x200,
+> +} cdi_mem_flags_t;
+> +
+> +/**
+> + * \german
+> + * Beschreibt einen physischen Speicherberich (Eintrag einer
+> + * Scatter/Gather-Liste)
+> + * \endgerman
+> + * \english
+> + * Describes an area of physical memory (an entry for a scatter/gather list)
+> + * \endenglish
+> + */
+> +struct cdi_mem_sg_item {
+> +    uintptr_t   start;
+> +    size_t      size;
+> +};
+> +
+> +/**
+> + * \german
+> + * Scatter/Gather-Liste, die die physischen Adressen zu einem bestimmten
+> + * virtuellen Speicherbereich enth??lt.
+> + * \endgerman
+> + * \english
+> + * Scatter/Gather list which contains the physical addresses for a given area
+> + * of virtual memory.
+> + * \endenglish
+> + */
+> +struct cdi_mem_sg_list {
+> +    size_t                  num;
+> +    struct cdi_mem_sg_item* items;
+> +};
+> +
+> +/**
+> + * \german
+> + * Beschreibt einen virtuellen Speicherbereich, je nach Flags mit einer
+> + * Scatter/Gather-Liste der zugeh??rigen phyischen Adressen.
+> + * \endgerman
+> + * \english
+> + * Describes an area of virtual memory, depending on the allocation flags with
+> + * a scatter/gather list of its physical addresses.
+> + * \endenglish
+> + */
+> +struct cdi_mem_area {
+> +    size_t                  size;
+> +    void*                   vaddr;
+> +    struct cdi_mem_sg_list  paddr;
+> +
+> +    cdi_mem_osdep           osdep;
+> +};
+> +
+> +/**
+> + * \german
+> + * Reserviert einen Speicherbereich.
+> + *
+> + * @param size Gr????e des Speicherbereichs in Bytes
+> + * @param flags Flags, die zus??tzliche Anforderungen beschreiben
+> + *
+> + * @return Eine cdi_mem_area bei Erfolg, NULL im Fehlerfall
+> + * \endgerman
+> + * \english
+> + * Allocates a memory area.
+> + *
+> + * @param size Size of the memory area in bytes
+> + * @param flags Flags that describe additional requirements
+> + *
+> + * @return A cdi_mem_area on success, NULL on failure
+> + * \endenglish
+> + */
+> +struct cdi_mem_area* cdi_mem_alloc(size_t size, cdi_mem_flags_t flags);
+> +
+> +/**
+> + * \german
+> + * Reserviert physisch zusammenh??genden Speicher an einer definierten Adresse
+> + *
+> + * @param paddr Physische Adresse des angeforderten Speicherbereichs
+> + * @param size Gr????e des ben??tigten Speichers in Bytes
+> + *
+> + * @return Eine cdi_mem_area bei Erfolg, NULL im Fehlerfall
+> + * \endgerman
+> + * \english
+> + * Reserves physically contiguous memory at a defined address
+> + *
+> + * @param paddr Physical address of the requested memory aread
+
+KRITIKEL                                                    ^^^^^
+
+> + * @param size Size of the requested memory area in bytes
+> + *
+> + * @return A cdi_mem_area on success, NULL on failure
+> + * \endenglish
+> + */
+> +struct cdi_mem_area* cdi_mem_map(uintptr_t paddr, size_t size);
+> +
+> +/**
+> + * \german
+> + * Gibt einen durch cdi_mem_alloc oder cdi_mem_map reservierten Speicherbereich
+> + * frei
+> + * \endgerman
+> + * \english
+> + * Frees a memory area that was previously allocated by cdi_mem_alloc or
+> + * cdi_mem_map
+> + * \endenglish
+> + */
+> +void cdi_mem_free(struct cdi_mem_area* p);
+> +
+> +/**
+> + * \german
+> + * Gibt einen Speicherbereich zur??ck, der dieselben Daten wie @a p beschreibt,
+> + * aber mindestens die gegebenen Flags gesetzt hat.
+> + *
+> + * Diese Funktion kann denselben virtuellen und physischen Speicherbereich wie
+> + * @p benutzen oder sogar @p selbst zur??ckzugeben, solange der gemeinsam
+> + * benutzte Speicher erst dann freigegeben wird, wenn sowohl @a p als auch der
+> + * R??ckgabewert durch cdi_mem_free freigegeben worden sind.
+> + *
+> + * Ansonsten wird ein neuer Speicherbereich reserviert und (au??er wenn das
+> + * Flag CDI_MEM_NOINIT gesetzt ist) die Daten werden aus @a p in den neu
+> + * reservierten Speicher kopiert.
+> + * \endgerman
+> + * \english
+> + * Returns a memory area that describes the same data as @a p does, but for
+> + * which at least the given flags are set.
+> + *
+> + * This function may use the same virtual and physical memory areas as used in
+> + * @a p, or it may even return @a p itself. In this case it must ensure that
+> + * the commonly used memory is only freed when both @a p and the return value
+> + * of this function have been freed by cdi_mem_free.
+> + *
+> + * Otherwise, a new memory area is allocated and data is copied from @a p into
+> + * the newly allocated memory (unless CDI_MEM_NOINIT is set).
+> + * \endenglish
+> + */
+> +struct cdi_mem_area* cdi_mem_require_flags(struct cdi_mem_area* p,
+> +    cdi_mem_flags_t flags);
+> +
+> +/**
+> + * \german
+> + * Kopiert die Daten von @a src nach @a dest. Beide Speicherbereiche m??ssen
+> + * gleich gro?? sein.
+> + *
+> + * Das bedeutet nicht unbedingt eine physische Kopie: Wenn beide
+> + * Speicherbereiche auf denselben physischen Speicher zeigen, macht diese
+> + * Funktion nichts. Sie kann auch andere Methoden verwenden, um den Speicher
+> + * effektiv zu kopieren, z.B. durch geeignetes Ummappen von Pages.
+> + *
+> + * @return 0 bei Erfolg, -1 sonst
+> + * \endgerman
+> + * \english
+> + * Copies data from @a src to @a dest. Both memory areas must be of the same
+> + * size.
+> + *
+> + * This does not necessarily involve a physical copy: If both memory areas
+> + * point to the same physical memory, this function does nothing. It can also
+> + * use other methods to achieve the same visible effect, e.g. by remapping
+> + * pages.
+> + *
+> + * @return 0 on success, -1 otherwise
+> + * \endenglish
+> + */
+> +int cdi_mem_copy(struct cdi_mem_area* dest, struct cdi_mem_area* src);
+> +
+> +#ifdef __cplusplus
+> +}; // extern "C"
+> +#endif
+> +
+> +#endif
+> +
+
+Abgesehen vom Kritikel oben sieht das gut aus. ;-)
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100328/ea0ee8eb/attachment.pgp>
+
+From toni at tyndur.org  Sun Mar 28 15:24:47 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Sun, 28 Mar 2010 15:24:47 +0200
+Subject: [tyndur-devel] [PATCH 2/5] cdi: mem.h implementiert
+In-Reply-To: <1266095541-6084-3-git-send-email-kevin@tyndur.org>
+References: <1266095541-6084-1-git-send-email-kevin@tyndur.org>
+	<1266095541-6084-3-git-send-email-kevin@tyndur.org>
+Message-ID: <20100328132447.GJ9262@neo.geekcave.lan>
+
+On Sat, Feb 13 22:12, Kevin Wolf wrote:
+> + cdi: mem.h implementiert
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+> ---
+>  src/modules/cdi/include/cdi-osdep.h |    1 +
+>  src/modules/cdi/lib/mem.c           |  215 +++++++++++++++++++++++++++++++++++
+>  2 files changed, 216 insertions(+), 0 deletions(-)
+>  create mode 100644 src/modules/cdi/lib/mem.c
+> 
+> diff --git a/src/modules/cdi/include/cdi-osdep.h b/src/modules/cdi/include/cdi-osdep.h
+> index 0d052fe..204793b 100644
+> --- a/src/modules/cdi/include/cdi-osdep.h
+> +++ b/src/modules/cdi/include/cdi-osdep.h
+> @@ -77,6 +77,7 @@ typedef struct
+>   * \endenglish
+>   */
+>  typedef struct {
+> +    int mapped;
+>  } cdi_mem_osdep;
+>  
+>  #endif
+> diff --git a/src/modules/cdi/lib/mem.c b/src/modules/cdi/lib/mem.c
+> new file mode 100644
+> index 0000000..36ad90d
+> --- /dev/null
+> +++ b/src/modules/cdi/lib/mem.c
+> @@ -0,0 +1,215 @@
+> +/*
+> + * Copyright (c) 2010 Kevin Wolf
+> + *
+> + * This program is free software. It comes without any warranty, to
+> + * the extent permitted by applicable law. You can redistribute it
+> + * and/or modify it under the terms of the Do What The Fuck You Want
+> + * To Public License, Version 2, as published by Sam Hocevar. See
+> + * http://sam.zoy.org/projects/COPYING.WTFPL for more details.
+> + */
+> +
+> +#include <stdint.h>
+> +#include <stdlib.h>
+> +#include <syscall.h>
+> +#include <string.h>
+> +
+> +#include "cdi.h"
+> +#include "cdi/mem.h"
+> +
+> +/**
+> + * \german
+> + * Reserviert einen Speicherbereich.
+> + *
+> + * @param size Gr????e des Speicherbereichs in Bytes
+> + * @param flags Flags, die zus??tzliche Anforderungen beschreiben
+> + * \endgerman
+> + * \english
+> + * Allocates a memory area.
+> + *
+> + * @param size Size of the memory area in bytes
+> + * @param flags Flags that describe additional requirements
+> + * \endenglish
+> + */
+> +struct cdi_mem_area* cdi_mem_alloc(size_t size, cdi_mem_flags_t flags)
+> +{
+> +    dma_mem_ptr_t buffer;
+> +    struct cdi_mem_area* area;
+> +    struct cdi_mem_sg_item* sg_item;
+> +
+> +    // Wir machen im Moment mal nur ganze Pages
+> +    if ((flags & CDI_MEM_ALIGN_MASK) > 12) {
+> +        return NULL;
+> +    }
+> +
+> +    // Speicher holen
+> +    if (flags & CDI_MEM_VIRT_ONLY) {
+> +        buffer = mem_dma_allocate(size, 0);
+> +    } else {
+> +        buffer = mem_dma_allocate(size, 0x80);
+> +    }
+> +
+> +    if (buffer.virt == NULL) {
+> +        return NULL;
+> +    }
+> +
+> +    // cdi_mem_area anlegen und befuellen
+> +    sg_item = malloc(sizeof(*sg_item));
+> +    *sg_item = (struct cdi_mem_sg_item) {
+> +        .start  = (uintptr_t) buffer.phys,
+> +        .size   = size,
+> +    };
+> +
+> +    area = malloc(sizeof(*area));
+> +    *area = (struct cdi_mem_area) {
+> +        .size   = size,
+> +        .vaddr  = buffer.virt,
+> +        .paddr  = {
+> +            .num    = 1,
+> +            .items  = sg_item,
+> +        },
+
+Hm solltest du .osdep.mapped hier nicht auch initialisieren? Ist ja kein
+calloc...
+
+> +    };
+> +
+> +    return area;
+> +}
+> +
+> +/**
+> + * Reserviert physisch zusammenh??genden Speicher an einer definierten Adresse
+> + *
+> + * @param paddr Physische Adresse des angeforderten Speicherbereichs
+> + * @param size Gr????e des ben??tigten Speichers in Bytes
+> + *
+> + * @return Eine cdi_mem_area bei Erfolg, NULL im Fehlerfall
+> + */
+> +struct cdi_mem_area* cdi_mem_map(uintptr_t paddr, size_t size)
+> +{
+> +    struct cdi_mem_area* area;
+> +    struct cdi_mem_sg_item* sg_item;
+> +    void* vaddr = mem_allocate_physical(size, paddr, 0);
+> +
+> +    if (vaddr == NULL) {
+> +        return NULL;
+> +    }
+> +
+> +    // cdi_mem_area anlegen und befuellen
+> +    sg_item = malloc(sizeof(*sg_item));
+> +    *sg_item = (struct cdi_mem_sg_item) {
+> +        .start  = paddr,
+> +        .size   = size,
+> +    };
+> +
+> +    area = malloc(sizeof(*area));
+> +    *area = (struct cdi_mem_area) {
+> +        .size   = size,
+> +        .vaddr  = vaddr,
+> +        .paddr  = {
+> +            .num    = 1,
+> +            .items  = sg_item,
+> +        },
+> +        .osdep = {
+> +            .mapped = 1,
+> +        },
+> +    };
+> +
+> +    return area;
+> +}
+> +
+> +
+> +/**
+> + * \german
+> + * Gibt einen durch cdi_mem_alloc oder cdi_mem_map reservierten Speicherbereich
+> + * frei
+> + * \endgerman
+> + * \english
+> + * Frees a memory area that was previously allocated by cdi_mem_alloc or
+> + * cdi_mem_map
+> + * \endenglish
+> + */
+> +void cdi_mem_free(struct cdi_mem_area* p)
+> +{
+> +    if (p->osdep.mapped) {
+> +        mem_free_physical(p->vaddr, p->size);
+> +    } else {
+> +        mem_free(p->vaddr, p->size);
+> +    }
+> +
+> +    free(p->paddr.items);
+> +    free(p);
+> +}
+> +
+> +/**
+> + * \german
+> + * Gibt einen Speicherbereich zur??ck, der dieselben Daten wie @a p beschreibt,
+> + * aber mindestens die gegebenen Flags gesetzt hat.
+> + *
+> + * Diese Funktion kann denselben virtuellen und physischen Speicherbereich wie
+> + * @p benutzen oder sogar @p selbst zur??ckzugeben, solange der gemeinsam
+> + * benutzte Speicher erst dann freigegeben wird, wenn sowohl @a p als auch der
+> + * R??ckgabewert durch cdi_mem_free freigegeben worden sind.
+> + *
+> + * Ansonsten wird ein neuer Speicherbereich reserviert und (au??er wenn das
+> + * Flag CDI_MEM_NOINIT gesetzt ist) die Daten werden aus @a p in den neu
+> + * reservierten Speicher kopiert.
+> + * \endgerman
+> + * \english
+> + * Returns a memory area that describes the same data as @a p does, but for
+> + * which at least the given flags are set.
+> + *
+> + * This function may use the same virtual and physical memory areas as used in
+> + * @a p, or it may even return @a p itself. In this case it must ensure that
+> + * the commonly used memory is only freed when both @a p and the return value
+> + * of this function have been freed by cdi_mem_free.
+> + *
+> + * Otherwise, a new memory area is allocated and data is copied from @a p into
+> + * the newly allocated memory (unless CDI_MEM_NOINIT is set).
+> + * \endenglish
+> + */
+> +struct cdi_mem_area* cdi_mem_require_flags(struct cdi_mem_area* p,
+> +    cdi_mem_flags_t flags)
+> +{
+> +    // TODO Das geht unter Umstaenden effizienter
+> +    struct cdi_mem_area* new = cdi_mem_alloc(p->size, flags);
+> +    if (new == NULL) {
+> +        return NULL;
+> +    }
+> +
+> +    memcpy(new->vaddr, p->vaddr, new->size);
+> +    return new;
+> +}
+> +
+> +/**
+> + * \german
+> + * Kopiert die Daten von @a src nach @a dest. Beide Speicherbereiche m??ssen
+> + * gleich gro?? sein.
+> + *
+> + * Das bedeutet nicht unbedingt eine physische Kopie: Wenn beide
+> + * Speicherbereiche auf denselben physischen Speicher zeigen, macht diese
+> + * Funktion nichts. Sie kann auch andere Methoden verwenden, um den Speicher
+> + * effektiv zu kopieren, z.B. durch geeignetes Ummappen von Pages.
+> + *
+> + * @return 0 bei Erfolg, -1 sonst
+> + * \endgerman
+> + * \english
+> + * Copies data from @a src to @a dest. Both memory areas must be of the same
+> + * size.
+> + *
+> + * This does not necessarily involve a physical copy: If both memory areas
+> + * point to the same physical memory, this function does nothing. It can also
+> + * use other methods to achieve the same visible effect, e.g. by remapping
+> + * pages.
+> + *
+> + * @return 0 on success, -1 otherwise
+> + * \endenglish
+> + */
+> +int cdi_mem_copy(struct cdi_mem_area* dest, struct cdi_mem_area* src)
+> +{
+> +    // TODO Das geht unter Umstaenden effizienter
+> +    if (dest->size != src->size) {
+> +        return -1;
+> +    }
+> +
+> +    if (dest->vaddr != src->vaddr) {
+> +        memcpy(dest->vaddr, src->vaddr, dest->size);
+> +    }
+> +
+> +    return 0;
+> +}
+> -- 
+> 1.6.0.2
+> 
+
+Sonst sieht das gut aus, wenn das oben gefixt ist kann das rein.
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100328/2d108bd0/attachment.pgp>
+
+From toni at tyndur.org  Sun Mar 28 16:03:31 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Sun, 28 Mar 2010 16:03:31 +0200
+Subject: [tyndur-devel] [PATCH 4/5] cdi: cdi_alloc_phys_mem/addr ersetzen
+In-Reply-To: <1266095541-6084-5-git-send-email-kevin@tyndur.org>
+References: <1266095541-6084-1-git-send-email-kevin@tyndur.org>
+	<1266095541-6084-5-git-send-email-kevin@tyndur.org>
+Message-ID: <20100328140331.GK9262@neo.geekcave.lan>
+
+On Sat, Feb 13 22:12, Kevin Wolf wrote:
+> * cdi: In allen Treibern cdi_alloc_phys_mem durch cdi_mem_alloc ersetzen
+> * cdi: In allen Treibern cdi_alloc_phys_addr durch cdi_mem_map ersetzen
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+> ---
+>  src/modules/cdi/ata/device.c              |   16 ++++++--
+>  src/modules/cdi/ata/device.h              |    4 +-
+>  src/modules/cdi/ata/request.c             |    2 +-
+>  src/modules/cdi/e1000/device.c            |   19 ++++++---
+>  src/modules/cdi/e1000/device.h            |    2 +-
+>  src/modules/cdi/ne2k/include/ne2k.h       |    4 +-
+>  src/modules/cdi/ne2k/ne2k.c               |   13 +++++-
+>  src/modules/cdi/pcnet/pcnet.c             |   61 +++++++++++++++++-----------
+>  src/modules/cdi/rtl8139/include/rtl8139.h |    4 +-
+>  src/modules/cdi/rtl8139/rtl8139.c         |   13 +++++-
+>  src/modules/cdi/sis900/device.c           |   15 +++++--
+>  src/modules/cdi/sis900/device.h           |    2 +-
+>  12 files changed, 102 insertions(+), 53 deletions(-)
+> 
+> diff --git a/src/modules/cdi/ata/device.c b/src/modules/cdi/ata/device.c
+> index dd087c3..6e33d52 100644
+> --- a/src/modules/cdi/ata/device.c
+> +++ b/src/modules/cdi/ata/device.c
+> @@ -34,6 +34,7 @@
+>  #include "cdi/misc.h"
+>  #include "cdi/io.h"
+>  #include "cdi/scsi.h"
+> +#include "cdi/mem.h"
+>  
+>  #include "device.h"
+>  
+> @@ -265,10 +266,17 @@ void ata_init_controller(struct ata_controller* controller)
+>  
+>      // Abschliessend wird noch DMA vorbereitet, wenn moeglich
+>      if (controller->port_bmr_base) {
+> -        cdi_alloc_phys_mem(sizeof(uint64_t), (void**) &controller->prdt_virt,
+> -            (void**) &controller->prdt_phys);
+> -        cdi_alloc_phys_mem(ATA_DMA_MAXSIZE, (void**) &controller->dma_buf_virt,
+> -            (void**) &controller->dma_buf_phys);
+> +        struct cdi_mem_area* buf;
+> +
+> +        buf = cdi_mem_alloc(sizeof(uint64_t),
+> +            CDI_MEM_PHYS_CONTIGUOUS | CDI_MEM_DMA_4G);
+> +        controller->prdt_virt = buf->vaddr;
+> +        controller->prdt_phys = buf->paddr.items[0].start;
+> +
+> +        buf = cdi_mem_alloc(ATA_DMA_MAXSIZE,
+> +            CDI_MEM_PHYS_CONTIGUOUS | CDI_MEM_DMA_4G);
+> +        controller->dma_buf_virt = buf->vaddr;
+> +        controller->dma_buf_phys = buf->paddr.items[0].start;
+>  
+>          controller->dma_use = 1;
+>      }
+> diff --git a/src/modules/cdi/ata/device.h b/src/modules/cdi/ata/device.h
+> index efb3f6f..6c438e0 100644
+> --- a/src/modules/cdi/ata/device.h
+> +++ b/src/modules/cdi/ata/device.h
+> @@ -367,11 +367,11 @@ struct ata_controller {
+>  
+>  
+>      /// Physische Adresse der Physical Region Descriptor Table (fuer DMA)
+> -    uint64_t*                   prdt_phys;
+> +    uintptr_t                   prdt_phys;
+>      /// Virtuelle Adresse der Physical Region Descriptor Table (fuer DMA)
+>      uint64_t*                   prdt_virt;
+>      /// Physische Adresse des DMA-Puffers
+> -    void*                       dma_buf_phys;
+> +    uintptr_t                   dma_buf_phys;
+>      /// Virtuelle Adresse des DMA-Puffers
+>      void*                       dma_buf_virt;
+>  };
+> diff --git a/src/modules/cdi/ata/request.c b/src/modules/cdi/ata/request.c
+> index e98ee60..9d618c7 100644
+> --- a/src/modules/cdi/ata/request.c
+> +++ b/src/modules/cdi/ata/request.c
+> @@ -433,7 +433,7 @@ static int ata_request_dma_init(struct ata_request* request)
+>          BMR_STATUS_IRQ);
+>  
+>      // Adresse der PRDT eintragen
+> -    cdi_outl(ctrl->port_bmr_base + BMR_PRDT, (uint32_t) ctrl->prdt_phys);
+> +    cdi_outl(ctrl->port_bmr_base + BMR_PRDT, ctrl->prdt_phys);
+>  
+>      if (request->flags.direction != READ) {
+>          memcpy(ctrl->dma_buf_virt, request->buffer, size);
+> diff --git a/src/modules/cdi/e1000/device.c b/src/modules/cdi/e1000/device.c
+> index b21df2f..1b31987 100644
+> --- a/src/modules/cdi/e1000/device.c
+> +++ b/src/modules/cdi/e1000/device.c
+> @@ -35,6 +35,7 @@
+>  #include "cdi.h"
+>  #include "cdi/misc.h"
+>  #include "cdi/pci.h"
+> +#include "cdi/mem.h"
+>  
+>  #include "device.h"
+>  #include "e1000_io.h"
+> @@ -42,7 +43,7 @@
+>  #undef DEBUG
+>  
+>  #define PHYS(netcard, field) \
+> -    ((uintptr_t) netcard->phys + offsetof(struct e1000_device, field))
+> +    (netcard->phys + offsetof(struct e1000_device, field))
+>  
+>  static void e1000_handle_interrupt(struct cdi_device* device);
+>  static uint64_t get_mac_address(struct e1000_device* device);
+> @@ -150,16 +151,22 @@ struct cdi_device* e1000_init_device(struct cdi_bus_data* bus_data)
+>  {
+>      struct cdi_pci_device* pci = (struct cdi_pci_device*) bus_data;
+>      struct e1000_device* netcard;
+> -    void* phys_device;
+> +    struct cdi_mem_area* buf;
+>  
+>      if (!((pci->vendor_id == 0x8086) && (pci->device_id == 0x100e))) {
+>          return NULL;
+>      }
+>  
+> -    cdi_alloc_phys_mem(sizeof(*netcard), (void**) &netcard, &phys_device);
+> +    buf = cdi_mem_alloc(sizeof(*netcard),
+> +        CDI_MEM_PHYS_CONTIGUOUS | CDI_MEM_DMA_4G | 2);
+> +    if (buf == NULL) {
+> +        return NULL;
+> +    }
+> +
+> +    netcard = buf->vaddr;
+>      memset(netcard, 0, sizeof(*netcard));
+>  
+> -    netcard->phys = phys_device;
+> +    netcard->phys = buf->paddr.items[0].start;
+>      netcard->net.dev.bus_data = (struct cdi_bus_data*) pci;
+>  
+>      // PCI-bezogenes Zeug initialisieren
+> @@ -172,8 +179,8 @@ struct cdi_device* e1000_init_device(struct cdi_bus_data* bus_data)
+>      int i;
+>      for (i = 0; (res = cdi_list_get(reslist, i)); i++) {
+>          if (res->type == CDI_PCI_MEMORY) {
+> -            netcard->mem_base =
+> -                cdi_alloc_phys_addr(res->length, res->start);
+> +            struct cdi_mem_area* mmio = cdi_mem_map(res->start, res->length);
+> +            netcard->mem_base = mmio->vaddr;
+>          }
+>      }
+>  
+> diff --git a/src/modules/cdi/e1000/device.h b/src/modules/cdi/e1000/device.h
+> index 9266e0f..2a10365 100644
+> --- a/src/modules/cdi/e1000/device.h
+> +++ b/src/modules/cdi/e1000/device.h
+> @@ -143,7 +143,7 @@ struct e1000_rx_descriptor {
+>  struct e1000_device {
+>      struct cdi_net_device       net;
+>  
+> -    void*                       phys;
+> +    uintptr_t                   phys;
+>  
+>      struct e1000_tx_descriptor  tx_desc[TX_BUFFER_NUM];
+>      uint8_t                     tx_buffer[TX_BUFFER_NUM * TX_BUFFER_SIZE];
+> diff --git a/src/modules/cdi/ne2k/include/ne2k.h b/src/modules/cdi/ne2k/include/ne2k.h
+> index 585eab5..0102ce8 100644
+> --- a/src/modules/cdi/ne2k/include/ne2k.h
+> +++ b/src/modules/cdi/ne2k/include/ne2k.h
+> @@ -71,7 +71,7 @@
+>  #define NE_DATA     0x10
+>  
+>  #define PHYS(netcard, field) \
+> -    ((uintptr_t) netcard->phys + offsetof(struct rtl8139_device, field))
+> +    (netcard->phys + offsetof(struct rtl8139_device, field))
+>  
+>  #define RX_BUFFER_SIZE 0x2000
+>  #define TX_BUFFER_SIZE 0x1000
+> @@ -84,7 +84,7 @@ typedef struct {
+>  struct ne2k_device {
+>      struct cdi_net_device       net;
+>  
+> -    void*                       phys;
+> +    uintptr_t                   phys;
+>      uint16_t                    port_base;
+>  
+>      uint8_t                     next_packet;
+> diff --git a/src/modules/cdi/ne2k/ne2k.c b/src/modules/cdi/ne2k/ne2k.c
+> index 7f1262e..d3fa019 100644
+> --- a/src/modules/cdi/ne2k/ne2k.c
+> +++ b/src/modules/cdi/ne2k/ne2k.c
+> @@ -35,6 +35,7 @@
+>  #include "cdi/pci.h"
+>  #include "cdi/io.h"
+>  #include "cdi/misc.h"
+> +#include "cdi/mem.h"
+>  
+>  #include "ne2k.h"
+>  #include "ethernet.h"
+> @@ -81,16 +82,22 @@ struct cdi_device* ne2k_init_device(struct cdi_bus_data* bus_data)
+>  {
+>      struct cdi_pci_device* pci = (struct cdi_pci_device*) bus_data;
+>      struct ne2k_device* netcard;
+> -    void* phys_device;
+> +    struct cdi_mem_area* buf;
+>  
+>      if (!((pci->vendor_id == 0x10ec) && (pci->device_id == 0x8029))) {
+>          return NULL;
+>      }
+>  
+> -    cdi_alloc_phys_mem(sizeof(*netcard), (void**) &netcard, &phys_device);
+> +    buf = cdi_mem_alloc(sizeof(*netcard),
+> +        CDI_MEM_PHYS_CONTIGUOUS | CDI_MEM_DMA_4G | 2);
+> +    if (buf == NULL) {
+> +        return NULL;
+> +    }
+> +
+> +    netcard = buf->vaddr;
+>      memset(netcard, 0, sizeof(*netcard));
+>  
+> -    netcard->phys = phys_device;
+> +    netcard->phys = buf->paddr.items[0].start;
+>      netcard->net.dev.bus_data = (struct cdi_bus_data*) pci;
+>  
+>      // PCI-bezogenes Zeug initialisieren
+> diff --git a/src/modules/cdi/pcnet/pcnet.c b/src/modules/cdi/pcnet/pcnet.c
+> index e4500dc..ea0b4d7 100644
+> --- a/src/modules/cdi/pcnet/pcnet.c
+> +++ b/src/modules/cdi/pcnet/pcnet.c
+> @@ -28,6 +28,7 @@
+>  
+>  #include "pcnet.h"
+>  #include "cdi/io.h"
+> +#include "cdi/mem.h"
+>  
+>  #include <stdio.h>
+>  #include <string.h>
+> @@ -242,14 +243,14 @@ static void pcnet_send_init_block(struct pcnet_device* netcard, int promisc)
+>          (struct cdi_pci_device*) netcard->net.dev.bus_data;
+>  
+>      struct initialization_block* initialization_block;
+> -    void* phys_initialization_block;
+> -
+> +    struct cdi_mem_area* buf;
+>  
+>      // Fill the initialization block
+>      // NOTE: Transmit and receive buffer contain 8 entries
+> -    cdi_alloc_phys_mem(sizeof(struct initialization_block),
+> -                       (void**) &initialization_block,
+> -                       &phys_initialization_block);
+> +    buf = cdi_mem_alloc(sizeof(struct initialization_block),
+> +        CDI_MEM_DMA_4G | CDI_MEM_PHYS_CONTIGUOUS);
+> +
+> +    initialization_block = buf->vaddr;
+>      memset(initialization_block, 0, sizeof(struct initialization_block));
+>      initialization_block->mode = promisc ? PROMISCUOUS_MODE : 0;
+>      initialization_block->receive_length = 0x30;
+> @@ -263,12 +264,12 @@ static void pcnet_send_init_block(struct pcnet_device* netcard, int promisc)
+>      #ifdef DEBUG
+>          printf("pcnet: initialization block at 0x%p virtual, 0x%p physical\n",
+>                 initialization_block,
+> -               phys_initialization_block);
+> +               (void*) buf->paddr.items[0].start);
+>      #endif
+>  
+>      // Set the address for the initialization block
+> -    pcnet_write_csr(netcard, 1, (uintptr_t) phys_initialization_block);
+> -    pcnet_write_csr(netcard, 2, (uintptr_t) phys_initialization_block >> 16);
+> +    pcnet_write_csr(netcard, 1, buf->paddr.items[0].start);
+> +    pcnet_write_csr(netcard, 2, buf->paddr.items[0].start >> 16);
+>  
+>      // TODO BCR18.BREADE / BWRITE
+>  
+> @@ -282,41 +283,50 @@ static void pcnet_send_init_block(struct pcnet_device* netcard, int promisc)
+>      if(irq < 0 || netcard->init_wait_for_irq == 1)
+>          printf("pcnet: waiting for IRQ failed: %d\n", irq);
+>  
+> -    // FIXME Free initialization block
+> +    // Free initialization block
+> +    cdi_mem_free(buf);
+>  }
+>  
+>  void pcnet_dev_init(struct pcnet_device *netcard, int promiscuous)
+>  {
+>      // Allocate the receive & transmit descriptor buffer
+> -    void *virt_desc_region;
+> -    void *phys_desc_region;
+> -    if (cdi_alloc_phys_mem(4096, &virt_desc_region, &phys_desc_region) == -1)
+> -    {
+> +    struct cdi_mem_area* desc;
+> +
+> +    desc = cdi_mem_alloc(4096, CDI_MEM_DMA_4G | CDI_MEM_PHYS_CONTIGUOUS);
+> +    if (desc == NULL) {
+>          printf("pcnet: failed to allocate descriptor region\n");
+>          return;
+>      }
+>  
+>      #ifdef DEBUG
+> -        printf("pcnet: descriptor region at 0x%p virtual and 0x%p physical\n", virt_desc_region, phys_desc_region);
+> +        printf("pcnet: descriptor region at 0x%p virtual and 0x%p physical\n",
+> +            desc->vaddr, (void*) desc->paddr.items[0].start);
+>      #endif
+> -    netcard->receive_descriptor = virt_desc_region;
+> -    netcard->transmit_descriptor = (struct transmit_descriptor*) (((char*)virt_desc_region) + 2 * 1024);
+> -    netcard->phys_receive_descriptor = phys_desc_region;
+> -    netcard->phys_transmit_descriptor = (void*) (((char*)phys_desc_region) + 2 * 1024);
+> +    netcard->receive_descriptor = desc->vaddr;
+> +    netcard->transmit_descriptor = (struct transmit_descriptor*)
+> +        ((char*) desc->vaddr + 2 * 1024);
+> +    netcard->phys_receive_descriptor = (void*) desc->paddr.items[0].start;
+> +    netcard->phys_transmit_descriptor = (void*)
+> +        ((desc->paddr.items[0].start) + 2 * 1024);
+>  
+>      
+>      // Allocate the buffers
+>      memset(netcard->transmit_descriptor, 0, 2048);
+> -    void *virt_buffer;
+> -    void *phys_buffer;
+>      int i = 0;
+>      for (;i < 4;i++)
+>      {
+> -        if (cdi_alloc_phys_mem(4096, &virt_buffer, &phys_buffer) == -1)
+> -        {
+> +        void* virt_buffer;
+> +        uintptr_t phys_buffer;
+> +        struct cdi_mem_area* buf;
+> +
+> +        buf = cdi_mem_alloc(4096, CDI_MEM_DMA_4G | CDI_MEM_PHYS_CONTIGUOUS);
+> +        if (buf == 0) {
+>              DEBUG_MSG("cdi_alloc_phys_mem failed");
+>              return;
+>          }
+> +        virt_buffer = buf->vaddr;
+> +        phys_buffer = buf->paddr.items[0].start;
+> +
+>          netcard->receive_buffer[2 * i] = virt_buffer;
+>          netcard->receive_buffer[2 * i + 1] = ((char*)virt_buffer) + 2048;
+>          netcard->receive_descriptor[2 * i].address = (uint32_t) phys_buffer;
+> @@ -328,11 +338,14 @@ void pcnet_dev_init(struct pcnet_device *netcard, int promiscuous)
+>          netcard->receive_descriptor[2 * i + 1].flags2 = 0;
+>          netcard->receive_descriptor[2 * i + 1].res = 0;
+>  
+> -        if (cdi_alloc_phys_mem(4096, &virt_buffer, &phys_buffer) == -1)
+> -        {
+> +        buf = cdi_mem_alloc(4096, CDI_MEM_DMA_4G | CDI_MEM_PHYS_CONTIGUOUS);
+> +        if (buf == 0) {
+>              DEBUG_MSG("cdi_alloc_phys_mem failed");
+>              return;
+>          }
+> +        virt_buffer = buf->vaddr;
+> +        phys_buffer = buf->paddr.items[0].start;
+> +
+>          netcard->transmit_buffer[2 * i] = virt_buffer;
+>          netcard->transmit_buffer[2 * i + 1] = ((char*)virt_buffer) + 2048;
+>          netcard->transmit_descriptor[2 * i].address = (uint32_t) phys_buffer;
+> diff --git a/src/modules/cdi/rtl8139/include/rtl8139.h b/src/modules/cdi/rtl8139/include/rtl8139.h
+> index 3ec81b0..aafa71f 100644
+> --- a/src/modules/cdi/rtl8139/include/rtl8139.h
+> +++ b/src/modules/cdi/rtl8139/include/rtl8139.h
+> @@ -70,7 +70,7 @@
+>  #define ISR_RECEIVE_OK                  (1 << 0)
+>  
+>  #define PHYS(netcard, field) \
+> -    ((uintptr_t) netcard->phys + offsetof(struct rtl8139_device, field))
+> +    (netcard->phys + offsetof(struct rtl8139_device, field))
+>  
+>  #define RX_BUFFER_SIZE 0x2000
+>  #define TX_BUFFER_SIZE 0x1000
+> @@ -83,7 +83,7 @@ typedef struct {
+>  struct rtl8139_device {
+>      struct cdi_net_device       net;
+>  
+> -    void*                       phys;
+> +    uintptr_t                   phys;
+>      uint16_t                    port_base;
+>  
+>      uint8_t                     buffer[TX_BUFFER_SIZE]
+> diff --git a/src/modules/cdi/rtl8139/rtl8139.c b/src/modules/cdi/rtl8139/rtl8139.c
+> index 600f3e9..6571c56 100644
+> --- a/src/modules/cdi/rtl8139/rtl8139.c
+> +++ b/src/modules/cdi/rtl8139/rtl8139.c
+> @@ -35,6 +35,7 @@
+>  #include "cdi/pci.h"
+>  #include "cdi/io.h"
+>  #include "cdi/misc.h"
+> +#include "cdi/mem.h"
+>  
+>  #include "rtl8139.h"
+>  #include "ethernet.h"
+> @@ -79,16 +80,22 @@ struct cdi_device* rtl8139_init_device(struct cdi_bus_data* bus_data)
+>  {
+>      struct cdi_pci_device* pci = (struct cdi_pci_device*) bus_data;
+>      struct rtl8139_device* netcard;
+> -    void* phys_device;
+> +    struct cdi_mem_area* buf;
+>  
+>      if (!((pci->vendor_id == 0x10ec) && (pci->device_id == 0x8139))) {
+>          return NULL;
+>      }
+>  
+> -    cdi_alloc_phys_mem(sizeof(*netcard), (void**) &netcard, &phys_device);
+> +    buf = cdi_mem_alloc(sizeof(*netcard),
+> +        CDI_MEM_PHYS_CONTIGUOUS | CDI_MEM_DMA_4G | 2);
+> +    if (buf == NULL) {
+> +        return NULL;
+> +    }
+> +
+> +    netcard = buf->vaddr;
+>      memset(netcard, 0, sizeof(*netcard));
+>  
+> -    netcard->phys = phys_device;
+> +    netcard->phys = buf->paddr.items[0].start;
+>      netcard->net.dev.bus_data = (struct cdi_bus_data*) pci;
+>  
+>      // PCI-bezogenes Zeug initialisieren
+> diff --git a/src/modules/cdi/sis900/device.c b/src/modules/cdi/sis900/device.c
+> index 30c6d39..aa5d7c8 100644
+> --- a/src/modules/cdi/sis900/device.c
+> +++ b/src/modules/cdi/sis900/device.c
+> @@ -34,6 +34,7 @@
+>  
+>  #include "cdi.h"
+>  #include "cdi/misc.h"
+> +#include "cdi/mem.h"
+>  
+>  #include "device.h"
+>  #include "sis900_io.h"
+> @@ -46,7 +47,7 @@
+>  #undef DEBUG
+>  
+>  #define PHYS(netcard, field) \
+> -    ((uintptr_t) netcard->phys + offsetof(struct sis900_device, field))
+> +    (netcard->phys + offsetof(struct sis900_device, field))
+>  
+>  static void sis900_handle_interrupt(struct cdi_device* device);
+>  
+> @@ -185,16 +186,22 @@ struct cdi_device* sis900_init_device(struct cdi_bus_data* bus_data)
+>  {
+>      struct cdi_pci_device* pci = (struct cdi_pci_device*) bus_data;
+>      struct sis900_device* netcard;
+> -    void* phys_device;
+> +    struct cdi_mem_area* buf;
+>  
+>      if (!((pci->vendor_id == 0x1039) && (pci->device_id == 0x0900))) {
+>          return NULL;
+>      }
+>  
+> -    cdi_alloc_phys_mem(sizeof(*netcard), (void**) &netcard, &phys_device);
+> +    buf = cdi_mem_alloc(sizeof(*netcard),
+> +        CDI_MEM_PHYS_CONTIGUOUS | CDI_MEM_DMA_4G | 2);
+> +    if (buf == NULL) {
+> +        return NULL;
+> +    }
+> +
+> +    netcard = buf->vaddr;
+>      memset(netcard, 0, sizeof(*netcard));
+>  
+> -    netcard->phys = phys_device;
+> +    netcard->phys = buf->paddr.items[0].start;
+>      netcard->net.dev.bus_data = (struct cdi_bus_data*) pci;
+>  
+>      // PCI-bezogenes Zeug initialisieren
+> diff --git a/src/modules/cdi/sis900/device.h b/src/modules/cdi/sis900/device.h
+> index cd110c0..7698d2f 100644
+> --- a/src/modules/cdi/sis900/device.h
+> +++ b/src/modules/cdi/sis900/device.h
+> @@ -129,7 +129,7 @@ struct sis900_tx_descriptor {
+>  struct sis900_device {
+>      struct cdi_net_device       net;
+>  
+> -    void*                       phys;
+> +    uintptr_t                   phys;
+>  
+>      struct sis900_tx_descriptor tx_desc[TX_BUFFER_NUM];
+>      uint8_t                     tx_buffer[TX_BUFFER_NUM * TX_BUFFER_SIZE];
+
+Sieht vernünftig aus.
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100328/a4120460/attachment-0001.pgp>
+
+From toni at tyndur.org  Sun Mar 28 16:04:39 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Sun, 28 Mar 2010 16:04:39 +0200
+Subject: [tyndur-devel] [PATCH 5/5] cdi: Veraltete Funktionen entfernt
+In-Reply-To: <1266095541-6084-6-git-send-email-kevin@tyndur.org>
+References: <1266095541-6084-1-git-send-email-kevin@tyndur.org>
+	<1266095541-6084-6-git-send-email-kevin@tyndur.org>
+Message-ID: <20100328140439.GL9262@neo.geekcave.lan>
+
+On Sat, Feb 13 22:12, Kevin Wolf wrote:
+> - cdi: Speicherverwaltungsfunktionen aus misc.h entfernt
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100328/45f99f41/attachment.pgp>
+
+From toni at tyndur.org  Sun Mar 28 16:06:30 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Sun, 28 Mar 2010 16:06:30 +0200
+Subject: [tyndur-devel] [PATCH 3/5] pcnet: Initialisierungsblock in
+ eigene Funktion auslagern
+In-Reply-To: <1266095541-6084-4-git-send-email-kevin@tyndur.org>
+References: <1266095541-6084-1-git-send-email-kevin@tyndur.org>
+	<1266095541-6084-4-git-send-email-kevin@tyndur.org>
+Message-ID: <20100328140630.GM9262@neo.geekcave.lan>
+
+On Sat, Feb 13 22:12, Kevin Wolf wrote:
+> * pcnet: Der Initialisierungsblock ist etwas temporaeres und gehoert
+>   deswegen nicht in pcnet_device. Weil es aber trotzdem ein paar Zeilen
+>   Code sind, wird dieser Code in eine eigene Funktion ausgelagert, um
+>   einfacher durch cdi_mem_alloc/free ersetzbar zu werden.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100328/74fe0e54/attachment.pgp>
+
+From toni at tyndur.org  Sun Mar 28 16:07:43 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Sun, 28 Mar 2010 16:07:43 +0200
+Subject: [tyndur-devel] [PATCH 1/4] kernel2: mmc_vfree
+In-Reply-To: <1269632119-22254-2-git-send-email-kevin@tyndur.org>
+References: <1269632119-22254-1-git-send-email-kevin@tyndur.org>
+	<1269632119-22254-2-git-send-email-kevin@tyndur.org>
+Message-ID: <20100328140742.GN9262@neo.geekcave.lan>
+
+On Fri, Mar 26 20:35, Kevin Wolf wrote:
+> + kernel2: mmc_vfree gibt einen virtuellen Speicherbereich sowohl
+>   virtuell als auch physisch frei
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100328/8e19da86/attachment.pgp>
+
+From toni at tyndur.org  Sun Mar 28 16:08:36 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Sun, 28 Mar 2010 16:08:36 +0200
+Subject: [tyndur-devel] [PATCH 2/4] kernel2: Fix fuer
+ find_contiguous_pages
+In-Reply-To: <1269632119-22254-3-git-send-email-kevin@tyndur.org>
+References: <1269632119-22254-1-git-send-email-kevin@tyndur.org>
+	<1269632119-22254-3-git-send-email-kevin@tyndur.org>
+Message-ID: <20100328140835.GO9262@neo.geekcave.lan>
+
+On Fri, Mar 26 20:35, Kevin Wolf wrote:
+> ! kernel2: find_contiguous_pages hat freie Pages nur dann gefunden, wenn
+>   in derselben Page Table nicht noch belegte Pages gekommen sind. Wenn
+>   genug freie Pages gefunden sind, einfach aufhoeren.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100328/179d1d41/attachment.pgp>
+
+From toni at tyndur.org  Sun Mar 28 16:11:07 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Sun, 28 Mar 2010 16:11:07 +0200
+Subject: [tyndur-devel] [PATCH 3/4] kernel2: mem_allocate/mem_free
+ richtig implementiert
+In-Reply-To: <1269632119-22254-4-git-send-email-kevin@tyndur.org>
+References: <1269632119-22254-1-git-send-email-kevin@tyndur.org>
+	<1269632119-22254-4-git-send-email-kevin@tyndur.org>
+Message-ID: <20100328141107.GP9262@neo.geekcave.lan>
+
+On Fri, Mar 26 20:35, Kevin Wolf wrote:
+> * kernel2: mem_allocate braucht jetzt keinen physisch zusammenhaengenden
+>   Speicher mehr
+> + kernel2: Implementierung fuer mem_free
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100328/b05654dc/attachment.pgp>
+
+From toni at tyndur.org  Sun Mar 28 16:17:54 2010
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Sun, 28 Mar 2010 16:17:54 +0200
+Subject: [tyndur-devel] [PATCH] libc: liballoc holt erst kleinere
+ Speicherbereiche
+In-Reply-To: <1268768757-14514-1-git-send-email-kevin@tyndur.org>
+References: <1268768757-14514-1-git-send-email-kevin@tyndur.org>
+Message-ID: <20100328141754.GQ9262@neo.geekcave.lan>
+
+On Tue, Mar 16 20:45, Kevin Wolf wrote:
+> * libc: Anstatt bei jedem Speicherbedarf 64k Speicher vom Kernel
+>   anzufordern, werden bei wenig genutztem Speicher zunaechst kleinere
+>   Allokationen durchgefuehrt. Dadurch sinkt der Speicherbedarf von
+>   kleinen Modulen deutlich von 64k auf 4k oder 8k.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100328/22839e9e/attachment.pgp>
+

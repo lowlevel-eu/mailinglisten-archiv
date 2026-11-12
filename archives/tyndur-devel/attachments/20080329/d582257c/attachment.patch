@@ -1,0 +1,700 @@
+=== src/modules/servmgr/service.c
+==================================================================
+--- src/modules/servmgr/service.c	(revision 1465)
++++ src/modules/servmgr/service.c	(revision 1470)
+@@ -0,0 +1,99 @@
++/*
++ * Copyright (c) 2008 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Antoine Kaufmann.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <stdint.h>
++#include <syscall.h>
++#include <init.h>
++#include <collections.h>
++
++#include "servmgr.h"
++
++pid_t service_pid(const char* name)
++
++{
++    // FIXME init_service_get sollte ein const haben
++    return init_service_get((char*) name);
++}
++
++bool service_running(const char* name)
++{
++    return (service_pid(name) != 0);
++}
++
++bool service_wait(const char* name, uint32_t timeout)
++{
++    uint64_t end = get_tick_count() + timeout * 1000;
++    bool running;
++
++    while (!(running = service_running(name)) && (end > get_tick_count())) {
++        yield();
++    }
++    
++    return running;
++}
++
++bool service_start(const char* name)
++{
++    struct config_service* conf_serv = config_service_get(name);
++    struct config_service* dep;
++    int i;
++
++    if (service_running(name)) {
++        return TRUE;
++    }
++
++    if (!conf_serv) {
++        printf("servmgr: Service nicht gefunden: %s\n", name);
++        return FALSE;
++    }
++
++    // Abhaengigkeiten starten
++    for (i = 0; (dep = list_get_element_at(conf_serv->deps, i)); i++) {
++        if (!service_start(dep->name)) {
++            printf("servmgr: Konnte die Abhaengigkeit von %s nicht erfuellen. "
++                "%s kann deshalb nicht gestartet werden.\n", dep->name, name);
++            return FALSE;
++        }
++    }
++
++    if (conf_serv->start_cmd) {
++        init_execute(conf_serv->start_cmd);
++        if (!conf_serv->conf.no_wait && !service_wait(name, 10000)) {
++            printf("servmgr: Timeout beim Warten auf den Service %s\n", name);
++            return FALSE;
++        }
++    }
++    return TRUE;
++}
+=== src/modules/servmgr/Makefile.all
+==================================================================
+--- src/modules/servmgr/Makefile.all	(revision 1465)
++++ src/modules/servmgr/Makefile.all	(revision 1470)
+@@ -0,0 +1,6 @@
++shopt -s extglob
++source $LOST_BUILDMK_ROOT/config.sh
++
++echo "LD   $1/modules/servmgr"
++$LOST_TOOLS_LD -Ttext=0x40000000 -oservmgr.mod  *.o --start-group $2 --end-group
++$LOST_TOOLS_STRIP -s servmgr.mod -o $1/modules/servmgr
+=== src/modules/servmgr/rpcif.c
+==================================================================
+--- src/modules/servmgr/rpcif.c	(revision 1465)
++++ src/modules/servmgr/rpcif.c	(revision 1470)
+@@ -0,0 +1,70 @@
++/*
++ * Copyright (c) 2008 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Antoine Kaufmann.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++#include <syscall.h>
++#include <rpc.h>
++#include <string.h>
++#include <stdio.h>
++#include "servmgr.h"
++
++static void rpc_needserv(pid_t pid, dword cid, size_t data_size, void* data);
++
++
++void rpcif_init()
++{
++    register_message_handler("NEEDSERV", rpc_needserv);
++}
++
++/**
++ * RPC um einen Service zu startem. Falls servmgr noch nicht konfiguriert ist,
++ * wird einfach gewartet, bis der Dienst laeuft.
++ */
++static void rpc_needserv(pid_t pid, dword cid, size_t data_size, void* data)
++{
++    char name[data_size + 1];
++    bool result;
++    memcpy(name, data, data_size);
++    name[data_size] = 0;
++
++    if (config_done) {
++        result = service_start(name);
++    } else {
++        // Noch nicht konfiguriert. Jetzt bleibt nur hoffen, dass der Dienst
++        // schon geladen wurde, sich aber noch nicht registriert hat.
++        result = service_wait(name, 10000);
++    }
++
++    rpc_send_dword_response(pid, cid, result);
++}
++
+=== src/modules/servmgr/main.c
+==================================================================
+--- src/modules/servmgr/main.c	(revision 1465)
++++ src/modules/servmgr/main.c	(revision 1470)
+@@ -0,0 +1,148 @@
++/*
++ * Copyright (c) 2008 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Antoine Kaufmann.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <stdint.h>
++#include <syscall.h>
++#include <collections.h>
++#include <unistd.h>
++#define _USE_START_
++#include <init.h>
++#undef _USE_START_
++
++#include "servmgr.h"
++
++bool service_running(const char* name);
++bool service_wait(const char* name, uint32_t timeout);
++
++const char* root_dir = "file:/";
++bool config_done = FALSE;
++
++// Liste mit den Services die gestartet werden muessen, bevor die Konfiguration
++// ausgelesen werden kann.
++list_t* statup_services;
++
++/**
++ * Parameter fuer den Programmaufruf verarbeiten
++ *
++ * @param argc Anzahl der Parameter
++ * @param argv Pointer auf die Argumente
++ */
++static void parse_params(int argc, char* argv[])
++{
++    int i;
++
++    if (argc > 1) {
++        // Der erste Parameter ist wie unten beschreiben das Root-Verzeichnis
++        root_dir = argv[1];
++        chdir(root_dir);
++
++        // Die weiteren sind Services auf die gewartet werden muss.
++        statup_services = list_create();
++        for (i = 2; i < argc; i++) {
++            list_push(statup_services, argv[i]);
++        }
++    }
++}
++
++/**
++ * Auf Statup-Services warten
++ *
++ * @return TRUE wenn alle gestartet werden konnten, FALSE sonst.
++ */
++static bool wait_startup_services()
++{
++    const char* service;
++    int i;
++
++    for (i = 0; (service = list_get_element_at(statup_services, i)); i++) {
++        if (!service_wait(service, 5000)) {
++            return FALSE;
++        }
++    }
++    return TRUE;
++}
++
++/**
++ * Startup-Services anzeigen, die nicht gestartet wurden.
++ */
++static void failed_startup_services()
++{
++    const char* service;
++    int i;
++
++    for (i = 0; (service = list_get_element_at(statup_services, i)); i++) {
++        if (!service_running(service)) {
++            printf("Service '%s' laeuft nicht!\n", service);
++        }
++    }
++}
++
++/**
++ * Hauptfunktion
++ *
++ * Vorgesehene Parameter fuer den Programmaufruf:
++ *  - Root-Verzeichnis (Konfiguration in $ROOT/config/servmgr/)
++ *  - Services auf die gewartet werden muss 
++ */
++int main(int argc, char* argv[])
++{
++    // Parameter verarbeiten
++    parse_params(argc, argv);
++    
++    init_service_register("servmgr");
++
++    // RPC-Interface vorbereiten
++    rpcif_init();
++
++    // Auf startup-services warten
++    if (!wait_startup_services()) {
++        failed_startup_services();
++        return EXIT_FAILURE;
++    }
++    
++    // Konfiguration einlesen
++    if (!config_read()) {
++        return EXIT_FAILURE;
++    }
++    config_done = TRUE;
++
++    // Services starten
++    service_start("default");
++
++    while (TRUE) {
++        wait_for_rpc();
++    }
++}
++
+=== src/modules/servmgr/config.c
+==================================================================
+--- src/modules/servmgr/config.c	(revision 1465)
++++ src/modules/servmgr/config.c	(revision 1470)
+@@ -0,0 +1,236 @@
++/*
++ * Copyright (c) 2008 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Antoine Kaufmann.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <stdint.h>
++#include <stdlib.h>
++#include <stdio.h>
++#include <syscall.h>
++#include <string.h>
++#include <dir.h>
++#include <assert.h>
++#include <collections.h>
++
++#include "servmgr.h"
++
++static list_t* config_list;
++char* full_config_path;
++
++/**
++ * Dateiinhalt auslesen und den Angegebenen Pointer auf einen Buffer mit dem
++ * Inhalt setzen. Wenn die Datei nicht geoeffnet werden konnte, wird er auf
++ * NULL gesetzt.
++ *
++ * @param path Pfad zur Datei
++ * @param dest Pointer auf den Pointer, er gesetzt werden soll
++ */
++static void config_read_file(const char* path, char** ptr)
++{
++    FILE* f = fopen(path, "r");
++    if (!f) {
++        *ptr = NULL;
++    } else {
++        // FIXME: Das koennte man noch etwas eleganter loesen ;-)
++        char buffer[513];
++        size_t size;
++        
++        size = fread(buffer, 1, sizeof(buffer) - 1, f);
++        buffer[size] = 0;
++        
++        // Einen eventuellen Zeilenumbruch entfernen
++        if (buffer[size - 1] == '\n') {
++            buffer[size - 1] = 0;
++        }
++
++        assert(asprintf(ptr, "%s", buffer) != -1);
++
++        fclose(f);
++    }
++}
++
++/**
++ * Datei mit Abhaengigkeiten fuer einen Service einlesen
++ *
++ * @param path Pfad zur Datei
++ * @param conf_serv Pointer auf die Kofigurationstruktur
++ */
++static void config_parse_deps(const char* path,
++    struct config_service* conf_serv)
++{
++    struct config_service* dep;
++    FILE* f;
++    char buffer[33];
++
++    conf_serv->deps = list_create();
++
++    f = fopen(path, "r");
++    if (!f) {
++        return;
++    }
++    
++    // FIXME: Das koennte man noch etwas eleganter loesen ;-)
++    while (fgets(buffer, sizeof(buffer), f)) {
++        dep = config_service_get(buffer);
++        if (dep == NULL) {
++            printf("servmgr: Service %s haengt ab von %s; Dieser ist aber "
++                "nicht vorhanden in der Konfiguration!\n", conf_serv->name,
++                buffer);
++            continue;
++        }
++
++        list_push(conf_serv->deps, dep);
++    }
++}
++
++/**
++ * Datei mit Konfiguration fuer einen Service einlesen
++ *
++ * @param path Pfad zur Datei
++ * @param conf_serv Pointer auf die Kofigurationstruktur
++ */
++static void config_parse_conf(const char* path,
++    struct config_service* conf_serv)
++{
++    FILE* f;
++    char buffer[33];
++
++    conf_serv->conf.no_wait = FALSE;
++
++    f = fopen(path, "r");
++    if (!f) {
++        return;
++    }
++    
++    // FIXME: Das koennte man noch etwas eleganter loesen ;-)
++    while (fgets(buffer, sizeof(buffer), f)) {
++        if (!strcmp(buffer, "nowait")) {
++            conf_serv->conf.no_wait = TRUE;
++        }
++    }
++}
++
++
++/**
++ * Konfigurationsverzeichnis parsen
++ *
++ * @param dir Verzeichnis-Handle
++ *
++ * @return TRUE wenn erfolgreich abgeschlossen wurde, FALSE sonst.
++ */
++static bool config_dir_parse(io_resource_t* dir)
++{
++    io_direntry_t* entry;
++    struct config_service* conf_serv;
++    int i;
++
++    config_list = list_create();
++
++    // In einem ersten Schritt werden alle Servicenamen eingelesen
++    while ((entry = directory_read(dir))) {
++        // Alles was nicht Verzeichnis ist, wird uebersprungen
++        if ((entry->type != IO_DIRENTRY_DIR) || (entry->name[1] == '.')) {
++            free(entry);
++            continue;
++        }
++        
++        // Service in der Liste eintragen
++        conf_serv = malloc(sizeof(*conf_serv));
++        assert(conf_serv != NULL);
++        
++        // Namen setzen
++        assert(asprintf(&conf_serv->name, "%s", entry->name) != -1);
++
++        list_push(config_list, conf_serv);
++
++        free(entry);
++    }
++    
++    // In einem zweiten schritt werden die Befehle zum Starten und die
++    // Abhaengigkeiten eingetragen
++    for (i = 0; (conf_serv = list_get_element_at(config_list, i)); i++) {
++        char* cmd_path;
++        char* deps_path;
++        char* conf_path;
++
++        assert(asprintf(&cmd_path, "%s/%s/cmd", full_config_path, conf_serv->
++            name) != -1);
++        assert(asprintf(&deps_path, "%s/%s/deps", full_config_path, conf_serv->
++            name) != -1);
++        assert(asprintf(&conf_path, "%s/%s/conf", full_config_path,
++            conf_serv->name) != -1);
++     
++        config_read_file(cmd_path, &conf_serv->start_cmd);
++        config_parse_deps(deps_path, conf_serv);
++        config_parse_conf(conf_path, conf_serv);
++        free(deps_path);
++        free(cmd_path);
++    }
++
++    return TRUE;
++}
++
++
++bool config_read()
++{
++    const char* config_path = "/config/servmgr";
++    io_resource_t* dir;
++    bool result;
++
++    assert(asprintf(&full_config_path, "%s%s", root_dir, config_path) != -1);
++    
++    // Verzeichnis mit der Konfiguration oeffnen
++    dir = directory_open(full_config_path);
++    if (!dir) {
++        printf("servmgr: Konnte Konfigurationsverzeichnis nicht oeffnen: '%s'",
++            full_config_path);
++        return FALSE;
++    }
++    
++    result = config_dir_parse(dir);
++    directory_close(dir);
++    return result;
++}
++
++struct config_service* config_service_get(const char* name)
++{
++    struct config_service* conf_serv;
++    int i;
++
++    for (i = 0; (conf_serv = list_get_element_at(config_list, i)); i++) {
++        if (!strcmp(name, conf_serv->name)) {
++            return conf_serv;
++        }
++    }
++    return NULL;
++}
+=== src/modules/servmgr/servmgr.h
+==================================================================
+--- src/modules/servmgr/servmgr.h	(revision 1465)
++++ src/modules/servmgr/servmgr.h	(revision 1470)
+@@ -0,0 +1,111 @@
++/*
++ * Copyright (c) 2008 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Antoine Kaufmann.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++#include <types.h>
++#include <collections.h>
++#include <stdint.h>
++
++extern const char* root_dir;
++extern bool config_done;
++
++
++/**
++ * PID eines Services
++ *
++ * @param name Name des Services
++ * 
++ * @return PID wenn der Service Laeuft, 0 sonst
++ */
++pid_t service_pid(const char* name);
++
++/**
++ * Pruefen ob ein bestimmter Service laeuft.
++ *
++ * @param name Name des Services
++ * 
++ * @return TRUE wenn er laeuft, FALSE sonst
++ */
++bool service_running(const char* name);
++
++/**
++ * Warten bis ein bestimmter Service gestartet wurde.
++ *
++ * @param name Service Name
++ * @param timeout Timeout in Millisekunden
++ *
++ * @return TRUE wenn der Service innerhalb dieser Zeit gestartet wurde oder
++ *         schon lief, FALSE sonst.
++ */
++bool service_wait(const char* name, uint32_t timeout);
++
++/**
++ * Service starten
++ *
++ * @param name Service Name
++ *
++ * @return TRUE wenn der Service erfolgreich gestartet wurde, FALSE sonst
++ */
++bool service_start(const char* name);
++
++
++
++/**
++ * Konfiguration eines Dienstes
++ */
++struct config_service {
++    char* name;
++    char* start_cmd;
++    list_t* deps;
++
++    struct {
++        bool no_wait;
++    } conf;
++};
++
++/**
++ * Konfiguration der Services einlesen
++ */
++bool config_read();
++
++/**
++ * Konfiguration fuer einen Service holen
++ */
++struct config_service* config_service_get(const char* name);
++
++
++
++/**
++ * RPC-Interface initialisieren
++ */
++void rpcif_init();

@@ -1,0 +1,877 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 4/4] kernel2: VM86
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%204/4%5D%20kernel2%3A%20VM86&In-Reply-To=%3C1269632119-22254-5-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001685.html">
+   <LINK REL="Next"  HREF="001677.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 4/4] kernel2: VM86</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%204/4%5D%20kernel2%3A%20VM86&In-Reply-To=%3C1269632119-22254-5-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 4/4] kernel2: VM86">kevin at tyndur.org
+                  </A><BR>
+    <I>Fr Mär 26 20:35:19 CET 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001685.html">[tyndur-devel] [PATCH 3/4] kernel2: mem_allocate/mem_free richtig implementiert
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001677.html">[tyndur-devel] [PATCH 4/4] kernel2: VM86
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1676">[ Datum ]</a>
+              <a href="thread.html#1676">[ Thema ]</a>
+              <a href="subject.html#1676">[ Betreff (Subject) ]</a>
+              <a href="author.html#1676">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ SYSCALL_VM86_BIOS_INT fuehrt einen beliebigen BIOS-Interrupt aus
++ kernel2: Unterstuetzung fuer den VM86
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/include/syscallno.h             |    3 +-
+ src/kernel2/include/arch/i386/cpu.h |   12 +
+ src/kernel2/include/syscall.h       |    6 +
+ src/kernel2/include/vm86.h          |   43 ++++
+ src/kernel2/src/arch/i386/mm/virt.c |   10 +-
+ src/kernel2/src/arch/i386/vm86.c    |  406 +++++++++++++++++++++++++++++++++++
+ src/kernel2/src/init.c              |    4 +
+ src/kernel2/src/interrupts/im.c     |   30 +++-
+ src/kernel2/src/syscall.c           |    3 +
+ src/kernel2/src/syscalls/vm86.c     |   53 +++++
+ src/modules/include/syscall.h       |    1 +
+ src/modules/lib/syscalls/vm86.c     |   58 +++++-
+ 12 files changed, 618 insertions(+), 11 deletions(-)
+ create mode 100644 src/kernel2/include/vm86.h
+ create mode 100644 src/kernel2/src/arch/i386/vm86.c
+ create mode 100644 src/kernel2/src/syscalls/vm86.c
+
+diff --git a/src/include/syscallno.h b/src/include/syscallno.h
+index b56ad45..fe2b693 100644
+--- a/src/include/syscallno.h
++++ b/src/include/syscallno.h
+@@ -54,6 +54,7 @@
+ #define SYSCALL_PM_SLEEP 6
+ 
+ #define SYSCALL_VM86 81
++#define SYSCALL_VM86_BIOS_INT 83
+ 
+ #define SYSCALL_PM_P 11
+ #define SYSCALL_PM_V 12
+@@ -83,6 +84,6 @@
+ 
+ #define SYSCALL_DEBUG_STACKTRACE 80
+ //ACHTUNG: Muss eine Zahl groesser als die Groesste Syscall-Nummer sein
+-#define SYSCALL_MAX 83
++#define SYSCALL_MAX 84
+ 
+ #endif
+diff --git a/src/kernel2/include/arch/i386/cpu.h b/src/kernel2/include/arch/i386/cpu.h
+index 772546e..d215cbd 100644
+--- a/src/kernel2/include/arch/i386/cpu.h
++++ b/src/kernel2/include/arch/i386/cpu.h
+@@ -36,6 +36,7 @@
+ #define _CPU_H_
+ 
+ #include &lt;types.h&gt;
++#include &lt;stdint.h&gt;
+ 
+ #include &quot;tasks.h&quot;
+ 
+@@ -65,6 +66,17 @@ typedef struct {
+     dword ss;
+ } __attribute__((packed)) interrupt_stack_frame_t;
+ 
++/** Der erweiterte Interruptstackframe fuer VM86-Tasks */
++struct vm86_isf {
++    interrupt_stack_frame_t isf;
++
++    uint32_t    es;
++    uint32_t    ds;
++    uint32_t    fs;
++    uint32_t    gs;
++} __attribute__((packed));
++
++
+ 
+ #define CPU_IO_BITMAP_LENGTH 0xffff
+ 
+diff --git a/src/kernel2/include/syscall.h b/src/kernel2/include/syscall.h
+index ea182c4..39a6bfa 100644
+--- a/src/kernel2/include/syscall.h
++++ b/src/kernel2/include/syscall.h
+@@ -166,5 +166,11 @@ void syscall_add_interrupt_handler(uint32_t intr);
+ /// Textausgabe ueber den Kernel
+ void syscall_putsn(int char_count, char* source);
+ 
++/// -ENOSYS
++int syscall_vm86_old(void* regs, uint32_t* memory);
++
++/// BIOS-Interrupt ausfuehren
++int syscall_vm86(uint8_t intr, void* regs, uint32_t* memory);
++
+ #endif //ifndef _SYSCALL_H_
+ 
+diff --git a/src/kernel2/include/vm86.h b/src/kernel2/include/vm86.h
+new file mode 100644
+index 0000000..978f762
+--- /dev/null
++++ b/src/kernel2/include/vm86.h
+@@ -0,0 +1,43 @@
++/*
++ * Copyright (c) 2010 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the tyndur Project
++ *     and its contributors.
++ * 4. Neither the name of the tyndur Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef _VM86_H_
++#define _VM86_H_
++
++void vm86_init(void);
++int arch_vm86(uint8_t intr, void* regs, uint32_t* memory);
++
++#endif
++
+diff --git a/src/kernel2/src/arch/i386/mm/virt.c b/src/kernel2/src/arch/i386/mm/virt.c
+index ecb889b..ad4095b 100644
+--- a/src/kernel2/src/arch/i386/mm/virt.c
++++ b/src/kernel2/src/arch/i386/mm/virt.c
+@@ -58,8 +58,14 @@ void vmm_init(mmc_context_t* kernel_context)
+         NUM_PAGES((uintptr_t) kernel_end - (uintptr_t) kernel_start));
+     
+     // Videospeicher mappen
+-    mmc_map(kernel_context, (paddr_t) 0xB8000, (vaddr_t) 0xB8000, PTE_W | PTE_P, 
+-        NUM_PAGES(25*80*2));
++    // TODO Usermodus muss die momentan wegen VM86 sehen. Waere wohl besser,
++    // wenn VM86 einen eigenen Adressraum haette.
++    mmc_map(kernel_context, (vaddr_t) 0xB8000, (paddr_t) 0xB8000,
++        PTE_U | PTE_W | PTE_P, 0x10);
++
++    // BIOS mappen
++    mmc_map(kernel_context, (vaddr_t) 0xC0000, (paddr_t) 0xC0000,
++        PTE_U | PTE_P, 0x40);
+     
+     
+     //mmc_map(kernel_context, kernel_context-&gt;page_directory, kernel_context-&gt;page_directory, PTE_P | PTE_W, 1);
+diff --git a/src/kernel2/src/arch/i386/vm86.c b/src/kernel2/src/arch/i386/vm86.c
+new file mode 100644
+index 0000000..5d02f2b
+--- /dev/null
++++ b/src/kernel2/src/arch/i386/vm86.c
+@@ -0,0 +1,406 @@
++/*
++ * Copyright (c) 2010 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the tyndur Project
++ *     and its contributors.
++ * 4. Neither the name of the tyndur Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include &lt;stdint.h&gt;
++#include &lt;string.h&gt;
++#include &lt;syscall_structs.h&gt;
++#include &lt;errno.h&gt;
++
++#include &quot;kernel.h&quot;
++#include &quot;kprintf.h&quot;
++#include &quot;tasks.h&quot;
++#include &quot;cpu.h&quot;
++#include &quot;vm86.h&quot;
++#include &quot;mm.h&quot;
++
++/*
++ * Grundsaetzliche Funktionsweise von VM86 in tyndur:
++ *
++ * Die VM86-Funktionalitaet wird ausschliesslich ueber den Syscall
++ * SYSCALL_VM86_BIOS_INT bereitgestellt. Beim Aufruf dieses Syscalls wird der
++ * aufrufende Thread blockiert und zu einem neu erstellten VM86-Thread
++ * desselben Prozesses gewechselt. Dieser Thread laeuft bis der BIOS-Interrupt
++ * ueber iret zurueckkehrt, dann wird der VM86-Thread beendet und der
++ * urspruengliche Thread fortgesetzt.
++ *
++ * Einsprung in den VM86:
++ *
++ *      Um in den VM86-Modus zu wechseln wird derselbe Mechanismus wie beim
++ *      normalen Multitasking verwendet (d.h. Softwaremultitasking). Beim
++ *      Sprung in den Task muss das VM-Flag in eflags gesetzt sein (0x20000),
++ *      damit der Prozessor in den VM86 wechselt. Zusaetzlich zu den normal
++ *      gesicherten Registern (esp, eflags, cs, eip) werden bei VM86-Tasks auch
++ *      die (Real-Mode-)Segmentregister auf den Stack gesichert und beim iret
++ *      wiederhergestellt.
++ *
++ * Behandlung privilegierter Instruktionen:
++ *
++ *      Wenn der VM86-Task auf privilegierte Instruktionen stoesst, wird ein
++ *      #GP ausgeloest. vm86_exception() faengt diese Exception vor den
++ *      normalen Exceptionhandlern ab und emuliert den aktuellen privilegierten
++ *      Befehl wenn moeglich.
++ *
++ *      Bei der Emulation von iret ist zu beachten, dass der VM86-Task beendet
++ *      werden muss, wenn sich der Stack wieder auf dem Anfangswert befindet;
++ *      der aufgerufene Interrupthandler ist dann fertig.
++ */
++
++/** Enthaelt eine Kopie der urspruenglichen ersten 4k im physischen Speicher */
++static struct {
++    uint16_t    ivt[256][2];
++    uint8_t     data[3072];
++} bios_data __attribute__ ((aligned (4096)));
++
++// FIXME Das darf eigentich nicht global sein
++static struct {
++    bool            in_use;
++    void*           stack;
++    void*           nullpage;
++    uint32_t*       memory;
++    pm_thread_t*    caller;
++    vm86_regs_t*    regs;
++} vm86_status = {
++    .in_use     =   FALSE,
++};
++
++/**
++ * Speichert BIOS-Daten, um sie den VM86-Tasks spÃ¤ter bereitstellen zu kÃ¶nnen
++ */
++void vm86_init(void)
++{
++    memcpy(&amp;bios_data, 0, 4096);
++}
++
++/**
++ * Erstellt einen VM86-Thread im aktuellen Prozess. Der aktuell ausgefuehrte
++ * Thread wird pausiert und ein Taskwechsel zum neuen VM86-Task wird
++ * durchgefuehrt.
++ *
++ * @oaram int Aufzurufender BIOS-Interrupt
++ * @param regs Anfaengliche Registerbelegung
++ * @param stack Virtuelle Adresse der fuer den Stack des VM86-Tasks benutzten
++ * Seite
++ */
++static int create_vm86_task(int intr, vm86_regs_t* regs, uintptr_t stack)
++{
++    uint16_t* ivt_entry = bios_data.ivt[intr];
++
++    // Erst einmal einen ganz normalen Thread erzeugen
++    pm_thread_t* task = pm_thread_create(current_process,
++        (vaddr_t)(uintptr_t) ivt_entry[0]);
++
++    interrupt_stack_frame_t* isf = task-&gt;kernel_stack;
++
++    struct vm86_isf visf;
++
++
++    // Register setzen
++    isf-&gt;eflags = 0x20202;
++    isf-&gt;cs = ivt_entry[1];
++    isf-&gt;ss = stack / 16;
++
++    isf-&gt;eax = regs-&gt;ax;
++    isf-&gt;ebx = regs-&gt;bx;
++    isf-&gt;ecx = regs-&gt;cx;
++    isf-&gt;edx = regs-&gt;dx;
++    isf-&gt;esi = regs-&gt;si;
++    isf-&gt;edi = regs-&gt;di;
++    isf-&gt;esp = PAGE_SIZE - 16;
++    isf-&gt;ebp = 0;
++
++    // Segmentregister setzen
++    // Dabei wird der bisherige Kernelstack in die temporaere
++    // visf-Datenstruktur kopiert, denn er muss verschoben werden, damit die
++    // VM86-Segmentregister noch Platz auf dem Stack haben
++    visf.isf = *isf;
++    visf.ds = regs-&gt;ds;
++    visf.es = regs-&gt;es;
++
++    // Und das ganze auf den Stack
++    task-&gt;kernel_stack = ((uint8_t*) task-&gt;kernel_stack)
++        + sizeof(*isf) - sizeof(visf);
++    memcpy(task-&gt;kernel_stack, &amp;visf, sizeof(visf));
++
++    // Sofort in den VM86-Task wechseln. Der aufrufende Thread wird
++    // waehrenddessen nicht in den Scheduler zurueckgegeben und gestoppt.
++    current_thread-&gt;status = PM_STATUS_BLOCKED;
++    current_thread = task;
++
++    return 0;
++}
++
++/**
++ * Implementiert den Syscall SYSCALL_VM86_BIOS_INT.
++ *
++ * @param intr BIOS-Interrupt, der aufgerufen werden soll
++ * @param regs Pointer auf die Struktur, die die anfaenglichen Registerwerte
++ * enthaelt und in die beim Ende des VM86-Tasks die dann aktuellen
++ * Registerwerte kopiert werden sollen.
++ * @param memory Array von Speicherbereichen, die in den VM86-Task gemappt
++ * werden sollen; NULL fuer keine.
++ *
++ * @return 0 bei Erfolg, -errno im Fehlerfall
++ */
++int arch_vm86(uint8_t intr, void* regs, uint32_t* memory)
++{
++    int res = 0;
++
++    // Wir koennen nur einen VM86-Task
++    if (vm86_status.in_use) {
++        return -EBUSY;
++    }
++
++    // Nullpage mappen
++    uint32_t* page_table = (uint32_t*) PAGETABLES_MEM_START;
++    void* nullpage = pmm_alloc(1);
++    page_table[0] = (uintptr_t) nullpage | PTE_U | PTE_W | PTE_P;
++    asm volatile(&quot;invlpg %0&quot; :: &quot;m&quot; (*(char*)0x0));
++    memcpy(0, &amp;bios_data, 4096);
++
++    // Stack mappen
++    void* stack = mmc_valloc_limits(&amp;mmc_current_context(), 1, NULL, NULL,
++        0x0, 0x9fc00, PTE_U | PTE_W | PTE_P);
++    if (stack == NULL) {
++        kprintf(&quot;vm86: Kein Platz fuer den Stack\n&quot;);
++        res = -ENOMEM;
++        goto fail_stack;
++    }
++
++    // Videospeicher mappen
++    // FIXME Das tut nur durch Zufall
++    bool ret = mmc_map(&amp;mmc_current_context(),
++        (vaddr_t) 0xa0000, (paddr_t) 0xa0000,
++        PTE_U | PTE_W | PTE_P, 0x10);
++    if (!ret) {
++        kprintf(&quot;vm86: Kein Platz fuer den Videospeicher\n&quot;);
++        res = -ENOMEM;
++        goto fail_video;
++    }
++
++    // Falls noetig, ein paar Pages mehr mappen
++    if (memory != NULL) {
++        uint32_t infosize = memory[0];
++        uint32_t i;
++
++        for (i = 0; i &lt; infosize; i++) {
++            uint32_t addr = memory[1 + i * 3];
++            uint32_t src = memory[1 + i * 3 + 1];
++            uint32_t size = memory[1 + i * 3 + 2];
++
++            if (size &gt; PAGE_SIZE) {
++                res = -EINVAL;
++                goto fail_memory;
++            }
++
++            paddr_t phys_mem = pmm_alloc(1);
++            if (!mmc_map(&amp;mmc_current_context(), (vaddr_t)(addr &amp; ~0xFFF),
++                phys_mem, PTE_W | PTE_P | PTE_U, 1))
++            {
++                res = -ENOMEM;
++                goto fail_memory;
++            }
++            memcpy((void*)addr, (void*)src, size);
++        }
++    }
++
++    // Informationen speichern
++    // TODO Ordentliches Locking fuer SMP
++    vm86_status.in_use   = 1;
++    vm86_status.caller   = current_thread;
++    vm86_status.stack    = stack;
++    vm86_status.nullpage = nullpage;
++    vm86_status.memory   = memory;
++    vm86_status.regs     = regs;
++
++    // Innerhalb vom VM86 einen RPC-Handler aufzurufen waere unklug
++    pm_block_rpc(current_process, current_process-&gt;pid);
++
++    // Task erstellen
++    create_vm86_task(intr, regs, (uintptr_t) stack);
++
++    return 0;
++
++fail_memory:
++    mmc_unmap(&amp;mmc_current_context(), (vaddr_t) 0xa0000, 0x10);
++fail_video:
++    mmc_vfree(&amp;mmc_current_context(), stack, 1);
++fail_stack:
++    pmm_free(nullpage, 1);
++    return res;
++}
++
++/**
++ * Beendet einen VM86-Task, kopiert alle zu zurueckzugebenden Daten und setzt
++ * die Ausfuehrung des aufrufenden Tasks fort.
++ */
++static void destroy_vm86_task(interrupt_stack_frame_t* isf)
++{
++    pm_thread_t* vm86_task = current_thread;
++    struct vm86_isf* visf = (struct vm86_isf*)
++        (((char*) isf) + (sizeof(*isf) - sizeof(*visf)));
++
++    // Den Thread loeschen und den Aufrufer wieder aktiv machen
++    vm86_task-&gt;status = PM_STATUS_BLOCKED;
++    pm_thread_destroy(vm86_task);
++
++    current_thread = vm86_status.caller;
++    current_thread-&gt;status = PM_STATUS_RUNNING;
++
++    // Temporaere Mappings rueckgaengig machen
++    mmc_unmap(&amp;mmc_current_context(), (vaddr_t) 0xa0000, 0x10);
++    mmc_unmap(&amp;mmc_current_context(), vm86_status.stack, 1);
++
++    uint32_t* page_table = (uint32_t*) PAGETABLES_MEM_START;
++    page_table[0] = 0;
++    asm volatile(&quot;invlpg %0&quot; :: &quot;m&quot; (*(char*)0x0));
++
++    pmm_free(vm86_status.nullpage, 1);
++
++    // Vom Benutzer angeforderte Mappings rueckgaengig machen
++    if (vm86_status.memory != NULL) {
++        uint32_t infosize = vm86_status.memory[0];
++        uint32_t i;
++
++        for (i = 0; i &lt; infosize; i++) {
++            uint32_t addr = vm86_status.memory[1 + i * 3];
++            uint32_t src = vm86_status.memory[1 + i * 3 + 1];
++            uint32_t size = vm86_status.memory[1 + i * 3 + 2];
++
++            memcpy((void*)src, (void*)addr, size);
++            pmm_free(mmc_resolve(&amp;mmc_current_context(),
++                (vaddr_t) (addr &amp; ~0xFFF)), 1);
++            mmc_unmap(&amp;mmc_current_context(), (vaddr_t)(addr &amp; ~0xFFF), 1);
++        }
++    }
++
++    // Register sichern
++    vm86_regs_t* regs = vm86_status.regs;
++    regs-&gt;ax = isf-&gt;eax;
++    regs-&gt;bx = isf-&gt;ebx;
++    regs-&gt;cx = isf-&gt;ecx;
++    regs-&gt;dx = isf-&gt;edx;
++    regs-&gt;si = isf-&gt;esi;
++    regs-&gt;di = isf-&gt;edi;
++    regs-&gt;ds = visf-&gt;ds;
++    regs-&gt;es = visf-&gt;es;
++
++    // Wir sind fertig mit VM86 :-)
++    pm_unblock_rpc(current_process, current_process-&gt;pid);
++    vm86_status.in_use = 0;
++}
++
++/** Pusht einen Wert auf den Stack des VM86-Tasks */
++static inline void emulator_push(interrupt_stack_frame_t* isf, uint16_t value)
++{
++    isf-&gt;esp -= 2;
++    ((uint16_t*)(isf-&gt;esp + (isf-&gt;ss &lt;&lt; 4)))[0] = value;
++}
++
++/** Popt einen Wert vom Stack des VM86-Tasks */
++static inline uint16_t emulator_pop(interrupt_stack_frame_t* isf)
++{
++    uint16_t res = ((uint16_t*)(isf-&gt;esp + (isf-&gt;ss &lt;&lt; 4)))[0];
++    isf-&gt;esp += 2;
++    return res;
++}
++
++/**
++ * Diese Funktion wird vom Interrupthandler bei Exceptions aufgerufen, wenn der
++ * aktuelle Task ein VM86-Task ist. Die Exception kann dann entweder hier
++ * behandelt werden oder an die allgemeinen Exceptionhandlern weitergegeben
++ * werden
++ *
++ * @return 1 wenn die Exception fertig behandelt ist; 0, wenn die normalen
++ * Exceptionhandler aufgerufen werden sollen.
++ */
++int vm86_exception(interrupt_stack_frame_t* isf)
++{
++    // Bei #GP muessen wir was emulieren, ansonsten koennen wir fuer den Task
++    // hier nichts tun
++    if (isf-&gt;interrupt_number != 13) {
++        return 0;
++    }
++
++    // Ein toller Emulator fuer privilegierte Instruktionen
++    uint8_t* ops = (uint8_t*)(isf-&gt;eip + (isf-&gt;cs &lt;&lt; 4));
++    switch (ops[0]) {
++
++        case 0x9c: /* pushf */
++            emulator_push(isf, isf-&gt;eflags);
++            isf-&gt;eip++;
++            break;
++
++        case 0x9d: /* popf */
++            // So tun, als wÃ¼rden wir die EFLAGS wiederherstellen.
++            // Das hier ist wohl alles andere als korrekt, aber funzt erstmal.
++            emulator_pop(isf);
++            isf-&gt;eip++;
++            break;
++
++        case 0xcd: /* int */
++        {
++            uint16_t intr = ops[1] &amp; 0xff;
++            uint16_t* ivt_entry = bios_data.ivt[intr];
++
++            emulator_push(isf, isf-&gt;eip + 2);
++            emulator_push(isf, isf-&gt;cs);
++            emulator_push(isf, isf-&gt;eflags);
++
++            isf-&gt;eip = ivt_entry[0];
++            isf-&gt;cs  = ivt_entry[1];
++            break;
++        }
++
++        case 0xcf: /* iret */
++
++            // Wenn es das finale iret ist, koennen wir den VM86-Task beenden
++            if (isf-&gt;esp == PAGE_SIZE - 16) {
++                destroy_vm86_task(isf);
++                return 1;
++            }
++
++            // Ansonsten muss es ganz normal emuliert werden
++            emulator_pop(isf);
++            isf-&gt;cs  = emulator_pop(isf);
++            isf-&gt;eip = emulator_pop(isf);
++            break;
++
++        default:
++            kprintf(&quot;vm86: Unbekannter Opcode %x\n&quot;, ops[0]);
++            return 0;
++    }
++
++    return 1;
++}
+diff --git a/src/kernel2/src/init.c b/src/kernel2/src/init.c
+index 6b9b202..1413b88 100644
+--- a/src/kernel2/src/init.c
++++ b/src/kernel2/src/init.c
+@@ -63,6 +63,7 @@ lock_t init_lock = 0;
+ 
+ void smp_init(void);
+ void gdt_init(void);
++void vm86_init(void);
+ 
+ /** 
+  * Kernel-Initialisierung erfolgt hier,
+@@ -97,6 +98,9 @@ void init(int multiboot_magic, struct multiboot_info *boot_info, bool bsp)
+             debug_parse_cmdline(multiboot_info.mi_cmdline);
+         }
+     #endif
++
++        // IVT fuer den VM86 sichern
++        vm86_init();
+         
+         debug_print(DEBUG_FLAG_INIT, &quot;Initialisiere physikalische&quot;
+             &quot;Speicherverwaltung&quot;);
+diff --git a/src/kernel2/src/interrupts/im.c b/src/kernel2/src/interrupts/im.c
+index d7130bd..91f818d 100644
+--- a/src/kernel2/src/interrupts/im.c
++++ b/src/kernel2/src/interrupts/im.c
+@@ -59,6 +59,7 @@ bool fastrpc_irq(pm_process_t* callee, size_t metadata_size, void* metadata,
+     size_t data_size, void* data, uint8_t irq);
+ 
+ extern void increase_user_stack_size(pm_thread_t* task_ptr, int pages);
++extern int vm86_exception(interrupt_stack_frame_t* isf);
+ 
+ /**
+  * Verarbeitet eine CPU-Exception
+@@ -71,6 +72,14 @@ static void handle_exception(interrupt_stack_frame_t* isf, uint8_t int_num)
+ //    kprintf(&quot;user_stack_bottom = %x\n&quot;,
+ //        current_thread-&gt;user_stack_bottom);
+ 
++    // Pruefen, ob ein VM86-Task die Exception ausgeloest hat
++    // Falls ja lassen wir sie vom VM86-Code behandeln, wenn er kann
++    if (isf-&gt;eflags &amp; 0x20000) {
++        if (vm86_exception(isf)) {
++            return;
++        }
++    }
++
+     if (int_num == 0x0e) {
+         // UeberprÃ¼fen ob der Pagefault durch einen Stackoverflow
+         // hervorgerufen wurde. Falls ja: Stack vergroessern und weitermachen
+@@ -97,7 +106,11 @@ static void handle_exception(interrupt_stack_frame_t* isf, uint8_t int_num)
+     // Ein Stacktrace duerfen wir nur ausgeben, wenn kein Pagefault wegen
+     // dem Stack aufgetreten ist!
+     if (!((cr2 &lt; isf-&gt;esp + 800) &amp;&amp; (cr2 &gt;= isf-&gt;esp -0x20))) {
+-        stack_backtrace(isf-&gt;ebp, isf-&gt;eip);
++        // Und fuer VM86 muessten wir wenigstens noch das Segment
++        // beruecksichtigen, aber eigentlich brauchen wir ihn da gar nicht
++        if ((isf-&gt;eflags &amp; 0x20000) == 0) {
++            stack_backtrace(isf-&gt;ebp, isf-&gt;eip);
++        }
+     }
+ 
+     // Hier werden alle Prozessoren zum halten gebracht
+@@ -166,10 +179,19 @@ interrupt_stack_frame_t* im_handler(interrupt_stack_frame_t* isf)
+ 
+     thread = current_thread;
+     if (thread != old_thread) {
++        interrupt_stack_frame_t* new_isf =
++            (interrupt_stack_frame_t*) thread-&gt;kernel_stack;
++
+         cpu_get_current()-&gt;tss.ss0 = 2 &lt;&lt; 3;
+-        cpu_get_current()-&gt;tss.esp0 =
+-            (uintptr_t) thread-&gt;kernel_stack
+-            + sizeof(interrupt_stack_frame_t);
++        if (new_isf-&gt;eflags &amp; 0x20000) {
++            cpu_get_current()-&gt;tss.esp0 =
++                (uintptr_t) thread-&gt;kernel_stack
++                + sizeof(struct vm86_isf);
++        } else {
++            cpu_get_current()-&gt;tss.esp0 =
++                (uintptr_t) thread-&gt;kernel_stack
++                + sizeof(interrupt_stack_frame_t);
++        }
+ 
+         mmc_activate(&amp;thread-&gt;process-&gt;context);
+     }
+diff --git a/src/kernel2/src/syscall.c b/src/kernel2/src/syscall.c
+index 4292724..073fe9b 100644
+--- a/src/kernel2/src/syscall.c
++++ b/src/kernel2/src/syscall.c
+@@ -93,6 +93,9 @@ void syscall_init()
+     syscall_register(SYSCALL_SHM_CREATE, &amp;syscall_shm_create, 1);
+     syscall_register(SYSCALL_SHM_ATTACH, &amp;syscall_shm_attach, 1);
+     syscall_register(SYSCALL_SHM_DETACH, &amp;syscall_shm_detach, 1);
++
++    syscall_register(SYSCALL_VM86, &amp;syscall_vm86_old, 2);
++    syscall_register(SYSCALL_VM86_BIOS_INT, &amp;syscall_vm86, 3);
+ }
+ 
+ /**
+diff --git a/src/kernel2/src/syscalls/vm86.c b/src/kernel2/src/syscalls/vm86.c
+new file mode 100644
+index 0000000..b105eca
+--- /dev/null
++++ b/src/kernel2/src/syscalls/vm86.c
+@@ -0,0 +1,53 @@
++/*
++ * Copyright (c) 2010 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the tyndur Project
++ *     and its contributors.
++ * 4. Neither the name of the tyndur Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include &lt;stdint.h&gt;
++#include &lt;errno.h&gt;
++
++#include &quot;kernel.h&quot;
++#include &quot;syscall.h&quot;
++#include &quot;vm86.h&quot;
++
++/// -ENOSYS
++int syscall_vm86_old(void* regs, uint32_t* memory)
++{
++    return -ENOSYS;
++}
++
++/// BIOS-Interrupt ausfuehren
++int syscall_vm86(uint8_t intr, void* regs, uint32_t* memory)
++{
++    return arch_vm86(intr, regs, memory);
++}
+diff --git a/src/modules/include/syscall.h b/src/modules/include/syscall.h
+index 3759d4b..d86a232 100644
+--- a/src/modules/include/syscall.h
++++ b/src/modules/include/syscall.h
+@@ -91,6 +91,7 @@ void unblock_process(pid_t pid);
+ char* get_cmdline(void);
+ 
+ bool vm86_int(vm86_regs_t *regs, dword *shm);
++int bios_int(int intr, vm86_regs_t* regs, uint32_t* shm);
+ 
+ task_info_t* enumerate_tasks(void);
+ 
+diff --git a/src/modules/lib/syscalls/vm86.c b/src/modules/lib/syscalls/vm86.c
+index 570558b..39a6666 100644
+--- a/src/modules/lib/syscalls/vm86.c
++++ b/src/modules/lib/syscalls/vm86.c
+@@ -1,16 +1,66 @@
++/*
++ * Copyright (c) 2007-2010 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Mathias Gottschlag.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
+ 
+-#include &quot;syscall.h&quot;
++#include &lt;syscall.h&gt;
++#include &lt;errno.h&gt;
++
++int bios_int(int intr, vm86_regs_t* regs, uint32_t* shm)
++{
++    int result;
++
++    asm(
++        &quot;pushl %4;&quot;
++        &quot;pushl %3;&quot;
++        &quot;pushl %2;&quot;
++        &quot;mov %1, %%eax;&quot;
++        &quot;int $0x30;&quot;
++        &quot;add $0xc, %%esp;&quot;
++    : &quot;=a&quot;(result)
++    : &quot;i&quot; (SYSCALL_VM86_BIOS_INT), &quot;r&quot; (intr), &quot;r&quot;(regs), &quot;r&quot;(shm));
++
++    return result;
++}
+ 
+ bool vm86_int(vm86_regs_t *regs, dword *shm)
+ {
+-    dword result;
++    int result;
++
+     asm(
+         &quot;pushl %3;&quot;
+         &quot;pushl %2;&quot;
+         &quot;mov %1, %%eax;&quot;
+         &quot;int $0x30;&quot;
+         &quot;add $0x8, %%esp;&quot;
+-    : &quot;=a&quot;(result): &quot;i&quot; (SYSCALL_VM86), &quot;r&quot;(regs), &quot;r&quot;(shm) );
++    : &quot;=a&quot;(result): &quot;i&quot; (SYSCALL_VM86), &quot;r&quot;(regs), &quot;r&quot;(shm));
++
++    if (result == -ENOSYS) {
++        return bios_int(0x10, regs, shm);
++    }
++
+     return (bool)result;
+ }
+-
+-- 
+1.6.0.2
+
+</PRE>
+
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001685.html">[tyndur-devel] [PATCH 3/4] kernel2: mem_allocate/mem_free richtig implementiert
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001677.html">[tyndur-devel] [PATCH 4/4] kernel2: VM86
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1676">[ Datum ]</a>
+              <a href="thread.html#1676">[ Thema ]</a>
+              <a href="subject.html#1676">[ Betreff (Subject)]</a>
+              <a href="author.html#1676">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

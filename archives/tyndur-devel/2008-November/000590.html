@@ -1,0 +1,128 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [Lost] [PATCH 2/2] kernel2: Shared Memory
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5BLost%5D%20%5BPATCH%202/2%5D%20kernel2%3A%20Shared%20Memory&In-Reply-To=%3C200811012318.44201%40kevin-wolf.de%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="000589.html">
+   <LINK REL="Next"  HREF="000591.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[Lost] [PATCH 2/2] kernel2: Shared Memory</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5BLost%5D%20%5BPATCH%202/2%5D%20kernel2%3A%20Shared%20Memory&In-Reply-To=%3C200811012318.44201%40kevin-wolf.de%3E"
+           TITLE="[Lost] [PATCH 2/2] kernel2: Shared Memory">mail at kevin-wolf.de
+                  </A><BR>
+    <I>Sa Nov  1 23:18:44 CET 2008</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="000589.html">[Lost] [PATCH 2/2] kernel2: Shared Memory
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="000591.html">[Lost] [PATCH 2/2] kernel2: Shared Memory
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#590">[ Datum ]</a>
+              <a href="thread.html#590">[ Thema ]</a>
+              <a href="subject.html#590">[ Betreff (Subject) ]</a>
+              <a href="author.html#590">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>Am Samstag, 1. November 2008 22:56:03 schrieb Antoine Kaufmann:
+&gt;<i> On Sat, Oct 25 23:05, Kevin Wolf wrote:
+</I>&gt;<i> &gt; + kernel2: Shared Memory
+</I>&gt;<i> &gt; diff --git a/src/kernel2/src/mm/shm.c b/src/kernel2/src/mm/shm.c
+</I>&gt;<i> &gt; new file mode 100644
+</I>&gt;<i> &gt; index 0000000..b48defc
+</I>&gt;<i> &gt; --- /dev/null
+</I>&gt;<i> &gt; +++ b/src/kernel2/src/mm/shm.c
+</I>&gt;<i> &gt; @@ -0,0 +1,171 @@
+</I>&gt;<i> &gt; ...
+</I>&gt;<i> &gt; +struct shm_desc {
+</I>&gt;<i> &gt; +    uint64_t            id;
+</I>&gt;<i>
+</I>&gt;<i> Aber unten werden immer nur 32-Bit Ids verwendet, oder sehe ich das
+</I>&gt;<i> falsch?
+</I>
+Der Schlüssel ist bei AVL-Bäumen per definitionem 64 Bit lang. Es gab sogar 
+irgendeinen Grund, warum ich hier trotzdem nur 32 Bit davon verwende, aber er 
+fällt mir gerade nicht mehr ein...
+
+&gt;<i>
+</I>&gt;<i> &gt; +    struct tree_item    tree_item;
+</I>&gt;<i> &gt; +
+</I>&gt;<i> &gt; +    paddr_t             paddr;
+</I>&gt;<i> &gt; +    size_t              num_pages;
+</I>&gt;<i> &gt; +    list_t*             processes;
+</I>&gt;<i> &gt; +};
+</I>&gt;<i> &gt; ...
+</I>&gt;<i> &gt; +uint32_t shm_create(size_t size)
+</I>&gt;<i> &gt; +{
+</I>&gt;<i> &gt; +    // FIXME Die Pages muessen nicht physisch zusammenhaengend sein
+</I>&gt;<i> &gt; +    paddr_t shm_phys = pmm_alloc(NUM_PAGES(size));
+</I>&gt;<i> &gt; +    uint32_t id = ++shm_last_id;
+</I>&gt;<i> &gt; +    struct shm_desc* shm;
+</I>&gt;<i> &gt; +
+</I>&gt;<i> &gt; +    while (tree_search(shms, id)) {
+</I>&gt;<i> &gt; +        id++;
+</I>&gt;<i> &gt; +    }
+</I>&gt;<i>
+</I>&gt;<i> Warum ist das denn notwendig? Müsste ++shm_last_id nicht sowieso noch
+</I>&gt;<i> frei sein?
+</I>
+Außer nach einem Overflow ja.
+
+&gt;<i> &gt; +    shm = calloc(1, sizeof(*shm));
+</I>&gt;<i> &gt; +    shm-&gt;id = id;
+</I>&gt;<i> &gt; +    shm-&gt;num_pages = NUM_PAGES(size);
+</I>&gt;<i> &gt; +    shm-&gt;paddr = shm_phys;
+</I>&gt;<i> &gt; +    shm-&gt;processes = list_create();
+</I>&gt;<i> &gt; +
+</I>&gt;<i> &gt; +    tree_insert(shms, shm);
+</I>&gt;<i> &gt; +
+</I>&gt;<i> &gt; +    return id;
+</I>&gt;<i> &gt; +}
+</I>&gt;<i> &gt;...
+</I>&gt;<i> &gt; diff --git a/src/kernel2/src/tasks/pm.c b/src/kernel2/src/tasks/pm.c
+</I>&gt;<i> &gt; index e47a11c..64a814c 100644
+</I>&gt;<i> &gt; --- a/src/kernel2/src/tasks/pm.c
+</I>&gt;<i> &gt; +++ b/src/kernel2/src/tasks/pm.c
+</I>&gt;<i> &gt; @@ -166,6 +166,8 @@ void pm_destroy(pm_process_t* process)
+</I>&gt;<i> &gt;      // TODO Die einzelnen Listenglieder freigeben
+</I>&gt;<i> &gt;      list_destroy(process-&gt;rpcs);
+</I>&gt;<i> &gt;
+</I>&gt;<i> &gt; +    // TODO Alle SHMs freigeben
+</I>&gt;<i> &gt; +
+</I>&gt;<i> &gt;      // Den Prozess aus der Liste entfernen
+</I>&gt;<i> &gt;      pm_process_t* _proc;
+</I>&gt;<i> &gt;      int i = 0;
+</I>&gt;<i>
+</I>&gt;<i> Das TODO ist aber nicht gerade schön... ;-) Aber jo wenn es tut, dann
+</I>&gt;<i> kann es zumindest mal rein. ;-)
+</I>
+Tasks beenden ist in kernel2 sowieso noch total kaputt, glaube ich.
+
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="000589.html">[Lost] [PATCH 2/2] kernel2: Shared Memory
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="000591.html">[Lost] [PATCH 2/2] kernel2: Shared Memory
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#590">[ Datum ]</a>
+              <a href="thread.html#590">[ Thema ]</a>
+              <a href="subject.html#590">[ Betreff (Subject)]</a>
+              <a href="author.html#590">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

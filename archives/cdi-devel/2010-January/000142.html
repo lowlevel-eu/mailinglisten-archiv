@@ -1,0 +1,168 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] Interrupts
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20Interrupts&In-Reply-To=%3Cf88ae151001172032v57365a78mc43f008c312f6c46%40mail.gmail.com%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000141.html">
+   <LINK REL="Next"  HREF="000143.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] Interrupts</H1>
+    <B>Matthew Iselin</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20Interrupts&In-Reply-To=%3Cf88ae151001172032v57365a78mc43f008c312f6c46%40mail.gmail.com%3E"
+       TITLE="[cdi-devel] Interrupts">matthew at theiselins.net
+       </A><BR>
+    <I>Mon Jan 18 05:32:42 CET 2010</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000141.html">[cdi-devel] Interrupts
+</A></li>
+        <LI>Next message: <A HREF="000143.html">[cdi-devel] [PATCH] ata: Remove partition handling
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#142">[ date ]</a>
+              <a href="thread.html#142">[ thread ]</a>
+              <a href="subject.html#142">[ subject ]</a>
+              <a href="author.html#142">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>On Mon, Jan 18, 2010 at 7:56 AM, Kevin Wolf &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">kevin at tyndur.org</A>&gt; wrote:
+&gt;&gt;<i> I would say that pcnet's implementation of its own solution when
+</I>&gt;&gt;<i> cdi_wait_irq already exists was fundamentally wrong. There is no point
+</I>&gt;&gt;<i> reinventing the wheel in each driver when you already have the
+</I>&gt;&gt;<i> functionality available in the interface.
+</I>&gt;<i>
+</I>&gt;<i> Reinventing the wheel is just ugliness, it doesn't lead to fundamentally
+</I>&gt;<i> broken code. But at least you don't seem to be opposed to forbid such
+</I>&gt;<i> things in a better specification.
+</I>
+Right, the interface provides things like cdi_wait_irq for a reason. I
+should have elaborated further when I stated that I felt the code was
+fundamentally wrong. Pedigree for example implements cdi_wait_irq in
+such a way that the calling thread can be put to sleep until the IRQ
+fires, at which point it can be woken up directly. Tyndur might define
+cdi_wait_irq in a different way, with its own unique semantics. This
+is why I feel it is fundamentally wrong to write a CDI driver which
+implements interface-provided functionality itself.
+
+You are free to disagree, of course. I will not hold that against you,
+but I do want to assert how I feel about the issue.
+
+&gt;&gt;<i> &gt; The point is that currently in my kernel CDI drivers generally run with
+</I>&gt;&gt;<i> &gt; IRQs turned off as the kernel lacks proper locking, so I'm not sure what
+</I>&gt;&gt;<i> &gt; would happen if I would allow IRQs in any place (or even let it be
+</I>&gt;&gt;<i> &gt; preempted). So pcnet would wait forever for an IRQ to happen.
+</I>&gt;&gt;<i>
+</I>&gt;&gt;<i> Perhaps cdi_wait_irq needs a timeout parameter. This way we can also
+</I>&gt;&gt;<i> enforce a decent timeframe in which an IRQ should occur, and avoid the
+</I>&gt;&gt;<i> case where a driver hangs because an IRQ never arrives.
+</I>&gt;<i>
+</I>&gt;<i> It already has this parameter.
+</I>
+I should have checked, but I was a little rushed. So if it does have
+this parameter, you could have a cdi_wait_irq(2000) in pcnet that
+waits 2 seconds for an IRQ rather than hang the system forever for an
+interrupt which will never arrive. Maybe cdi_wait_irq could also check
+and enable interrupts to be absolutely certain (this is an OS-specific
+thing though).
+
+In my opinion, IRQ support should be a requirement for the CDI
+interface. The alternative is that drivers have multiple code paths:
+one for &quot;IRQs available&quot;, the other for &quot;No IRQs available&quot; (and throw
+an error when the device can't run without IRQs).
+
+&gt;&gt;<i> &gt; What do you think? Do all other OSes implementing CDI so far allow IRQs
+</I>&gt;&gt;<i> &gt; at any time or does it just happen to work? (I think meanwhile all
+</I>&gt;&gt;<i> &gt; drivers are well-behaved and don't do it manually)
+</I>&gt;&gt;<i>
+</I>&gt;&gt;<i> Drivers that use interrupts should be able to assume interrupts are
+</I>&gt;&gt;<i> enabled and working properly.
+</I>&gt;<i>
+</I>&gt;<i> I fully agree that driver should be safe to assume that interrupts work.
+</I>&gt;<i> The question is what &quot;working properly&quot; means. Basically this is about
+</I>&gt;<i> whether a driver function can be interrupted for a IRQ handler (like for
+</I>&gt;<i> a Unix signal handler) or if the IRQs are queued. I strongly suggest the
+</I>&gt;<i> latter - in the example of pcnet this would mean that the code was
+</I>&gt;<i> completely wrong and could not even have worked (which shows that tyndur
+</I>&gt;<i> doesn't implement this semantics yet).
+</I>
+Keep in mind that I come from the monolithic school of thought, where
+I can say that the driver is just another function call and therefore
+can be interrupted easily. You come from microkernel land, where
+drivers are actually running outside the kernel.
+
+&gt;<i> I've though a bit more about it, and in fact I think what we need to
+</I>&gt;<i> clearly define is semantics with respect to concurrency and/or
+</I>&gt;<i> signal-like interruptions. IDC message handling is another thing of this
+</I>&gt;<i> type, should it ever be implemented.
+</I>
+Semantics are always fun to discuss :-)
+
+&gt;<i> If we want to allow concurrency/interruption, we need to define things
+</I>&gt;<i> like locks, signal blocking etc. I really don't want to get into that
+</I>&gt;<i> business with CDI because I fear trouble with the different types of
+</I>&gt;<i> OSes here. So maybe the most reasonable approach is to defined that at
+</I>&gt;<i> the same time at most one driver function per device is running and that
+</I>&gt;<i> it may not be interrupted as in signals. The library can then define the
+</I>&gt;<i> necessary message queues, threading with locks or whatever model it
+</I>&gt;<i> likes. The drivers themselves can be kept simple then.
+</I>
+I agree with the concept of only one driver function per device. This
+avoids race conditions when accessing device-specific data in the
+driver (eg, rx/tx buffers on a NIC) and also helps implementors to
+visualise the way CDI is used a little easier.
+
+If IRQs are queued until after a driver function is complete,
+cdi_wait_irq may need to actually break from convention here.
+cdi_wait_irq is, in my opinion, one of the most important functions in
+CDI. Drivers often need to wait for an IRQ to determine if a network
+packet got sent correctly, or to find out that a disk sector has been
+transferred.
+
+Perhaps cdi_wait_irq could set a flag which allows IRQs to be called?
+Something like this:
+
+cdi_wait_irq:
+check irq queue, run irq handler and return &quot;success&quot;
+set &quot;interruptible&quot; flag
+wait for IRQ, run irq handler if one comes in before timeout
+unset &quot;interruptible&quot; flag
+return timeout or success
+
+This may entail a cdi_os_wait_irq function (or something like that) to
+actually perform the wait for an IRQ in order to remove this
+complicated CDI trickery from the OS-provided implementation.
+
+I'm interested to hear yours and Max's thoughts.
+
+Cheers,
+
+Matt
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000141.html">[cdi-devel] Interrupts
+</A></li>
+	<LI>Next message: <A HREF="000143.html">[cdi-devel] [PATCH] ata: Remove partition handling
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#142">[ date ]</a>
+              <a href="thread.html#142">[ thread ]</a>
+              <a href="subject.html#142">[ subject ]</a>
+              <a href="author.html#142">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

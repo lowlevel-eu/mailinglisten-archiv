@@ -1,0 +1,324 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 2/5] cdi: mem.h implementiert
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%202/5%5D%20cdi%3A%20mem.h%20implementiert&In-Reply-To=%3C20100328132447.GJ9262%40neo.geekcave.lan%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001678.html">
+   <LINK REL="Next"  HREF="001680.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 2/5] cdi: mem.h implementiert</H1>
+    <B>Antoine Kaufmann</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%202/5%5D%20cdi%3A%20mem.h%20implementiert&In-Reply-To=%3C20100328132447.GJ9262%40neo.geekcave.lan%3E"
+           TITLE="[tyndur-devel] [PATCH 2/5] cdi: mem.h implementiert">toni at tyndur.org
+                  </A><BR>
+    <I>So Mär 28 15:24:47 CEST 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001678.html">[tyndur-devel] [PATCH 1/5] cdi: Verwaltung von Speicherbereichen
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001680.html">[tyndur-devel] [PATCH 4/5] cdi: cdi_alloc_phys_mem/addr ersetzen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1679">[ Datum ]</a>
+              <a href="thread.html#1679">[ Thema ]</a>
+              <a href="subject.html#1679">[ Betreff (Subject) ]</a>
+              <a href="author.html#1679">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>On Sat, Feb 13 22:12, Kevin Wolf wrote:
+&gt;<i> + cdi: mem.h implementiert
+</I>&gt;<i> 
+</I>&gt;<i> Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+</I>&gt;<i> ---
+</I>&gt;<i>  src/modules/cdi/include/cdi-osdep.h |    1 +
+</I>&gt;<i>  src/modules/cdi/lib/mem.c           |  215 +++++++++++++++++++++++++++++++++++
+</I>&gt;<i>  2 files changed, 216 insertions(+), 0 deletions(-)
+</I>&gt;<i>  create mode 100644 src/modules/cdi/lib/mem.c
+</I>&gt;<i> 
+</I>&gt;<i> diff --git a/src/modules/cdi/include/cdi-osdep.h b/src/modules/cdi/include/cdi-osdep.h
+</I>&gt;<i> index 0d052fe..204793b 100644
+</I>&gt;<i> --- a/src/modules/cdi/include/cdi-osdep.h
+</I>&gt;<i> +++ b/src/modules/cdi/include/cdi-osdep.h
+</I>&gt;<i> @@ -77,6 +77,7 @@ typedef struct
+</I>&gt;<i>   * \endenglish
+</I>&gt;<i>   */
+</I>&gt;<i>  typedef struct {
+</I>&gt;<i> +    int mapped;
+</I>&gt;<i>  } cdi_mem_osdep;
+</I>&gt;<i>  
+</I>&gt;<i>  #endif
+</I>&gt;<i> diff --git a/src/modules/cdi/lib/mem.c b/src/modules/cdi/lib/mem.c
+</I>&gt;<i> new file mode 100644
+</I>&gt;<i> index 0000000..36ad90d
+</I>&gt;<i> --- /dev/null
+</I>&gt;<i> +++ b/src/modules/cdi/lib/mem.c
+</I>&gt;<i> @@ -0,0 +1,215 @@
+</I>&gt;<i> +/*
+</I>&gt;<i> + * Copyright (c) 2010 Kevin Wolf
+</I>&gt;<i> + *
+</I>&gt;<i> + * This program is free software. It comes without any warranty, to
+</I>&gt;<i> + * the extent permitted by applicable law. You can redistribute it
+</I>&gt;<i> + * and/or modify it under the terms of the Do What The Fuck You Want
+</I>&gt;<i> + * To Public License, Version 2, as published by Sam Hocevar. See
+</I>&gt;<i> + * <A HREF="http://sam.zoy.org/projects/COPYING.WTFPL">http://sam.zoy.org/projects/COPYING.WTFPL</A> for more details.
+</I>&gt;<i> + */
+</I>&gt;<i> +
+</I>&gt;<i> +#include &lt;stdint.h&gt;
+</I>&gt;<i> +#include &lt;stdlib.h&gt;
+</I>&gt;<i> +#include &lt;syscall.h&gt;
+</I>&gt;<i> +#include &lt;string.h&gt;
+</I>&gt;<i> +
+</I>&gt;<i> +#include &quot;cdi.h&quot;
+</I>&gt;<i> +#include &quot;cdi/mem.h&quot;
+</I>&gt;<i> +
+</I>&gt;<i> +/**
+</I>&gt;<i> + * \german
+</I>&gt;<i> + * Reserviert einen Speicherbereich.
+</I>&gt;<i> + *
+</I>&gt;<i> + * @param size Gr????e des Speicherbereichs in Bytes
+</I>&gt;<i> + * @param flags Flags, die zus??tzliche Anforderungen beschreiben
+</I>&gt;<i> + * \endgerman
+</I>&gt;<i> + * \english
+</I>&gt;<i> + * Allocates a memory area.
+</I>&gt;<i> + *
+</I>&gt;<i> + * @param size Size of the memory area in bytes
+</I>&gt;<i> + * @param flags Flags that describe additional requirements
+</I>&gt;<i> + * \endenglish
+</I>&gt;<i> + */
+</I>&gt;<i> +struct cdi_mem_area* cdi_mem_alloc(size_t size, cdi_mem_flags_t flags)
+</I>&gt;<i> +{
+</I>&gt;<i> +    dma_mem_ptr_t buffer;
+</I>&gt;<i> +    struct cdi_mem_area* area;
+</I>&gt;<i> +    struct cdi_mem_sg_item* sg_item;
+</I>&gt;<i> +
+</I>&gt;<i> +    // Wir machen im Moment mal nur ganze Pages
+</I>&gt;<i> +    if ((flags &amp; CDI_MEM_ALIGN_MASK) &gt; 12) {
+</I>&gt;<i> +        return NULL;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    // Speicher holen
+</I>&gt;<i> +    if (flags &amp; CDI_MEM_VIRT_ONLY) {
+</I>&gt;<i> +        buffer = mem_dma_allocate(size, 0);
+</I>&gt;<i> +    } else {
+</I>&gt;<i> +        buffer = mem_dma_allocate(size, 0x80);
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    if (buffer.virt == NULL) {
+</I>&gt;<i> +        return NULL;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    // cdi_mem_area anlegen und befuellen
+</I>&gt;<i> +    sg_item = malloc(sizeof(*sg_item));
+</I>&gt;<i> +    *sg_item = (struct cdi_mem_sg_item) {
+</I>&gt;<i> +        .start  = (uintptr_t) buffer.phys,
+</I>&gt;<i> +        .size   = size,
+</I>&gt;<i> +    };
+</I>&gt;<i> +
+</I>&gt;<i> +    area = malloc(sizeof(*area));
+</I>&gt;<i> +    *area = (struct cdi_mem_area) {
+</I>&gt;<i> +        .size   = size,
+</I>&gt;<i> +        .vaddr  = buffer.virt,
+</I>&gt;<i> +        .paddr  = {
+</I>&gt;<i> +            .num    = 1,
+</I>&gt;<i> +            .items  = sg_item,
+</I>&gt;<i> +        },
+</I>
+Hm solltest du .osdep.mapped hier nicht auch initialisieren? Ist ja kein
+calloc...
+
+&gt;<i> +    };
+</I>&gt;<i> +
+</I>&gt;<i> +    return area;
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +/**
+</I>&gt;<i> + * Reserviert physisch zusammenh??genden Speicher an einer definierten Adresse
+</I>&gt;<i> + *
+</I>&gt;<i> + * @param paddr Physische Adresse des angeforderten Speicherbereichs
+</I>&gt;<i> + * @param size Gr????e des ben??tigten Speichers in Bytes
+</I>&gt;<i> + *
+</I>&gt;<i> + * @return Eine cdi_mem_area bei Erfolg, NULL im Fehlerfall
+</I>&gt;<i> + */
+</I>&gt;<i> +struct cdi_mem_area* cdi_mem_map(uintptr_t paddr, size_t size)
+</I>&gt;<i> +{
+</I>&gt;<i> +    struct cdi_mem_area* area;
+</I>&gt;<i> +    struct cdi_mem_sg_item* sg_item;
+</I>&gt;<i> +    void* vaddr = mem_allocate_physical(size, paddr, 0);
+</I>&gt;<i> +
+</I>&gt;<i> +    if (vaddr == NULL) {
+</I>&gt;<i> +        return NULL;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    // cdi_mem_area anlegen und befuellen
+</I>&gt;<i> +    sg_item = malloc(sizeof(*sg_item));
+</I>&gt;<i> +    *sg_item = (struct cdi_mem_sg_item) {
+</I>&gt;<i> +        .start  = paddr,
+</I>&gt;<i> +        .size   = size,
+</I>&gt;<i> +    };
+</I>&gt;<i> +
+</I>&gt;<i> +    area = malloc(sizeof(*area));
+</I>&gt;<i> +    *area = (struct cdi_mem_area) {
+</I>&gt;<i> +        .size   = size,
+</I>&gt;<i> +        .vaddr  = vaddr,
+</I>&gt;<i> +        .paddr  = {
+</I>&gt;<i> +            .num    = 1,
+</I>&gt;<i> +            .items  = sg_item,
+</I>&gt;<i> +        },
+</I>&gt;<i> +        .osdep = {
+</I>&gt;<i> +            .mapped = 1,
+</I>&gt;<i> +        },
+</I>&gt;<i> +    };
+</I>&gt;<i> +
+</I>&gt;<i> +    return area;
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +/**
+</I>&gt;<i> + * \german
+</I>&gt;<i> + * Gibt einen durch cdi_mem_alloc oder cdi_mem_map reservierten Speicherbereich
+</I>&gt;<i> + * frei
+</I>&gt;<i> + * \endgerman
+</I>&gt;<i> + * \english
+</I>&gt;<i> + * Frees a memory area that was previously allocated by cdi_mem_alloc or
+</I>&gt;<i> + * cdi_mem_map
+</I>&gt;<i> + * \endenglish
+</I>&gt;<i> + */
+</I>&gt;<i> +void cdi_mem_free(struct cdi_mem_area* p)
+</I>&gt;<i> +{
+</I>&gt;<i> +    if (p-&gt;osdep.mapped) {
+</I>&gt;<i> +        mem_free_physical(p-&gt;vaddr, p-&gt;size);
+</I>&gt;<i> +    } else {
+</I>&gt;<i> +        mem_free(p-&gt;vaddr, p-&gt;size);
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    free(p-&gt;paddr.items);
+</I>&gt;<i> +    free(p);
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +/**
+</I>&gt;<i> + * \german
+</I>&gt;<i> + * Gibt einen Speicherbereich zur??ck, der dieselben Daten wie @a p beschreibt,
+</I>&gt;<i> + * aber mindestens die gegebenen Flags gesetzt hat.
+</I>&gt;<i> + *
+</I>&gt;<i> + * Diese Funktion kann denselben virtuellen und physischen Speicherbereich wie
+</I>&gt;<i> + * @p benutzen oder sogar @p selbst zur??ckzugeben, solange der gemeinsam
+</I>&gt;<i> + * benutzte Speicher erst dann freigegeben wird, wenn sowohl @a p als auch der
+</I>&gt;<i> + * R??ckgabewert durch cdi_mem_free freigegeben worden sind.
+</I>&gt;<i> + *
+</I>&gt;<i> + * Ansonsten wird ein neuer Speicherbereich reserviert und (au??er wenn das
+</I>&gt;<i> + * Flag CDI_MEM_NOINIT gesetzt ist) die Daten werden aus @a p in den neu
+</I>&gt;<i> + * reservierten Speicher kopiert.
+</I>&gt;<i> + * \endgerman
+</I>&gt;<i> + * \english
+</I>&gt;<i> + * Returns a memory area that describes the same data as @a p does, but for
+</I>&gt;<i> + * which at least the given flags are set.
+</I>&gt;<i> + *
+</I>&gt;<i> + * This function may use the same virtual and physical memory areas as used in
+</I>&gt;<i> + * @a p, or it may even return @a p itself. In this case it must ensure that
+</I>&gt;<i> + * the commonly used memory is only freed when both @a p and the return value
+</I>&gt;<i> + * of this function have been freed by cdi_mem_free.
+</I>&gt;<i> + *
+</I>&gt;<i> + * Otherwise, a new memory area is allocated and data is copied from @a p into
+</I>&gt;<i> + * the newly allocated memory (unless CDI_MEM_NOINIT is set).
+</I>&gt;<i> + * \endenglish
+</I>&gt;<i> + */
+</I>&gt;<i> +struct cdi_mem_area* cdi_mem_require_flags(struct cdi_mem_area* p,
+</I>&gt;<i> +    cdi_mem_flags_t flags)
+</I>&gt;<i> +{
+</I>&gt;<i> +    // TODO Das geht unter Umstaenden effizienter
+</I>&gt;<i> +    struct cdi_mem_area* new = cdi_mem_alloc(p-&gt;size, flags);
+</I>&gt;<i> +    if (new == NULL) {
+</I>&gt;<i> +        return NULL;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    memcpy(new-&gt;vaddr, p-&gt;vaddr, new-&gt;size);
+</I>&gt;<i> +    return new;
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +/**
+</I>&gt;<i> + * \german
+</I>&gt;<i> + * Kopiert die Daten von @a src nach @a dest. Beide Speicherbereiche m??ssen
+</I>&gt;<i> + * gleich gro?? sein.
+</I>&gt;<i> + *
+</I>&gt;<i> + * Das bedeutet nicht unbedingt eine physische Kopie: Wenn beide
+</I>&gt;<i> + * Speicherbereiche auf denselben physischen Speicher zeigen, macht diese
+</I>&gt;<i> + * Funktion nichts. Sie kann auch andere Methoden verwenden, um den Speicher
+</I>&gt;<i> + * effektiv zu kopieren, z.B. durch geeignetes Ummappen von Pages.
+</I>&gt;<i> + *
+</I>&gt;<i> + * @return 0 bei Erfolg, -1 sonst
+</I>&gt;<i> + * \endgerman
+</I>&gt;<i> + * \english
+</I>&gt;<i> + * Copies data from @a src to @a dest. Both memory areas must be of the same
+</I>&gt;<i> + * size.
+</I>&gt;<i> + *
+</I>&gt;<i> + * This does not necessarily involve a physical copy: If both memory areas
+</I>&gt;<i> + * point to the same physical memory, this function does nothing. It can also
+</I>&gt;<i> + * use other methods to achieve the same visible effect, e.g. by remapping
+</I>&gt;<i> + * pages.
+</I>&gt;<i> + *
+</I>&gt;<i> + * @return 0 on success, -1 otherwise
+</I>&gt;<i> + * \endenglish
+</I>&gt;<i> + */
+</I>&gt;<i> +int cdi_mem_copy(struct cdi_mem_area* dest, struct cdi_mem_area* src)
+</I>&gt;<i> +{
+</I>&gt;<i> +    // TODO Das geht unter Umstaenden effizienter
+</I>&gt;<i> +    if (dest-&gt;size != src-&gt;size) {
+</I>&gt;<i> +        return -1;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    if (dest-&gt;vaddr != src-&gt;vaddr) {
+</I>&gt;<i> +        memcpy(dest-&gt;vaddr, src-&gt;vaddr, dest-&gt;size);
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    return 0;
+</I>&gt;<i> +}
+</I>&gt;<i> -- 
+</I>&gt;<i> 1.6.0.2
+</I>&gt;<i> 
+</I>
+Sonst sieht das gut aus, wenn das oben gefixt ist kann das rein.
+
+Acked-by: Antoine Kaufmann &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">toni at tyndur.org</A>&gt;
+
+-- 
+Antoine Kaufmann
+&lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">toni at famkaufmann.info</A>&gt;
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : &lt;<A HREF="http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100328/2d108bd0/attachment.pgp">http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100328/2d108bd0/attachment.pgp</A>&gt;
+</PRE>
+
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001678.html">[tyndur-devel] [PATCH 1/5] cdi: Verwaltung von Speicherbereichen
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001680.html">[tyndur-devel] [PATCH 4/5] cdi: cdi_alloc_phys_mem/addr ersetzen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1679">[ Datum ]</a>
+              <a href="thread.html#1679">[ Thema ]</a>
+              <a href="subject.html#1679">[ Betreff (Subject)]</a>
+              <a href="author.html#1679">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

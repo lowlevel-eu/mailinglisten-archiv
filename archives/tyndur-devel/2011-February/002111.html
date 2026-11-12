@@ -1,0 +1,141 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 1/5] kernel2: IRQ-Sharing
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%201/5%5D%20kernel2%3A%20IRQ-Sharing&In-Reply-To=%3C20110212100302.GA5471%40silvanus%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002110.html">
+   <LINK REL="Next"  HREF="002112.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 1/5] kernel2: IRQ-Sharing</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%201/5%5D%20kernel2%3A%20IRQ-Sharing&In-Reply-To=%3C20110212100302.GA5471%40silvanus%3E"
+           TITLE="[tyndur-devel] [PATCH 1/5] kernel2: IRQ-Sharing">kevin at tyndur.org
+                  </A><BR>
+    <I>Sa Feb 12 11:03:03 CET 2011</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002110.html">[tyndur-devel] [PATCH] cdi: Rückgabewert von cdi_bios_int10 gefixt
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002112.html">[tyndur-devel] [PATCH] kbc: Race zwischen send_kbd_command und	IRQ-Handler gefixt
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2111">[ Datum ]</a>
+              <a href="thread.html#2111">[ Thema ]</a>
+              <a href="subject.html#2111">[ Betreff (Subject) ]</a>
+              <a href="author.html#2111">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>On Sat, Jan 29, 2011 at 01:38:34PM +0100, <A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">max at tyndur.org</A> wrote:
+&gt;<i> From: Max Reitz &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">max at tyndur.org</A>&gt;
+</I>&gt;<i> 
+</I>&gt;<i> + Bis zu vier Tasks können jetzt beim Auftreten eines IRQs
+</I>&gt;<i>   benachrichtigt werden.
+</I>&gt;<i> 
+</I>&gt;<i> Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">max at tyndur.org</A>&gt;
+</I>&gt;<i> ---
+</I>&gt;<i>  src/kernel2/src/interrupts/im.c |   89 ++++++++++++++++++++++++++++----------
+</I>&gt;<i>  1 files changed, 65 insertions(+), 24 deletions(-)
+</I>&gt;<i> 
+</I>&gt;<i> diff --git a/src/kernel2/src/interrupts/im.c b/src/kernel2/src/interrupts/im.c
+</I>&gt;<i> index d266959..96bfdd9 100644
+</I>&gt;<i> --- a/src/kernel2/src/interrupts/im.c
+</I>&gt;<i> +++ b/src/kernel2/src/interrupts/im.c
+</I>&gt;<i> @@ -33,6 +33,7 @@
+</I>&gt;<i>   * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+</I>&gt;<i>   */
+</I>&gt;<i>  
+</I>&gt;<i> +#include &lt;stdbool.h&gt;
+</I>&gt;<i>  #include &lt;types.h&gt;
+</I>&gt;<i>  #include &lt;lost/config.h&gt;
+</I>&gt;<i>  
+</I>&gt;<i> @@ -51,8 +52,18 @@ extern size_t cpu_count;
+</I>&gt;<i>  /** Einheit: Mikrosekunden */
+</I>&gt;<i>  uint64_t timer_ticks = 0;
+</I>&gt;<i>  
+</I>&gt;<i> -static pm_process_t* intr_handling_task[IM_NUM_INTERRUPTS];
+</I>&gt;<i> -static uint32_t intr_to_send[IM_NUM_INTERRUPTS];
+</I>&gt;<i> +#define MAX_INTERRUPTS 4
+</I>&gt;<i> +
+</I>&gt;<i> +// Wenn mehrere Tasks für einen Interrupt registriert sind, dann werden sie im
+</I>&gt;<i> +// Array so angeordnet, dass nur die ersten Einträge gefüllt sind
+</I>&gt;<i> +static pm_process_t* intr_handling_task[IM_NUM_INTERRUPTS][MAX_INTERRUPTS];
+</I>&gt;<i> +static uint32_t intr_to_send[IM_NUM_INTERRUPTS][MAX_INTERRUPTS];
+</I>&gt;<i> +// Anzahl von Tasks pro Interrupt
+</I>&gt;<i> +static int intr_num_tasks[IM_NUM_INTERRUPTS];
+</I>&gt;<i> +// Gibt an, ob überhaupt irgendein Interrupt für die jeweilige Nummer
+</I>&gt;<i> +// auszuliefern ist (ist also false, wenn alle intr_to_send-Einträge für den
+</I>&gt;<i> +// Interrupt 0 sind, sonst true).
+</I>&gt;<i> +static bool any_intr[IM_NUM_INTERRUPTS];
+</I>&gt;<i>  
+</I>&gt;<i>  void im_send_interrupts(void);
+</I>&gt;<i>  bool fastrpc_irq(pm_process_t* callee, size_t metadata_size, void* metadata,
+</I>&gt;<i> @@ -193,7 +204,11 @@ interrupt_stack_frame_t* im_handler(interrupt_stack_frame_t* isf)
+</I>&gt;<i>              // Timer ausloesen, wenn noetig
+</I>&gt;<i>              timer_notify(timer_ticks);
+</I>&gt;<i>          } else {
+</I>&gt;<i> -            intr_to_send[int_num]++;
+</I>&gt;<i> +            int i;
+</I>&gt;<i> +            for (i = 0; i &lt; intr_num_tasks[int_num]; i++) {
+</I>&gt;<i> +                intr_to_send[int_num][i]++;
+</I>&gt;<i> +            }
+</I>&gt;<i> +            any_intr[int_num] = true;
+</I>&gt;<i>              im_disable_irq(int_num - IM_IRQ_BASE);
+</I>&gt;<i>          }
+</I>&gt;<i>      } else if (int_num == 0x30) {
+</I>&gt;<i> @@ -261,12 +276,25 @@ static void on_process_destroy(pm_process_t* process, void* prv)
+</I>&gt;<i>          panic(&quot;im.c: on_process_destroy(): Korrupte Interruptnummer %d&quot;, intr);
+</I>&gt;<i>      }
+</I>&gt;<i>  
+</I>&gt;<i> -    if (intr_handling_task[intr] != process) {
+</I>&gt;<i> -        panic(&quot;im.c: on_process_destroy(): Prozess nicht fuer Interrupt %d &quot;
+</I>&gt;<i> -            &quot;zustaendig&quot;, intr);
+</I>&gt;<i> +    int i, j;
+</I>&gt;<i> +    for (i = 0; i &lt; intr_num_tasks[intr]; i++) {
+</I>&gt;<i> +        if (intr_handling_task[intr][i] == process) {
+</I>&gt;<i> +            intr_handling_task[intr][i] = NULL;
+</I>&gt;<i> +
+</I>&gt;<i> +            // Nach vorn schieben, sodass immer nur die vorderen Plätze des
+</I>&gt;<i> +            // Arrays belegt sind
+</I>&gt;<i> +            for (j = --intr_num_tasks[intr]; j &gt; i; j--) {
+</I>&gt;<i> +                if (intr_handling_task[intr][j] != NULL) {
+</I>&gt;<i> +                    intr_handling_task[intr][i] = intr_handling_task[intr][j];
+</I>&gt;<i> +                }
+</I>&gt;<i> +            }
+</I>
+Bist du dir mit dem Algorithmus sicher? Angenommen wir haben vier Tasks
+und löschen den ersten:
+
+0 1 2 3, i = 0, j = 3
+3 1 2,   i = 0, j = 2 -- hier besser aufhören, tun wir aber nicht
+2 1 2,   i = 0, j = 1
+1 1 2,   i = 0, j = 0
+
+Ansonsten sieht der Patch in Ordnung aus.
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002110.html">[tyndur-devel] [PATCH] cdi: Rückgabewert von cdi_bios_int10 gefixt
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002112.html">[tyndur-devel] [PATCH] kbc: Race zwischen send_kbd_command und	IRQ-Handler gefixt
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2111">[ Datum ]</a>
+              <a href="thread.html#2111">[ Thema ]</a>
+              <a href="subject.html#2111">[ Betreff (Subject)]</a>
+              <a href="author.html#2111">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

@@ -1,0 +1,859 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH 3/2] hdaudio: Driver for Intel HD Audio
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%203/2%5D%20hdaudio%3A%20Driver%20for%20Intel%20HD%20Audio&In-Reply-To=%3C1292952260-8884-1-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000243.html">
+   <LINK REL="Next"  HREF="000245.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH 3/2] hdaudio: Driver for Intel HD Audio</H1>
+    <B>Kevin Wolf</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%203/2%5D%20hdaudio%3A%20Driver%20for%20Intel%20HD%20Audio&In-Reply-To=%3C1292952260-8884-1-git-send-email-kevin%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH 3/2] hdaudio: Driver for Intel HD Audio">kevin at tyndur.org
+       </A><BR>
+    <I>Tue Dec 21 18:24:20 CET 2010</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000243.html">[cdi-devel] [PATCH 2/2] CDI.audio: AC97
+</A></li>
+        <LI>Next message: <A HREF="000245.html">[cdi-devel] [PATCH 3/2] hdaudio: Driver for Intel HD Audio
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#244">[ date ]</a>
+              <a href="thread.html#244">[ thread ]</a>
+              <a href="subject.html#244">[ subject ]</a>
+              <a href="author.html#244">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>+ hdaudio: Added a CDI driver for Intel HD Audio. Tested on qemu and
+  VirtualBox.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">kevin at tyndur.org</A>&gt;
+---
+ hdaudio/device.h  |  195 ++++++++++++++++++
+ hdaudio/main.c    |  566 +++++++++++++++++++++++++++++++++++++++++++++++++++++
+ include/cdi/pci.h |    4 +
+ 3 files changed, 765 insertions(+), 0 deletions(-)
+ create mode 100644 hdaudio/device.h
+ create mode 100644 hdaudio/main.c
+
+diff --git a/hdaudio/device.h b/hdaudio/device.h
+new file mode 100644
+index 0000000..8552521
+--- /dev/null
++++ b/hdaudio/device.h
+@@ -0,0 +1,195 @@
++/*
++ * Copyright (c) 2010 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef DEVICE_H
++#define DEVICE_H
++
++#include &lt;stdint.h&gt;
++
++#include &quot;cdi/audio.h&quot;
++#include &quot;cdi/mem.h&quot;
++
++#define BDL_SIZE                      4
++#define BUFFER_SIZE             0x10000
++
++#define BDL_BYTES_ROUNDED \
++    ((BDL_SIZE * sizeof(struct hda_bdl_entry) + 127) &amp; ~127)
++
++#define SAMPLES_PER_BUFFER (BUFFER_SIZE / 2)
++
++/** HD Audio Memory Mapped Registers */
++enum hda_reg {
++    REG_GCTL        = 0x08, ///&lt; GCTL - Global Control
++    REG_WAKEEN      = 0x0c, ///&lt; WAKEEN - Wake Enable
++    REG_STATESTS    = 0x0e, ///&lt; STATESTS - State Change Status
++    REG_INTCTL      = 0x20, ///&lt; INTCTL - Interrupt Control
++    REG_INTSTS      = 0x24, ///&lt; INTSTS - Interrupt Status
++
++    REG_CORBLBASE   = 0x40, ///&lt; CORBLBASE - CORB Lower Base Address
++    REG_CORBUBASE   = 0x44, ///&lt; CORBUBASE - CORB Upper Base Address
++    REG_CORBWP      = 0x48, ///&lt; CORBWP - CORB Write Pointer
++    REG_CORBRP      = 0x4a, ///&lt; CORBRP - CORB Read Pointer
++    REG_CORBCTL     = 0x4c, ///&lt; CORBCTL - CORB Control
++    REG_CORBSIZE    = 0x4e, ///&lt; CORBSIZE - CORB size
++
++    REG_RIRBLBASE   = 0x50, ///&lt; RIRBLBASE - RIRB Lower Base Address
++    REG_RIRBUBASE   = 0x54, ///&lt; RIRBUBASE - RIRB Upper Base Address
++    REG_RIRBWP      = 0x58, ///&lt; RIRBWP - RIRB Write Pointer
++    REG_RINTCNT     = 0x5a, ///&lt; RINTCNT - Respone Interrupt Count
++    REG_RIRBCTL     = 0x5c, ///&lt; RIRBCTL - RIRB Control
++    REG_RIRBSTS     = 0x5d, ///&lt; RIRBSTS - RIRB Interrupt Status
++    REG_RIRBSIZE    = 0x5e, ///&lt; RIRBSIZE - RIRB size
++
++    REG_DPLBASE     = 0x70, ///&lt; DPLBASE - DMA Position Lower Base Address
++    REG_DPUBASE     = 0x74, ///&lt; DPUBASE - DMA Posiition Upper Base Address
++
++    REG_O0_CTLL     = 0x100,    ///&lt; Output 0 - Control Lower
++    REG_O0_CTLU     = 0x102,    ///&lt; Output 0 - Control Upper
++    REG_O0_STS      = 0x103,    ///&lt; Output 0 - Status
++    REG_O0_CBL      = 0x108,    ///&lt; Output 0 - Cyclic Buffer Length
++    REG_O0_STLVI    = 0x10c,    ///&lt; Output 0 - Last Valid Index
++    REG_O0_BDLPL    = 0x118,    ///&lt; Output 0 - BDL Pointer Lower
++    REG_O0_BDLPU    = 0x11c,    ///&lt; Output 0 - BDL Pointer Upper
++};
++
++/* GCTL bits */
++enum hda_reg_gctl {
++    GCTL_RESET  =   (1 &lt;&lt; 0),
++};
++
++/* CORBCTL bits */
++enum hda_reg_corbctl {
++    CORBCTL_CORBRUN = (1 &lt;&lt; 1),
++};
++
++/* RIRBCTL bits */
++enum hda_reg_rirbctl {
++    RIRBCTL_RIRBRUN = (1 &lt;&lt; 1),
++};
++
++/* Stream Descriptor Control Register bits */
++enum hda_reg_sdctl {
++    SDCTL_RUN   =   0x2, ///&lt; Enable DMA Engine
++    SDCTL_IOCE  =   0x4, ///&lt; Enable Interrupt on Complete
++};
++
++/** Represents an address of an output widget */
++struct hda_output {
++    struct cdi_audio_stream stream;
++
++    uint8_t     codec;
++    uint16_t    nid;
++
++    uint32_t    sample_rate;
++    int         num_channels;
++};
++
++/** Buffer Descriptor List Entry */
++struct hda_bdl_entry {
++    uint64_t paddr;
++    uint32_t length;
++    uint32_t flags;
++} __attribute__((packed));
++
++/** Represents the state of an HD Audio PCI card */
++struct hda_device {
++    struct cdi_audio_device audio;
++
++    struct hda_output output;
++
++    struct cdi_mem_area* mmio;
++    uintptr_t mmio_base;
++
++
++    struct cdi_mem_area*    rings;          ///&lt; Buffer for CORB and RIRB
++    uint32_t*               corb;           ///&lt; Command Outbound Ring Buffer
++    volatile uint64_t*      rirb;           ///&lt; Response Inbound Ring Buffer
++    struct hda_bdl_entry*   bdl;            ///&lt; Buffer Descriptor List
++    volatile uint64_t*      dma_pos;        ///&lt; DMA Position in Current Buffer
++
++    size_t                  corb_entries;   ///&lt; Number of CORB entries
++    size_t                  rirb_entries;   ///&lt; Number of RIRB entries
++    uint16_t                rirbrp;         ///&lt; RIRB Read Pointer
++
++    struct cdi_mem_area*    buffer;
++    int                     buffers_completed;
++};
++
++static inline void reg_outl(struct hda_device* hda, int reg, uint32_t value) {
++    volatile uint32_t* mmio = (uint32_t*) ((uint8_t*) hda-&gt;mmio-&gt;vaddr + reg);
++    *mmio = value;
++}
++
++static inline uint32_t reg_inl(struct hda_device* hda, int reg) {
++    volatile uint32_t* mmio = (uint32_t*) ((uint8_t*) hda-&gt;mmio-&gt;vaddr + reg);
++    return *mmio;
++}
++
++
++static inline void reg_outw(struct hda_device* hda, int reg, uint16_t value) {
++    volatile uint16_t* mmio = (uint16_t*) ((uint8_t*) hda-&gt;mmio-&gt;vaddr + reg);
++    *mmio = value;
++}
++
++static inline uint16_t reg_inw(struct hda_device* hda, int reg) {
++    volatile uint16_t* mmio = (uint16_t*) ((uint8_t*) hda-&gt;mmio-&gt;vaddr + reg);
++    return *mmio;
++}
++
++
++static inline void reg_outb(struct hda_device* hda, int reg, uint8_t value) {
++    volatile uint8_t* mmio = (uint8_t*) ((uint8_t*) hda-&gt;mmio-&gt;vaddr + reg);
++    *mmio = value;
++}
++
++static inline uint8_t reg_inb(struct hda_device* hda, int reg) {
++    volatile uint8_t* mmio = (uint8_t*) ((uint8_t*) hda-&gt;mmio-&gt;vaddr + reg);
++    return *mmio;
++}
++
++enum codec_verbs {
++    VERB_GET_PARAMETER      = 0xf0000,
++    VERB_SET_STREAM_CHANNEL = 0x70600,
++    VERB_SET_FORMAT         = 0x20000,
++    VERB_SET_AMP_GAIN_MUTE  = 0x30000,
++};
++
++enum codec_parameters {
++    PARAM_NODE_COUNT        = 0x04,
++    PARAM_AUDIO_WID_CAP     = 0x09,
++};
++
++enum sample_format {
++    SR_48_KHZ               = 0,
++    SR_44_KHZ               = (1 &lt;&lt; 14),
++    BITS_32                 = (4 &lt;&lt;  4),
++    BITS_16                 = (1 &lt;&lt;  4),
++};
++
++
++#endif
+diff --git a/hdaudio/main.c b/hdaudio/main.c
+new file mode 100644
+index 0000000..ce9e506
+--- /dev/null
++++ b/hdaudio/main.c
+@@ -0,0 +1,566 @@
++/*
++ * Copyright (c) 2010 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include &lt;stdlib.h&gt;
++#include &lt;string.h&gt;
++
++#include &quot;cdi/pci.h&quot;
++#include &quot;cdi/misc.h&quot;
++
++#include &quot;device.h&quot;
++
++#define DRIVER_NAME &quot;hdaudio&quot;
++
++#undef DEBUG
++
++#ifdef DEBUG
++#define DPRINTF(fmt, ...) \
++    do { stdout = NULL; printf(DRIVER_NAME &quot;: &quot; fmt, ##__VA_ARGS__); } while(0)
++#else
++#define DPRINTF(...) do {} while(0)
++#endif
++
++static struct cdi_audio_driver driver;
++
++static void hda_handle_interrupt(struct cdi_device* device)
++{
++    struct hda_device* hda = (struct hda_device*) device;
++    uint32_t isr = reg_inl(hda, REG_INTSTS);
++    uint8_t sts = reg_inb(hda, REG_O0_STS);
++
++    DPRINTF(&quot;hda_handle_interrupt, status %x, O0 status %x [%d]\n&quot;,
++        isr, sts, hda-&gt;buffers_completed);
++
++    /* An interrupt for stream 1 means that a buffer has completed */
++    if (sts &amp; 0x4) {
++        cdi_audio_buffer_completed(&amp;hda-&gt;output.stream,
++            hda-&gt;buffers_completed);
++
++        hda-&gt;buffers_completed++;
++        hda-&gt;buffers_completed %= BDL_SIZE;
++    }
++
++    /* Reset interrupt status registers */
++    reg_outl(hda, REG_INTSTS, isr);
++    reg_outb(hda, REG_O0_STS, sts);
++}
++
++static void setup_corb(struct hda_device* hda)
++{
++    uint8_t reg;
++    uint64_t corb_base;
++
++    reg = reg_inb(hda, REG_CORBSIZE);
++
++    /* Check CORB size capabilities and choose the largest size */
++    if (reg &amp; (1 &lt;&lt; 6)) {
++        hda-&gt;corb_entries = 256;
++        reg |= 0x2;
++    } else if (reg &amp; (1 &lt;&lt; 5)) {
++        hda-&gt;corb_entries = 16;
++        reg |= 0x1;
++    } else if (reg &amp; (1 &lt;&lt; 4)) {
++        hda-&gt;corb_entries = 2;
++        reg |= 0x0;
++    } else {
++        printf(&quot;hdaudio: No supported CORB size!\n&quot;);
++    }
++
++    reg_outb(hda, REG_CORBSIZE, reg);
++
++    /* Set CORB base address */
++    corb_base = (uintptr_t) hda-&gt;rings-&gt;paddr.items[0].start + 0;
++    reg_outl(hda, REG_CORBLBASE, corb_base &amp; 0xffffffff);
++    reg_outl(hda, REG_CORBUBASE, corb_base &gt;&gt; 32);
++
++    /* Start DMA engine */
++    reg_outb(hda, REG_CORBCTL, 0x02);
++}
++
++static void setup_rirb(struct hda_device* hda)
++{
++    uint8_t reg;
++    uint64_t rirb_base;
++
++    reg = reg_inb(hda, REG_RIRBSIZE);
++
++    /* Check RIRB size capabilities and choose the largest size */
++    if (reg &amp; (1 &lt;&lt; 6)) {
++        hda-&gt;rirb_entries = 256;
++        reg |= 0x2;
++    } else if (reg &amp; (1 &lt;&lt; 5)) {
++        hda-&gt;rirb_entries = 16;
++        reg |= 0x1;
++    } else if (reg &amp; (1 &lt;&lt; 4)) {
++        hda-&gt;rirb_entries = 2;
++        reg |= 0x0;
++    } else {
++        printf(&quot;hdaudio: No supported RIRB size!\n&quot;);
++    }
++
++    reg_outb(hda, REG_RIRBSIZE, reg);
++
++    /* Set RIRB base address */
++    rirb_base = (uintptr_t) hda-&gt;rings-&gt;paddr.items[0].start + 1024;
++    reg_outl(hda, REG_RIRBLBASE, rirb_base &amp; 0xffffffff);
++    reg_outl(hda, REG_RIRBUBASE, rirb_base &gt;&gt; 32);
++
++    reg_outb(hda, REG_RINTCNT, 0x42); /* TODO Is this only needed for qemu? */
++
++    /* Start DMA engine */
++    reg_outb(hda, REG_RIRBCTL, 0x02);
++}
++
++static void corb_write(struct hda_device* hda, uint32_t verb)
++{
++    uint16_t wp = reg_inw(hda, REG_CORBWP) &amp; 0xff;
++    uint16_t rp;
++    uint16_t next;
++
++    /* Wait until there's a free entry in the CORB */
++    next = (wp + 1) % hda-&gt;corb_entries;
++
++    do {
++        rp = reg_inw(hda, REG_CORBRP) &amp; 0xff;
++    } while (next == rp);
++
++    /* Write to CORB */
++    hda-&gt;corb[next] = verb;
++    reg_outw(hda, REG_CORBWP, next);
++}
++
++static void rirb_read(struct hda_device* hda, uint64_t* response)
++{
++    uint16_t wp;
++    uint16_t rp = hda-&gt;rirbrp;
++
++    /* Wait for an unread entry in the RIRB */
++    do {
++       wp = reg_inw(hda, REG_RIRBWP) &amp; 0xff;
++    } while (wp == rp);
++
++    /* Read from RIRB */
++    rp = (rp + 1) % hda-&gt;rirb_entries;
++    hda-&gt;rirbrp = rp;
++
++    *response = hda-&gt;rirb[rp];
++    reg_outb(hda, REG_RIRBSTS, 0x5); /* TODO Is this only needed for qemu? */
++}
++
++static uint32_t codec_query(struct hda_device* hda, int codec, int nid,
++    uint32_t payload)
++{
++    uint64_t response;
++    uint32_t verb =
++        ((codec &amp; 0xf) &lt;&lt; 28) |
++        ((nid &amp; 0xff) &lt;&lt; 20) |
++        (payload &amp; 0xfffff);
++
++    corb_write(hda, verb);
++    rirb_read(hda, &amp;response);
++
++    return response &amp; 0xffffffff;
++}
++
++static void configure_output_widget(struct hda_device* hda)
++{
++    /* Set sample format */
++    codec_query(hda, hda-&gt;output.codec, hda-&gt;output.nid,
++        VERB_SET_FORMAT |
++        BITS_16 | hda-&gt;output.sample_rate |
++        (hda-&gt;output.num_channels - 1));
++}
++
++static void init_output_widget(struct hda_device* hda)
++{
++    /* CDI stream properties */
++    hda-&gt;output.stream.device = &amp;hda-&gt;audio;
++    hda-&gt;output.stream.num_buffers = BDL_SIZE;
++    hda-&gt;output.stream.buffer_size = BUFFER_SIZE / 2;
++    hda-&gt;output.stream.sample_format = CDI_AUDIO_16SI;
++
++    /* Select the right HDA stream/channel (0:0) */
++    codec_query(hda, hda-&gt;output.codec, hda-&gt;output.nid,
++        VERB_SET_STREAM_CHANNEL | 0x10);
++
++    /* Set sample rate etc. */
++    hda-&gt;output.sample_rate = SR_48_KHZ;
++    hda-&gt;output.num_channels = 2;
++    configure_output_widget(hda);
++}
++
++static int find_output_widget(struct hda_device* hda, int codec)
++{
++    uint32_t param;
++    int num_fg, num_widgets;
++    int fg_start, widgets_start;
++    int i, j;
++
++    param = codec_query(hda, codec, 0, VERB_GET_PARAMETER | PARAM_NODE_COUNT);
++
++    num_fg = param &amp; 0xff;
++    fg_start = (param &gt;&gt; 16) &amp; 0xff;
++
++    DPRINTF(&quot;    %d function groups starting at ID %d\n&quot;, num_fg, fg_start);
++
++    for (i = 0; i &lt; num_fg; i++) {
++        param = codec_query(hda, codec, fg_start + i,
++            VERB_GET_PARAMETER | PARAM_NODE_COUNT);
++
++        num_widgets = param &amp; 0xff;
++        widgets_start = (param &gt;&gt; 16) &amp; 0xff;
++
++        DPRINTF(&quot;    %d widgets starting at ID %d\n&quot;,
++            num_widgets, widgets_start);
++        for (j = 0; i &lt; num_widgets; j++) {
++            param = codec_query(hda, codec, widgets_start + j,
++                VERB_GET_PARAMETER | PARAM_AUDIO_WID_CAP);
++            if ((param != 0) &amp;&amp; ((param &amp; 0xf00000) == 0)) {
++                DPRINTF(&quot;    Audio output at ID %d!\n&quot;, widgets_start + j);
++
++                hda-&gt;output.codec = codec;
++                hda-&gt;output.nid = widgets_start + j;
++
++                return 0;
++            }
++        }
++    }
++
++    return -1;
++}
++
++static void hda_enumerate_codecs(struct hda_device* hda)
++{
++    uint16_t statests;
++    int i;
++
++    DPRINTF(&quot;hda_enumerate_codecs\n&quot;);
++    statests = reg_inw(hda, REG_STATESTS);
++
++    /*
++     * Our model of the hardware is completely wrong: Our hda_device is the PCI
++     * card when in fact it should be a device on an HDA bus which is provided
++     * by the PCI device. This mean that we're limited to using a single
++     * output.
++     *
++     * So let's just pick the first output widget and use that one.
++     */
++    for (i = 0; i &lt; 15; i++) {
++        if ((statests &amp; (1 &lt;&lt; i))) {
++            DPRINTF(&quot;   Found codec at %d\n&quot;, i);
++            if (find_output_widget(hda, i)) {
++                return;
++            }
++        }
++    }
++}
++
++static void hda_reset(struct hda_device* hda)
++{
++    DPRINTF(&quot;hda_reset\n&quot;);
++
++    /* Must clear CORB/RIRB RUN bits before reset */
++    reg_outl(hda, REG_CORBCTL, 0);
++    reg_outl(hda, REG_RIRBCTL, 0);
++    while ((reg_inl(hda, REG_CORBCTL) &amp; CORBCTL_CORBRUN)
++        || (reg_inl(hda, REG_RIRBCTL) &amp; RIRBCTL_RIRBRUN));
++
++    /* Reset the CRST bit and wait until hardware is in reset */
++    reg_outl(hda, REG_GCTL, 0);
++    while ((reg_inl(hda, REG_GCTL) &amp; GCTL_RESET));
++
++    /* TODO Need a delay here? */
++
++    /* Take the hardware out of reset */
++    reg_outl(hda, REG_GCTL, GCTL_RESET);
++    while ((reg_inl(hda, REG_GCTL) &amp; GCTL_RESET) == 0);
++
++    /* We want to get all interrupts */
++    reg_outw(hda, REG_WAKEEN, 0xffff);
++    reg_outl(hda, REG_INTCTL, 0x800000ff);
++
++    /* Setup data structures */
++    setup_corb(hda);
++    setup_rirb(hda);
++    DPRINTF(&quot;CORB size: %d entries; RIRB size: %d entries\n&quot;,
++        hda-&gt;corb_entries, hda-&gt;rirb_entries);
++
++    /* Need to wait 25 frames (521 &#194;&#181;s) before enumerating codecs */
++    cdi_sleep_ms(1);
++    hda_enumerate_codecs(hda);
++}
++
++static void init_stream_descriptor(struct hda_device* hda)
++{
++    uint64_t bdl_base, dma_pos_base;
++    int i;
++
++    /* Set some Stream Descriptor registers for Output 0 */
++    reg_outb(hda, REG_O0_CTLU, 0x10);
++    reg_outl(hda, REG_O0_CBL, BDL_SIZE * BUFFER_SIZE);
++    reg_outw(hda, REG_O0_STLVI, BDL_SIZE - 1);
++
++    /* Setup Buffer Description List */
++    bdl_base = (uintptr_t) hda-&gt;rings-&gt;paddr.items[0].start + 3072;
++    reg_outl(hda, REG_O0_BDLPL, bdl_base &amp; 0xffffffff);
++    reg_outl(hda, REG_O0_BDLPU, bdl_base &gt;&gt; 32);
++
++    for (i = 0; i &lt; BDL_SIZE; i++) {
++        hda-&gt;bdl[i].paddr =
++            hda-&gt;buffer-&gt;paddr.items[0].start + (i * BUFFER_SIZE);
++        hda-&gt;bdl[i].length = BUFFER_SIZE;
++        hda-&gt;bdl[i].flags = 1;
++    }
++
++    memset(hda-&gt;buffer-&gt;vaddr, 0, BDL_SIZE * BUFFER_SIZE);
++
++    /* Initialise DMA Position in Buffer structure */
++    for (i = 0; i &lt; 8; i++) {
++        hda-&gt;dma_pos[i] = 0;
++    }
++
++    dma_pos_base = (uintptr_t) hda-&gt;rings-&gt;paddr.items[0].start + 3072
++        + BDL_BYTES_ROUNDED;
++    reg_outl(hda, REG_DPLBASE, (dma_pos_base &amp; 0xffffffff) | 0x1); /* TODO */
++    reg_outl(hda, REG_DPUBASE, dma_pos_base &gt;&gt; 32);
++}
++
++static struct cdi_device* hda_init_device(struct cdi_bus_data* bus_data)
++{
++    struct cdi_pci_device* pci = (struct cdi_pci_device*) bus_data;
++    struct hda_device* hda;
++    int i;
++
++    /* Check PCI class/subclass */
++    if (pci-&gt;class_id != PCI_CLASS_MULTIMEDIA ||
++        pci-&gt;subclass_id != PCI_SUBCLASS_MM_HDAUDIO)
++    {
++        return NULL;
++    }
++
++    /* Initialise device structure */
++    hda = calloc(1, sizeof(*hda));
++
++    hda-&gt;rings = cdi_mem_alloc(1024 + 2048 + BDL_BYTES_ROUNDED + 128,
++        CDI_MEM_PHYS_CONTIGUOUS | 7);
++    if (hda-&gt;rings == NULL) {
++        goto fail;
++    }
++
++    hda-&gt;corb       = (uint32_t*) ((uintptr_t) hda-&gt;rings-&gt;vaddr + 0);
++    hda-&gt;rirb       = (uint64_t*) ((uintptr_t) hda-&gt;rings-&gt;vaddr + 1024);
++    hda-&gt;bdl        = (void*    ) ((uintptr_t) hda-&gt;rings-&gt;vaddr + 3072);
++    hda-&gt;dma_pos    = (uint64_t*) ((uintptr_t) hda-&gt;rings-&gt;vaddr + 3072
++                        + BDL_BYTES_ROUNDED);
++
++    hda-&gt;buffer = cdi_mem_alloc(BDL_SIZE * BUFFER_SIZE,
++        CDI_MEM_PHYS_CONTIGUOUS | 7);
++    if (hda-&gt;buffer == NULL) {
++        goto fail;
++    }
++
++    /* Get information from PCI config space */
++    cdi_list_t reslist = pci-&gt;resources;
++    struct cdi_pci_resource* res;
++    for (i = 0; (res = cdi_list_get(reslist, i)); i++) {
++        if (res-&gt;type == CDI_PCI_MEMORY) {
++            hda-&gt;mmio = cdi_mem_map(res-&gt;start, res-&gt;length);
++            if (hda-&gt;mmio == NULL) {
++                goto fail;
++            }
++        }
++    }
++
++    cdi_register_irq(pci-&gt;irq, hda_handle_interrupt, &amp;hda-&gt;audio.dev);
++    cdi_pci_alloc_ioports(pci);
++
++    /* Initialise hardware */
++    hda_reset(hda);
++    init_output_widget(hda);
++    init_stream_descriptor(hda);
++
++    hda-&gt;audio.record = 0;
++    hda-&gt;audio.streams = cdi_list_create();
++    cdi_list_push(hda-&gt;audio.streams, &amp;hda-&gt;output.stream);
++
++    driver.set_volume(&amp;hda-&gt;output.stream, 255);
++
++    return &amp;hda-&gt;audio.dev;
++
++fail:
++    if (hda-&gt;buffer) {
++        cdi_mem_free(hda-&gt;buffer);
++    }
++    if (hda-&gt;rings) {
++        cdi_mem_free(hda-&gt;rings);
++    }
++
++    free(hda);
++    return NULL;
++}
++
++static void hda_remove_device(struct cdi_device* device)
++{
++    /* TODO */
++}
++
++
++static int hda_driver_init(void)
++{
++    cdi_driver_init(&amp;driver.drv);
++
++    return 0;
++}
++
++static int hda_driver_destroy(void)
++{
++    cdi_driver_destroy(&amp;driver.drv);
++
++    return 0;
++}
++
++static void hda_set_volume(struct cdi_audio_stream* stream, uint8_t volume)
++{
++    struct hda_device* hda = (struct hda_device*) stream-&gt;device;
++    int meta = 0xb000; /* Output Amp, Left and Right */
++
++    if (volume == 0) {
++        /* Set the mute bit */
++        volume = 0x80;
++    } else {
++        /* Scale to 7-bit value */
++        volume &gt;&gt;= 1;
++    }
++
++    codec_query(hda, hda-&gt;output.codec, hda-&gt;output.nid,
++        VERB_SET_AMP_GAIN_MUTE | meta | volume);
++}
++
++static int hda_set_sample_rate(struct cdi_audio_stream* stream,
++    int sample_rate)
++{
++    struct hda_device* hda = (struct hda_device*) stream-&gt;device;
++
++    switch (sample_rate) {
++        case 44100:
++            hda-&gt;output.sample_rate = SR_44_KHZ;
++            break;
++        default:
++            sample_rate = 48000;
++            hda-&gt;output.sample_rate = SR_48_KHZ;
++            break;
++    }
++
++    configure_output_widget(hda);
++
++    return sample_rate;
++}
++
++static int hda_set_channel_count(struct cdi_audio_device* dev, int channels)
++{
++    struct hda_device* hda = (struct hda_device*) dev;
++
++    if (channels &lt; 1 || channels &gt; 2) {
++        channels = 2;
++    }
++
++    hda-&gt;output.num_channels = channels;
++    configure_output_widget(hda);
++
++    return channels;
++}
++
++static int hda_transfer_data(struct cdi_audio_stream* stream, size_t buffer,
++    struct cdi_mem_area* memory, size_t offset)
++{
++    struct hda_device* hda = (struct hda_device*) stream-&gt;device;
++
++    DPRINTF(&quot;hda_transfer_data: buf %d, off %d\n&quot;, buffer, offset);
++
++    if (buffer &gt;= BDL_SIZE || offset &gt;= SAMPLES_PER_BUFFER) {
++        return -1;
++    }
++
++    memcpy((uint8_t*)hda-&gt;buffer-&gt;vaddr + buffer * BUFFER_SIZE + (offset * 2),
++        memory-&gt;vaddr,
++        (SAMPLES_PER_BUFFER - offset) * 2);
++
++    return 0;
++}
++
++static cdi_audio_status_t hda_change_status(struct cdi_audio_device* device,
++    cdi_audio_status_t status)
++{
++    struct hda_device* hda = (struct hda_device*) device;
++    uint16_t ctl;
++
++    DPRINTF(&quot;hda_change_status: %d\n&quot;, status);
++
++    if (status == CDI_AUDIO_PLAY) {
++        ctl = SDCTL_RUN | SDCTL_IOCE;
++    } else {
++        ctl = 0;
++    }
++
++    reg_outw(hda, REG_O0_CTLL, ctl);
++
++    return status;
++}
++
++static void hda_get_position(struct cdi_audio_stream* stream,
++    cdi_audio_position_t* position)
++{
++    struct hda_device* hda = (struct hda_device*) stream-&gt;device;
++    uint32_t pos = hda-&gt;dma_pos[4] &amp; 0xffffffff;
++
++    position-&gt;buffer = pos / BUFFER_SIZE;
++    position-&gt;frame = (pos % BUFFER_SIZE) / 2;
++
++    DPRINTF(&quot;hda_get_position: %d/%d\n&quot;, position-&gt;buffer, position-&gt;frame);
++}
++
++static struct cdi_audio_driver driver = {
++    .drv = {
++        .name           = DRIVER_NAME,
++        .type           = CDI_AUDIO,
++        .bus            = CDI_PCI,
++        .init           = hda_driver_init,
++        .destroy        = hda_driver_destroy,
++        .init_device    = hda_init_device,
++        .remove_device  = hda_remove_device,
++    },
++
++    .set_volume             = hda_set_volume,
++    .set_sample_rate        = hda_set_sample_rate,
++    .set_number_of_channels = hda_set_channel_count,
++    .transfer_data          = hda_transfer_data,
++    .change_device_status   = hda_change_status,
++    .get_position           = hda_get_position,
++};
++
++CDI_DRIVER(DRIVER_NAME, driver)
+diff --git a/include/cdi/pci.h b/include/cdi/pci.h
+index 23bea62..d60a105 100644
+--- a/include/cdi/pci.h
++++ b/include/cdi/pci.h
+@@ -17,6 +17,10 @@
+ #include &lt;cdi-osdep.h&gt;
+ #include &lt;cdi/lists.h&gt;
+ 
++#define PCI_CLASS_MULTIMEDIA      0x04
++#define PCI_SUBCLASS_MM_HDAUDIO   0x03
++
++
+ /**
+  * \german
+  * Beschreibt ein PCI-Ger&#195;&#164;t
+-- 
+1.6.0.2
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000243.html">[cdi-devel] [PATCH 2/2] CDI.audio: AC97
+</A></li>
+	<LI>Next message: <A HREF="000245.html">[cdi-devel] [PATCH 3/2] hdaudio: Driver for Intel HD Audio
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#244">[ date ]</a>
+              <a href="thread.html#244">[ thread ]</a>
+              <a href="subject.html#244">[ subject ]</a>
+              <a href="author.html#244">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

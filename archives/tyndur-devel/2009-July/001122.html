@@ -1,0 +1,157 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] tcpip: tcp_free_connection()
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20tcpip%3A%20tcp_free_connection%28%29&In-Reply-To=%3C1246981660-6626-1-git-send-email-xanclic%40googlemail.com%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001121.html">
+   <LINK REL="Next"  HREF="001123.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] tcpip: tcp_free_connection()</H1>
+    <B>Max Reitz</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20tcpip%3A%20tcp_free_connection%28%29&In-Reply-To=%3C1246981660-6626-1-git-send-email-xanclic%40googlemail.com%3E"
+           TITLE="[tyndur-devel] [PATCH] tcpip: tcp_free_connection()">xanclic at googlemail.com
+                  </A><BR>
+    <I>Di Jul  7 17:47:40 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001121.html">[tyndur-devel] [PATCH] tcpip: SYN-ACK-Timeout-TODO +	Clientportoverflow
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001123.html">[PATCH] +cp: -r, -v und -t hinzugefÃ¼gt
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1122">[ Datum ]</a>
+              <a href="thread.html#1122">[ Thema ]</a>
+              <a href="subject.html#1122">[ Betreff (Subject) ]</a>
+              <a href="author.html#1122">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>! tcpip: Das Löschen einer Verbindung nach
+         tcp_free_connection() ausgelagert
+         (und gelockt)
+- tcpip: Kommentar des doppelten printf()
+---
+ src/modules/tcpip/include/tcp.h |    1 +
+ src/modules/tcpip/tcp.c         |   46 ++++++++++++++++++++++++++------------
+ 2 files changed, 32 insertions(+), 15 deletions(-)
+
+diff --git a/src/modules/tcpip/include/tcp.h b/src/modules/tcpip/include/tcp.h
+index 4f33957..b0b5917 100644
+--- a/src/modules/tcpip/include/tcp.h
++++ b/src/modules/tcpip/include/tcp.h
+@@ -116,6 +116,7 @@ struct tcp_server {
+ 
+ void init_tcp(void);
+ struct tcp_connection* tcp_open_connection(dword ip, word port);
++void tcp_free_connection(struct tcp_connection* conn);
+ void tcp_accept_connection(struct tcp_connection* conn);
+ 
+ word tcp_checksum
+diff --git a/src/modules/tcpip/tcp.c b/src/modules/tcpip/tcp.c
+index 061ceb9..1501316 100644
+--- a/src/modules/tcpip/tcp.c
++++ b/src/modules/tcpip/tcp.c
+@@ -186,7 +186,6 @@ struct tcp_connection* tcp_open_connection(dword ip, word port)
+ {
+     struct routing_entry* route = get_routing_entry(ip);
+     uint64_t timeout;
+-    int tcp_list_size, i;
+ 
+     if (route == NULL) {
+         return NULL;
+@@ -223,18 +222,7 @@ struct tcp_connection* tcp_open_connection(dword ip, word port)
+ 
+     if (conn-&gt;status == TCPS_WAIT_FOR_SYN_ACK) {
+         tcp_send_reset(conn);
+-        tcp_list_size = list_size(tcp_connections);
+-        for (i = 0; i &lt; tcp_list_size; i++) //Geht alle Elemente durch, es könnte ja sein, dass conn jetzt nicht mehr das erste Element ist
+-        {
+-            if (list_get_element_at(tcp_connections, i) == conn) {
+-                list_remove(tcp_connections, i); //Hoffen wir mal, dass in der Zwischenzeit (von list_get_element_at() bis hier) nichts gepusht wurde
+-                break;
+-            }
+-        }
+-        list_destroy(conn-&gt;out_buffer);
+-        list_destroy(conn-&gt;in_buffer);
+-        list_destroy(conn-&gt;to_lostio);
+-        free(conn);
++        tcp_free_connection(conn);
+         DEBUG_MSG(&quot;Timeout beim Verbindungsaufbau&quot;);
+         return NULL;
+     }
+@@ -244,6 +232,36 @@ struct tcp_connection* tcp_open_connection(dword ip, word port)
+     return conn;
+ }
+ 
++void tcp_free_connection(struct tcp_connection* conn)
++{
++    int tcp_list_size, i;
++    
++    tcp_list_size = list_size(tcp_connections);
++    for (i = 0; i &lt; tcp_list_size; i++) //Geht alle Elemente durch, es koennte
++                                        //ja sein, dass conn jetzt nicht mehr
++                                        //das erste Element ist
++    {
++        if (list_get_element_at(tcp_connections, i) == conn) {
++            p();
++            //Falls inzwischen was geaendert wurde, dauert das erneute Durchlaufen
++            //der ganze Liste relativ lang. Aber es passiert vermutlich selten und
++            //anstatt die ganze Schleife zu locken, ist das bestimmt besser.
++            if (list_get_element_at(tcp_connections, i) != conn) {
++                v();
++                i = -1; //Wird nach dem continue auf 0 inkrementiert
++                continue;
++            }
++            list_remove(tcp_connections, i);
++            v();
++            break;
++        }
++    }
++    list_destroy(conn-&gt;out_buffer);
++    list_destroy(conn-&gt;in_buffer);
++    list_destroy(conn-&gt;to_lostio);
++    free(conn);
++}
++
+ void tcp_accept_connection(struct tcp_connection* conn)
+ {
+     DEBUG_MSG(&quot;tcp_send_syn_ack&quot;);
+@@ -394,8 +412,6 @@ void tcp_receive(dword source_ip, void* data, dword data_size)
+         
+         printf(&quot;\033[1;31mTCP-Checksumme ungueltig\n\033[0;37m\n\n&quot;);
+ 
+-        //printf(&quot;\033[1;31mTCP-Checksumme ungueltig\n\033[0;37m\n\n&quot;);
+-
+ #if 0
+         debug_checksum = TRUE;
+         p();
+-- 
+1.6.0.2
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001121.html">[tyndur-devel] [PATCH] tcpip: SYN-ACK-Timeout-TODO +	Clientportoverflow
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001123.html">[PATCH] +cp: -r, -v und -t hinzugefÃ¼gt
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1122">[ Datum ]</a>
+              <a href="thread.html#1122">[ Thema ]</a>
+              <a href="subject.html#1122">[ Betreff (Subject)]</a>
+              <a href="author.html#1122">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

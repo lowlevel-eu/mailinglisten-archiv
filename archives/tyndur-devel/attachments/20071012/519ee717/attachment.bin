@@ -1,0 +1,401 @@
+Index: src/modules/lib/stdlibc/file.c
+===================================================================
+--- src/modules/lib/stdlibc/file.c	(Revision 590)
++++ src/modules/lib/stdlibc/file.c	(Arbeitskopie)
+@@ -45,69 +45,8 @@
+ #define IO_BUFFER_MODE_FULL 1
+ #define IO_BUFFER_MODE_LINE 2
+ 
++extern char* io_get_absolute_path(const char* path);
+ 
+-char* io_get_absolute_path(const char* path)
+-{
+-    const char* cwd = getcwd(NULL, 0);
+-    if (cwd == NULL) {
+-        cwd = path;
+-    }
+-    char* buffer = malloc(strlen(path) + strlen(cwd) + 2);
+-    size_t cwd_len = strlen(cwd);
+-    
+-    //Ueberpruefen, ob ein relativer pfad vorliegt
+-    if(strcmp(path, "..") == 0)
+-    {
+-        //CWD kopieren
+-        memcpy(buffer, cwd, cwd_len + 1);
+-
+-        int i = strlen(buffer) - 2;
+-        for(; i > 0; i--)
+-        {
+-            if(buffer[i] == '/')
+-            {
+-                if(buffer[i-1] == ':')
+-                {
+-                    i++;
+-                }
+-                buffer[i] = 0;
+-                break;
+-            }
+-        }
+-    }
+-    else if((strcmp(path, ".") == 0) && (strlen(path) == 1))
+-    {
+-        memcpy(buffer, cwd, cwd_len);
+-        buffer[cwd_len] = 0;
+-    }
+-    else if(strstr(path, ":/") == NULL)
+-    {
+-        //CWD kopieren
+-        memcpy(buffer, cwd, cwd_len);
+-
+-
+-        if(buffer[cwd_len-1] != '/')
+-        {
+-            buffer[cwd_len] = '/';
+-            memcpy((void*)((dword)buffer + cwd_len + 1), path, strlen(path) + 1);
+-        }
+-        else
+-        {
+-            memcpy((void*)((dword)buffer + cwd_len), path, strlen(path) + 1);
+-        }
+-    }
+-    else
+-    {
+-        memcpy(buffer, path, strlen(path) + 1);
+-    }
+-    
+-    if (cwd != path) {
+-        free((char*) cwd);
+-    }
+-    return buffer;
+-}
+-
+-
+ /**
+  * Datei oeffnen
+  *
+Index: src/modules/lib/lost_path.c
+===================================================================
+--- src/modules/lib/lost_path.c	(Revision 0)
++++ src/modules/lib/lost_path.c	(Revision 0)
+@@ -0,0 +1,321 @@
++/*  
++ * Copyright (c) 2007 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Antoine Kaufmann.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS 
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR 
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, 
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, 
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; 
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR 
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <string.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <unistd.h>
++#include <stdint.h>
++#include <collections.h>
++
++typedef enum {NO_SEP, SERVICE_SEP, PATH_SEP, PIPE_SEP} path_sep_t;
++struct path_element {
++    path_sep_t left_sep;
++    path_sep_t right_sep;
++
++    char text[255];
++};
++
++/**
++ * Zerstueckelt einen Pfad in die einzelnen Elemente
++ */
++static bool get_path_element(const char* path, int index, struct path_element* element)
++{
++    bool escaped = FALSE;
++    char* pos = (char*) path;
++    char* last_element = (char*) path;
++    path_sep_t left_sep = NO_SEP;
++
++    // Pfad Zeichenweise durchgehen
++    while (TRUE) {
++        // Wenn das letzte Zeichen ein Escape-Zeichen war, muss das aktuelle
++        // nicht beruecksichtigt werden
++        if (escaped == TRUE) {
++            escaped = FALSE;
++        } else {
++            size_t cur_size = (uintptr_t) pos - (uintptr_t) last_element;
++            // Wenn das aktuelle Zeichen ein Escape ist, wird escaped auf TRUE
++            // gesetzt, damit das naechste Zeichen nicht beachtet wird
++            if (*pos == '\\') {
++                escaped = TRUE;
++            }
++            // Auf Service-Seperator :/ Pruefen
++            else if ((*pos == ':') && (*(pos + 1) == '/')) {
++                // Ist das das gewuenschte Element?
++                if (index-- == 0) {
++                    element->left_sep = left_sep;
++                    element->right_sep = SERVICE_SEP;
++                    
++                    // Text kopieren
++                    memcpy(element->text, last_element, cur_size);
++                    element->text[cur_size] = '\0';
++
++                    // Wir sind am Ende angekommen
++                    return TRUE;
++                }
++
++                // Fuer das naechste Element
++                left_sep = SERVICE_SEP;
++                last_element = pos + 2;
++
++                // Da dieser Seperator 2 Zeichen lang ist, muss pos auch noch
++                // inkrementiert werden;
++                pos++;
++            }
++            // Pfad-Seperator /
++            else if (*pos == '/') {
++                if (pos != last_element) {
++                    // Ist das das gewuenschte Element?
++                    if (index-- == 0) {
++                        element->left_sep = left_sep;
++                        element->right_sep = PATH_SEP;
++
++                        // Text kopieren
++                        memcpy(element->text, last_element, cur_size);
++                        element->text[cur_size] = '\0';
++
++                        // Wir sind am Ende angekommen
++                        return TRUE;
++                    }
++                }
++                // Fuer das naechste Element
++                left_sep = PATH_SEP;
++                last_element = pos + 1;
++            }
++            // Pfad-Seperator /
++            else if (*pos == '|') {
++                // Ist das das gewuenschte Element?
++                if (index-- == 0) {
++                    element->left_sep = left_sep;
++                    element->right_sep = PIPE_SEP;
++
++                    // Text kopieren
++                    memcpy(element->text, last_element, cur_size);
++                    element->text[cur_size] = '\0';
++
++                    // Wir sind am Ende angekommen
++                    return TRUE;
++                }
++
++                // Fuer das naechste Element
++                left_sep = PIPE_SEP;
++                last_element = pos + 1;
++            }
++            // String-Ende
++            else if (*pos == '\0') {
++                // Ist das das gewuenschte Element?
++                if (index-- == 0) {
++                    element->left_sep = left_sep;
++                    element->right_sep = NO_SEP;
++
++                    // Text kopieren
++                    memcpy(element->text, last_element, cur_size);
++                    element->text[cur_size] = '\0';
++
++                    // Wir sind am Ende angekommen
++                    return TRUE;
++                }
++                
++                // Hier ist eh Fertig. Wenn noch nicht abgebrochen wurde, sind
++                // wir am Ende angelangt
++                return FALSE;
++            }
++        }
++        pos++;
++    }
++    
++    // Sollte nicht vorkommen
++    return FALSE;
++}
++
++/**
++ * Erstellt aus einem Beliebigen Pfad einen absoluten
++ */
++char* io_get_absolute_path(const char* path)
++{
++    char* cwd = getcwd(NULL, 0);
++    // Hier wird eine Liste mit all den Pfad-Elementen erstellt
++    struct path_element* element = malloc(sizeof(struct path_element));
++    list_t* element_stack = list_create();
++
++    int i = 0;
++    // Elemente einzeln holen, und an Liste anhaengen
++    while (get_path_element(path, i++, element) == TRUE) { 
++        list_push(element_stack, element);
++        element = malloc(sizeof(struct path_element));
++    }
++    // Das letzte Element ist unbenutzt und kann freigegeben werden
++    free(element);
++
++    
++    // Jetzt werden relative Pfade aufgeloest
++    int last_element = list_size(element_stack) - 1;
++    element = list_get_element_at(element_stack, last_element++);
++    
++    // Wenn der Pfad relativ ist wird noch cwd vorne angehaengt
++    if ((element->left_sep == NO_SEP) && (element->right_sep !=
++        SERVICE_SEP))
++    {
++        // CWD-Elemente holen und an Liste anhaengen
++        i = 0;
++        struct path_element* cwd_element = malloc(sizeof(struct path_element));
++        while (get_path_element(cwd, i++, cwd_element) == TRUE) {
++            list_insert(element_stack, last_element, cwd_element);
++            cwd_element = malloc(sizeof(struct path_element));
++        }
++        // Das letzte Element ist unbenutzt und kann freigegeben werden
++        free(cwd_element);
++
++        // Beim letzten Element muss noch der Seperator angepasst werden
++        // TODO: Stimmt das?
++        cwd_element = list_get_element_at(element_stack, last_element);
++        cwd_element->right_sep = PATH_SEP;
++    }
++    
++    // Wen der Pfad relativ zum aktuellen Service ist wird die Sache etwas
++    // komplizierter. Dann muessen von CWD erst alle verzeichnisse bis zum
++    // hintersten Service abgetrennt werden
++    if (element->left_sep == PATH_SEP)
++    {
++        list_t* cwd_list = list_create();
++
++        // CWD-Elemente holen und an Liste anhaengen
++        i = 0;
++        struct path_element* cwd_element = malloc(sizeof(struct path_element));
++        while (get_path_element(cwd, i++, cwd_element) == TRUE) {
++            cwd_list = list_push(cwd_list, cwd_element);
++            cwd_element = malloc(sizeof(struct path_element));
++        }
++        // Das letzte Element ist unbenutzt und kann freigegeben werden
++        free(cwd_element);
++        
++        // Jetzt werden alle Elemente bis zum Service-Element verworfen
++        i = 0;
++        while ((cwd_element = list_get_element_at(cwd_list, i))) {
++            if (cwd_element->right_sep != SERVICE_SEP) {
++                list_remove(cwd_list, i);
++            } else {
++                break;
++            }
++        }
++
++        // Die uebrig gebliebenen Elemente werden angehaengt
++        i = list_size(cwd_list);
++        while ((cwd_element = list_get_element_at(cwd_list, --i))) {
++            list_insert(element_stack, last_element, cwd_element);
++        }
++        
++        list_destroy(cwd_list);
++    } 
++    
++
++    // Dot und Dotdot Elemente eliminieren
++    i = 0;
++    int dotdot = 0;
++    while ((element = list_get_element_at(element_stack, i))) {
++        // Bei Dotdot wird das aktuelle geloescht und dotdot inkrementiert,
++        // damit die naechsten Elemente entsprechend geloescht werden
++        if (strcmp(element->text, "..") == 0) {
++            list_remove(element_stack, i);
++            dotdot++;
++        }
++        // Dot-Elemente und leere werden einfach verworfen
++        else if ((strcmp(element->text, ".") == 0) || (strlen(element->text)
++            == 0))
++        {
++            list_remove(element_stack, i);
++        }
++        // Alles andere bleibt gleich
++        else {
++            // Wenn Dotdot-Elemente da waren, muss das Element geloescht werden
++            // und dotdot dekrementiert
++            if (dotdot != 0) {
++                list_remove(element_stack, i);
++                dotdot--;
++            } else {
++                i++;
++            }
++        }
++    }
++    
++
++    // Berechnen, wieviel Speicher der fertige Pfad belegt
++    size_t size = 0;
++    i = 0;
++    while ((element = list_get_element_at(element_stack, i++))) {
++        size += strlen(element->text);
++        // Berechnen, wieviel Speicher der Seperator belegen wird
++        switch (element->right_sep) {
++            case SERVICE_SEP:
++                size += 1;
++            case PATH_SEP:
++            case PIPE_SEP:
++                size += 1;
++        }
++    }
++
++    // Jezt ist es soweit, der neue Pfad kann kopiert werden
++    char* new_path = malloc(size + 1);
++    char* pos = new_path;
++    i = list_size(element_stack);
++    while ((element = list_get_element_at(element_stack, --i))) {
++        // Element-Text kopieren
++        size = strlen(element->text);
++        memcpy(pos, element->text, size);
++        pos += size;
++        
++        // Seperator einfuegen
++        switch (element->right_sep) {
++            case SERVICE_SEP:
++                *(pos++) = ':';
++                *(pos++) = '/';
++                break;
++
++            case PATH_SEP:
++                *(pos++) = '/';
++                break;
++
++            case PIPE_SEP:
++                *(pos++) = '|';
++                break;
++        }
++    }
++    *pos = '\0';
++    //printf("Path='%s'  => '%s'\n", path, new_path);
++    free(cwd);
++    list_destroy(element_stack);
++    return new_path;
++}
++

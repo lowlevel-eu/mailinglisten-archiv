@@ -1,0 +1,266 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 4/4] libc: Blockpuffer auf allen Dateien	aktivieren
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%204/4%5D%20libc%3A%20Blockpuffer%20auf%20allen%20Dateien%0A%09aktivieren&In-Reply-To=%3C1241272271-24571-5-git-send-email-toni%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="000836.html">
+   <LINK REL="Next"  HREF="000840.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 4/4] libc: Blockpuffer auf allen Dateien	aktivieren</H1>
+    <B>Antoine Kaufmann</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%204/4%5D%20libc%3A%20Blockpuffer%20auf%20allen%20Dateien%0A%09aktivieren&In-Reply-To=%3C1241272271-24571-5-git-send-email-toni%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 4/4] libc: Blockpuffer auf allen Dateien	aktivieren">toni at tyndur.org
+                  </A><BR>
+    <I>Sa Mai  2 15:51:11 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="000836.html">[tyndur-devel] [PATCH 3/4] Pascal-RTL: Libc-Pufferung auf Streams	deaktivieren
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="000840.html">[tyndur-devel] [PATCH 4/4] libc: Blockpuffer auf allen Dateien	aktivieren
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#837">[ Datum ]</a>
+              <a href="thread.html#837">[ Thema ]</a>
+              <a href="subject.html#837">[ Betreff (Subject) ]</a>
+              <a href="author.html#837">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* libc: Blockpuffer auf allen Dateien aktivieren
+* libc: Buffer fuer stderr deaktivieren
+---
+ src/modules/include/lostio.h     |    6 ++++++
+ src/modules/lib/lostio/handler.c |   12 +++++++++---
+ src/modules/lib/posix/socket.c   |    9 +++++----
+ src/modules/lib/stdlibc/file.c   |   29 +++++++++++++++++++++++++++--
+ src/modules/lib/stdlibc/stdio.c  |    4 ++++
+ 5 files changed, 51 insertions(+), 9 deletions(-)
+
+diff --git a/src/modules/include/lostio.h b/src/modules/include/lostio.h
+index 60cddf1..57e3cf7 100644
+--- a/src/modules/include/lostio.h
++++ b/src/modules/include/lostio.h
+@@ -117,6 +117,12 @@ typedef struct
+ } typehandle_t;
+ 
+ 
++/// Geoeffnete Datei auf Clientseite (Wrapper fuer FILE)
++struct lostio_internal_file {
++    io_resource_t res;
++    bool          free_buffer;
++};
++
+ 
+ ///LostIO-Schnittstelle initialisieren
+ void lostio_init(void);
+diff --git a/src/modules/lib/lostio/handler.c b/src/modules/lib/lostio/handler.c
+index ce61485..271738e 100644
+--- a/src/modules/lib/lostio/handler.c
++++ b/src/modules/lib/lostio/handler.c
+@@ -63,6 +63,12 @@ void rpc_io_open(pid_t pid, dword correlation_id, size_t data_size, void* data)
+     
+     //Wird bei pipes als quelle verwendet
+     io_resource_t* io_source = (io_resource_t*) ((dword)data + 1 + sizeof(pid_t));
++
++    // FIXME
++    struct lostio_internal_file* int_source = malloc(sizeof(*int_source));
++    int_source-&gt;res = *io_source;
++    int_source-&gt;free_buffer = FALSE;
++    io_source = &amp;int_source-&gt;res;
+     
+     byte* attr = (byte*) data;
+     pid_t* caller_pid = (pid_t*) ((dword)data + 1 );
+@@ -79,6 +85,7 @@ void rpc_io_open(pid_t pid, dword correlation_id, size_t data_size, void* data)
+     {
+         io_res.pid = 0;
+         rpc_send_response(pid, correlation_id, sizeof(io_resource_t), (char*) &amp;io_res);
++        free(int_source);
+     }
+     else
+     {
+@@ -120,6 +127,7 @@ void rpc_io_open(pid_t pid, dword correlation_id, size_t data_size, void* data)
+         if(io_res.id == 0)
+         {
+             io_res.pid = 0;
++            free(int_source);
+         }
+     
+         rpc_send_response(pid, correlation_id, sizeof(io_resource_t), (char*) &amp;io_res);
+@@ -562,13 +570,11 @@ static lostio_filehandle_t* lostio_open(char* path, byte attr, pid_t pid, io_res
+     handle-&gt;id      = handle_id++;
+     handle-&gt;pid     = pid;
+     handle-&gt;flags   = attr;
+-    handle-&gt;source  = malloc(sizeof(io_resource_t));
++    handle-&gt;source  = io_source;
+     handle-&gt;pos     = 0;
+     handle-&gt;data    = NULL;
+     handle-&gt;node    = node;
+     
+-    memcpy(handle-&gt;source, io_source, sizeof(io_resource_t));
+-    
+     filehandles = list_push(filehandles, (void*) handle);
+     //printf(&quot;[ LOSTIO ] Oeffne '%s'  '%s'\n&quot;, node-&gt;name, path);
+     
+diff --git a/src/modules/lib/posix/socket.c b/src/modules/lib/posix/socket.c
+index b8941d7..87112e8 100644
+--- a/src/modules/lib/posix/socket.c
++++ b/src/modules/lib/posix/socket.c
+@@ -29,6 +29,7 @@
+ #include &lt;sys/socket.h&gt;
+ #include &lt;netinet/in.h&gt;
+ #include &lt;unistd.h&gt;
++#include &lt;lostio.h&gt;
+ 
+ #include &lt;stdlib.h&gt;
+ #include &lt;stdio.h&gt;
+@@ -42,7 +43,7 @@ struct socket {
+     struct tree_item    tinfo;
+ 
+     sa_family_t         sa_family;
+-    FILE                conn;
++    struct lostio_internal_file conn;
+ };
+ 
+ static tree_t* sockets = NULL;
+@@ -68,7 +69,7 @@ static int create_socket(struct socket* socket)
+         sockets = tree_create(struct socket, tinfo, id);
+     }
+ 
+-    socket-&gt;id = fileno(&amp;socket-&gt;conn);
++    socket-&gt;id = fileno(&amp;socket-&gt;conn.res);
+     tree_insert(sockets, socket);
+     return socket-&gt;id;
+ }
+@@ -126,7 +127,7 @@ int connect(int sock, struct sockaddr* address, socklen_t address_len)
+     uint16_t port;
+     char* path;
+     int ret = 0;
+-    FILE* conn;
++    struct lostio_internal_file* conn;
+ 
+     if (socket == NULL) {
+         errno = EBADF;
+@@ -147,7 +148,7 @@ int connect(int sock, struct sockaddr* address, socklen_t address_len)
+         goto out_ip_string;
+     }
+ 
+-    conn = fopen(path, &quot;r+&quot;);
++    conn = (struct lostio_internal_file*) fopen(path, &quot;r+&quot;);
+     if (conn == NULL) {
+         errno = ETIMEDOUT;
+         ret = -1;
+diff --git a/src/modules/lib/stdlibc/file.c b/src/modules/lib/stdlibc/file.c
+index f7b94e2..5bb60cd 100644
+--- a/src/modules/lib/stdlibc/file.c
++++ b/src/modules/lib/stdlibc/file.c
+@@ -142,6 +142,16 @@ FILE* fopen (const char* filename, const char* mode)
+         // Pfad im Handle hinterlegen
+         io_res-&gt;path = malloc(strlen(filename) + 1);
+         strcpy(io_res-&gt;path, filename);
++
++
++        struct lostio_internal_file* int_res = malloc(sizeof(*int_res));
++        int_res-&gt;res = *io_res;
++        int_res-&gt;free_buffer = FALSE;
++        setvbuf(&amp;int_res-&gt;res, malloc(BUFSIZ), _IOFBF, BUFSIZ);
++        int_res-&gt;free_buffer = TRUE;
++
++        free(io_res);
++        io_res = &amp;int_res-&gt;res;
+     }
+     free(resp);
+     
+@@ -192,6 +202,7 @@ int fclose (FILE* io_res)
+     }
+ 
+     fflush(io_res);
++    setvbuf(io_res, NULL, _IONBF, 0);
+ 
+     result = rpc_get_dword(io_res-&gt;pid, &quot;IO_CLOSE&quot;, sizeof(io_resource_id_t),
+         (char*) &amp;(io_res-&gt;id));
+@@ -753,15 +764,21 @@ int fpurge(io_resource_t* io_res)
+  */
+ int setvbuf(FILE* io_res, char* buffer, int mode, size_t size)
+ {
++    struct lostio_internal_file* int_res =
++        (struct lostio_internal_file*) io_res;
++    char* old_buffer;
++
+     // Wenn das Dateihandle nicht in Ordung ist, wird abgebrochen
+     if (io_res == NULL) {
+         return -1;
+     }
+ 
++    old_buffer = io_res-&gt;buffer_ptr;
++
+ 	if (buffer == NULL) {
+ 		io_res-&gt;buffer_ptr = NULL;
+ 		io_res-&gt;buffer_mode = IO_BUFFER_MODE_NONE;
+-		return 0;
++        goto out;
+ 	}
+ 
+ 	//Hier wird ein switch benutzt, damit keine nicht Definierten Werte fuer
+@@ -795,7 +812,15 @@ int setvbuf(FILE* io_res, char* buffer, int mode, size_t size)
+ 		default:
+ 			return -1;
+ 	}
+-	
++
++out:
++    // Wenn bis jetzt ein intern Alloziierter Puffer benutzt wurde, muss er
++    // freigegeben werden.
++    if (int_res-&gt;free_buffer &amp;&amp; old_buffer &amp;&amp; (old_buffer != buffer)) {
++        free(old_buffer);
++        int_res-&gt;free_buffer = FALSE;
++    }
++
+ 	return 0;
+ }
+ 
+diff --git a/src/modules/lib/stdlibc/stdio.c b/src/modules/lib/stdlibc/stdio.c
+index 3bb54d6..e6a1955 100644
+--- a/src/modules/lib/stdlibc/stdio.c
++++ b/src/modules/lib/stdlibc/stdio.c
+@@ -111,6 +111,10 @@ void stdio_init(void)
+         } else {
+             stderr = fopen(path,  &quot;a&quot;);
+         }
++
++        // stderr soll ungepuffert sein
++        setvbuf(stderr, NULL, _IONBF, 0);
++
+         fclose(path_file);
+     }
+ }
+-- 
+1.6.0.6
+
+</PRE>
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="000836.html">[tyndur-devel] [PATCH 3/4] Pascal-RTL: Libc-Pufferung auf Streams	deaktivieren
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="000840.html">[tyndur-devel] [PATCH 4/4] libc: Blockpuffer auf allen Dateien	aktivieren
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#837">[ Datum ]</a>
+              <a href="thread.html#837">[ Thema ]</a>
+              <a href="subject.html#837">[ Betreff (Subject)]</a>
+              <a href="author.html#837">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

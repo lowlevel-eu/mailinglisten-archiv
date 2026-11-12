@@ -1,0 +1,193 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 2/3] kernel2/i386: Nach 4 MB mappen,	erste PT ist Userspace
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%202/3%5D%20kernel2/i386%3A%20Nach%204%20MB%20mappen%2C%0A%09erste%20PT%20ist%20Userspace&In-Reply-To=%3C1419943075-8940-3-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002466.html">
+   <LINK REL="Next"  HREF="002468.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 2/3] kernel2/i386: Nach 4 MB mappen,	erste PT ist Userspace</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%202/3%5D%20kernel2/i386%3A%20Nach%204%20MB%20mappen%2C%0A%09erste%20PT%20ist%20Userspace&In-Reply-To=%3C1419943075-8940-3-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 2/3] kernel2/i386: Nach 4 MB mappen,	erste PT ist Userspace">kevin at tyndur.org
+                  </A><BR>
+    <I>Di Dez 30 13:37:54 CET 2014</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002466.html">[tyndur-devel] [PATCH 1/3] kernel2: UTF-8 und Trailing Whitespace
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002468.html">[tyndur-devel] [PATCH 3/3] kernel2: VM86 wieder ohne	Task-Gate-Tricksereien
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2467">[ Datum ]</a>
+              <a href="thread.html#2467">[ Thema ]</a>
+              <a href="subject.html#2467">[ Betreff (Subject) ]</a>
+              <a href="author.html#2467">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* kernel2: Erste PT für Userspace freiräumen, damit sich VM86 dort
+  breitmachen kann. Da wir am Anfang ein 1:1-Mapping haben, heißt das,
+  dass tyndur jetzt mehr als 4 MB RAM braucht. Schade.
+* kernel2: Der Videospeicher hat kein 1:1-Mapping mehr, sonst würde er
+  im Userspace landen.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/include/arch/i386/page.h              |    2 +-
+ src/kernel2/src/arch/i386/kernel.ld       |    4 ++--
+ src/kernel2/src/arch/i386/mm/mm_context.c |   17 +++++++++++------
+ src/kernel2/src/arch/i386/mm/virt.c       |   11 +++++++----
+ src/kernel2/src/console.c                 |    2 +-
+ 5 files changed, 22 insertions(+), 14 deletions(-)
+
+diff --git a/src/include/arch/i386/page.h b/src/include/arch/i386/page.h
+index 19d3dc3..c37f15e 100644
+--- a/src/include/arch/i386/page.h
++++ b/src/include/arch/i386/page.h
+@@ -41,7 +41,7 @@
+ 
+ // TODO: Muss das Kernelzeug wirklich hier sein? :/
+ // Die Adresse, an der der Kernel-Adressraum beginnt
+-#define KERNEL_MEM_START    0x00000000
++#define KERNEL_MEM_START    0x00400000
+ #define KERNEL_MEM_END      0x40000000
+ 
+ #define PAGETABLES_MEM_START 0x3fc00000
+diff --git a/src/kernel2/src/arch/i386/kernel.ld b/src/kernel2/src/arch/i386/kernel.ld
+index d9dcd48..10f9d2d 100644
+--- a/src/kernel2/src/arch/i386/kernel.ld
++++ b/src/kernel2/src/arch/i386/kernel.ld
+@@ -1,5 +1,5 @@
+-LOAD_ADDR = 0x100000;
+-LINK_ADDR = 0x100000;
++LOAD_ADDR = 0x400000;
++LINK_ADDR = 0x400000;
+ VIRT_TO_PHYS = LINK_ADDR - LOAD_ADDR;
+ 
+ ENTRY(_start)
+diff --git a/src/kernel2/src/arch/i386/mm/mm_context.c b/src/kernel2/src/arch/i386/mm/mm_context.c
+index 7f40312..9192142 100644
+--- a/src/kernel2/src/arch/i386/mm/mm_context.c
++++ b/src/kernel2/src/arch/i386/mm/mm_context.c
+@@ -145,7 +145,8 @@ mmc_context_t mmc_create_kernel_context()
+ static void mmc_sync(mmc_context_t* context)
+ {
+     if (context-&gt;version &lt; page_directory_version) {
+-        memcpy(context-&gt;page_directory_virt, page_directory_current, 0x3FC);
++        memcpy(&amp;context-&gt;page_directory_virt[1],
++               &amp;page_directory_current[1], 0x3FC - 4);
+         context-&gt;version = page_directory_version;
+     }
+ 
+@@ -305,17 +306,21 @@ static bool map_page
+     // Kernelpages duerfen immer nur im gerade aktiven Kontext gemappt werden.
+     // Ales andere ergibt keinen Sinn, weil diese Bereiche ohnehin zwischen
+     // allen Kontexten synchron gehalten werden muessen.
+-    //
+-    // TODO: Ergibt sehr wohl Sinn, wenn man nämlich IDT und GDT von einem
+-    // vm86-Task erstellen will.
+-#if 0
++    if ((flags &amp; PTE_P) &amp;&amp; !(flags &amp; PTE_U) &amp;&amp;
++        !(((uintptr_t) vaddr &gt;= KERNEL_MEM_START) &amp;&amp;
++          ((uintptr_t) vaddr &lt;  KERNEL_MEM_END)))
++    {
++        panic(&quot;Versuch, Kernelpages in Userspace-Bereich zu mappen: %x&quot;,
++              vaddr);
++    }
++
++    // Außerdem müssen sie im richtigen Speicherbereic gemappt werden
+     if ((context != &amp;mmc_current_context()) &amp;&amp;
+         ((uintptr_t) vaddr &gt;= KERNEL_MEM_START) &amp;&amp;
+         ((uintptr_t) vaddr &lt;  KERNEL_MEM_END))
+     {
+         panic(&quot;Versuch, Kernelpages in inaktivem Kontext zu mappen&quot;);
+     }
+-#endif
+ 
+     // Falls es sich im den aktuellen Kontext handelt, muss das Page directory
+     // nicht gemappt werden, sonst schon.
+diff --git a/src/kernel2/src/arch/i386/mm/virt.c b/src/kernel2/src/arch/i386/mm/virt.c
+index e4c08f2..18e8098 100644
+--- a/src/kernel2/src/arch/i386/mm/virt.c
++++ b/src/kernel2/src/arch/i386/mm/virt.c
+@@ -45,6 +45,9 @@ extern void pmm_set_bitmap_start(void* bitmap_start);
+ extern bool use_phys_addr;
+ extern page_directory_t page_directory_current;
+ 
++extern unsigned short* vidmem;
++unsigned short* paging_vidmem;
++
+ /**
+  * Initialisiert die virtuelle Speicherverwaltung. Insbesondere wird ein
+  * Page Directory fuer den Kernel angelegt und geladen.
+@@ -64,10 +67,8 @@ void vmm_init(mmc_context_t* kernel_context)
+         (paddr_t) kernel_phys_start + rosize, PTE_P | PTE_W, NUM_PAGES(rwsize));
+ 
+     // Videospeicher mappen
+-    // TODO Usermodus muss die momentan wegen VM86 sehen. Waere wohl besser,
+-    // wenn VM86 einen eigenen Adressraum haette.
+-    mmc_map(kernel_context, (vaddr_t) 0xB8000, (paddr_t) 0xB8000,
+-        PTE_U | PTE_W | PTE_P, 8);
++    paging_vidmem = mmc_automap(kernel_context, (paddr_t) 0xB8000, 8,
++        KERNEL_MEM_START, KERNEL_MEM_END, PTE_P | PTE_W);
+ 
+     // BIOS mappen
+     mmc_map(kernel_context, (vaddr_t) 0xC0000, (paddr_t) 0xC0000,
+@@ -108,6 +109,8 @@ void vmm_init(mmc_context_t* kernel_context)
+  */
+ void vmm_init_local(mmc_context_t* kernel_context)
+ {
++    vidmem = paging_vidmem;
++
+     // Und ab ins Verderben
+     asm volatile (
+         // Adresse des Page directories setzen
+diff --git a/src/kernel2/src/console.c b/src/kernel2/src/console.c
+index cf20352..1a6aea2 100644
+--- a/src/kernel2/src/console.c
++++ b/src/kernel2/src/console.c
+@@ -89,7 +89,7 @@
+ 
+ void con_set_hw_cursor(void);
+ 
+-static unsigned short * vidmem = (unsigned short*)0xb8000;
++unsigned short * vidmem = (unsigned short*)0xb8000;
+ 
+ // Aktuelle Cursor-Position
+ static unsigned int cursor_x;
+-- 
+1.7.7
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002466.html">[tyndur-devel] [PATCH 1/3] kernel2: UTF-8 und Trailing Whitespace
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002468.html">[tyndur-devel] [PATCH 3/3] kernel2: VM86 wieder ohne	Task-Gate-Tricksereien
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2467">[ Datum ]</a>
+              <a href="thread.html#2467">[ Thema ]</a>
+              <a href="subject.html#2467">[ Betreff (Subject)]</a>
+              <a href="author.html#2467">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

@@ -1,0 +1,372 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 5/7] libc: Erstellen und Auslesen von PPBs
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%205/7%5D%20libc%3A%20Erstellen%20und%20Auslesen%20von%20PPBs&In-Reply-To=%3C1293628353-11131-6-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001951.html">
+   <LINK REL="Next"  HREF="001953.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 5/7] libc: Erstellen und Auslesen von PPBs</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%205/7%5D%20libc%3A%20Erstellen%20und%20Auslesen%20von%20PPBs&In-Reply-To=%3C1293628353-11131-6-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 5/7] libc: Erstellen und Auslesen von PPBs">kevin at tyndur.org
+                  </A><BR>
+    <I>Mi Dez 29 14:12:31 CET 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001951.html">[tyndur-devel] [PATCH 4/7] kernel2: SYSCALL_PM_INIT_PROC_PARAM_BLOCK
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001953.html">[tyndur-devel] [PATCH 6/7] libc: crt0.c: argv aus PPB auslesen,	falls vorhanden
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1952">[ Datum ]</a>
+              <a href="thread.html#1952">[ Thema ]</a>
+              <a href="subject.html#1952">[ Betreff (Subject) ]</a>
+              <a href="author.html#1952">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ libc: Funktionen zum Erstellen und zum anschließend Auslesen eines
+  Prozessparameterblocks
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/include/init.h |    7 +
+ src/modules/lib/param.c    |  264 ++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 271 insertions(+), 0 deletions(-)
+ create mode 100644 src/modules/lib/param.c
+
+diff --git a/src/modules/include/init.h b/src/modules/include/init.h
+index d431cee..eb29b3a 100644
+--- a/src/modules/include/init.h
++++ b/src/modules/include/init.h
+@@ -30,11 +30,13 @@
+ 
+ #include &lt;types.h&gt;
+ #include &lt;stdio.h&gt;
++#include &lt;stdbool.h&gt;
+ 
+ #define INIT_PID 1
+ 
+ extern void stdio_init(void);
+ 
++struct proc_param_block;
+ 
+ void init_service_register(char* name);
+ pid_t init_service_get(char* name);
+@@ -42,10 +44,15 @@ char *init_service_get_name(pid_t pid);
+ 
+ void init_process_exit(int result);
+ pid_t init_execute(const char* cmd);
++int ppb_from_argv(const char* const argv[]);
+ 
+ int cmdline_get_argc(const char* args);
+ void cmdline_copy_argv(char* args, const char** argv, size_t argc);
+ 
++bool ppb_is_valid(struct proc_param_block* ppb, size_t ppb_size);
++int ppb_get_argc(struct proc_param_block* ppb, size_t ppb_size);
++void ppb_copy_argv(struct proc_param_block* ppb, size_t ppb_size,
++    char** argv, int argc);
+ 
+ 
+ #ifdef _USE_START_
+diff --git a/src/modules/lib/param.c b/src/modules/lib/param.c
+new file mode 100644
+index 0000000..c3a4f60
+--- /dev/null
++++ b/src/modules/lib/param.c
+@@ -0,0 +1,264 @@
++/*
++ * Copyright (c) 2010 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include &lt;stdlib.h&gt;
++#include &lt;string.h&gt;
++#include &lt;errno.h&gt;
++
++#include &lt;syscall.h&gt;
++#include &lt;page.h&gt;
++
++enum ppb_entry_type {
++    PPB_CMDLINE_ARG = 1,
++    PPB_ENV_VAR,
++};
++
++struct ppb_entry {
++    enum ppb_entry_type type;
++    ptrdiff_t           value;
++    size_t              len;
++};
++
++struct proc_param_block {
++    size_t              num;
++    struct ppb_entry    entries[];
++};
++
++struct ppb_builder {
++    struct proc_param_block*    ppb;
++    size_t                      ppb_dir_size;
++    size_t                      ppb_dir_used;
++    size_t                      ppb_data_used;
++};
++
++extern pid_t __init_exec(const char* cmd, int ppb_shm_id);
++
++static struct ppb_builder* ppb_builder_init(void)
++{
++    struct ppb_builder* b;
++
++    b = malloc(sizeof(*b));
++    if (b == NULL) {
++        return NULL;
++    }
++
++    b-&gt;ppb              = mem_allocate(PAGE_SIZE, 0);
++    b-&gt;ppb_dir_size     = PAGE_SIZE;
++    b-&gt;ppb_dir_used     = sizeof(struct proc_param_block);
++    b-&gt;ppb_data_used    = 0;
++
++    memset(b-&gt;ppb, 0, PAGE_SIZE);
++
++    return b;
++}
++
++static void* pgrealloc(void* old, size_t old_size, size_t new_size)
++{
++    void* new;
++
++    new = mem_allocate(new_size, 0);
++    if (new == NULL) {
++        return NULL;
++    }
++
++    memcpy(new, old, old_size);
++    mem_free(old, old_size);
++
++    return new;
++}
++
++static int ppb_add_entry(struct ppb_builder* b, enum ppb_entry_type type,
++    const void* value, size_t len)
++{
++    size_t used;
++    int index;
++    void* new;
++
++    /* Verzeichnis vergroessern falls noetig */
++    used = b-&gt;ppb_dir_used + sizeof(struct ppb_entry);
++
++    if (used &gt; b-&gt;ppb_dir_size) {
++        new = pgrealloc(b-&gt;ppb, b-&gt;ppb_dir_size, NUM_PAGES(used));
++        if (new == NULL) {
++            return -ENOMEM;
++        }
++
++        b-&gt;ppb = new;
++        b-&gt;ppb_dir_size = NUM_PAGES(b-&gt;ppb_dir_used);
++    }
++
++    /* Daten eintragen */
++    index = b-&gt;ppb-&gt;num++;
++    b-&gt;ppb-&gt;entries[index].type  = type;
++    b-&gt;ppb-&gt;entries[index].value = (ptrdiff_t) value;
++    b-&gt;ppb-&gt;entries[index].len   = len;
++
++    b-&gt;ppb_dir_used += sizeof(struct ppb_entry);
++    b-&gt;ppb_data_used += len;
++
++    return 0;
++}
++
++static int ppb_builder_finish(struct ppb_builder* b)
++{
++    int shm;
++    size_t size;
++    uint8_t* p;
++    int i, num_entries;
++    ptrdiff_t offset;
++    struct ppb_entry* entry;
++
++    /* Shared Memory anlegen */
++    size = b-&gt;ppb_dir_used + b-&gt;ppb_data_used;
++
++    shm = create_shared_memory(size);
++    if (shm &lt; 0) {
++        return shm;
++    }
++
++    p = open_shared_memory(shm);
++    if (p == NULL) {
++        return -ENOMEM;
++    }
++
++    /* Daten kopieren*/
++    num_entries = b-&gt;ppb-&gt;num;
++    offset = b-&gt;ppb_dir_used;
++
++    for (i = 0; i &lt; num_entries; i++) {
++        entry = &amp;b-&gt;ppb-&gt;entries[i];
++        memcpy(p + offset, (void*) entry-&gt;value, entry-&gt;len);
++        entry-&gt;value = offset;
++        offset += entry-&gt;len;
++    }
++
++    memcpy(p, b-&gt;ppb, b-&gt;ppb_dir_used);
++
++    /* Strukturen freigeben */
++    mem_free(b-&gt;ppb, NUM_PAGES(b-&gt;ppb_dir_used));
++    free(b);
++
++    return shm;
++}
++
++int ppb_from_argv(const char* const argv[])
++{
++    struct ppb_builder* b;
++    int shm;
++    const char* const* p;
++
++    b = ppb_builder_init();
++    if (b == NULL) {
++        errno = ENOMEM;
++        return -1;
++    }
++
++    p = argv;
++    while (*p != NULL) {
++        ppb_add_entry(b, PPB_CMDLINE_ARG, *p, strlen(*p) + 1);
++        p++;
++    }
++
++    shm = ppb_builder_finish(b);
++    if (shm &lt; 0) {
++        errno = -shm;
++        return -1;
++    }
++
++    return shm;
++}
++
++bool ppb_is_valid(struct proc_param_block* ppb, size_t ppb_size)
++{
++    size_t offset;
++    size_t len;
++    int i;
++
++    len = sizeof(*ppb) + ppb-&gt;num + sizeof(*ppb-&gt;entries);
++    if (ppb_size &lt; len) {
++        return false;
++    }
++
++    ppb_size -= len;
++    for (i = 0; i &lt; ppb-&gt;num; i++) {
++        len = ppb-&gt;entries[i].len;
++        if (ppb_size &lt; len) {
++            return false;
++        }
++
++        offset = ppb-&gt;entries[i].value;
++        if (offset &gt; ppb_size || offset + len &gt; ppb_size) {
++            return false;
++        }
++
++        ppb_size -= len;
++    }
++
++    return true;
++}
++
++int ppb_get_argc(struct proc_param_block* ppb, size_t ppb_size)
++{
++    int i;
++    int argc = 0;
++
++    if (!ppb_is_valid(ppb, ppb_size)) {
++        return -EINVAL;
++    }
++
++    for (i = 0; i &lt; ppb-&gt;num; i++) {
++        if (ppb-&gt;entries[i].type == PPB_CMDLINE_ARG) {
++            argc++;
++        }
++    }
++
++    return argc;
++}
++
++void ppb_copy_argv(struct proc_param_block* ppb, size_t ppb_size,
++    char** argv, int argc)
++{
++    int i;
++    int arg;
++
++    if (!ppb_is_valid(ppb, ppb_size)) {
++        return;
++    }
++
++    arg = 0;
++    for (i = 0; i &lt; ppb-&gt;num; i++) {
++        if (ppb-&gt;entries[i].type == PPB_CMDLINE_ARG) {
++            argv[arg++] = ((char*) ppb) + ppb-&gt;entries[i].value;
++            if (arg == argc) {
++                break;
++            }
++        }
++    }
++
++    argv[argc] = NULL;
++}
+-- 
+1.6.0.2
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001951.html">[tyndur-devel] [PATCH 4/7] kernel2: SYSCALL_PM_INIT_PROC_PARAM_BLOCK
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001953.html">[tyndur-devel] [PATCH 6/7] libc: crt0.c: argv aus PPB auslesen,	falls vorhanden
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1952">[ Datum ]</a>
+              <a href="thread.html#1952">[ Thema ]</a>
+              <a href="subject.html#1952">[ Betreff (Subject)]</a>
+              <a href="author.html#1952">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

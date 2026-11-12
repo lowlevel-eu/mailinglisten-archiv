@@ -1,0 +1,291 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH] usb: Handle multiple packets in	usb_do_packet
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%5D%20usb%3A%20Handle%20multiple%20packets%20in%0A%09usb_do_packet&In-Reply-To=%3C4A9921BB.4070405%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000022.html">
+   <LINK REL="Next"  HREF="000024.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH] usb: Handle multiple packets in	usb_do_packet</H1>
+    <B>Max Reitz</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%5D%20usb%3A%20Handle%20multiple%20packets%20in%0A%09usb_do_packet&In-Reply-To=%3C4A9921BB.4070405%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH] usb: Handle multiple packets in	usb_do_packet">max at tyndur.org
+       </A><BR>
+    <I>Sat Aug 29 14:40:27 CEST 2009</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000022.html">[cdi-devel] [PATCH] usb: Handle multiple packets in usb_do_packet
+</A></li>
+        <LI>Next message: <A HREF="000024.html">[cdi-devel] [PATCH] Multiple packets
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#23">[ date ]</a>
+              <a href="thread.html#23">[ thread ]</a>
+              <a href="subject.html#23">[ subject ]</a>
+              <a href="author.html#23">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>On Sat, Aug 29 14:22, Kevin Wolf wrote:
+&gt;<i> Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">kevin at tyndur.org</A>&gt;
+</I>&gt;<i> ---
+</I>&gt;<i>  usb/include/usb.h |    2 +-
+</I>&gt;<i>  usb/main.c        |   93 ++++++++++++++++++++++++++++++++++++++++++-----------
+</I>&gt;<i>  usb/msd.c         |   10 +++---
+</I>&gt;<i>  3 files changed, 80 insertions(+), 25 deletions(-)
+</I>&gt;<i> 
+</I>&gt;<i> diff --git a/usb/include/usb.h b/usb/include/usb.h
+</I>&gt;<i> index 3882601..5f0f2cc 100644
+</I>&gt;<i> --- a/usb/include/usb.h
+</I>&gt;<i> +++ b/usb/include/usb.h
+</I>&gt;<i> @@ -334,7 +334,7 @@ struct usb_pipe {
+</I>&gt;<i>  #define HCI_STRUCT_SIZE max(sizeof(struct ohci), sizeof(struct uhci))
+</I>&gt;<i>  
+</I>&gt;<i>  
+</I>&gt;<i> -int usb_do_packet(struct usb_packet* packet);
+</I>&gt;<i> +int usb_do_packet(struct usb_packet* packets, int num_packets);
+</I>&gt;<i>  void enumerate_hci(struct hci*);
+</I>&gt;<i>  struct cdi_driver* init_uhcd(void);
+</I>&gt;<i>  void init_msc_driver(void);
+</I>&gt;<i> diff --git a/usb/main.c b/usb/main.c
+</I>&gt;<i> index cfab9a5..da767cb 100644
+</I>&gt;<i> --- a/usb/main.c
+</I>&gt;<i> +++ b/usb/main.c
+</I>&gt;<i> @@ -99,20 +99,38 @@ static const int next_data_type[9] = {
+</I>&gt;<i>      &quot;STATUS&quot;
+</I>&gt;<i>     };*/
+</I>&gt;<i>  
+</I>&gt;<i> +#define MIN(a, b) ((a) &lt; (b) ? (a) : (b))
+</I>&gt;<i> +
+</I>&gt;<i>  /**
+</I>&gt;<i>    * Verarbeitet ein USB-Paket.
+</I>&gt;<i>    *
+</I>&gt;<i>    * @param packet Das Paket
+</I>&gt;<i>    */
+</I>&gt;<i>  
+</I>&gt;<i> -int usb_do_packet(struct usb_packet* packet)
+</I>&gt;<i> +int usb_do_packet(struct usb_packet* packets, int num_packets)
+</I>&gt;<i>  {
+</I>&gt;<i>      int error = USB_NAK;
+</I>&gt;<i> -    int tod_short, tod = packet-&gt;type_of_data;
+</I>&gt;<i> +    int tod_short, tod;
+</I>&gt;<i>      int i = 0, mps;
+</I>&gt;<i> -    struct usb_pipe* pipe = packet-&gt;pipe;
+</I>&gt;<i> -    struct usb_device* device = pipe-&gt;device;
+</I>&gt;<i> +    int num_out_packets;
+</I>&gt;<i> +    struct usb_pipe* pipe;
+</I>&gt;<i> +    struct usb_device* device;
+</I>&gt;<i> +    struct usb_packet* out_packets;
+</I>&gt;<i> +
+</I>&gt;<i> +    if (num_packets &lt; 1) {
+</I>&gt;<i> +        return USB_TRIVIAL_ERROR;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    // Alle Pakete muessen vom selben Typ sein und dieselbe Pipe benutzen
+</I>&gt;<i> +    tod = packets[0].type_of_data;
+</I>&gt;<i> +    pipe = packets[0].pipe;
+</I>&gt;<i> +    for (i = 1; i &lt; num_packets; i++) {
+</I>&gt;<i> +        if ((packets[i].type_of_data != tod) || (packets[i].pipe != pipe)) {
+</I>&gt;<i> +            return USB_TRIVIAL_ERROR;
+</I>&gt;<i> +        }
+</I>&gt;<i> +    }
+</I>&gt;<i>  
+</I>&gt;<i> +    device = pipe-&gt;device;
+</I>&gt;<i>      if (!(device-&gt;expects &amp; tod)) {
+</I>&gt;<i>          dprintf(&quot;0x%04X erwartet, 0x%04X bekommen...?\n&quot;, device-&gt;expects, tod);
+</I>&gt;<i>          // FIXME Das ist keine elegante Loesung des Problems
+</I>&gt;<i> @@ -125,31 +143,63 @@ int usb_do_packet(struct usb_packet* packet)
+</I>&gt;<i>      }
+</I>&gt;<i>      //dprintf(&quot;TOD: %s\n&quot;, tod_name[tod_short]);
+</I>&gt;<i>      device-&gt;expects = next_data_type[tod_short];
+</I>&gt;<i> -    packet-&gt;type &amp;= 0xFF;
+</I>&gt;<i>  
+</I>&gt;<i> -    struct usb_packet send_packet = {
+</I>&gt;<i> -        .pipe      = packet-&gt;pipe,
+</I>&gt;<i> -        .type      = packet-&gt;type,
+</I>&gt;<i> -        .data      = packet-&gt;data
+</I>&gt;<i> -    };
+</I>&gt;<i> +    // Pruefen, wie viele Pakete wir draus machen muessen
+</I>&gt;<i>      mps = pipe-&gt;endpoint-&gt;max_packet_size;
+</I>&gt;<i> +    num_out_packets = 0;
+</I>&gt;<i> +    for (i = 0; i &lt; num_packets; i++) {
+</I>&gt;<i> +        int num = (packets[i].length + mps - 1) / mps;
+</I>&gt;<i> +        if (num &gt; 0) {
+</I>&gt;<i> +            num_out_packets += num;
+</I>&gt;<i> +        } else {
+</I>&gt;<i> +            // Pakete ohne Daten wollen auch gesendet werden
+</I>&gt;<i> +            num_out_packets++;
+</I>&gt;<i> +        }
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    // Ggf. Pakete kopieren und splitten
+</I>&gt;<i> +    if (num_out_packets == num_packets) {
+</I>&gt;<i> +        out_packets = packets;
+</I>&gt;<i> +    } else {
+</I>&gt;<i> +        int j;
+</I>&gt;<i> +        int cur = 0;
+</I>&gt;<i> +
+</I>&gt;<i> +        out_packets = calloc(num_out_packets, sizeof(*out_packets));
+</I>&gt;<i> +        for (i = 0; i &lt; num_packets; i++) {
+</I>&gt;<i> +            int num = (packets[i].length + mps - 1) / mps;
+</I>&gt;<i> +            if (num == 0) {
+</I>&gt;<i> +                num = 1;
+</I>&gt;<i> +            }
+</I>&gt;<i> +
+</I>&gt;<i> +            for (j = 0; j &lt; num; j++) {
+</I>&gt;<i> +                out_packets[cur].pipe = pipe;
+</I>&gt;<i> +                out_packets[cur].type = packets[i].type;
+</I>&gt;<i> +                out_packets[cur].data = packets[i].data;
+</I>&gt;<i> +                out_packets[cur].length = MIN(packets[i].length, mps);
+</I>&gt;<i> +                out_packets[cur].type_of_data = tod;
+</I>&gt;<i>  
+</I>&gt;<i> -    for (i = 0; (i &lt; packet-&gt;length) || (!i &amp;&amp; !packet-&gt;length); i += mps) {
+</I>&gt;<i> -        send_packet.length =
+</I>&gt;<i> -            (packet-&gt;length - i &gt; mps) ? mps : (packet-&gt;length - i);
+</I>&gt;<i> +                packets[i].data += out_packets[cur].length;
+</I>&gt;<i> +                packets[i].length -= out_packets[cur].length;
+</I>&gt;<i> +                cur++;
+</I>&gt;<i> +            }
+</I>&gt;<i> +        }
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    // Pakete (FIXME: einzeln) senden
+</I>&gt;<i> +    for (i = 0; i &lt; num_out_packets; i++) {
+</I>&gt;<i>          error = USB_NAK;
+</I>&gt;<i>          while (error == USB_NAK) {
+</I>&gt;<i> -            error = device-&gt;hci-&gt;do_packet(&amp;send_packet);
+</I>&gt;<i> +            error = device-&gt;hci-&gt;do_packet(&amp;out_packets[i]);
+</I>&gt;<i>              if (error == USB_NAK) {
+</I>&gt;<i>                  cdi_sleep_ms(5);
+</I>&gt;<i>              }
+</I>&gt;<i>          }
+</I>&gt;<i>          if (error != USB_NO_ERROR) {
+</I>&gt;<i> -            i -= mps;
+</I>&gt;<i> +            i--;
+</I>&gt;<i>          } else {
+</I>&gt;<i>              pipe-&gt;data_toggle ^= 1;
+</I>&gt;<i> -            send_packet.data += mps;
+</I>&gt;<i>          }
+</I>&gt;<i> +
+</I>&gt;<i>          if (error == USB_STALLED) {
+</I>&gt;<i>              printf(&quot;[usb] ENDPOINT 0x%02X DES GER&#195;&#65533;TS %i STALLED!\n&quot;,
+</I>&gt;<i>                  pipe-&gt;endpoint-&gt;endpoint_address,
+</I>&gt;<i> @@ -159,6 +209,11 @@ int usb_do_packet(struct usb_packet* packet)
+</I>&gt;<i>                  pipe-&gt;endpoint-&gt;endpoint_address);
+</I>&gt;<i>          }
+</I>&gt;<i>      }
+</I>&gt;<i> +
+</I>&gt;<i> +    if (out_packets != packets) {
+</I>&gt;<i> +        free(out_packets);
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i>      return error;
+</I>&gt;<i>  }
+</I>&gt;<i>  
+</I>&gt;<i> @@ -191,7 +246,7 @@ static void* do_control(struct usb_device* device, int direction, void* buffer,
+</I>&gt;<i>          .type_of_data = USB_TOD_SETUP,
+</I>&gt;<i>      };
+</I>&gt;<i>  
+</I>&gt;<i> -    if (usb_do_packet(&amp;setup_packet)) {
+</I>&gt;<i> +    if (usb_do_packet(&amp;setup_packet, 1)) {
+</I>&gt;<i>          return NULL;
+</I>&gt;<i>      }
+</I>&gt;<i>  
+</I>&gt;<i> @@ -209,7 +264,7 @@ static void* do_control(struct usb_device* device, int direction, void* buffer,
+</I>&gt;<i>                   DEV_TO_HOST ? USB_TOD_SETUP_DATA_IN : USB_TOD_SETUP_DATA_OUT),
+</I>&gt;<i>          };
+</I>&gt;<i>  
+</I>&gt;<i> -        rval = usb_do_packet(&amp;data_packet);
+</I>&gt;<i> +        rval = usb_do_packet(&amp;data_packet, 1);
+</I>&gt;<i>      }
+</I>&gt;<i>  
+</I>&gt;<i>      if (rval == USB_NO_ERROR) {
+</I>&gt;<i> @@ -228,7 +283,7 @@ static void* do_control(struct usb_device* device, int direction, void* buffer,
+</I>&gt;<i>              ack_packet.type_of_data = USB_TOD_SETUP_ACK_OUT;
+</I>&gt;<i>          }
+</I>&gt;<i>  
+</I>&gt;<i> -        rval = usb_do_packet(&amp;ack_packet);
+</I>&gt;<i> +        rval = usb_do_packet(&amp;ack_packet, 1);
+</I>&gt;<i>      }
+</I>&gt;<i>      return (rval == USB_NO_ERROR) ? buffer : NULL;
+</I>&gt;<i>  }
+</I>&gt;<i> diff --git a/usb/msd.c b/usb/msd.c
+</I>&gt;<i> index f91df4d..4191002 100644
+</I>&gt;<i> --- a/usb/msd.c
+</I>&gt;<i> +++ b/usb/msd.c
+</I>&gt;<i> @@ -241,7 +241,7 @@ static int write_cmd(struct usb_device* usbdev, void* src)
+</I>&gt;<i>          .type_of_data = USB_TOD_COMMAND,
+</I>&gt;<i>      };
+</I>&gt;<i>  
+</I>&gt;<i> -    return usb_do_packet(&amp;cmd_packet);
+</I>&gt;<i> +    return usb_do_packet(&amp;cmd_packet, 1);
+</I>&gt;<i>  }
+</I>&gt;<i>  
+</I>&gt;<i>  /**
+</I>&gt;<i> @@ -268,7 +268,7 @@ static int read_status(struct usb_device* usbdev, uint32_t expected_tag)
+</I>&gt;<i>          .type_of_data = USB_TOD_STATUS,
+</I>&gt;<i>      };
+</I>&gt;<i>  
+</I>&gt;<i> -    error = usb_do_packet(&amp;status_packet);
+</I>&gt;<i> +    error = usb_do_packet(&amp;status_packet, 1);
+</I>&gt;<i>      if (error != USB_NO_ERROR) {
+</I>&gt;<i>          return error;
+</I>&gt;<i>      }
+</I>&gt;<i> @@ -321,7 +321,7 @@ static int msd_get_capacity(struct usb_device* usbdev, uint32_t* block_size,
+</I>&gt;<i>          .type_of_data = USB_TOD_DATA_IN,
+</I>&gt;<i>      };
+</I>&gt;<i>  
+</I>&gt;<i> -    if (usb_do_packet(&amp;in_packet) != USB_NO_ERROR) {
+</I>&gt;<i> +    if (usb_do_packet(&amp;in_packet, 1) != USB_NO_ERROR) {
+</I>&gt;<i>          return 0;
+</I>&gt;<i>      }
+</I>&gt;<i>  
+</I>&gt;<i> @@ -463,7 +463,7 @@ static uint32_t msd_read(struct usb_device* usbdev, uint32_t lba,
+</I>&gt;<i>          .type_of_data = USB_TOD_DATA_IN,
+</I>&gt;<i>      };
+</I>&gt;<i>  
+</I>&gt;<i> -    error = usb_do_packet(&amp;in_packet);
+</I>&gt;<i> +    error = usb_do_packet(&amp;in_packet, 1);
+</I>&gt;<i>      if (error != USB_NO_ERROR) {
+</I>&gt;<i>          return error;
+</I>&gt;<i>      }
+</I>&gt;<i> @@ -564,7 +564,7 @@ static uint32_t msd_write(struct usb_device* usbdev, uint32_t lba,
+</I>&gt;<i>          .type_of_data = USB_TOD_DATA_OUT,
+</I>&gt;<i>      };
+</I>&gt;<i>  
+</I>&gt;<i> -    error = usb_do_packet(&amp;out_packet);
+</I>&gt;<i> +    error = usb_do_packet(&amp;out_packet, 1);
+</I>&gt;<i>      if (error != USB_NO_ERROR) {
+</I>&gt;<i>          return error;
+</I>&gt;<i>      }
+</I>&gt;<i> 
+</I>
+Acked-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000022.html">[cdi-devel] [PATCH] usb: Handle multiple packets in usb_do_packet
+</A></li>
+	<LI>Next message: <A HREF="000024.html">[cdi-devel] [PATCH] Multiple packets
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#23">[ date ]</a>
+              <a href="thread.html#23">[ thread ]</a>
+              <a href="subject.html#23">[ subject ]</a>
+              <a href="author.html#23">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

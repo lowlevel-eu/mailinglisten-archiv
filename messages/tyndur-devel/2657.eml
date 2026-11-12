@@ -1,0 +1,115 @@
+Delivered-To: mlmmj-tyndur-devel
+Received: from sv1.famkaufmann.info [176.9.73.67]
+	by a9b8c5461646 with IMAP (fetchmail-6.3.26)
+	for <mlmmj@localhost> (single-drop); Sat, 01 May 2021 12:17:27 +0000 (GMT)
+Received: from localhost ([172.29.0.7])
+	by sv1.famkaufmann.info with LMTP
+	id iHYVGcFGjWAlQAAALHnFKQ
+	(envelope-from <kevin@tyndur.org>)
+	for <mlmmj-tyndur-devel>; Sat, 01 May 2021 12:17:05 +0000
+Delivered-To: tyndur-devel@tyndur.org
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=tyndur.org; s=key2;
+	t=1619871425;
+	h=from:from:reply-to:subject:subject:date:date:message-id:message-id:
+	 to:to:cc:mime-version:mime-version:content-type:content-type:
+	 content-transfer-encoding:content-transfer-encoding:
+	 in-reply-to:in-reply-to:references:references;
+	bh=TY/pKcj5flV+Ajb2+qjTar01glsN5MrhcGu+D99ZGwY=;
+	b=ggJM9wyvG97ux675lv6A9IUCZ6PxBRlU0mVwnFeoD5N4XXWtsVNimu4GbL7Od3jeFxmX0c
+	YaSWwdcasz3W0Gqgq6lTWltvYwsrVvuKZu/b1EF7DFAZfYD+skxS2DzSSQHcwSsXayylNB
+	kmzK41HTxZ9ZMkvBYD+u4/TI/nh2oqM=
+Received: from faunus.fritz.box (p200300F3F7100100Ce3b2eBB4dB62e93.dip0.t-ipconnect.de [2003:f3:f710:100:ce3b:2ebb:4db6:2e93])
+	by sv1.famkaufmann.info (OpenSMTPD) with ESMTPSA id 8d979971 (TLSv1.2:ECDHE-RSA-AES256-GCM-SHA384:256:NO)
+	for <tyndur-devel@tyndur.org>;
+	Sat, 1 May 2021 12:17:05 +0000 (UTC)
+From: Kevin Wolf <kevin@tyndur.org>
+To: tyndur-devel@tyndur.org
+Subject: [PATCH 1/2] libc: sleep_ns() rausgeplittet und gefixt
+Date: Sat,  1 May 2021 14:16:56 +0200
+Message-Id: <20210501121657.30248-2-kevin@tyndur.org>
+X-Mailer: git-send-email 2.26.2
+In-Reply-To: <20210501121657.30248-1-kevin@tyndur.org>
+References: <20210501121657.30248-1-kevin@tyndur.org>
+Errors-To: toni@tyndur.org
+Precedence: list
+Reply-To: tyndur-Patches <tyndur-devel@tyndur.org>
+List-Id: tyndur-Patches <tyndur-devel.tyndur.org>
+List-Unsubscribe: <mailto:tyndur-devel+unsubscribe@tyndur.org>
+List-Post: <mailto:tyndur-devel@tyndur.org>
+List-Help: <mailto:tyndur-devel+help@tyndur.org>
+List-Subscribe: <mailto:tyndur-devel+subscribe@tyndur.org>
+List-Owner: <mailto:toni@tyndur.org>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
++ libc: sleep() rechnet als erstes sowieso alles in Nanosekunden um,
+  dann kann man genauso gut ein sleep_ns() anbieten, das die Zeit direkt
+  in Nanosekunden nimmt.
+
+! libc: Theoretisch gibt es in sleep() zwischen der Timeout-Prüfung und
+  wait_for_rpc() ein Race, und wenn man es verliert, landet man in einem
+  Deadlock (falls nicht irgendjemand anderes zufällig einen RPC schickt,
+  dann wartet man nur zu lang). Ich habe es zwar in der Praxis nie
+  gesehen, aber wenn man die Funktion schon anfasst, kann man es ja auch
+  gleich fixen.
+
+Signed-off-by: Kevin Wolf <kevin@tyndur.org>
+---
+ src/modules/include/sleep.h |  4 ++++
+ src/modules/lib/msleep.c    | 19 +++++++++++++------
+ 2 files changed, 17 insertions(+), 6 deletions(-)
+
+diff --git a/src/modules/include/sleep.h b/src/modules/include/sleep.h
+index 9b0b9e099..e3dc4f6b7 100644
+--- a/src/modules/include/sleep.h
++++ b/src/modules/include/sleep.h
+@@ -32,8 +32,12 @@
+ extern "C" {
+ #endif
+ 
++// Benutzt eine Busyloop zum Warten
+ void msleep(unsigned long msec);
+ 
++// Schedult einen Timer und yieldet
++void sleep_ns(uint64_t nsec);
++
+ #ifdef __cplusplus
+ }; // extern "C"
+ #endif
+diff --git a/src/modules/lib/msleep.c b/src/modules/lib/msleep.c
+index 38dd32a1a..04356b3f3 100644
+--- a/src/modules/lib/msleep.c
++++ b/src/modules/lib/msleep.c
+@@ -42,15 +42,22 @@ void msleep(unsigned long msec)
+ 
+ static void do_nothing(void) {}
+ 
+-unsigned int sleep(unsigned int sec)
++void sleep_ns(uint64_t nsec)
+ {
+-    uint64_t timeout = get_tick_count() + sec * 1000 * 1000;
+-    timer_register(do_nothing, sec * 1000 * 1000);
++    uint64_t timeout = get_tick_count() + nsec;
+ 
+-    while(timeout > get_tick_count())
+-    {
+-        wait_for_rpc();
++    timer_register(do_nothing, nsec);
++
++    p();
++    while (timeout > get_tick_count()) {
++        v_and_wait_for_rpc();
++        p();
+     }
++    v();
++}
+ 
++unsigned int sleep(unsigned int sec)
++{
++    sleep_ns(sec * 1000 * 1000);
+     return 0;
+ }
+-- 
+2.26.2
+

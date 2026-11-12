@@ -1,0 +1,2270 @@
+From max at tyndur.org  Wed Nov 17 21:01:57 2010
+From: max at tyndur.org (max at tyndur.org)
+Date: Wed, 17 Nov 2010 21:01:57 +0100
+Subject: [cdi-devel] [PATCH] cdi/cmos.h
+Message-ID: <1290024117-20399-1-git-send-email-max@tyndur.org>
+
+From: Max Reitz <max at tyndur.org>
+
+* Unset the executable bit
+
+Signed-off-by: Max Reitz <max at tyndur.org>
+---
+ 0 files changed, 0 insertions(+), 0 deletions(-)
+ mode change 100755 => 100644 include/cdi/cmos.h
+
+diff --git a/include/cdi/cmos.h b/include/cdi/cmos.h
+old mode 100755
+new mode 100644
+-- 
+1.7.1
+
+
+From max at tyndur.org  Wed Nov 17 21:04:22 2010
+From: max at tyndur.org (max at tyndur.org)
+Date: Wed, 17 Nov 2010 21:04:22 +0100
+Subject: [cdi-devel] [PATCH] CDI.audio
+Message-ID: <1290024262-20905-1-git-send-email-max@tyndur.org>
+
+From: Max Reitz <max at tyndur.org>
+
+This patch is a proposal for a CDI.audio interface, still without the
+mixer part (which either may be introduced later as a new CDI driver
+interface or as an OS unspecific library).
+
+I hope the header to be well commented, thus I don't have to explain
+every detail but I think it can't hurt to give you an overview of it:
+
+Every driver provides several devices (of course), each device is
+either capable of receiving (recording) or sending (playing) data.
+Furthermore, every device is divided into one or more subdevices, which
+are called streams (if anyone knows a better name, I'd appreciate it).
+The actual playback or recording is done via those streams, the system
+sends samples to them and they are then mixed by the device. Thus,
+recording devices provide just one stream, because mixing makes no
+sense.
+
+Max
+
+Signed-off-by: Max Reitz <max at tyndur.org>
+---
+ include/cdi/audio.h |  377 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 files changed, 377 insertions(+), 0 deletions(-)
+ create mode 100644 include/cdi/audio.h
+
+diff --git a/include/cdi/audio.h b/include/cdi/audio.h
+new file mode 100644
+index 0000000..864c6fd
+--- /dev/null
++++ b/include/cdi/audio.h
+@@ -0,0 +1,377 @@
++/*
++ * Copyright (c) 2010 Max Reitz
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it
++ * and/or modify it under the terms of the Do What The Fuck You Want
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * http://sam.zoy.org/projects/COPYING.WTFPL for more details.
++ */
++
++/**
++ * \german
++ * Treiber f??r Soundkarten
++ * \endgerman
++ * \english
++ * Sound card drivers
++ * \endenglish
++ * \defgroup audio
++ */
++/*\@{*/
++
++#ifndef _CDI_AUDIO_H_
++#define _CDI_AUDIO_H_
++
++#include <stddef.h>
++#include <stdint.h>
++
++#include "cdi.h"
++#include "cdi/lists.h"
++
++/**
++ * \german
++ * M??gliche Sampleformate (also Integer vorzeichenbehaftet/vorzeichenlos,
++ * Gleitkommazahlen, Gr????e eines Samples, ...).
++ * \endgerman
++ * \english
++ * Possible sample formats (i.e., signed/unsigned integer, floating point
++ * numbers, one sample's size, ...).
++ * \endenglish
++ */
++typedef enum {
++    // 16 bit signed integer
++    CDI_AUDIO_16SI = 0,
++} cdi_audio_sample_format_t;
++
++/**
++ * \german
++ * Abspielposition eines Kanals. Enth??lt den Index des aktuellen Puffers und
++ * des aktuell abgespielten Frames.
++ * \endgerman
++ * \english
++ * A stream's playback position. Contains the index of both the current buffer
++ * and the frame being played.
++ * \endenglish
++ */
++typedef struct cdi_audio_position {
++    size_t buffer;
++    size_t frame;
++} cdi_audio_position_t;
++
++/**
++ * \german
++ * Beschreibt ein CDI.audio-Ger??t, also Tonabspiel- oder Aufnahmehardware.
++ * Bietet eine Soundkarte beide Funktionen an, so muss sie in zwei CDI.audio-
++ * Ger??te aufgeteilt werden.
++ * \endgerman
++ * \english
++ * Describes a CDI.audio device, i.e. a playback or recording device. If a
++ * sound card provides both functions, the driver must register one CDI.audio
++ * device per function.
++ * \endenglish
++ */
++struct cdi_audio_device {
++    struct cdi_device dev;
++
++    /**
++     * \german
++     * Ist dieser Wert ungleich 0, so handelt es sich um ein Aufnahmeger??t,
++     * es kann nur gelesen werden. Ist er 0, dann k??nnen nur T??ne abgespielt
++     * werden.
++     * \endgerman
++     * \english
++     * If this value is not 0, this device is a recording device, thus one can
++     * only read data. Otherwise, only play back is possible.
++     * \endenglish
++     */
++    int record;
++
++    /**
++     * \german
++     * Abspielger??te k??nnen mehrere logische Kan??le anbieten, die vom Ger??t
++     * zusammengemixt werden. Ist dem nicht der Fall oder handelt es sich um
++     * ein Aufnahmeger??t, dann ist die Gr????e dieser Liste genau 1. Sie enth??lt
++     * Elemente des Typs struct cdi_audio_stream.
++     * \endgerman
++     * \english
++     * Play back devices may provide several logical streams which are mixed by
++     * the device. If this is either not true or it is a recording device, the
++     * list's size is exactly 1. It contains elements of type
++     * struct cdi_audio_stream.
++     * \endenglish
++     */
++    cdi_list_t streams;
++};
++
++/**
++ * \german
++ * Beschreibt einen Kanal eines CDI.audio-Ger??ts.
++ * Jeder Kanal besteht aus einer Reihe von Puffern mit abzuspielenden Samples,
++ * die hintereinander und in einer Schleife abgespielt werden.
++ * \endgerman
++ * \english
++ * Describes a CDI.audio device's stream.
++ * Each stream consists of a set of buffers containing samples being played
++ * consecutively and as a loop.
++ * \endenglish
++ */
++struct cdi_audio_stream {
++    /**
++     * \german
++     * Ger??t, zu dem dieser Kanal geh??rt.
++     * \endgerman
++     * \english
++     * Device to which this stream belongs.
++     * \endenglish
++     */
++    struct cdi_audio_device* device;
++
++    /**
++     * \german
++     * Gibt die Anzahl der verf??gbaren Datenpuffer an.
++     * \endgerman
++     * \english
++     * Contains the number of available data buffers.
++     * \endenglish
++     */
++    size_t buffers;
++
++    /**
++     * \german
++     * Gibt die Anzahl von Samples pro Datenpuffer an.
++     * \endgerman
++     * \english
++     * Contains the number of samples per buffer.
++     * \endenglish
++     */
++    size_t buffer_size;
++
++    /**
++     * \german
++     * Bei 0 kann die Samplerate eingestellt werden. Ansonsten kann sie nicht
++     * ver??ndert werden und hat einen festen (hier angegebenen) Wert (in Hz).
++     * \endgerman
++     * \english
++     * If 0, the sample rate is adjustable. Otherwise, it isn't and is set to
++     * a fixed value in Hz (which is given here).
++     * \endenglish
++     */
++    int fixed_sample_rate;
++
++    /**
++     * \german
++     * Format der Samples in den Puffern.
++     * \endgerman
++     * \english
++     * Format of the samples contained in the buffers.
++     * \endenglish
++     */
++    cdi_audio_sample_format_t sample_format;
++};
++
++struct cdi_audio_driver {
++    struct cdi_driver drv;
++
++    /**
++     * \german
++     *
++     * ??bertr??gt Daten von oder zu einem Puffer eines Ger??ts (bei
++     * Aufnahmeger??ten wird empfangen, sonst gesendet). Es werden so viele
++     * Bytes ??bertragen, wie in den Puffer passen (abh??ngig von Sampleformat und
++     * Anzahl der Samples pro Puffer).
++     *
++     * @param stream Kanal, der angesprochen werden soll.
++     * @param buffer Der dort zu verwendende Puffer.
++     * @param memory Speicher, mit dem die Daten ausgetauscht werden sollen.
++     *
++     * @return 0 bei Erfolg, -1 im Fehlerfall.
++     *
++     * \endgerman
++     * \english
++     *
++     * Sends or receives data to/from a device's buffer (receives from recording
++     * devices, sends otherwise). The amount of data transmitted equals the
++     * buffer's size (depends on the sample format and the number of samples per
++     * buffer).
++     *
++     * @param stream Stream to be used.
++     * @param buffer Buffer to be used.
++     * @param memory Memory buffer being either source or destination.
++     *
++     * @return 0 on success, -1 on error.
++     *
++     * \endenglish
++     */
++    int (*transfer_data)(struct cdi_audio_stream* stream, size_t buffer,
++        void* memory);
++
++    /**
++     * \german
++     *
++     * H??lt ein CDI.audio-Ger??t an oder l??sst es aufnehmen bzw. abspielen. Wird
++     * es angehalten, so wird die Position automatisch auf den Anfang des ersten
++     * Puffers gesetzt.
++     *
++     * @param device Das Ger??t
++     * @param status Wenn 0, wird das Ger??t angehalten, sonst soll es Daten
++     *               aufnehmen oder T??ne abspielen.
++     *
++     * @return Tats??chlicher neuer Status.
++     *
++     * \endgerman
++     * \english
++     *
++     * Stops a CDI.audio device or makes it record or play, respectively. If it
++     * is stopped, its position is automatically set to the beginning of the
++     * first buffer.
++     *
++     * @param device The device
++     * @param status If 0, the device stops, otherwise it should record or play
++     *               sound.
++     *
++     * @return Actual new status.
++     *
++     * \endenglish
++     */
++    int (*change_device_status)(struct cdi_audio_device* device, int status);
++
++    /**
++     * \german
++     *
++     * Setzt die Lautst??rke eines Kanals.
++     *
++     * @param volume 0x00 ist stumm, 0xFF ist volle Lautst??rke.
++     *
++     * \endgerman
++     * \english
++     *
++     * Sets a stream's volume.
++     *
++     * @param volume 0x00 is mute, 0xFF is full volume.
++     *
++     * \endenglish
++     */
++    void (*set_volume)(struct cdi_audio_stream* stream, uint8_t volume);
++
++    /**
++     * \german
++     *
++     * Ver??ndert die Samplerate eines Kanals.
++     *
++     * @param stream Anzupassender Kanal.
++     * @param sample_rate Neue Samplerate, ist der Wert nichtpositiv, dann wird
++     *                    die aktuelle Samplerate nicht ver??ndert.
++     *
++     * @return Gibt die tats??chliche neue Samplerate zur??ck (kann vom Parameter
++     *         abweichen und wird es bei nichtpositivem auch).
++     *
++     * \endgerman
++     * \english
++     *
++     * Changes a stream's sample rate.
++     *
++     * @param stream Stream to be adjusted.
++     * @param sample_rate New sample rate, if nonpositive, the current sample
++     *                    rate won't be changed.
++     *
++     * @return Returns the actual new sample rate (may differ from the parameter
++     *         and will, if the latter was nonpositive).
++     *
++     * \endenglish
++     */
++    int (*set_sample_rate)(struct cdi_audio_stream* stream, int sample_rate);
++
++    /**
++     * \german
++     *
++     * Gibt die aktuelle Abspiel-/Aufnahmeposition des Kanals zur??ck.
++     *
++     * @param stream Abzufragender Kanal.
++     * @param position Zeiger zu einer Struktur, die den Index des aktuellen
++     *                 Puffers und des derzeit abgespielten Frames empf??ngt.
++     *
++     * \endgerman
++     * \english
++     *
++     * Returns the stream's current playback/recording position.
++     *
++     * @param stream Stream to be queried.
++     * @param position Pointer to a structure receiving the index of both the
++     *                 current buffer and the frame played right now.
++     *
++     * \endenglish
++     */
++    void (*get_position)(struct cdi_audio_stream* stream,
++        cdi_audio_position_t* position);
++
++    /**
++     * \german
++     *
++     * Ver??ndert die Anzahl der von einem CDI.audio-Ger??t verwendeten Channel
++     * (da dies die Gr????e der Frames ver??ndert, kann auch die Anzahl der
++     * tats??chlich verwendeten Samples in einem Puffer ver??ndert werden:
++     * Betr??gt diese Maximalzahl z. B. 0xFFFF, dann k??nnen bei zwei Channeln
++     * nur 0xFFFE Samples verwendet werden (da es keine halben Frames gibt)).
++     *
++     * @param dev CDI.audio-Ger??t
++     * @param channels Anzahl der zu verwendenden Channels (bei ung??ltigem Wert
++     *                 wird am Ger??t nichts ver??ndert).
++     *
++     * @return Jetzt tats??chlich benutzte Channelanzahl.
++     *
++     * \endgerman
++     * \english
++     *
++     * Changes the number of channels used by a CDI.audio device (this changes
++     * the frames' size, hence the number of actually used samples per buffer
++     * may be changed, too: If this size equals e.g. 0xFFFF, only 0xFFFE samples
++     * are used when working with two channels (because there is no half of a
++     * frame)).
++     *
++     * @param dev CDI.audio device
++     * @param channels Number of channels to be used (if invalid, nothing will
++     *                 be changed).
++     *
++     * @return Actually used number of channels now.
++     *
++     * \endenglish
++     */
++    int (*set_number_of_channels)(struct cdi_audio_device* dev, int channels);
++};
++
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * \german
++ *
++ * Wird vom Treiber aufgerufen, wenn die Bearbeitung eines Puffers abgeschlossen
++ * wurde (komplett abgespielt oder aufgenommen). Darf auch aus einer ISR heraus
++ * aufgerufen werden.
++ *
++ * @param stream Kanal, den es betrifft.
++ * @param buffer Pufferindex, der bearbeitet wurde.
++ *
++ * \endgerman
++ * \english
++ *
++ * Is called by a driver when having completed a buffer (i.e., completely played
++ * or recorded). May be called by an ISR.
++ *
++ * @param stream Stream being concerned.
++ * @param buffer Index of the completed buffer.
++ *
++ * \endenglish
++ */
++void cdi_audio_buffer_completed(struct cdi_audio_stream* stream, size_t buffer);
++
++#ifdef __cplusplus
++}; // extern "C"
++#endif
++
++#endif
++
++/*\@}*/
++
+-- 
+1.7.1
+
+
+From kevin at tyndur.org  Wed Nov 17 21:16:16 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Wed, 17 Nov 2010 21:16:16 +0100
+Subject: [cdi-devel] [PATCH] cdi/cmos.h
+In-Reply-To: <1290024117-20399-1-git-send-email-max@tyndur.org>
+References: <1290024117-20399-1-git-send-email-max@tyndur.org>
+Message-ID: <20101117201616.GA7963@silvanus>
+
+On Wed, Nov 17, 2010 at 09:01:57PM +0100, max at tyndur.org wrote:
+> From: Max Reitz <max at tyndur.org>
+> 
+> * Unset the executable bit
+> 
+> Signed-off-by: Max Reitz <max at tyndur.org>
+
+Thanks, applied.
+
+From kevin at tyndur.org  Wed Nov 17 22:45:40 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Wed, 17 Nov 2010 22:45:40 +0100
+Subject: [cdi-devel] [PATCH] CDI.audio
+In-Reply-To: <1290024262-20905-1-git-send-email-max@tyndur.org>
+References: <1290024262-20905-1-git-send-email-max@tyndur.org>
+Message-ID: <20101117214537.GB7963@silvanus>
+
+On Wed, Nov 17, 2010 at 09:04:22PM +0100, max at tyndur.org wrote:
+> From: Max Reitz <max at tyndur.org>
+> 
+> This patch is a proposal for a CDI.audio interface, still without the
+> mixer part (which either may be introduced later as a new CDI driver
+> interface or as an OS unspecific library).
+> 
+> I hope the header to be well commented, thus I don't have to explain
+> every detail but I think it can't hurt to give you an overview of it:
+> 
+> Every driver provides several devices (of course), each device is
+> either capable of receiving (recording) or sending (playing) data.
+> Furthermore, every device is divided into one or more subdevices, which
+> are called streams (if anyone knows a better name, I'd appreciate it).
+
+The German comment says "Kanal", so what about "channel"?
+
+> The actual playback or recording is done via those streams, the system
+> sends samples to them and they are then mixed by the device. Thus,
+> recording devices provide just one stream, because mixing makes no
+> sense.
+> 
+> Max
+> 
+> Signed-off-by: Max Reitz <max at tyndur.org>
+> ---
+>  include/cdi/audio.h |  377 +++++++++++++++++++++++++++++++++++++++++++++++++++
+>  1 files changed, 377 insertions(+), 0 deletions(-)
+>  create mode 100644 include/cdi/audio.h
+> 
+> diff --git a/include/cdi/audio.h b/include/cdi/audio.h
+> new file mode 100644
+> index 0000000..864c6fd
+> --- /dev/null
+> +++ b/include/cdi/audio.h
+> @@ -0,0 +1,377 @@
+> +/*
+> + * Copyright (c) 2010 Max Reitz
+> + *
+> + * This program is free software. It comes without any warranty, to
+> + * the extent permitted by applicable law. You can redistribute it
+> + * and/or modify it under the terms of the Do What The Fuck You Want
+> + * To Public License, Version 2, as published by Sam Hocevar. See
+> + * http://sam.zoy.org/projects/COPYING.WTFPL for more details.
+> + */
+> +
+> +/**
+> + * \german
+> + * Treiber f?r Soundkarten
+> + * \endgerman
+> + * \english
+> + * Sound card drivers
+> + * \endenglish
+> + * \defgroup audio
+> + */
+> +/*\@{*/
+> +
+> +#ifndef _CDI_AUDIO_H_
+> +#define _CDI_AUDIO_H_
+> +
+> +#include <stddef.h>
+> +#include <stdint.h>
+> +
+> +#include "cdi.h"
+> +#include "cdi/lists.h"
+> +
+> +/**
+> + * \german
+> + * M?gliche Sampleformate (also Integer vorzeichenbehaftet/vorzeichenlos,
+> + * Gleitkommazahlen, Gr??e eines Samples, ...).
+> + * \endgerman
+> + * \english
+> + * Possible sample formats (i.e., signed/unsigned integer, floating point
+> + * numbers, one sample's size, ...).
+> + * \endenglish
+> + */
+> +typedef enum {
+> +    // 16 bit signed integer
+> +    CDI_AUDIO_16SI = 0,
+> +} cdi_audio_sample_format_t;
+> +
+> +/**
+> + * \german
+> + * Abspielposition eines Kanals. Enth?lt den Index des aktuellen Puffers und
+> + * des aktuell abgespielten Frames.
+> + * \endgerman
+> + * \english
+> + * A stream's playback position. Contains the index of both the current buffer
+> + * and the frame being played.
+> + * \endenglish
+> + */
+> +typedef struct cdi_audio_position {
+> +    size_t buffer;
+> +    size_t frame;
+> +} cdi_audio_position_t;
+> +
+> +/**
+> + * \german
+> + * Beschreibt ein CDI.audio-Ger?t, also Tonabspiel- oder Aufnahmehardware.
+> + * Bietet eine Soundkarte beide Funktionen an, so muss sie in zwei CDI.audio-
+> + * Ger?te aufgeteilt werden.
+> + * \endgerman
+> + * \english
+> + * Describes a CDI.audio device, i.e. a playback or recording device. If a
+> + * sound card provides both functions, the driver must register one CDI.audio
+> + * device per function.
+> + * \endenglish
+> + */
+> +struct cdi_audio_device {
+> +    struct cdi_device dev;
+> +
+> +    /**
+> +     * \german
+> +     * Ist dieser Wert ungleich 0, so handelt es sich um ein Aufnahmeger?t,
+> +     * es kann nur gelesen werden. Ist er 0, dann k?nnen nur T?ne abgespielt
+> +     * werden.
+> +     * \endgerman
+> +     * \english
+> +     * If this value is not 0, this device is a recording device, thus one can
+> +     * only read data. Otherwise, only play back is possible.
+> +     * \endenglish
+> +     */
+> +    int record;
+
+Hm, shouldn't that be a property of a stream/channel? It seems odd to
+have two devices appearing in the system for one physical sound card,
+just to have one for playback and one for recording. It's like having
+a different devices for reading from a disk than for writing to it.
+
+> +
+> +    /**
+> +     * \german
+> +     * Abspielger?te k?nnen mehrere logische Kan?le anbieten, die vom Ger?t
+> +     * zusammengemixt werden. Ist dem nicht der Fall oder handelt es sich um
+> +     * ein Aufnahmeger?t, dann ist die Gr??e dieser Liste genau 1. Sie enth?lt
+> +     * Elemente des Typs struct cdi_audio_stream.
+> +     * \endgerman
+> +     * \english
+> +     * Play back devices may provide several logical streams which are mixed by
+> +     * the device. If this is either not true or it is a recording device, the
+> +     * list's size is exactly 1. It contains elements of type
+> +     * struct cdi_audio_stream.
+> +     * \endenglish
+> +     */
+> +    cdi_list_t streams;
+
+If you want to keep the restriction enforced and still have only one
+device for everything, you could have a cdi_list_t playback_streams and
+a struct cdi_audio_stream* record_stream, which may be NULL.
+
+> +};
+> +
+> +/**
+> + * \german
+> + * Beschreibt einen Kanal eines CDI.audio-Ger?ts.
+> + * Jeder Kanal besteht aus einer Reihe von Puffern mit abzuspielenden Samples,
+> + * die hintereinander und in einer Schleife abgespielt werden.
+> + * \endgerman
+> + * \english
+> + * Describes a CDI.audio device's stream.
+> + * Each stream consists of a set of buffers containing samples being played
+> + * consecutively and as a loop.
+> + * \endenglish
+> + */
+> +struct cdi_audio_stream {
+> +    /**
+> +     * \german
+> +     * Ger?t, zu dem dieser Kanal geh?rt.
+> +     * \endgerman
+> +     * \english
+> +     * Device to which this stream belongs.
+> +     * \endenglish
+> +     */
+> +    struct cdi_audio_device* device;
+> +
+> +    /**
+> +     * \german
+> +     * Gibt die Anzahl der verf?gbaren Datenpuffer an.
+> +     * \endgerman
+> +     * \english
+> +     * Contains the number of available data buffers.
+> +     * \endenglish
+> +     */
+> +    size_t buffers;
+
+num_buffers?
+
+> +
+> +    /**
+> +     * \german
+> +     * Gibt die Anzahl von Samples pro Datenpuffer an.
+> +     * \endgerman
+> +     * \english
+> +     * Contains the number of samples per buffer.
+> +     * \endenglish
+> +     */
+> +    size_t buffer_size;
+> +
+> +    /**
+> +     * \german
+> +     * Bei 0 kann die Samplerate eingestellt werden. Ansonsten kann sie nicht
+> +     * ver?ndert werden und hat einen festen (hier angegebenen) Wert (in Hz).
+> +     * \endgerman
+> +     * \english
+> +     * If 0, the sample rate is adjustable. Otherwise, it isn't and is set to
+> +     * a fixed value in Hz (which is given here).
+> +     * \endenglish
+> +     */
+> +    int fixed_sample_rate;
+> +
+> +    /**
+> +     * \german
+> +     * Format der Samples in den Puffern.
+> +     * \endgerman
+> +     * \english
+> +     * Format of the samples contained in the buffers.
+> +     * \endenglish
+> +     */
+> +    cdi_audio_sample_format_t sample_format;
+> +};
+> +
+> +struct cdi_audio_driver {
+> +    struct cdi_driver drv;
+> +
+> +    /**
+> +     * \german
+> +     *
+> +     * ?bertr?gt Daten von oder zu einem Puffer eines Ger?ts (bei
+> +     * Aufnahmeger?ten wird empfangen, sonst gesendet). Es werden so viele
+> +     * Bytes ?bertragen, wie in den Puffer passen (abh?ngig von Sampleformat und
+> +     * Anzahl der Samples pro Puffer).
+> +     *
+> +     * @param stream Kanal, der angesprochen werden soll.
+> +     * @param buffer Der dort zu verwendende Puffer.
+> +     * @param memory Speicher, mit dem die Daten ausgetauscht werden sollen.
+> +     *
+> +     * @return 0 bei Erfolg, -1 im Fehlerfall.
+> +     *
+> +     * \endgerman
+> +     * \english
+> +     *
+> +     * Sends or receives data to/from a device's buffer (receives from recording
+> +     * devices, sends otherwise). The amount of data transmitted equals the
+> +     * buffer's size (depends on the sample format and the number of samples per
+> +     * buffer).
+> +     *
+> +     * @param stream Stream to be used.
+> +     * @param buffer Buffer to be used.
+> +     * @param memory Memory buffer being either source or destination.
+> +     *
+> +     * @return 0 on success, -1 on error.
+> +     *
+> +     * \endenglish
+> +     */
+> +    int (*transfer_data)(struct cdi_audio_stream* stream, size_t buffer,
+> +        void* memory);
+
+Would it make sense to use a cdi_mem_area instead of size_t/void*?
+
+How is success/error defined? You say "The amount of data transmitted
+equals the buffer's size" (I assume this refers to stream->buffer_size).
+So is buffer != stream->buffer_size an error or would it result in
+something like a short write?
+
+Also, what's the state after a transfer_data() call? I suppose no data
+has been queued in that case?
+
+Is there a way to update the data later? I'm thinking of a mixer that
+sent 30 seconds in advance to keep the CPU load low, but then the user
+hit the stop button. If you completely stop the audio device and restart
+it, other sounds being played at the same time would stop for some time,
+too. Sounds easy enough to add such a function later, though, so feel
+free to ignore my thoughts on this for now.
+
+> +
+> +    /**
+> +     * \german
+> +     *
+> +     * H?lt ein CDI.audio-Ger?t an oder l?sst es aufnehmen bzw. abspielen. Wird
+> +     * es angehalten, so wird die Position automatisch auf den Anfang des ersten
+> +     * Puffers gesetzt.
+> +     *
+> +     * @param device Das Ger?t
+> +     * @param status Wenn 0, wird das Ger?t angehalten, sonst soll es Daten
+> +     *               aufnehmen oder T?ne abspielen.
+> +     *
+> +     * @return Tats?chlicher neuer Status.
+> +     *
+> +     * \endgerman
+> +     * \english
+> +     *
+> +     * Stops a CDI.audio device or makes it record or play, respectively. If it
+> +     * is stopped, its position is automatically set to the beginning of the
+> +     * first buffer.
+> +     *
+> +     * @param device The device
+> +     * @param status If 0, the device stops, otherwise it should record or play
+> +     *               sound.
+> +     *
+> +     * @return Actual new status.
+> +     *
+> +     * \endenglish
+> +     */
+> +    int (*change_device_status)(struct cdi_audio_device* device, int status);
+
+Better use 0/1 and leave the rest undefined/reserved. You never know what you
+want to add later.
+
+> +
+> +    /**
+> +     * \german
+> +     *
+> +     * Setzt die Lautst?rke eines Kanals.
+> +     *
+> +     * @param volume 0x00 ist stumm, 0xFF ist volle Lautst?rke.
+> +     *
+> +     * \endgerman
+> +     * \english
+> +     *
+> +     * Sets a stream's volume.
+> +     *
+> +     * @param volume 0x00 is mute, 0xFF is full volume.
+> +     *
+> +     * \endenglish
+> +     */
+> +    void (*set_volume)(struct cdi_audio_stream* stream, uint8_t volume);
+> +
+> +    /**
+> +     * \german
+> +     *
+> +     * Ver?ndert die Samplerate eines Kanals.
+> +     *
+> +     * @param stream Anzupassender Kanal.
+> +     * @param sample_rate Neue Samplerate, ist der Wert nichtpositiv, dann wird
+> +     *                    die aktuelle Samplerate nicht ver?ndert.
+> +     *
+> +     * @return Gibt die tats?chliche neue Samplerate zur?ck (kann vom Parameter
+> +     *         abweichen und wird es bei nichtpositivem auch).
+> +     *
+> +     * \endgerman
+> +     * \english
+> +     *
+> +     * Changes a stream's sample rate.
+> +     *
+> +     * @param stream Stream to be adjusted.
+> +     * @param sample_rate New sample rate, if nonpositive, the current sample
+> +     *                    rate won't be changed.
+> +     *
+> +     * @return Returns the actual new sample rate (may differ from the parameter
+> +     *         and will, if the latter was nonpositive).
+> +     *
+> +     * \endenglish
+> +     */
+> +    int (*set_sample_rate)(struct cdi_audio_stream* stream, int sample_rate);
+
+Unit? (Okay, it's obvious, but belongs here anyway)
+
+> +
+> +    /**
+> +     * \german
+> +     *
+> +     * Gibt die aktuelle Abspiel-/Aufnahmeposition des Kanals zur?ck.
+> +     *
+> +     * @param stream Abzufragender Kanal.
+> +     * @param position Zeiger zu einer Struktur, die den Index des aktuellen
+> +     *                 Puffers und des derzeit abgespielten Frames empf?ngt.
+> +     *
+> +     * \endgerman
+> +     * \english
+> +     *
+> +     * Returns the stream's current playback/recording position.
+> +     *
+> +     * @param stream Stream to be queried.
+> +     * @param position Pointer to a structure receiving the index of both the
+> +     *                 current buffer and the frame played right now.
+> +     *
+> +     * \endenglish
+> +     */
+> +    void (*get_position)(struct cdi_audio_stream* stream,
+> +        cdi_audio_position_t* position);
+> +
+> +    /**
+> +     * \german
+> +     *
+> +     * Ver?ndert die Anzahl der von einem CDI.audio-Ger?t verwendeten Channel
+> +     * (da dies die Gr??e der Frames ver?ndert, kann auch die Anzahl der
+> +     * tats?chlich verwendeten Samples in einem Puffer ver?ndert werden:
+> +     * Betr?gt diese Maximalzahl z. B. 0xFFFF, dann k?nnen bei zwei Channeln
+> +     * nur 0xFFFE Samples verwendet werden (da es keine halben Frames gibt)).
+> +     *
+> +     * @param dev CDI.audio-Ger?t
+> +     * @param channels Anzahl der zu verwendenden Channels (bei ung?ltigem Wert
+> +     *                 wird am Ger?t nichts ver?ndert).
+> +     *
+> +     * @return Jetzt tats?chlich benutzte Channelanzahl.
+> +     *
+> +     * \endgerman
+> +     * \english
+> +     *
+> +     * Changes the number of channels used by a CDI.audio device (this changes
+> +     * the frames' size, hence the number of actually used samples per buffer
+> +     * may be changed, too: If this size equals e.g. 0xFFFF, only 0xFFFE samples
+> +     * are used when working with two channels (because there is no half of a
+> +     * frame)).
+> +     *
+> +     * @param dev CDI.audio device
+> +     * @param channels Number of channels to be used (if invalid, nothing will
+> +     *                 be changed).
+> +     *
+> +     * @return Actually used number of channels now.
+> +     *
+> +     * \endenglish
+> +     */
+> +    int (*set_number_of_channels)(struct cdi_audio_device* dev, int channels);
+> +};
+> +
+> +
+> +#ifdef __cplusplus
+> +extern "C" {
+> +#endif
+> +
+> +/**
+> + * \german
+> + *
+> + * Wird vom Treiber aufgerufen, wenn die Bearbeitung eines Puffers abgeschlossen
+> + * wurde (komplett abgespielt oder aufgenommen). Darf auch aus einer ISR heraus
+> + * aufgerufen werden.
+> + *
+> + * @param stream Kanal, den es betrifft.
+> + * @param buffer Pufferindex, der bearbeitet wurde.
+> + *
+> + * \endgerman
+> + * \english
+> + *
+> + * Is called by a driver when having completed a buffer (i.e., completely played
+> + * or recorded). May be called by an ISR.
+> + *
+> + * @param stream Stream being concerned.
+> + * @param buffer Index of the completed buffer.
+> + *
+> + * \endenglish
+> + */
+> +void cdi_audio_buffer_completed(struct cdi_audio_stream* stream, size_t buffer);
+> +
+> +#ifdef __cplusplus
+> +}; // extern "C"
+> +#endif
+> +
+> +#endif
+> +
+> +/*\@}*/
+> +
+> -- 
+> 1.7.1
+
+General direction looks good to me.
+
+Kevin
+
+From matthew at theiselins.net  Wed Nov 17 23:00:34 2010
+From: matthew at theiselins.net (Matthew Iselin)
+Date: Thu, 18 Nov 2010 08:00:34 +1000
+Subject: [cdi-devel] [PATCH] CDI.audio
+In-Reply-To: <20101117214537.GB7963@silvanus>
+References: <1290024262-20905-1-git-send-email-max@tyndur.org>
+	<20101117214537.GB7963@silvanus>
+Message-ID: <AANLkTin0wJSeYuOKK-w00AyNeswNst_1q4FK3=MHp1P5@mail.gmail.com>
+
+A few thoughts from me.
+
+On Thu, Nov 18, 2010 at 7:45 AM, Kevin Wolf <kevin at tyndur.org> wrote:
+> On Wed, Nov 17, 2010 at 09:04:22PM +0100, max at tyndur.org wrote:
+>> From: Max Reitz <max at tyndur.org>
+>>
+
+>> + ? ?/**
+>> + ? ? * \german
+>> + ? ? * Ist dieser Wert ungleich 0, so handelt es sich um ein Aufnahmeger?t,
+>> + ? ? * es kann nur gelesen werden. Ist er 0, dann k?nnen nur T?ne abgespielt
+>> + ? ? * werden.
+>> + ? ? * \endgerman
+>> + ? ? * \english
+>> + ? ? * If this value is not 0, this device is a recording device, thus one can
+>> + ? ? * only read data. Otherwise, only play back is possible.
+>> + ? ? * \endenglish
+>> + ? ? */
+>> + ? ?int record;
+>
+> Hm, shouldn't that be a property of a stream/channel? It seems odd to
+> have two devices appearing in the system for one physical sound card,
+> just to have one for playback and one for recording. It's like having
+> a different devices for reading from a disk than for writing to it.
+
+What about a system with a sound card that offers three inputs and six
+outputs? To the OS all three inputs should appear as unique devices
+unless they are not separate on the sound card.
+
+Something to consider.
+
+>> +
+>> + ? ?/**
+>> + ? ? * \german
+>> + ? ? * Abspielger?te k?nnen mehrere logische Kan?le anbieten, die vom Ger?t
+>> + ? ? * zusammengemixt werden. Ist dem nicht der Fall oder handelt es sich um
+>> + ? ? * ein Aufnahmeger?t, dann ist die Gr??e dieser Liste genau 1. Sie enth?lt
+>> + ? ? * Elemente des Typs struct cdi_audio_stream.
+>> + ? ? * \endgerman
+>> + ? ? * \english
+>> + ? ? * Play back devices may provide several logical streams which are mixed by
+>> + ? ? * the device. If this is either not true or it is a recording device, the
+>> + ? ? * list's size is exactly 1. It contains elements of type
+>> + ? ? * struct cdi_audio_stream.
+>> + ? ? * \endenglish
+>> + ? ? */
+>> + ? ?cdi_list_t streams;
+>
+> If you want to keep the restriction enforced and still have only one
+> device for everything, you could have a cdi_list_t playback_streams and
+> a struct cdi_audio_stream* record_stream, which may be NULL.
+
+Maybe this is something for CDI/mixer if that path is chosen. I'm
+wondering now what does the mixing here on devices that don't do
+hardware mixing.
+
+Other than that though, this looks good.
+
+Matt
+
+From max at tyndur.org  Wed Nov 17 23:02:11 2010
+From: max at tyndur.org (Max Reitz)
+Date: Wed, 17 Nov 2010 23:02:11 +0100
+Subject: [cdi-devel] [PATCH] CDI.audio
+In-Reply-To: <20101117214537.GB7963@silvanus>
+References: <1290024262-20905-1-git-send-email-max@tyndur.org>
+	<20101117214537.GB7963@silvanus>
+Message-ID: <4CE450E3.5080801@tyndur.org>
+
+Kevin Wolf wrote:
+
+>> called streams (if anyone knows a better name, I'd appreciate it).
+> 
+> The German comment says "Kanal", so what about "channel"?
+
+Well, I use the word channel when talking about mono (one channel), stereo (two channels) and so on, so I didn't know if this would be appropriate.
+
+>> +struct cdi_audio_device {
+>> +    int record;
+> 
+> Hm, shouldn't that be a property of a stream/channel? It seems odd to
+> have two devices appearing in the system for one physical sound card,
+> just to have one for playback and one for recording. It's like having
+> a different devices for reading from a disk than for writing to it.
+
+Well, actually I wanted to use multiple streams per device only if there's a hardware mixer, thus I thought it to be more appropriate here.
+And, as far as I'm concerned, I do think a microphone and loud speakers actually are different devices. ;-)
+
+>> +    cdi_list_t streams;
+> 
+> If you want to keep the restriction enforced and still have only one
+> device for everything, you could have a cdi_list_t playback_streams and
+> a struct cdi_audio_stream* record_stream, which may be NULL.
+
+Hm, yes, maybe as a union (because you know whether a device records or plays, if record stays in this struct)... But on the other hand, it's more uniform this way.
+
+>> +struct cdi_audio_stream {
+>> +    size_t buffers;
+> 
+> num_buffers?
+
+Well, why not?
+
+
+>> +struct cdi_audio_driver {
+>> +    int (*transfer_data)(struct cdi_audio_stream* stream, size_t buffer,
+>> +        void* memory);
+> 
+> Would it make sense to use a cdi_mem_area instead of size_t/void*?
+
+May be true, though I don't think it's a big difference whether the driver receives the structure or just the vaddr, because I don't think any driver will use this buffer directly without copying its content.
+
+> How is success/error defined? You say "The amount of data transmitted
+> equals the buffer's size" (I assume this refers to stream->buffer_size).
+> So is buffer != stream->buffer_size an error or would it result in
+> something like a short write?
+
+I guess it would be considered an error (though I don't know why it should partially fail).
+
+> Also, what's the state after a transfer_data() call? I suppose no data
+> has been queued in that case?
+
+If there was an error, that buffer retains its old state (if there was a partial fail, well...).
+
+> Is there a way to update the data later? I'm thinking of a mixer that
+> sent 30 seconds in advance to keep the CPU load low, but then the user
+> hit the stop button.
+
+The stop button is handled by the application, thus it must make sure the mixer won't get the data 30 seconds in advance (I think; I've never written such an application).
+
+>> +    int (*change_device_status)(struct cdi_audio_device* device, int status);
+> 
+> Better use 0/1 and leave the rest undefined/reserved. You never know what you
+> want to add later.
+
+Sounds good.
+
+>> +    int (*set_sample_rate)(struct cdi_audio_stream* stream, int sample_rate);
+> 
+> Unit? (Okay, it's obvious, but belongs here anyway)
+
+See above (fixed_sample_rate). *g*
+
+> General direction looks good to me.
+
+Fine. :-)
+
+
+Max
+
+From kevin at tyndur.org  Wed Nov 17 23:28:12 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Wed, 17 Nov 2010 23:28:12 +0100
+Subject: [cdi-devel] [PATCH] CDI.audio
+In-Reply-To: <AANLkTin0wJSeYuOKK-w00AyNeswNst_1q4FK3=MHp1P5@mail.gmail.com>
+References: <1290024262-20905-1-git-send-email-max@tyndur.org>
+	<20101117214537.GB7963@silvanus>
+	<AANLkTin0wJSeYuOKK-w00AyNeswNst_1q4FK3=MHp1P5@mail.gmail.com>
+Message-ID: <20101117222811.GA715@silvanus>
+
+On Thu, Nov 18, 2010 at 08:00:34AM +1000, Matthew Iselin wrote:
+> A few thoughts from me.
+> 
+> On Thu, Nov 18, 2010 at 7:45 AM, Kevin Wolf <kevin at tyndur.org> wrote:
+> > On Wed, Nov 17, 2010 at 09:04:22PM +0100, max at tyndur.org wrote:
+> >> From: Max Reitz <max at tyndur.org>
+> >>
+> 
+> >> + ? ?/**
+> >> + ? ? * \german
+> >> + ? ? * Ist dieser Wert ungleich 0, so handelt es sich um ein Aufnahmeger?t,
+> >> + ? ? * es kann nur gelesen werden. Ist er 0, dann k?nnen nur T?ne abgespielt
+> >> + ? ? * werden.
+> >> + ? ? * \endgerman
+> >> + ? ? * \english
+> >> + ? ? * If this value is not 0, this device is a recording device, thus one can
+> >> + ? ? * only read data. Otherwise, only play back is possible.
+> >> + ? ? * \endenglish
+> >> + ? ? */
+> >> + ? ?int record;
+> >
+> > Hm, shouldn't that be a property of a stream/channel? It seems odd to
+> > have two devices appearing in the system for one physical sound card,
+> > just to have one for playback and one for recording. It's like having
+> > a different devices for reading from a disk than for writing to it.
+> 
+> What about a system with a sound card that offers three inputs and six
+> outputs? To the OS all three inputs should appear as unique devices
+> unless they are not separate on the sound card.
+> 
+> Something to consider.
+
+I guess the decision we have to make here is whether this should appear
+as nine independent devices to the OS, or as one device providing
+multiple inputs and outputs.
+
+As a user I think I would expect that some kind of device manager shows
+the one sound card I have, not one input device and one output device
+(sorry, I don't have as fancy hardware as you ;-)) which aren't separate
+boards in my computer.
+
+But then, there are probably good points for the opposition and in the
+end it's a matter of taste. I won't insist on a change here.
+
+> >> +
+> >> + ? ?/**
+> >> + ? ? * \german
+> >> + ? ? * Abspielger?te k?nnen mehrere logische Kan?le anbieten, die vom Ger?t
+> >> + ? ? * zusammengemixt werden. Ist dem nicht der Fall oder handelt es sich um
+> >> + ? ? * ein Aufnahmeger?t, dann ist die Gr??e dieser Liste genau 1. Sie enth?lt
+> >> + ? ? * Elemente des Typs struct cdi_audio_stream.
+> >> + ? ? * \endgerman
+> >> + ? ? * \english
+> >> + ? ? * Play back devices may provide several logical streams which are mixed by
+> >> + ? ? * the device. If this is either not true or it is a recording device, the
+> >> + ? ? * list's size is exactly 1. It contains elements of type
+> >> + ? ? * struct cdi_audio_stream.
+> >> + ? ? * \endenglish
+> >> + ? ? */
+> >> + ? ?cdi_list_t streams;
+> >
+> > If you want to keep the restriction enforced and still have only one
+> > device for everything, you could have a cdi_list_t playback_streams and
+> > a struct cdi_audio_stream* record_stream, which may be NULL.
+> 
+> Maybe this is something for CDI/mixer if that path is chosen. I'm
+> wondering now what does the mixing here on devices that don't do
+> hardware mixing.
+
+As Max stated in his initial description, that's a layer not addressed
+by this patch. We can get that later. Instead of creating a solution
+for hardware access, mixers, generalized driver communication and world
+hunger at once (which has failed in the past year), I'd really love to
+see _something_ working. If that means that I won't be able to play two
+sounds at the same time for now - well, so be it. Better than not
+having any sound for another year.
+
+Don't get me wrong, I'm all for an OS independent mixer. But it
+shouldn't be a requirement for getting the hardware drivers in.
+
+Kevin
+
+From max at tyndur.org  Wed Nov 17 23:37:14 2010
+From: max at tyndur.org (Max Reitz)
+Date: Wed, 17 Nov 2010 23:37:14 +0100
+Subject: [cdi-devel] [PATCH] CDI.audio
+In-Reply-To: <20101117222811.GA715@silvanus>
+References: <1290024262-20905-1-git-send-email-max@tyndur.org>	<20101117214537.GB7963@silvanus>	<AANLkTin0wJSeYuOKK-w00AyNeswNst_1q4FK3=MHp1P5@mail.gmail.com>
+	<20101117222811.GA715@silvanus>
+Message-ID: <4CE4591A.7070005@tyndur.org>
+
+Kevin Wolf wrote:
+> I guess the decision we have to make here is whether this should appear
+> as nine independent devices to the OS, or as one device providing
+> multiple inputs and outputs.
+> 
+> As a user I think I would expect that some kind of device manager shows
+> the one sound card I have, not one input device and one output device
+> (sorry, I don't have as fancy hardware as you ;-)) which aren't separate
+> boards in my computer.
+
+Well, as a user, I would not see the sound card but the nine different input and output devices (microphones, loud speakers, earphones, whatever), thus I'd expect six different output devices offered by the OS, too. ;-)
+
+However, there's little chance there will ever be "normal" users using our OS, hence we just have to find the way which is working best. ;-)
+
+
+Max
+
+From kevin at tyndur.org  Wed Nov 17 23:51:32 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Wed, 17 Nov 2010 23:51:32 +0100
+Subject: [cdi-devel] [PATCH] CDI.audio
+In-Reply-To: <4CE450E3.5080801@tyndur.org>
+References: <1290024262-20905-1-git-send-email-max@tyndur.org>
+	<20101117214537.GB7963@silvanus> <4CE450E3.5080801@tyndur.org>
+Message-ID: <20101117225129.GB715@silvanus>
+
+On Wed, Nov 17, 2010 at 11:02:11PM +0100, Max Reitz wrote:
+> Kevin Wolf wrote:
+> 
+> >> called streams (if anyone knows a better name, I'd appreciate it).
+> > 
+> > The German comment says "Kanal", so what about "channel"?
+> 
+> Well, I use the word channel when talking about mono (one channel), stereo (two channels) and so on, so I didn't know if this would be appropriate.
+
+True. But then Kanal is just as wrong.
+
+> >> +struct cdi_audio_device {
+> >> +    int record;
+> > 
+> > Hm, shouldn't that be a property of a stream/channel? It seems odd to
+> > have two devices appearing in the system for one physical sound card,
+> > just to have one for playback and one for recording. It's like having
+> > a different devices for reading from a disk than for writing to it.
+> 
+> Well, actually I wanted to use multiple streams per device only if there's a hardware mixer, thus I thought it to be more appropriate here.
+> And, as far as I'm concerned, I do think a microphone and loud speakers actually are different devices. ;-)
+
+But you don't have a driver for the microphone but for the sound card.
+
+Anyway, I think this is a point where the text need to be clearer: Matt
+seems to be talking about multiple interfaces that address different
+output devices whereas you are talking about hardware mixing.
+
+Maybe Matt's point that you can have multiple output devices attached to
+only one card means that treating each output/input device (such as
+microphones or speakers) as a different cdi_audio_device actually makes
+most sense.
+
+In this case, let's just keep what you have to support hardware mixing.
+
+
+> 
+> >> +    cdi_list_t streams;
+> > 
+> > If you want to keep the restriction enforced and still have only one
+> > device for everything, you could have a cdi_list_t playback_streams and
+> > a struct cdi_audio_stream* record_stream, which may be NULL.
+> 
+> Hm, yes, maybe as a union (because you know whether a device records or plays, if record stays in this struct)... But on the other hand, it's more uniform this way.
+
+Don't think that a union would help. If we keep input/output devices
+separate, it's best to leave it as it is.
+
+> 
+> >> +struct cdi_audio_stream {
+> >> +    size_t buffers;
+> > 
+> > num_buffers?
+> 
+> Well, why not?
+> 
+> 
+> >> +struct cdi_audio_driver {
+> >> +    int (*transfer_data)(struct cdi_audio_stream* stream, size_t buffer,
+> >> +        void* memory);
+> > 
+> > Would it make sense to use a cdi_mem_area instead of size_t/void*?
+> 
+> May be true, though I don't think it's a big difference whether the driver receives the structure or just the vaddr, because I don't think any driver will use this buffer directly without copying its content.
+
+Well, you never know. And even if it converts it to a linear buffer this
+might mean that we can save an additional copy in the OS.
+
+> > How is success/error defined? You say "The amount of data transmitted
+> > equals the buffer's size" (I assume this refers to stream->buffer_size).
+> > So is buffer != stream->buffer_size an error or would it result in
+> > something like a short write?
+> 
+> I guess it would be considered an error (though I don't know why it should partially fail).
+
+Assume stream->buffer_size = 42 and I provide buffer = 1337. What
+happens? Does it copy 42 bytes (this is what your documentation
+suggests) or does it fail immediately?
+
+> > Also, what's the state after a transfer_data() call? I suppose no data
+> > has been queued in that case?
+> 
+> If there was an error, that buffer retains its old state (if there was a partial fail, well...).
+> 
+> > Is there a way to update the data later? I'm thinking of a mixer that
+> > sent 30 seconds in advance to keep the CPU load low, but then the user
+> > hit the stop button.
+> 
+> The stop button is handled by the application, thus it must make sure the mixer won't get the data 30 seconds in advance (I think; I've never written such an application).
+
+You'll always want to provide some data in advance. The shorter your
+buffers are, the higher are the chances that you get dropouts. So the
+application can't make it too short. On the other, a stop button that
+works only with a delay isn't really acceptable either.
+
+Kevin
+
+From max at tyndur.org  Wed Nov 17 23:57:39 2010
+From: max at tyndur.org (Max Reitz)
+Date: Wed, 17 Nov 2010 23:57:39 +0100
+Subject: [cdi-devel] [PATCH] CDI.audio
+In-Reply-To: <20101117225129.GB715@silvanus>
+References: <1290024262-20905-1-git-send-email-max@tyndur.org>	<20101117214537.GB7963@silvanus>
+	<4CE450E3.5080801@tyndur.org> <20101117225129.GB715@silvanus>
+Message-ID: <4CE45DE3.90609@tyndur.org>
+
+Kevin Wolf wrote:
+> True. But then Kanal is just as wrong.
+That's why I used "Channel" in German when referring to channels. *g*
+
+>>>> +struct cdi_audio_driver {
+>>>> +    int (*transfer_data)(struct cdi_audio_stream* stream, size_t buffer,
+>>>> +        void* memory);
+>>>
+>>> Would it make sense to use a cdi_mem_area instead of size_t/void*?
+>>
+>> May be true, though I don't think it's a big difference whether the driver receives the structure or just the vaddr, because I don't think any driver will use this buffer directly without copying its content.
+> 
+> Well, you never know. And even if it converts it to a linear buffer this
+> might mean that we can save an additional copy in the OS.
+OK.
+
+>>> How is success/error defined? You say "The amount of data transmitted
+>>> equals the buffer's size" (I assume this refers to stream->buffer_size).
+>>> So is buffer != stream->buffer_size an error or would it result in
+>>> something like a short write?
+>>
+>> I guess it would be considered an error (though I don't know why it should partially fail).
+> 
+> Assume stream->buffer_size = 42 and I provide buffer = 1337. What
+> happens? Does it copy 42 bytes (this is what your documentation
+> suggests) or does it fail immediately?
+It would copy 42 bytes, though I don't know what you mean with "buffer = 1337". I guess no driver will ever support 1338 buffers, the AC97 e.g. will probably use 32.
+
+>>> Is there a way to update the data later? I'm thinking of a mixer that
+>>> sent 30 seconds in advance to keep the CPU load low, but then the user
+>>> hit the stop button.
+>>
+>> The stop button is handled by the application, thus it must make sure the mixer won't get the data 30 seconds in advance (I think; I've never written such an application).
+> 
+> You'll always want to provide some data in advance. The shorter your
+> buffers are, the higher are the chances that you get dropouts. So the
+> application can't make it too short. On the other, a stop button that
+> works only with a delay isn't really acceptable either.
+Hm... Anyone who knows how this is handled on Linux etc.?
+
+
+Max
+
+From matthew at theiselins.net  Thu Nov 18 10:54:09 2010
+From: matthew at theiselins.net (Matthew Iselin)
+Date: Thu, 18 Nov 2010 19:54:09 +1000
+Subject: [cdi-devel] [PATCH] CDI.audio
+In-Reply-To: <4CE45DE3.90609@tyndur.org>
+References: <1290024262-20905-1-git-send-email-max@tyndur.org>
+	<20101117214537.GB7963@silvanus> <4CE450E3.5080801@tyndur.org>
+	<20101117225129.GB715@silvanus> <4CE45DE3.90609@tyndur.org>
+Message-ID: <AANLkTinPEen78abrTLUBb-cwDPx4iBsAogibi_wgNFXE@mail.gmail.com>
+
+On Thu, Nov 18, 2010 at 8:51 AM, Kevin Wolf <kevin at tyndur.org> wrote:
+> On Wed, Nov 17, 2010 at 11:02:11PM +0100, Max Reitz wrote:
+>> Kevin Wolf wrote:
+>> >> +struct cdi_audio_device {
+>> >> + ? ?int record;
+>> >
+>> > Hm, shouldn't that be a property of a stream/channel? It seems odd to
+>> > have two devices appearing in the system for one physical sound card,
+>> > just to have one for playback and one for recording. It's like having
+>> > a different devices for reading from a disk than for writing to it.
+>>
+>> Well, actually I wanted to use multiple streams per device only if there's a hardware mixer, thus I thought it to be more appropriate here.
+>> And, as far as I'm concerned, I do think a microphone and loud speakers actually are different devices. ;-)
+>
+> But you don't have a driver for the microphone but for the sound card.
+>
+> Anyway, I think this is a point where the text need to be clearer: Matt
+> seems to be talking about multiple interfaces that address different
+> output devices whereas you are talking about hardware mixing.
+>
+> Maybe Matt's point that you can have multiple output devices attached to
+> only one card means that treating each output/input device (such as
+> microphones or speakers) as a different cdi_audio_device actually makes
+> most sense.
+>
+> In this case, let's just keep what you have to support hardware mixing.
+
+Windows and Linux both show me a heap of output and input choices when
+I do sound-related stuff. All these outputs and inputs are linked to a
+specific sound device, which also has properties that can be set. It
+seems they also create multiple "objects" (not "devices") that
+reference back to the root "device" but provide different views of it
+to applications.
+
+In other words...
+
+You don't have a driver for the microphone but the sound card does
+essentially offer multiple devices. The fact that they are
+"interfaces" compared to "pure devices" is a technicality - I would
+consider a sound card's "interfaces" much like USB interfaces: if a
+USB device has two interfaces (one that is Mass Storage, the other a
+camera perhaps) you don't expose both interfaces as one device, right?
+You expose them as a disk and a camera - two separate devices that
+stem from the same piece of hardware.
+
+(I should note Pedigree does not yet support multi-interface devices,
+so I can't comment on how badly it screws up the driver interface
+;-).)
+
+The distinction between, say, the "line out" jack rather than the
+"center speaker" jack should IMHO be clear. Whether that is done by
+implementing each input/output offered by sound hardware as a device
+(my personal preferred option - upper layers outside the driver can
+provide APIs that mix multiple outputs to create surround sound and
+such) or by some other mechanism in CDI is up for discussion I think.
+
+That is the point I'm making - I believe hardware mixing itself should
+be done on a "per-interface" or "per-input/output" level. That way if
+you are outputting sound from one application to all speakers in a
+surround sound environment some other application can jump in on the
+center speaker - because the mix is separate per-output. I hope that's
+a bit clearer now - early mornings don't do well for my explaining
+skills it seems!
+
+On Thu, Nov 18, 2010 at 8:57 AM, Max Reitz <max at tyndur.org> wrote:
+> Kevin Wolf wrote:
+>> True. But then Kanal is just as wrong.
+> That's why I used "Channel" in German when referring to channels. *g*
+>
+>>>>> +struct cdi_audio_driver {
+>>>>> + ? ?int (*transfer_data)(struct cdi_audio_stream* stream, size_t buffer,
+>>>>> + ? ? ? ?void* memory);
+>>>>
+>>>> Would it make sense to use a cdi_mem_area instead of size_t/void*?
+>>>
+>>> May be true, though I don't think it's a big difference whether the driver receives the structure or just the vaddr, because I don't think any driver will use this buffer directly without copying its content.
+>>
+>> Well, you never know. And even if it converts it to a linear buffer this
+>> might mean that we can save an additional copy in the OS.
+> OK.
+
+I agree with the use of a cdi_mem_area here.
+
+>>>> How is success/error defined? You say "The amount of data transmitted
+>>>> equals the buffer's size" (I assume this refers to stream->buffer_size).
+>>>> So is buffer != stream->buffer_size an error or would it result in
+>>>> something like a short write?
+>>>
+>>> I guess it would be considered an error (though I don't know why it should partially fail).
+>>
+>> Assume stream->buffer_size = 42 and I provide buffer = 1337. What
+>> happens? Does it copy 42 bytes (this is what your documentation
+>> suggests) or does it fail immediately?
+> It would copy 42 bytes, though I don't know what you mean with "buffer = 1337". I guess no driver will ever support 1338 buffers, the AC97 e.g. will probably use 32.
+
+I would presume the driver should sanitise the input (and possibly
+create a a set of "in-advance" streams for buffers bigger than those
+that the hardware can handle, ready to be used once the current stream
+completes).
+
+>>>> Is there a way to update the data later? I'm thinking of a mixer that
+>>>> sent 30 seconds in advance to keep the CPU load low, but then the user
+>>>> hit the stop button.
+>>>
+>>> The stop button is handled by the application, thus it must make sure the mixer won't get the data 30 seconds in advance (I think; I've never written such an application).
+>>
+>> You'll always want to provide some data in advance. The shorter your
+>> buffers are, the higher are the chances that you get dropouts. So the
+>> application can't make it too short. On the other, a stop button that
+>> works only with a delay isn't really acceptable either.
+> Hm... Anyone who knows how this is handled on Linux etc.?
+
+To be honest, I wouldn't be looking at how Linux does audio as a
+reference ;-). Jokes aside - it might be worth delving into the source
+code of an audio-based application as well as the source for something
+such as pulseaudio to determine how that kind of stuff works - whether
+"stop" is passed all the way down to the driver or not or if the
+userspace audio layer does it.
+
+Matt
+
+From max at tyndur.org  Thu Nov 18 16:13:02 2010
+From: max at tyndur.org (Max Reitz)
+Date: Thu, 18 Nov 2010 16:13:02 +0100
+Subject: [cdi-devel] [PATCH] CDI.audio
+In-Reply-To: <AANLkTinPEen78abrTLUBb-cwDPx4iBsAogibi_wgNFXE@mail.gmail.com>
+References: <1290024262-20905-1-git-send-email-max@tyndur.org>	<20101117214537.GB7963@silvanus>
+	<4CE450E3.5080801@tyndur.org>	<20101117225129.GB715@silvanus>
+	<4CE45DE3.90609@tyndur.org>
+	<AANLkTinPEen78abrTLUBb-cwDPx4iBsAogibi_wgNFXE@mail.gmail.com>
+Message-ID: <4CE5427E.8020408@tyndur.org>
+
+Matthew Iselin wrote:
+> I would presume the driver should sanitise the input (and possibly
+> create a a set of "in-advance" streams for buffers bigger than those
+> that the hardware can handle, ready to be used once the current stream
+> completes).
+
+Hm, I don't really understand what you want to say... Both the number of streams (or channels, as Kevin proposed) as well as the number of buffers and their size are predefined by hardware (or, to be more precise: may be predefined by hardware) and will thus be unchangable by the driver. Hence, neither may a stream complete nor will a CDI.audio driver be able to create a new one out of the blue with an arbitrary buffer size.
+
+> it might be worth delving into the source
+> code of an audio-based application as well as the source for something
+> such as pulseaudio to determine how that kind of stuff works - whether
+> "stop" is passed all the way down to the driver or not or if the
+> userspace audio layer does it.
+
+Well, today I had a look into the mplayer code. Obviously it caches up to 64 kB (which equal several 100 ms of sound). If it wants to stop the current playback, it calls a function which forces the output device (e.g. ALSA) to drop all the data it sent. But I have absolutely no clue how this might be implemented. Maybe one would have to store all the input data and if one of those sources drops its samples, the mixer would have to remix everything without that source and replace the existing data in the sound card's buffer with that. Anyway, I think that's the mixer's problem and it's not really related to the sound card interface. Maybe we should add an offset to the transfer_data function so the mixer doesn't have to replace all of the buffer's content in that case.
+
+However, it might be a good idea if I just write a simple sample AC97 driver to show how this interface is used...
+
+
+Max
+
+From kevin at tyndur.org  Thu Nov 18 18:41:32 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Thu, 18 Nov 2010 18:41:32 +0100
+Subject: [cdi-devel] [PATCH] CDI.audio
+In-Reply-To: <4CE5427E.8020408@tyndur.org>
+References: <1290024262-20905-1-git-send-email-max@tyndur.org>
+	<20101117214537.GB7963@silvanus> <4CE450E3.5080801@tyndur.org>
+	<20101117225129.GB715@silvanus> <4CE45DE3.90609@tyndur.org>
+	<AANLkTinPEen78abrTLUBb-cwDPx4iBsAogibi_wgNFXE@mail.gmail.com>
+	<4CE5427E.8020408@tyndur.org>
+Message-ID: <20101118174129.GA4912@silvanus>
+
+On Thu, Nov 18, 2010 at 04:13:02PM +0100, Max Reitz wrote:
+> Matthew Iselin wrote:
+> > I would presume the driver should sanitise the input (and possibly
+> > create a a set of "in-advance" streams for buffers bigger than those
+> > that the hardware can handle, ready to be used once the current stream
+> > completes).
+> 
+> Hm, I don't really understand what you want to say... Both the number of streams (or channels, as Kevin proposed) as well as the number of buffers and their size are predefined by hardware (or, to be more precise: may be predefined by hardware) and will thus be unchangable by the driver. Hence, neither may a stream complete nor will a CDI.audio driver be able to create a new one out of the blue with an arbitrary buffer size.
+
+I think what Matt means is that nobody forces the driver to push all
+buffers to the device immediately, so a driver could keep some
+additional buffers in RAM that it sends as soon as there are some
+free buffers.
+
+There seems to be a misunderstanding about what streams actually are. So
+what I understand is that streams are the input interfaces of the
+hardware mixer (so their number is given by the hardware), and each of
+them has its own ring (?) of buffers in typical hardware
+implementations. Is my understanding correct so far?
+
+> > it might be worth delving into the source
+> > code of an audio-based application as well as the source for something
+> > such as pulseaudio to determine how that kind of stuff works - whether
+> > "stop" is passed all the way down to the driver or not or if the
+> > userspace audio layer does it.
+> 
+> Well, today I had a look into the mplayer code. Obviously it caches up to 64 kB (which equal several 100 ms of sound). If it wants to stop the current playback, it calls a function which forces the output device (e.g. ALSA) to drop all the data it sent. But I have absolutely no clue how this might be implemented. Maybe one would have to store all the input data and if one of those sources drops its samples, the mixer would have to remix everything without that source and replace the existing data in the sound card's buffer with that. Anyway, I think that's the mixer's problem and it's not really related to the sound card interface.
+
+I agree until here.
+
+But you have the mixer which must send its data to the hardware in the
+same way. And now we've just recreated the same problem one level below.
+So now the mixer has sent some data in advance to the hardware and needs
+to take that back and possibly replace it by something else. This is
+what I'm talking about.
+
+> Maybe we should add an offset to the transfer_data function so the mixer doesn't have to replace all of the buffer's content in that case.
+
+Might work, yes.
+
+> However, it might be a good idea if I just write a simple sample AC97 driver to show how this interface is used...
+
+Go for it. ;-)
+
+Kevin
+
+PS: Any chance to tell your mailer to wrap lines properly?
+
+From max at tyndur.org  Thu Nov 18 20:24:48 2010
+From: max at tyndur.org (Max Reitz)
+Date: Thu, 18 Nov 2010 20:24:48 +0100
+Subject: [cdi-devel] [PATCH] CDI.audio
+In-Reply-To: <20101118174129.GA4912@silvanus>
+References: <1290024262-20905-1-git-send-email-max@tyndur.org>	<20101117214537.GB7963@silvanus>
+	<4CE450E3.5080801@tyndur.org>	<20101117225129.GB715@silvanus>
+	<4CE45DE3.90609@tyndur.org>	<AANLkTinPEen78abrTLUBb-cwDPx4iBsAogibi_wgNFXE@mail.gmail.com>	<4CE5427E.8020408@tyndur.org>
+	<20101118174129.GA4912@silvanus>
+Message-ID: <4CE57D80.6060907@tyndur.org>
+
+On Thu, Nov 18, 2010 at 18:41, Kevin Wolf wrote::
+> On Thu, Nov 18, 2010 at 04:13:02PM +0100, Max Reitz wrote:
+>> Matthew Iselin wrote:
+>>> I would presume the driver should sanitise the input (and possibly
+>>> create a a set of "in-advance" streams for buffers bigger than those
+>>> that the hardware can handle, ready to be used once the current stream
+>>> completes).
+>>
+>> Hm, I don't really understand what you want to say... Both the number of streams (or channels, as Kevin proposed) as well as the number of buffers and their size are predefined by hardware (or, to be more precise: may be predefined by hardware) and will thus be unchangable by the driver. Hence, neither may a stream complete nor will a CDI.audio driver be able to create a new one out of the blue with an arbitrary buffer size.
+> 
+> I think what Matt means is that nobody forces the driver to push all
+> buffers to the device immediately, so a driver could keep some
+> additional buffers in RAM that it sends as soon as there are some
+> free buffers.
+> 
+> There seems to be a misunderstanding about what streams actually are. So
+> what I understand is that streams are the input interfaces of the
+> hardware mixer (so their number is given by the hardware), and each of
+> them has its own ring (?) of buffers in typical hardware
+> implementations. Is my understanding correct so far?
+
+Yes, it is.
+
+>>> it might be worth delving into the source
+>>> code of an audio-based application as well as the source for something
+>>> such as pulseaudio to determine how that kind of stuff works - whether
+>>> "stop" is passed all the way down to the driver or not or if the
+>>> userspace audio layer does it.
+>>
+>> Well, today I had a look into the mplayer code. Obviously it caches up to 64 kB (which equal several 100 ms of sound). If it wants to stop the current playback, it calls a function which forces the output device (e.g. ALSA) to drop all the data it sent. But I have absolutely no clue how this might be implemented. Maybe one would have to store all the input data and if one of those sources drops its samples, the mixer would have to remix everything without that source and replace the existing data in the sound card's buffer with that. Anyway, I think that's the mixer's problem and it's not really related to the sound card interface.
+> 
+> I agree until here.
+> 
+> But you have the mixer which must send its data to the hardware in the
+> same way. And now we've just recreated the same problem one level below.
+> So now the mixer has sent some data in advance to the hardware and needs
+> to take that back and possibly replace it by something else. This is
+> what I'm talking about.
+
+That shouldn't be a big deal. Just use transfer_data with the buffer which
+is currently in use.
+
+>> However, it might be a good idea if I just write a simple sample AC97 driver to show how this interface is used...
+> 
+> Go for it. ;-)
+
+I just completed it, though I don't know (of course) whether it works,
+because CDI.audio support is rare so far. *g*
+It does compile at least. ;-)
+
+> PS: Any chance to tell your mailer to wrap lines properly?
+
+I think not, but I tried to wrap them manually.
+
+
+Max
+
+From max at tyndur.org  Thu Nov 18 20:30:46 2010
+From: max at tyndur.org (max at tyndur.org)
+Date: Thu, 18 Nov 2010 20:30:46 +0100
+Subject: [cdi-devel] [RFC] CDI.audio: ac97
+Message-ID: <1290108646-12916-1-git-send-email-max@tyndur.org>
+
+From: Max Reitz <max at tyndur.org>
+
+This is a sample driver for AC97 using the proposed CDI.audio interface
+(with some slight changes, e.g., num_buffers instead of buffers in
+struct cdi_audio_stream and the usage of cdi_mem_area for
+transfer_data).
+
+I don't know if it's the best example because AC97 doesn't support
+hardware mixing nor do I know anything about recording, thus this isn't
+supported either. However, I hope it makes clear how the interface is
+meant to be used.
+
+Max
+---
+ ac97/device.c |  296 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ ac97/device.h |  116 ++++++++++++++++++++++
+ ac97/main.c   |   65 +++++++++++++
+ 3 files changed, 477 insertions(+), 0 deletions(-)
+ create mode 100644 ac97/device.c
+ create mode 100644 ac97/device.h
+ create mode 100644 ac97/main.c
+
+diff --git a/ac97/device.c b/ac97/device.c
+new file mode 100644
+index 0000000..4525e8d
+--- /dev/null
++++ b/ac97/device.c
+@@ -0,0 +1,296 @@
++/******************************************************************************
++ * Copyright (c) 2010 Max Reitz                                               *
++ *                                                                            *
++ * Permission is hereby granted,  free of charge,  to any person  obtaining a *
++ * copy of this software and associated documentation files (the "Software"), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
++ * and/or  sell copies of the  Software,  and to permit  persons to whom  the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED,  INCLUDING BUT NOT LIMITED TO THE WARRANTIES  OF MERCHANTABILITY, *
++ * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH  THE SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "cdi.h"
++#include "cdi/audio.h"
++#include "cdi/io.h"
++#include "cdi/lists.h"
++#include "cdi/mem.h"
++#include "cdi/misc.h"
++#include "cdi/pci.h"
++
++#include "device.h"
++
++static void ac97_isr(struct cdi_device* device);
++
++struct cdi_device* ac97_init_device(struct cdi_bus_data* bus_data)
++{
++    struct cdi_pci_device* pci = (struct cdi_pci_device*) bus_data;
++
++    // Search for a usable device
++    if ((pci->vendor_id != 0x8086) || ((pci->device_id != 0x2415) &&
++        (pci->device_id != 0x2425) &&  (pci->device_id != 0x2445)))
++    {
++        return NULL;
++    }
++
++    struct ac97_device* dev = calloc(1, sizeof(*dev));
++
++    cdi_pci_alloc_ioports(pci);
++
++    // Get the I/O resources (NAMBAR and NABMBAR)
++    struct cdi_pci_resource* res;
++    for (int i = 0; (res = cdi_list_get(pci->resources, i)); i++) {
++        if (res->type == CDI_PCI_IOPORTS) {
++            if (!res->index) {
++                dev->nambar = res->start;
++            } else {
++                dev->nabmbar = res->start;
++                break;
++            }
++        }
++    }
++
++    if (!dev->nambar || !dev->nabmbar) {
++        free(dev);
++        cdi_pci_free_ioports(pci);
++        return NULL;
++    }
++
++    #ifdef CDI_PCI_DIRECT_ACCESS
++    // If possible, activate the I/O resources and the busmaster capability
++    cdi_pci_config_writew(pci, 4, cdi_pci_config_readw(pci, 4) | 5);
++    #endif
++
++    struct ac97_card* ac97_card = malloc(sizeof(*ac97_card));
++    struct ac97_stream* ac97_stream = malloc(sizeof(*ac97_stream));
++
++    // Define the CDI.audio sound card
++    ac97_card->card.record = 0;
++    ac97_card->card.streams = cdi_list_create();
++    ac97_card->device = dev;
++
++    // And the only stream
++    ac97_stream->stream.device = &ac97_card->card;
++    ac97_stream->stream.num_buffers = 32;
++    ac97_stream->stream.buffer_size = 0xFFFE;
++    ac97_stream->stream.sample_format = CDI_AUDIO_16SI;
++
++    dev->output = &ac97_stream->stream;
++
++    cdi_list_push(ac97_card->card.streams, ac97_stream);
++
++    // Register the IRQ
++    cdi_register_irq(pci->irq, &ac97_isr, &ac97_card->card.dev);
++
++    // Reset the card
++    cdi_outw(dev->nambar + NAM_RESET, 42);
++
++    cdi_sleep_ms(100);
++
++    // Reset some more...
++    cdi_outb(dev->nabmbar + NABM_GLB_CTRL_STAT, 0x02);
++
++    cdi_sleep_ms(100);
++
++    // And still something...
++    cdi_outw(dev->nabmbar + NABM_PICONTROL, 0x02);
++    cdi_outw(dev->nabmbar + NABM_POCONTROL, 0x02);
++    cdi_outw(dev->nabmbar + NABM_MCCONTROL, 0x02);
++
++    cdi_sleep_ms(100);
++
++    // Set volume to 100 %
++    cdi_outw(dev->nambar + NAM_MASTER_VOLUME, 0x0000);
++    cdi_outw(dev->nambar + NAM_MONO_VOLUME, 0x00);
++    cdi_outw(dev->nambar + NAM_PC_BEEP, 0x00);
++    cdi_outw(dev->nambar + NAM_PCM_VOLUME, 0x0000);
++
++    cdi_sleep_ms(10);
++
++    // Test if sample rate is adjustable
++    if (!(cdi_inw(dev->nambar + NAM_EXT_AUDIO_ID) & 1)) {
++        // No it isn't; it's fixed to 48 kHz
++        ac97_stream->stream.fixed_sample_rate = 48000;
++    } else {
++        // Yes, it is
++        ac97_stream->stream.fixed_sample_rate = 0;
++
++        // Use that capability (Variable Audio Rate)
++        cdi_outw(dev->nambar + NAM_EXT_AUDIO_STC,
++            cdi_inw(dev->nambar + NAM_EXT_AUDIO_STC) | 1);
++
++        cdi_sleep_ms(10);
++
++        // Set the sample rate to 44.1 kHz
++        cdi_outw(dev->nambar + NAM_FRONT_SPLRATE, 44100);
++        cdi_outw(dev->nambar + NAM_LR_SPLRATE, 44100);
++    }
++
++    // TODO: Error handling
++
++    // Allocate the buffer descriptor array
++    struct cdi_mem_area* bd = cdi_mem_alloc(32 * sizeof(dev->bd[0]),
++        3 | CDI_MEM_DMA_4G | CDI_MEM_PHYS_CONTIGUOUS);
++
++    dev->bd  = bd->vaddr;
++    dev->vbd = calloc(32, sizeof(dev->vbd[0]));
++
++    for (int i = 0; i < 32; i++)
++    {
++        // Allocate each buffer (actually, their sizes equals 131068, but who
++        // cares about those four bytes)
++        struct cdi_mem_area* buffer = cdi_mem_alloc(131072,
++            12 | CDI_MEM_DMA_4G | CDI_MEM_PHYS_CONTIGUOUS);
++
++        dev->bd[i].buffer = buffer->paddr.items->start;
++        dev->bd[i].length = 0xFFFE;
++        // Generate an IRQ on completion
++        dev->bd[i].flags = FLAG_IOC;
++        dev->vbd[i] = buffer->vaddr;
++
++        // Zero the buffer
++        memset(buffer->vaddr, 0, 131072);
++    }
++
++    // Set the base address of the descriptor array
++    cdi_outl(dev->nabmbar + NABM_POBDBAR, bd->paddr.items->start);
++
++    // Return the new device
++    return &ac97_card->card.dev;
++}
++
++void ac97_remove_device(struct cdi_device* device)
++{
++    // TODO: Well...
++    (void) device;
++}
++
++int ac97_transfer_data(struct cdi_audio_stream* stream, size_t buffer,
++    struct cdi_mem_area* memory)
++{
++    // Check if buffer index is valid
++    if (buffer >= 32)
++        return -1;
++
++    struct ac97_stream* s = (struct ac97_stream*) stream;
++
++    // Copy the content to the AC97 buffer
++    memcpy(s->device->vbd[buffer], memory, 0xFFFE);
++
++    return 0;
++}
++
++cdi_audio_status_t ac97_change_status(struct cdi_audio_device* device,
++    cdi_audio_status_t status)
++{
++    struct ac97_device* dev = ((struct ac97_card*) device)->device;
++
++    if (status == CDI_AUDIO_PLAY) {
++        // Start playback
++        cdi_outb(dev->nabmbar + NABM_POCONTROL, 0x11);
++        // Set last valid buffer index to 31
++        cdi_outb(dev->nabmbar + NABM_POLVI, 31);
++    } else if (status == CDI_AUDIO_STOP) {
++        // Stop playback
++        cdi_outb(dev->nabmbar + NABM_POCONTROL, 0x00);
++    }
++
++    // Returns whether the card is active or not
++    return cdi_inb(dev->nabmbar + NABM_POCONTROL) & 0x1;
++}
++
++void ac97_set_volume(struct cdi_audio_stream* stream, uint8_t volume)
++{
++    struct ac97_device* dev = ((struct ac97_stream*) stream)->device;
++
++    // Calculate the AC97 volume (which is 63 - (volume * 63 / 255))
++    int rvolume = volume * 63;
++    rvolume /= 255;
++
++    rvolume = 63 - rvolume;
++
++    // And set it
++    cdi_outw(dev->nambar + NAM_MASTER_VOLUME, (rvolume << 8) | rvolume);
++}
++
++int ac97_set_sample_rate(struct cdi_audio_stream* stream, int sample_rate)
++{
++    struct ac97_device* dev = ((struct ac97_stream*) stream)->device;
++
++    if (stream->fixed_sample_rate) {
++        // If the sample rate cannot be adjustet, return the fixed value
++        return stream->fixed_sample_rate;
++    }
++
++    if (sample_rate > 0) {
++        // Try to set the requested sample rate
++        cdi_outw(dev->nambar + NAM_FRONT_SPLRATE, sample_rate);
++        cdi_outw(dev->nambar + NAM_LR_SPLRATE, sample_rate);
++
++        cdi_sleep_ms(10);
++    }
++
++    // And return the actual rate set
++    return cdi_inw(dev->nambar + NAM_FRONT_SPLRATE);
++}
++
++void ac97_get_position(struct cdi_audio_stream* stream,
++    cdi_audio_position_t* position)
++{
++    struct ac97_device* dev = ((struct ac97_stream*) stream)->device;
++
++    position->buffer = cdi_inb(dev->nabmbar + NABM_POCIV);
++    // Yes, really 0x7FFE, not 0x7FFF
++    // (POPICB contains the number of samples not yet read from the buffer,
++    // we are required to return the number of frames played)
++    position->frame = 0x7FFE - cdi_inw(dev->nabmbar + NABM_POPICB) / 2;
++}
++
++int ac97_set_channel_count(struct cdi_audio_device* dev, int channels)
++{
++    (void) dev;
++    (void) channels;
++
++    // TODO: Is that really fixed or is there any way to use e.g. mono?
++    return 2;
++}
++
++static void ac97_isr(struct cdi_device* device)
++{
++    struct ac97_device* dev = ((struct ac97_card*) device)->device;
++
++    int pi = cdi_inb(dev->nabmbar + NABM_PISTATUS) & 0x1C;
++    int po = cdi_inb(dev->nabmbar + NABM_POSTATUS) & 0x1C;
++    int mc = cdi_inb(dev->nabmbar + NABM_MCSTATUS) & 0x1C;
++
++    // Check if just anything happened
++    if (!pi && !po && !mc) {
++        return;
++    }
++
++    // Tell the card we handled everything (no, we don't, but who cares).
++    cdi_outb(dev->nabmbar + NABM_PISTATUS, pi);
++    cdi_outb(dev->nabmbar + NABM_POSTATUS, po);
++    cdi_outb(dev->nabmbar + NABM_MCSTATUS, mc);
++
++    if (po & (1 << 3)) {
++        // If a buffer has been completed, tell that to the CDI library
++        cdi_audio_buffer_completed(dev->output,
++            cdi_inb(dev->nabmbar + NABM_POCIV));
++    }
++}
++
+diff --git a/ac97/device.h b/ac97/device.h
+new file mode 100644
+index 0000000..e096722
+--- /dev/null
++++ b/ac97/device.h
+@@ -0,0 +1,116 @@
++/******************************************************************************
++ * Copyright (c) 2010 Max Reitz                                               *
++ *                                                                            *
++ * Permission is hereby granted,  free of charge,  to any person  obtaining a *
++ * copy of this software and associated documentation files (the "Software"), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
++ * and/or  sell copies of the  Software,  and to permit  persons to whom  the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED,  INCLUDING BUT NOT LIMITED TO THE WARRANTIES  OF MERCHANTABILITY, *
++ * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH  THE SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#ifndef DEVICE_H
++#define DEVICE_H
++
++#include <stddef.h>
++#include <stdint.h>
++
++#include "cdi.h"
++#include "cdi/audio.h"
++#include "cdi/mem.h"
++#include "cdi/pci.h"
++
++// Some I/O port offsets
++// NAMBAR
++#define NAM_RESET          0x0000
++#define NAM_MASTER_VOLUME  0x0002
++#define NAM_MONO_VOLUME    0x0006
++#define NAM_PC_BEEP        0x000A
++#define NAM_PCM_VOLUME     0x0018
++#define NAM_EXT_AUDIO_ID   0x0028
++#define NAM_EXT_AUDIO_STC  0x002A
++#define NAM_FRONT_SPLRATE  0x002C
++#define NAM_LR_SPLRATE     0x0032
++// NABMBAR
++#define NABM_POBDBAR       0x0010
++#define NABM_POCIV         0x0014
++#define NABM_POLVI         0x0015
++#define NABM_PISTATUS      0x0006
++#define NABM_POSTATUS      0x0016
++#define NABM_MCSTATUS      0x0026
++#define NABM_POPICB        0x0018
++#define NABM_PICONTROL     0x000B
++#define NABM_POCONTROL     0x001B
++#define NABM_MCCONTROL     0x002B
++#define NABM_GLB_STAT      0x0030
++#define NABM_GLB_CTRL_STAT 0x0060
++
++// Buffer flags which may be set
++// Buffer underrun policy: If set, output 0 after the last sample, if there's no
++// new buffer; else, output the last sample.
++#define FLAG_BUP (1 << 14)
++// Interrupt on completion: Request an interrupt when having completed the
++// buffer
++#define FLAG_IOC (1 << 15)
++
++// A descriptor describing a buffer
++struct buf_desc
++{
++    // Physical address
++    uint32_t buffer;
++    // Number of samples contained
++    uint16_t length;
++    // Flags (BUP and/or IOC)
++    uint16_t flags;
++} __attribute__((packed));
++
++// A structure describing an AC97 card
++struct ac97_device {
++    // The two I/O spaces
++    uint16_t nambar, nabmbar;
++
++    // The buffer descriptor array
++    struct buf_desc* bd;
++    // The buffer's virtual addresses
++    void** vbd;
++
++    // Pointer to the output stream
++    struct cdi_audio_stream* output;
++};
++
++struct ac97_stream {
++    struct cdi_audio_stream stream;
++    struct ac97_device* device;
++};
++
++struct ac97_card {
++    struct cdi_audio_device card;
++    struct ac97_device* device;
++};
++
++struct cdi_device* ac97_init_device(struct cdi_bus_data* bus_data);
++void ac97_remove_device(struct cdi_device* device);
++
++int ac97_transfer_data(struct cdi_audio_stream* stream, size_t buffer,
++    struct cdi_mem_area* memory);
++cdi_audio_status_t ac97_change_status(struct cdi_audio_device* device,
++    cdi_audio_status_t status);
++void ac97_set_volume(struct cdi_audio_stream* stream, uint8_t volume);
++int ac97_set_sample_rate(struct cdi_audio_stream* stream, int sample_rate);
++void ac97_get_position(struct cdi_audio_stream* stream,
++    cdi_audio_position_t* position);
++int ac97_set_channel_count(struct cdi_audio_device* dev, int channels);
++
++#endif
++
+diff --git a/ac97/main.c b/ac97/main.c
+new file mode 100644
+index 0000000..5afa557
+--- /dev/null
++++ b/ac97/main.c
+@@ -0,0 +1,65 @@
++/******************************************************************************
++ * Copyright (c) 2010 Max Reitz                                               *
++ *                                                                            *
++ * Permission is hereby granted,  free of charge,  to any person  obtaining a *
++ * copy of this software and associated documentation files (the "Software"), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
++ * and/or  sell copies of the  Software,  and to permit  persons to whom  the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED,  INCLUDING BUT NOT LIMITED TO THE WARRANTIES  OF MERCHANTABILITY, *
++ * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH  THE SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#include "cdi/audio.h"
++
++#include "device.h"
++
++#define DRIVER_NAME "ac97"
++
++static struct cdi_audio_driver driver;
++
++static int ac97_driver_init(void)
++{
++    cdi_driver_init(&driver.drv);
++
++    return 0;
++}
++
++static int ac97_driver_destroy(void)
++{
++    cdi_driver_destroy(&driver.drv);
++
++    return 0;
++}
++
++static struct cdi_audio_driver driver = {
++    .drv = {
++        .name          = DRIVER_NAME,
++        .type          = CDI_AUDIO,
++        .bus           = CDI_PCI,
++        .init          = ac97_driver_init,
++        .destroy       = ac97_driver_destroy,
++        .init_device   = ac97_init_device,
++        .remove_device = ac97_remove_device
++    },
++
++    .transfer_data          = ac97_transfer_data,
++    .change_device_status   = ac97_change_status,
++    .set_volume             = ac97_set_volume,
++    .set_sample_rate        = ac97_set_sample_rate,
++    .get_position           = ac97_get_position,
++    .set_number_of_channels = ac97_set_channel_count
++};
++
++CDI_DRIVER(DRIVER_NAME, driver)
++
+-- 
+1.7.1
+
+
+From kevin at tyndur.org  Thu Nov 18 20:43:07 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Thu, 18 Nov 2010 20:43:07 +0100
+Subject: [cdi-devel] [PATCH] CDI.audio
+In-Reply-To: <4CE57D80.6060907@tyndur.org>
+References: <1290024262-20905-1-git-send-email-max@tyndur.org>
+	<20101117214537.GB7963@silvanus> <4CE450E3.5080801@tyndur.org>
+	<20101117225129.GB715@silvanus> <4CE45DE3.90609@tyndur.org>
+	<AANLkTinPEen78abrTLUBb-cwDPx4iBsAogibi_wgNFXE@mail.gmail.com>
+	<4CE5427E.8020408@tyndur.org> <20101118174129.GA4912@silvanus>
+	<4CE57D80.6060907@tyndur.org>
+Message-ID: <20101118194307.GB4912@silvanus>
+
+On Thu, Nov 18, 2010 at 08:24:48PM +0100, Max Reitz wrote:
+> > But you have the mixer which must send its data to the hardware in the
+> > same way. And now we've just recreated the same problem one level below.
+> > So now the mixer has sent some data in advance to the hardware and needs
+> > to take that back and possibly replace it by something else. This is
+> > what I'm talking about.
+> 
+> That shouldn't be a big deal. Just use transfer_data with the buffer which
+> is currently in use.
+
+Heh, I think I just start understanding the transfer_data interface.
+I've been taking the size_t parameter as a buffer size instead of the
+buffer index so far and assumed that every transferred buffer is queued
+at the end.
+
+Now things become much clearer and start to actually make sense.
+
+> > PS: Any chance to tell your mailer to wrap lines properly?
+> 
+> I think not, but I tried to wrap them manually.
+
+I'm pretty sure that Thunderbird can do this, at least my version of it
+does it right.
+
+Kevin
+
+From kevin at tyndur.org  Sat Nov 27 14:18:28 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 27 Nov 2010 14:18:28 +0100
+Subject: [cdi-devel] [PATCH] ata: Fix bus master direction flag
+Message-ID: <1290863908-5147-1-git-send-email-kevin@tyndur.org>
+
+! ata: Bit 3 in the Bus Master IDE Command Register is set if the DMA
+  transfer is a bus master write, i.e. read from disk and write to
+  memory. Current code got that wrong and sets it for writes to the
+  disk.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ ata/device.h  |    2 +-
+ ata/request.c |    7 ++++---
+ 2 files changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/ata/device.h b/ata/device.h
+index 6c438e0..c939a34 100644
+--- a/ata/device.h
++++ b/ata/device.h
+@@ -116,7 +116,7 @@
+ 
+ // Bits im Busmaster Command Register
+ #define BMR_CMD_START           (1 << 0)
+-#define BMR_CMD_WRITE           (1 << 3)
++#define BMR_CMD_READ            (1 << 3)
+ 
+ // Bits im Busmaster Status Register
+ #define BMR_STATUS_ERROR        (1 << 1)
+diff --git a/ata/request.c b/ata/request.c
+index 9d618c7..ff5d479 100644
+--- a/ata/request.c
++++ b/ata/request.c
+@@ -461,10 +461,11 @@ static int ata_protocol_dma(struct ata_request* request)
+     // aus, dass es notwendig ist.
+     cdi_inb(ctrl->port_bmr_base + BMR_COMMAND);
+     cdi_inb(ctrl->port_bmr_base + BMR_STATUS);
++
+     // Busmastering starten
+-    if (request->flags.direction != READ) {
+-        cdi_outb(ctrl->port_bmr_base + BMR_COMMAND, BMR_CMD_START |
+-            BMR_CMD_WRITE);
++    if (request->flags.direction == READ) {
++        cdi_outb(ctrl->port_bmr_base + BMR_COMMAND,
++            BMR_CMD_START | BMR_CMD_READ);
+     } else {
+         cdi_outb(ctrl->port_bmr_base + BMR_COMMAND, BMR_CMD_START);
+     }
+-- 
+1.6.0.2
+
+

@@ -1,0 +1,226 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 2/7] libc: cmdline_get_argc/copy_argv
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%202/7%5D%20libc%3A%20cmdline_get_argc/copy_argv&In-Reply-To=%3C20110108141059.GC7079%40neo.geekcave.lan%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001996.html">
+   <LINK REL="Next"  HREF="001998.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 2/7] libc: cmdline_get_argc/copy_argv</H1>
+    <B>Antoine Kaufmann</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%202/7%5D%20libc%3A%20cmdline_get_argc/copy_argv&In-Reply-To=%3C20110108141059.GC7079%40neo.geekcave.lan%3E"
+           TITLE="[tyndur-devel] [PATCH 2/7] libc: cmdline_get_argc/copy_argv">toni at tyndur.org
+                  </A><BR>
+    <I>Sa Jan  8 15:10:59 CET 2011</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001996.html">[tyndur-devel] [PATCH 1/7] init: init.h benutzen statt lokal deklarieren
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001998.html">[tyndur-devel] [PATCH 3/7] kernel2: Fixes für SHM in nicht-aktivem Kontext
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1997">[ Datum ]</a>
+              <a href="thread.html#1997">[ Thema ]</a>
+              <a href="subject.html#1997">[ Betreff (Subject) ]</a>
+              <a href="author.html#1997">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>On Wed, Dec 29 14:12, Kevin Wolf wrote:
+&gt;<i> + libc: Neue Funktionen cmdline_get_argc und cmdline_copy_argv, die aus
+</I>&gt;<i>   einer gegebenen Kommandozeile argc auslesen bzw. ein gegebenes argv
+</I>&gt;<i>   aus der Kommandozeile befuellen
+</I>&gt;<i> * libc: crt0.c benutzt die neuen Funktionen statt der eigenen
+</I>&gt;<i>   Implementierung
+</I>&gt;<i> 
+</I>&gt;<i> Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+</I>&gt;<i> ---
+</I>&gt;<i>  src/modules/include/init.h |    2 ++
+</I>&gt;<i>  src/modules/lib/crt0.c     |   42 ++++++++++--------------------------------
+</I>&gt;<i>  src/modules/lib/init.c     |   38 ++++++++++++++++++++++++++++++++++++++
+</I>&gt;<i>  3 files changed, 50 insertions(+), 32 deletions(-)
+</I>&gt;<i> 
+</I>&gt;<i> diff --git a/src/modules/include/init.h b/src/modules/include/init.h
+</I>&gt;<i> index 195511a..d431cee 100644
+</I>&gt;<i> --- a/src/modules/include/init.h
+</I>&gt;<i> +++ b/src/modules/include/init.h
+</I>&gt;<i> @@ -43,6 +43,8 @@ char *init_service_get_name(pid_t pid);
+</I>&gt;<i>  void init_process_exit(int result);
+</I>&gt;<i>  pid_t init_execute(const char* cmd);
+</I>&gt;<i>  
+</I>&gt;<i> +int cmdline_get_argc(const char* args);
+</I>&gt;<i> +void cmdline_copy_argv(char* args, const char** argv, size_t argc);
+</I>&gt;<i>  
+</I>&gt;<i>  
+</I>&gt;<i>  
+</I>&gt;<i> diff --git a/src/modules/lib/crt0.c b/src/modules/lib/crt0.c
+</I>&gt;<i> index 4c3192d..fb42271 100644
+</I>&gt;<i> --- a/src/modules/lib/crt0.c
+</I>&gt;<i> +++ b/src/modules/lib/crt0.c
+</I>&gt;<i> @@ -27,8 +27,9 @@
+</I>&gt;<i>   */
+</I>&gt;<i>  
+</I>&gt;<i>  #include &lt;stdlib.h&gt;
+</I>&gt;<i> -#include &quot;syscall.h&quot;
+</I>&gt;<i> -#include &quot;rpc.h&quot;
+</I>&gt;<i> +#include &lt;syscall.h&gt;
+</I>&gt;<i> +#include &lt;rpc.h&gt;
+</I>&gt;<i> +#include &lt;init.h&gt;
+</I>&gt;<i>  #include &lt;string.h&gt;
+</I>&gt;<i>  #include &lt;stdio.h&gt;
+</I>&gt;<i>  
+</I>&gt;<i> @@ -56,7 +57,9 @@ static void call_constructors(void)
+</I>&gt;<i>  
+</I>&gt;<i>  void __attribute__((weak)) _start(void)
+</I>&gt;<i>  {
+</I>&gt;<i> -    //v();
+</I>&gt;<i> +    char* args = NULL;
+</I>&gt;<i> +    int argc;
+</I>&gt;<i> +
+</I>&gt;<i>      init_memory_manager();
+</I>&gt;<i>      init_messaging();
+</I>&gt;<i>      init_sync_messages();
+</I>&gt;<i> @@ -70,37 +73,12 @@ void __attribute__((weak)) _start(void)
+</I>&gt;<i>      //Kommandozeilenargumente Parsen ----
+</I>&gt;<i>      //TODO: Das ist alles noch sehr primitiv
+</I>&gt;<i>      //Erst den String vom Kernel holen
+</I>&gt;<i> -    char* args = get_cmdline();
+</I>&gt;<i> -    int argc, pos, f;
+</I>&gt;<i> -    argc = 0;
+</I>&gt;<i> -    f = 0;
+</I>&gt;<i> -    //Jetzt werden die Argumente gezaehlt.
+</I>&gt;<i> -    for (pos = 0; pos &lt; strlen(args); pos++) {
+</I>&gt;<i> -        if (args[pos] == ' ') {
+</I>&gt;<i> -            // mehrere leerzeichen direkt hintereinander nur einmal z???hlen
+</I>&gt;<i> -            if(f == 1)
+</I>&gt;<i> -            {
+</I>&gt;<i> -                argc++;
+</I>&gt;<i> -            }
+</I>&gt;<i> -            f = 0;
+</I>&gt;<i> -        }
+</I>&gt;<i> -        else
+</I>&gt;<i> -        {
+</I>&gt;<i> -            f = 1;
+</I>&gt;<i> -        }
+</I>&gt;<i> -    }
+</I>&gt;<i> -    if(f == 1)
+</I>&gt;<i> -    {
+</I>&gt;<i> -        argc++;
+</I>&gt;<i> -    }
+</I>&gt;<i> +    args = get_cmdline();
+</I>&gt;<i> +    argc = cmdline_get_argc(args);
+</I>&gt;<i>  
+</I>&gt;<i>      char* argv[argc + 1];
+</I>&gt;<i> -    argv[0] = strtok(args, &quot; &quot;);
+</I>&gt;<i> -    for(pos = 1; pos &lt; argc; pos++)
+</I>&gt;<i> -    {
+</I>&gt;<i> -        argv[pos] = strtok(NULL, &quot; &quot;);
+</I>&gt;<i> -    }
+</I>&gt;<i> -    argv[argc] = NULL;
+</I>&gt;<i> +
+</I>&gt;<i> +    cmdline_copy_argv(args, (const char**) argv, argc);
+</I>&gt;<i>  
+</I>&gt;<i>      call_constructors();
+</I>&gt;<i>      int result = main(argc, argv);
+</I>&gt;<i> diff --git a/src/modules/lib/init.c b/src/modules/lib/init.c
+</I>&gt;<i> index 3e021c8..ea0a7d2 100644
+</I>&gt;<i> --- a/src/modules/lib/init.c
+</I>&gt;<i> +++ b/src/modules/lib/init.c
+</I>&gt;<i> @@ -35,6 +35,7 @@
+</I>&gt;<i>  #include &quot;stdlib.h&quot;
+</I>&gt;<i>  #include &lt;io.h&gt;
+</I>&gt;<i>  #include &lt;unistd.h&gt;
+</I>&gt;<i> +#include &lt;ctype.h&gt;
+</I>&gt;<i>  #include &lt;dir.h&gt;
+</I>&gt;<i>  
+</I>&gt;<i>  // Kindprozess eintragen
+</I>&gt;<i> @@ -177,6 +178,43 @@ pid_t init_execute(const char* cmd)
+</I>&gt;<i>      return pid;
+</I>&gt;<i>  }
+</I>&gt;<i>  
+</I>&gt;<i> +/*
+</I>&gt;<i> + * Zaehlt die Argumente in einer Kommandozeile. Mehrere aufeinanderfolgende
+</I>&gt;<i> + * Leerzeichen werden als ein einziger Trenner aufgefasst.
+</I>&gt;<i> + */
+</I>&gt;<i> +int cmdline_get_argc(const char* args)
+</I>&gt;<i> +{
+</I>&gt;<i> +    bool space = false;
+</I>&gt;<i> +    int argc = 0;
+</I>&gt;<i> +    int pos;
+</I>&gt;<i> +
+</I>&gt;<i> +    for (pos = 0; pos &lt; strlen(args); pos++) {
+</I>&gt;<i> +        if (isspace(args[pos]) &amp;&amp; !space) {
+</I>&gt;<i> +            argc++;
+</I>&gt;<i> +        }
+</I>&gt;<i> +
+</I>&gt;<i> +        space = isspace(args[pos]);
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    if (!space) {
+</I>&gt;<i> +        argc++;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    return argc;
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>
+Vielleicht sollte man hier in einem Kommentar noch anmerken dass args
+veraendert wird, und auch nicht freigegeben werden darf.
+
+&gt;<i> +void cmdline_copy_argv(char* args, const char** argv, size_t argc)
+</I>&gt;<i> +{
+</I>&gt;<i> +    int pos;
+</I>&gt;<i> +    argv[0] = strtok(args, &quot; &quot;);
+</I>&gt;<i> +
+</I>&gt;<i> +    for(pos = 1; pos &lt; argc; pos++) {
+</I>&gt;<i> +        argv[pos] = strtok(NULL, &quot; &quot;);
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    argv[argc] = NULL;
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i>  int init_dev_register(struct init_dev_desc* dev, size_t size)
+</I>&gt;<i>  {
+</I>&gt;<i>      return rpc_get_int(1, &quot;DEV_REG &quot;, size, (char*) dev);
+</I>
+Sonst sieht das gut aus, glaube ich. ;-)
+
+Acked-by: Antoine Kaufmann &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">toni at tyndur.org</A>&gt;
+
+-- 
+Antoine Kaufmann
+&lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">toni at famkaufmann.info</A>&gt;
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : &lt;<A HREF="http://list.tyndur.org/pipermail/tyndur-devel/attachments/20110108/356b028a/attachment.pgp">http://list.tyndur.org/pipermail/tyndur-devel/attachments/20110108/356b028a/attachment.pgp</A>&gt;
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001996.html">[tyndur-devel] [PATCH 1/7] init: init.h benutzen statt lokal deklarieren
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001998.html">[tyndur-devel] [PATCH 3/7] kernel2: Fixes für SHM in nicht-aktivem Kontext
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1997">[ Datum ]</a>
+              <a href="thread.html#1997">[ Thema ]</a>
+              <a href="subject.html#1997">[ Betreff (Subject)]</a>
+              <a href="author.html#1997">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

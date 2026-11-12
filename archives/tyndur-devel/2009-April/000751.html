@@ -1,0 +1,175 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] kernel: RPC zu unbekanntem Prozess tolerieren
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20kernel%3A%20RPC%20zu%20unbekanntem%20Prozess%20tolerieren&In-Reply-To=%3C1240060030-3059-1-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="000749.html">
+   <LINK REL="Next"  HREF="000756.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] kernel: RPC zu unbekanntem Prozess tolerieren</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20kernel%3A%20RPC%20zu%20unbekanntem%20Prozess%20tolerieren&In-Reply-To=%3C1240060030-3059-1-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH] kernel: RPC zu unbekanntem Prozess tolerieren">kevin at tyndur.org
+                  </A><BR>
+    <I>Sa Apr 18 15:07:10 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="000749.html">[tyndur-devel] [PATCH] Shell: Neuer Befehl kill
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="000756.html">[tyndur-devel] [PATCH] kernel: RPC zu unbekanntem	Prozess	tolerieren
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#751">[ Datum ]</a>
+              <a href="thread.html#751">[ Thema ]</a>
+              <a href="subject.html#751">[ Betreff (Subject) ]</a>
+              <a href="author.html#751">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* kernel: Wenn jemand zu einem unbekannten Prozess einen RPC machen
+  will, sollte man ihm das einfach sagen statt ihn abzuschiessen.
+---
+ src/kernel/src/syscall.c       |    6 ++--
+ src/modules/include/syscall.h  |    3 +-
+ src/modules/lib/syscalls/rpc.c |   41 +++++++++++++++++++++++++++++++++++----
+ 3 files changed, 41 insertions(+), 9 deletions(-)
+
+diff --git a/src/kernel/src/syscall.c b/src/kernel/src/syscall.c
+index 2ee793d..87911fa 100644
+--- a/src/kernel/src/syscall.c
++++ b/src/kernel/src/syscall.c
+@@ -34,6 +34,7 @@
+  */  
+ 
+ #include &lt;stdint.h&gt;
++#include &lt;errno.h&gt;
+ 
+ #include &quot;console.h&quot;
+ #include &quot;syscall.h&quot;
+@@ -668,8 +669,7 @@ void syscall(struct int_stack_frame ** esp)
+             struct task* callee = get_task(callee_pid);
+ 
+             if (!callee) {
+-                abort_task(&quot;SYSCALL_FASTRPC: RPC zu unbekanntem Prozess %d)&quot;,
+-                    callee_pid);
++                isf-&gt;eax = -ESRCH;
+                 break;
+             }
+ 
+@@ -693,7 +693,7 @@ void syscall(struct int_stack_frame ** esp)
+             )) {
+                 schedule_to_task(callee, (dword*) esp);
+             } else {
+-                isf-&gt;eax = -1;
++                isf-&gt;eax = -EAGAIN;
+                 schedule((dword*)esp);
+             }
+             break;
+diff --git a/src/modules/include/syscall.h b/src/modules/include/syscall.h
+index e22b0df..6bb3593 100644
+--- a/src/modules/include/syscall.h
++++ b/src/modules/include/syscall.h
+@@ -72,7 +72,8 @@ void set_rpc_handler(void (*rpc_handler)(void));
+ void add_intr_handler(dword intr);
+ 
+ void rpc(pid_t pid);
+-void send_message(pid_t pid, dword function, dword correlation_id, dword len, char* data);
++int send_message(pid_t pid, dword function, dword correlation_id,
++    dword len, char* data);
+ void wait_for_rpc(void);
+ void v_and_wait_for_rpc(void);
+ 
+diff --git a/src/modules/lib/syscalls/rpc.c b/src/modules/lib/syscalls/rpc.c
+index 72d4bbc..2a07352 100644
+--- a/src/modules/lib/syscalls/rpc.c
++++ b/src/modules/lib/syscalls/rpc.c
+@@ -1,5 +1,34 @@
+-#include &quot;types.h&quot;
+-#include &quot;syscall.h&quot;
++/*
++ * Copyright (c) 2006-2009 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include &lt;types.h&gt;
++#include &lt;syscall.h&gt;
++#include &lt;errno.h&gt;
+ 
+ void rpc(dword pid) 
+ {
+@@ -16,10 +45,10 @@ void rpc(dword pid)
+     } while (result != 0);
+ }
+ 
+-void send_message
++int send_message
+     (dword pid, dword function, dword correlation_id, dword len, char* data)
+ {
+-    dword result = 0;
++    int32_t result = 0;
+ 
+     // Auf die Variable wird zwar sonst nirgends schreibend zugegriffen, aber
+     // das volatile ist noetig, weil gcc sonst der Meinung ist, der Arrayinhalt
+@@ -42,6 +71,8 @@ void send_message
+         : &quot;i&quot; (SYSCALL_FASTRPC), &quot;g&quot; (pid), &quot;i&quot; (0x8), &quot;g&quot; (metadata), 
+             &quot;g&quot; (len), &quot;g&quot; (data), &quot;0&quot; (result));
+ 
+-    } while (result != 0);
++    } while (result == -EAGAIN);
++
++    return result;
+ }
+ 
+-- 
+1.6.0.2
+
+
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="000749.html">[tyndur-devel] [PATCH] Shell: Neuer Befehl kill
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="000756.html">[tyndur-devel] [PATCH] kernel: RPC zu unbekanntem	Prozess	tolerieren
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#751">[ Datum ]</a>
+              <a href="thread.html#751">[ Thema ]</a>
+              <a href="subject.html#751">[ Betreff (Subject)]</a>
+              <a href="author.html#751">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

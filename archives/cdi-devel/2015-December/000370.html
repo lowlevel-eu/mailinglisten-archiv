@@ -1,0 +1,285 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH 6/7] e1000: Implement support for 8086:10f5	e1000e chip
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%206/7%5D%20e1000%3A%20Implement%20support%20for%208086%3A10f5%0A%09e1000e%20chip&In-Reply-To=%3C1451492843-6394-7-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000369.html">
+   <LINK REL="Next"  HREF="000371.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH 6/7] e1000: Implement support for 8086:10f5	e1000e chip</H1>
+    <B>Kevin Wolf</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%206/7%5D%20e1000%3A%20Implement%20support%20for%208086%3A10f5%0A%09e1000e%20chip&In-Reply-To=%3C1451492843-6394-7-git-send-email-kevin%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH 6/7] e1000: Implement support for 8086:10f5	e1000e chip">kevin at tyndur.org
+       </A><BR>
+    <I>Wed Dec 30 17:27:22 CET 2015</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000369.html">[cdi-devel] [PATCH 5/7] e1000: Move a few model-specific things to	e1000_model
+</A></li>
+        <LI>Next message: <A HREF="000371.html">[cdi-devel] [PATCH 7/7] e1000: Wait for Link Up
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#370">[ date ]</a>
+              <a href="thread.html#370">[ thread ]</a>
+              <a href="subject.html#370">[ subject ]</a>
+              <a href="author.html#370">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>This adds support for the e1000e in my Thinkpad T500.
+
+The main difference between the already supported e1000 cards and the
+8086:10f5 is that the EEPROM can't be accessed using EERD, but must use
+the flash interface. Apart from that, only the settings in TCTL differ.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">kevin at tyndur.org</A>&gt;
+---
+ e1000/device.c   | 79 +++++++++++++++++++++++++++++++++++++++++++++++++++++++-
+ e1000/device.h   | 32 +++++++++++++++++++++++
+ e1000/e1000_io.h | 29 +++++++++++++++++++++
+ 3 files changed, 139 insertions(+), 1 deletion(-)
+
+diff --git a/e1000/device.c b/e1000/device.c
+index 6356721..d9e65c5 100644
+--- a/e1000/device.c
++++ b/e1000/device.c
+@@ -247,6 +247,63 @@ static uint32_t e1000e_read_eerd(struct e1000_device *device, uint16_t offset)
+ }
+ #endif
+ 
++static uint32_t e1000e_read_flash(struct e1000_device *device, uint16_t offset)
++{
++    uint16_t hsfsts;
++    uint32_t linear_address;
++
++    /* Convert from words to bytes */
++    offset *= 2;
++
++    if (device-&gt;flash_base == NULL) {
++        printf(&quot;e1000: Cannot read from flash without flash BAR\n&quot;);
++        return (uint32_t) -1;
++    }
++
++    if (offset + 2 &gt; device-&gt;flash_size) {
++        printf(&quot;e1000: Cannot read from flash offset %d (size %d)\n&quot;,
++               offset, device-&gt;flash_size);
++        return (uint32_t) -1;
++    }
++
++    /* Check that hardware sequencing is supported */
++    hsfsts = flash_reg_inw(device, FLASH_REG_HSFSTS);
++    if ((hsfsts &amp; HSFSTS_FDV) == 0) {
++        /* TODO Implement access using Software Sequencing registers */
++        printf(&quot;e1000: Cannot read from flash without hardware sequencing\n&quot;);
++        return (uint32_t) -1;
++    }
++
++    /* Check that no SPI cycle is in progress */
++    if (hsfsts &amp; HSFSTS_SCIP) {
++        printf(&quot;e1000: Cannot read from flash while SPI cycle in progress\n&quot;);
++        return (uint32_t) -1;
++    }
++
++    /* Start a new cycle */
++    linear_address = device-&gt;flash_base_offset + offset;
++    flash_reg_outl(device, FLASH_REG_FADDR, linear_address);
++
++    flash_reg_outw(device, FLASH_REG_HSFSTS,
++                   HSFSTS_FDONE | HSFSTS_FCERR | HSFSTS_AEL);
++    flash_reg_outw(device, FLASH_REG_HSFCTL,
++                   HSFCTL_FGO | HSFCTL_FCYCLE_READ | HSFCTL_FDBC_WORD);
++
++    CDI_CONDITION_WAIT_SLEEP(
++        flash_reg_inw(device, FLASH_REG_HSFSTS) &amp; HSFSTS_FDONE, 100, 1);
++
++    hsfsts = flash_reg_inw(device, FLASH_REG_HSFSTS);
++    if ((hsfsts &amp; (HSFSTS_FDONE | HSFSTS_FCERR)) == HSFSTS_FDONE) {
++        return flash_reg_inl(device, FLASH_REG_FDATA0);
++    } else if ((hsfsts &amp; HSFSTS_FDONE) == 0){
++        printf(&quot;e1000: Timeout while reading from flash\n&quot;);
++    } else {
++        printf(&quot;e1000: Error while reading from flash\n&quot;);
++    }
++
++    return (uint32_t) -1;
++}
++
+ static uint16_t e1000_eeprom_read(struct e1000_device* device, uint16_t offset)
+ {
+     static int eerd_safe = 1;
+@@ -287,6 +344,18 @@ static void reset_nic(struct e1000_device* netcard)
+     cdi_sleep_ms(10);
+     while (reg_inl(netcard, REG_CTL) &amp; CTL_RESET);
+ 
++    // Flash-Basisadresse
++    if (netcard-&gt;flash_base) {
++        uint32_t glfpr = flash_reg_inl(netcard, FLASH_REG_GLFPR);
++        uint32_t base = (glfpr &amp; 0x1fff) &lt;&lt; 12;
++        uint32_t limit = ((glfpr &gt;&gt; 16) &amp; 0x1fff) &lt;&lt; 12;
++
++        netcard-&gt;flash_base_offset = base;
++        netcard-&gt;flash_size = limit - base;
++
++        printf(&quot;e1000: Flash base offset %x; size %x\n&quot;, base, limit - base);
++    }
++
+     // Kontrollregister initialisieren
+     reg_outl(netcard, REG_CTL, CTL_AUTO_SPEED | CTL_LINK_UP);
+ 
+@@ -377,6 +446,11 @@ static struct e1000_model models[] = {
+         .device_id      = 0x100f,
+         .tctl_flags     = TCTL_COLL_DIST_E1000,
+         .eeprom_read    = e1000_read_eerd,
++    }, {
++        .vendor_id      = 0x8086,
++        .device_id      = 0x10f5,
++        .tctl_flags     = TCTL_COLL_DIST_E1000E | TCTL_RRTHRESH,
++        .eeprom_read    = e1000e_read_flash,
+     }
+ };
+ 
+@@ -418,9 +492,12 @@ found:
+     cdi_list_t reslist = pci-&gt;resources;
+     struct cdi_pci_resource* res;
+     for (i = 0; (res = cdi_list_get(reslist, i)); i++) {
+-        if (res-&gt;type == CDI_PCI_MEMORY) {
++        if (res-&gt;type == CDI_PCI_MEMORY &amp;&amp; res-&gt;index == 0) {
+             struct cdi_mem_area* mmio = cdi_mem_map(res-&gt;start, res-&gt;length);
+             netcard-&gt;mem_base = mmio-&gt;vaddr;
++        } else if (res-&gt;type == CDI_PCI_MEMORY &amp;&amp; res-&gt;index == 1) {
++            struct cdi_mem_area* mmio = cdi_mem_map(res-&gt;start, res-&gt;length);
++            netcard-&gt;flash_base = mmio-&gt;vaddr;
+         }
+     }
+ 
+diff --git a/e1000/device.h b/e1000/device.h
+index 2eebf8a..638e6f9 100644
+--- a/e1000/device.h
++++ b/e1000/device.h
+@@ -93,6 +93,10 @@ enum {
+ 
+     /* e1000 specific values */
+     TCTL_COLL_DIST_E1000    = (0x40 &lt;&lt; 12), /* COLD - Collision Distance */
++
++    /* e1000e specific values */
++    TCTL_COLL_DIST_E1000E   = (0x3f &lt;&lt; 12), /* COLD - Collision Distance */
++    TCTL_RRTHRESH           = (0x03 &lt;&lt; 28), /* Read Request Threshold */
+ };
+ 
+ enum {
+@@ -101,6 +105,31 @@ enum {
+ };
+ 
+ enum {
++    FLASH_REG_GLFPR     =   0x0, /* Gigabit LAN Flash Primary Region */
++    FLASH_REG_HSFSTS    =   0x4, /* Hardware Sequencing Flash Status */
++    FLASH_REG_HSFCTL    =   0x6, /* Hardware Sequencing Flash Control */
++    FLASH_REG_FADDR     =   0x8, /* Flash Address Register */
++    FLASH_REG_FDATA0    =  0x10, /* Flash Data 0 Register */
++};
++
++enum {
++    HSFSTS_FDONE        = (1 &lt;&lt;  0),
++    HSFSTS_FCERR        = (1 &lt;&lt;  1),
++    HSFSTS_AEL          = (1 &lt;&lt;  2),
++    HSFSTS_SCIP         = (1 &lt;&lt;  5),
++    HSFSTS_FDV          = (1 &lt;&lt; 14),
++};
++
++enum {
++    HSFCTL_FGO          = (1 &lt;&lt;  0),
++    HSFCTL_FCYCLE_READ  = (0 &lt;&lt;  1),
++    /*HSFCTL_FCYCLE_WRITE = (2 &lt;&lt;  1),*/
++    HSFCTL_FDBC_BYTE    = (0 &lt;&lt;  8),
++    HSFCTL_FDBC_WORD    = (1 &lt;&lt;  8),
++    HSFCTL_FDBC_DWORD   = (3 &lt;&lt;  8),
++};
++
++enum {
+     EEPROM_OFS_MAC      = 0x0,
+ };
+ 
+@@ -190,6 +219,9 @@ struct e1000_device {
+     uint32_t                    rx_cur_buffer;
+ 
+     void*                       mem_base;
++    void*                       flash_base;
++    uint32_t                    flash_base_offset;
++    uint32_t                    flash_size;
+     uint8_t                     revision;
+ 
+     struct e1000_model*         model;
+diff --git a/e1000/e1000_io.h b/e1000/e1000_io.h
+index 68937a9..2432b1c 100644
+--- a/e1000/e1000_io.h
++++ b/e1000/e1000_io.h
+@@ -74,4 +74,33 @@ static inline uint32_t reg_inl(struct e1000_device* netcard, uint16_t reg)
+     return *mmio;
+ }
+ 
++
++/* Flash register access */
++
++static inline void flash_reg_outw
++    (struct e1000_device* netcard, uint16_t reg, uint16_t value)
++{
++    volatile uint16_t* mmio = (uint16_t*) (((char*)netcard-&gt;flash_base) + reg);
++    *mmio = value;
++}
++
++static inline void flash_reg_outl
++    (struct e1000_device* netcard, uint16_t reg, uint32_t value)
++{
++    volatile uint32_t* mmio = (uint32_t*) (((char*)netcard-&gt;flash_base) + reg);
++    *mmio = value;
++}
++
++static inline uint16_t flash_reg_inw(struct e1000_device* netcard, uint16_t reg)
++{
++    volatile uint16_t* mmio = (uint16_t*) (((char*)netcard-&gt;flash_base) + reg);
++    return *mmio;
++}
++
++static inline uint32_t flash_reg_inl(struct e1000_device* netcard, uint16_t reg)
++{
++    volatile uint32_t* mmio = (uint32_t*) (((char*)netcard-&gt;flash_base) + reg);
++    return *mmio;
++}
++
+ #endif
+-- 
+2.1.4
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000369.html">[cdi-devel] [PATCH 5/7] e1000: Move a few model-specific things to	e1000_model
+</A></li>
+	<LI>Next message: <A HREF="000371.html">[cdi-devel] [PATCH 7/7] e1000: Wait for Link Up
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#370">[ date ]</a>
+              <a href="thread.html#370">[ thread ]</a>
+              <a href="subject.html#370">[ subject ]</a>
+              <a href="author.html#370">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

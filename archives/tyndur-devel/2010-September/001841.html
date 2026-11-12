@@ -1,0 +1,200 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] kernel2: Kernel-Interrupts moeglich machen
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20kernel2%3A%20Kernel-Interrupts%20moeglich%20machen&In-Reply-To=%3C1285447799-16027-1-git-send-email-toni%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001836.html">
+   <LINK REL="Next"  HREF="001842.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] kernel2: Kernel-Interrupts moeglich machen</H1>
+    <B>Antoine Kaufmann</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20kernel2%3A%20Kernel-Interrupts%20moeglich%20machen&In-Reply-To=%3C1285447799-16027-1-git-send-email-toni%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH] kernel2: Kernel-Interrupts moeglich machen">toni at tyndur.org
+                  </A><BR>
+    <I>Sa Sep 25 22:49:59 CEST 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001836.html">[tyndur-devel] [PATCH] kernel2: Kernel-Interrupts moeglich machen
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001842.html">[tyndur-devel] [PATCH] kernel2: Kernel-Interrupts moeglich machen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1841">[ Datum ]</a>
+              <a href="thread.html#1841">[ Thema ]</a>
+              <a href="subject.html#1841">[ Betreff (Subject) ]</a>
+              <a href="author.html#1841">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* kernel2: Anpassungen damit kernel-Interrupts nicht mehr den Stack
+           durcheinander bringen.
+* kernel2: Neues Feld user_isf eingefuehrt, damit im Kernel jederzeit
+           auf den ISF des Userspace-Interrupts zugegriffen werden
+           kann, auch nach einem Kernel-Interrupt.
+! kernel2: Keine RPCs zu Tasks die in Kernel-Interrupts sind
+
+Signed-off-by: Antoine Kaufmann &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">toni at tyndur.org</A>&gt;
+---
+ src/kernel2/include/tasks.h      |    3 +++
+ src/kernel2/src/arch/i386/vm86.c |    1 +
+ src/kernel2/src/interrupts/im.c  |   24 ++++++++++++++----------
+ src/kernel2/src/syscalls/rpc.c   |   12 ++++++++++--
+ src/kernel2/src/tasks/thread.c   |    1 +
+ 5 files changed, 29 insertions(+), 12 deletions(-)
+
+diff --git a/src/kernel2/include/tasks.h b/src/kernel2/include/tasks.h
+index dfd0ea5..d1b031c 100644
+--- a/src/kernel2/include/tasks.h
++++ b/src/kernel2/include/tasks.h
+@@ -106,6 +106,9 @@ typedef struct {
+     /// Groesse des Kernelstacks
+     size_t kernel_stack_size;
+ 
++    /// Aktueller Stackframe des Userspace-Interrupts
++    vaddr_t user_isf;
++
+     /// Anfang des Usermode-Stacks
+     vaddr_t user_stack_bottom;
+ 
+diff --git a/src/kernel2/src/arch/i386/vm86.c b/src/kernel2/src/arch/i386/vm86.c
+index cdee6f1..2aa7a25 100644
+--- a/src/kernel2/src/arch/i386/vm86.c
++++ b/src/kernel2/src/arch/i386/vm86.c
+@@ -152,6 +152,7 @@ static int create_vm86_task(int intr, vm86_regs_t* regs, uintptr_t stack)
+     // Und das ganze auf den Stack
+     task-&gt;kernel_stack = ((uint8_t*) task-&gt;kernel_stack)
+         + sizeof(*isf) - sizeof(visf);
++    task-&gt;user_isf = task-&gt;kernel_stack;
+     memcpy(task-&gt;kernel_stack, &amp;visf, sizeof(visf));
+ 
+     // Sofort in den VM86-Task wechseln. Der aufrufende Thread wird
+diff --git a/src/kernel2/src/interrupts/im.c b/src/kernel2/src/interrupts/im.c
+index 1930c0d..b9b1e01 100644
+--- a/src/kernel2/src/interrupts/im.c
++++ b/src/kernel2/src/interrupts/im.c
+@@ -133,9 +133,14 @@ interrupt_stack_frame_t* im_handler(interrupt_stack_frame_t* isf)
+     // Pointer auf den aktuellen Thread holen    
+     pm_thread_t* thread = current_thread;
+     pm_thread_t* old_thread = thread;
+-    thread-&gt;kernel_stack = (vaddr_t) isf;
+     uint8_t int_num = isf-&gt;interrupt_number;
+-    
++    interrupt_stack_frame_t* new_isf = isf;
++
++    // Wenn der Int aus dem Userspace kommt, legen wir den zugehoerigen ISF ab
++    if ((isf-&gt;cs &amp; 0x3) || (isf-&gt;eflags &amp; 0x20000)) {
++        thread-&gt;user_isf = isf;
++    }
++
+     if (int_num &lt; 20) {
+         handle_exception(isf, int_num);
+     } else if ((int_num &gt;= 20) &amp;&amp; (int_num &lt; 32)){
+@@ -179,25 +184,24 @@ interrupt_stack_frame_t* im_handler(interrupt_stack_frame_t* isf)
+ 
+     thread = current_thread;
+     if (thread != old_thread) {
+-        interrupt_stack_frame_t* new_isf =
+-            (interrupt_stack_frame_t*) thread-&gt;kernel_stack;
++        interrupt_stack_frame_t* user_isf = thread-&gt;user_isf;
++        old_thread-&gt;kernel_stack = isf;
++        new_isf = thread-&gt;kernel_stack;
+ 
+         cpu_get_current()-&gt;tss.ss0 = 2 &lt;&lt; 3;
+-        if (new_isf-&gt;eflags &amp; 0x20000) {
++        if (user_isf-&gt;eflags &amp; 0x20000) {
+             cpu_get_current()-&gt;tss.esp0 =
+-                (uintptr_t) thread-&gt;kernel_stack
+-                + sizeof(struct vm86_isf);
++                (uintptr_t) user_isf + sizeof(struct vm86_isf);
+         } else {
+             cpu_get_current()-&gt;tss.esp0 =
+-                (uintptr_t) thread-&gt;kernel_stack
+-                + sizeof(interrupt_stack_frame_t);
++                (uintptr_t) user_isf + sizeof(interrupt_stack_frame_t);
+         }
+ 
+         mmc_activate(&amp;thread-&gt;process-&gt;context);
+     }
+ 
+     im_end_of_interrupt(int_num);
+-    return (interrupt_stack_frame_t*) thread-&gt;kernel_stack;
++    return new_isf;
+ }
+ 
+ /**
+diff --git a/src/kernel2/src/syscalls/rpc.c b/src/kernel2/src/syscalls/rpc.c
+index 0f542d9..f412389 100644
+--- a/src/kernel2/src/syscalls/rpc.c
++++ b/src/kernel2/src/syscalls/rpc.c
+@@ -198,11 +198,19 @@ int do_fastrpc(pid_t callee_pid, size_t metadata_size, void* metadata,
+ 
+     // Interrupt Stack Frame des aufgerufenen Tasks mappen
+     paddr_t callee_isf_phys =
+-        mmc_resolve(&amp;callee-&gt;process-&gt;context, callee-&gt;kernel_stack);
++        mmc_resolve(&amp;callee-&gt;process-&gt;context, callee-&gt;user_isf);
+ 
+     interrupt_stack_frame_t* callee_isf = (interrupt_stack_frame_t*)
+         vmm_kernel_automap(callee_isf_phys, sizeof(*callee_isf));
+ 
++    // Wenn sich der Task gerade in einem Kernel-Int befindet, lassen wir ihn
++    // besser in Ruhe und probieren spaeter nochmal.
++    if ((current_thread != callee) &amp;&amp;
++        (callee-&gt;kernel_stack != callee-&gt;user_isf))
++    {
++        vmm_kernel_unmap(callee_isf, sizeof(*callee_isf));
++        return -EAGAIN;
++    }
+ 
+     // RPC-Backlinkinformation anlegen
+     rpc_t* rpc = malloc(sizeof(rpc_t));
+@@ -351,7 +359,7 @@ bool fastrpc_irq(pm_process_t* callee, size_t metadata_size, void* metadata,
+ void syscall_fastrpc_ret(void)
+ {
+     rpc_t* rpc = list_pop(current_process-&gt;rpcs);
+-    interrupt_stack_frame_t* callee_isf = current_thread-&gt;kernel_stack;
++    interrupt_stack_frame_t* callee_isf = current_thread-&gt;user_isf;
+ 
+     // Wenn der Task vom RPC-Handler zurÃ¼ckkehrt, obwohl der Handler
+     // gar nicht aufgerufen wurde, lÃ¤uft was schief
+diff --git a/src/kernel2/src/tasks/thread.c b/src/kernel2/src/tasks/thread.c
+index b94cc3b..ba6e569 100644
+--- a/src/kernel2/src/tasks/thread.c
++++ b/src/kernel2/src/tasks/thread.c
+@@ -79,6 +79,7 @@ pm_thread_t* pm_thread_create(pm_process_t* process, vaddr_t entry)
+         thread-&gt;kernel_stack_size - sizeof(interrupt_stack_frame_t));
+     interrupt_stack_frame_t* isf = (interrupt_stack_frame_t*) thread-&gt;
+         kernel_stack;
++    thread-&gt;user_isf = thread-&gt;kernel_stack;
+ 
+     //  Wir wollen alle Register schoen mit 0 initialisiert haben
+     memset(isf, 0, sizeof(interrupt_stack_frame_t));
+-- 
+1.6.4.4
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001836.html">[tyndur-devel] [PATCH] kernel2: Kernel-Interrupts moeglich machen
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001842.html">[tyndur-devel] [PATCH] kernel2: Kernel-Interrupts moeglich machen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1841">[ Datum ]</a>
+              <a href="thread.html#1841">[ Thema ]</a>
+              <a href="subject.html#1841">[ Betreff (Subject)]</a>
+              <a href="author.html#1841">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

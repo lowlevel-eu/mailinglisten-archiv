@@ -1,0 +1,1004 @@
+From kevin at tyndur.org  Sat May 12 23:19:44 2012
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 12 May 2012 23:19:44 +0200
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH_1/6=5D_LIOv1=3A_Readahead?=
+In-Reply-To: <1336857589-6603-1-git-send-email-kevin@tyndur.org>
+References: <1336857589-6603-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1336857589-6603-2-git-send-email-kevin@tyndur.org>
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/include/io_struct.h                  |    3 +
+ src/modules/include/lostio.h                     |    6 +++
+ src/modules/lib/lostio/client/file.c             |   40 +++++++++++++++----
+ src/modules/lib/lostio/handler.c                 |   46 +++++++++++++++++++++-
+ src/modules/lib/lostio/include/lostio_internal.h |    3 +
+ src/modules/lib/lostio/lostio.c                  |    1 +
+ 6 files changed, 90 insertions(+), 9 deletions(-)
+
+diff --git a/src/modules/include/io_struct.h b/src/modules/include/io_struct.h
+index e2500a2..c4ec7d3 100644
+--- a/src/modules/include/io_struct.h
++++ b/src/modules/include/io_struct.h
+@@ -45,6 +45,8 @@
+ #define IO_OPEN_MODE_LINK 64
+ #define IO_OPEN_MODE_SYNC 128
+ 
++#define IO_RES_FLAG_READAHEAD 1
++
+ typedef uint32_t io_resource_id_t;
+ typedef uint8_t io_direntry_type_t;
+ typedef struct
+@@ -52,6 +54,7 @@ typedef struct
+     io_resource_id_t    id;
+     pid_t               pid;
+     io_resource_id_t    resid;
++    int                 flags;
+ 
+     lio_stream_t        lio2_stream;
+     lio_resource_t      lio2_res;
+diff --git a/src/modules/include/lostio.h b/src/modules/include/lostio.h
+index 8fc4e4d..4b31fba 100644
+--- a/src/modules/include/lostio.h
++++ b/src/modules/include/lostio.h
+@@ -51,6 +51,8 @@
+ #define LOSTIO_FLAG_SYMLINK 0x40000
+ /// EOF nicht automatisch setzen wenn beim Oeffnen die Groesse 0 ist
+ #define LOSTIO_FLAG_NOAUTOEOF 0x80000
++/// Readahead erlauben (d.h. ein zweites read muss dieselben Daten liefern)
++#define LOSTIO_FLAG_READAHEAD 0x100000
+ 
+ /*#define LOSTIO_MODE_READ 0x1
+ #define LOSTIO_MODE_WRITE 0x2
+@@ -110,6 +112,7 @@ typedef struct
+     void            (*post_open)(lostio_filehandle_t*);
+ 
+     size_t          (*read)(lostio_filehandle_t*,void*,size_t,size_t);
++    size_t          (*readahead)(lostio_filehandle_t*,void*,size_t,size_t);
+     size_t          (*write)(lostio_filehandle_t*,size_t,size_t,void*);
+     int             (*seek)(lostio_filehandle_t*,uint64_t,int);
+     int             (*close)(lostio_filehandle_t*);
+@@ -212,6 +215,9 @@ int lio_compat_close(io_resource_t* io_res);
+ ssize_t lio_compat_read(void* dest, size_t blocksize, size_t blockcount,
+     io_resource_t* io_res);
+ 
++/** Liest aus einer Ressource, ohne den Dateizeiger zu verändern */
++ssize_t lio_compat_readahead(void* dest, size_t size, io_resource_t* io_res);
++
+ /**
+  * Schreibt in eine Ressource
+  *
+diff --git a/src/modules/lib/lostio/client/file.c b/src/modules/lib/lostio/client/file.c
+index 8fe5ebe..160851b 100644
+--- a/src/modules/lib/lostio/client/file.c
++++ b/src/modules/lib/lostio/client/file.c
+@@ -118,6 +118,7 @@ static io_resource_t* lio2_open(const char* filename, uint8_t attr)
+     *result = (io_resource_t) {
+         .lio2_stream    =   s,
+         .lio2_res       =   r,
++        .flags          =   IO_RES_FLAG_READAHEAD,
+     };
+ 
+ out_err:
+@@ -198,8 +199,8 @@ int lio_compat_close(io_resource_t* io_res)
+  *
+  * @return Anzahl gelesener Bytes; 0 bei Dateiende; negativ im Fehlerfall.
+  */
+-ssize_t lio_compat_read(void* dest, size_t blocksize, size_t blockcount,
+-    io_resource_t* io_res)
++static ssize_t lio1_read_fn(void* dest, size_t blocksize, size_t blockcount,
++    io_resource_t* io_res, char* rpc_fn)
+ {
+     size_t size;
+ 
+@@ -209,17 +210,13 @@ ssize_t lio_compat_read(void* dest, size_t blocksize, size_t blockcount,
+         .blockcount = blockcount,
+     };
+ 
+-    if (IS_LIO2(io_res)) {
+-        return lio_read(io_res->lio2_stream, blocksize * blockcount, dest);
+-    }
+-
+     // Wenn mehr als 256 Bytes gelesen werden sollen, wird SHM benutzt
+     if ((blocksize * blockcount) > 256) {
+ 
+         get_shm(blocksize * blockcount);
+         read_request.shared_mem_id = shm_id;
+ 
+-        response_t* resp = rpc_get_response(io_res->pid, "IO_READ ",
++        response_t* resp = rpc_get_response(io_res->pid, rpc_fn,
+             sizeof(read_request), (char*) &(read_request));
+         size = *((size_t*) resp->data);
+ 
+@@ -236,7 +233,7 @@ ssize_t lio_compat_read(void* dest, size_t blocksize, size_t blockcount,
+     } else {
+         read_request.shared_mem_id = 0;
+ 
+-        response_t* resp = rpc_get_response(io_res->pid, "IO_READ ",
++        response_t* resp = rpc_get_response(io_res->pid, rpc_fn,
+             sizeof(read_request), (char*) &(read_request));
+         size = resp->data_length;
+ 
+@@ -258,6 +255,16 @@ ssize_t lio_compat_read(void* dest, size_t blocksize, size_t blockcount,
+     return size;
+ }
+ 
++ssize_t lio_compat_read(void* dest, size_t blocksize, size_t blockcount,
++    io_resource_t* io_res)
++{
++    if (IS_LIO2(io_res)) {
++        return lio_read(io_res->lio2_stream, blocksize * blockcount, dest);
++    }
++
++    return lio1_read_fn(dest, blocksize, blockcount, io_res, "IO_READ ");
++}
++
+ /**
+  * Schreibt in eine Ressource
+  *
+@@ -317,3 +324,20 @@ int lio_compat_eof(io_resource_t* io_res)
+     return rpc_get_dword(io_res->pid, "IO_EOF  ", sizeof(io_eof_request_t),
+         (char*) &eof_request);
+ }
++
++/**
++ * Liest aus einer Ressource, ohne den Dateizeiger zu verändern
++ */
++ssize_t lio_compat_readahead(void* dest, size_t size, io_resource_t* io_res)
++{
++    if (IS_LIO2(io_res)) {
++        uint64_t pos = lio_seek(io_res->lio2_stream, 0, LIO_SEEK_CUR);
++        if (pos < 0) {
++            return pos;
++        }
++
++        return lio_pread(io_res->lio2_stream, pos, size, dest);
++    } else {
++        return lio1_read_fn(dest, 1, size, io_res, "IO_READA");
++    }
++}
+diff --git a/src/modules/lib/lostio/handler.c b/src/modules/lib/lostio/handler.c
+index b3bca65..38fac60 100644
+--- a/src/modules/lib/lostio/handler.c
++++ b/src/modules/lib/lostio/handler.c
+@@ -125,6 +125,7 @@ void rpc_io_open(pid_t pid, uint32_t correlation_id, size_t data_size, void* dat
+                 // Symlink wieder schliessen, sonst kann er anschliessend nicht
+                 // mehr geloescht werden.
+                 lostio_close(pid, filehandle->id);
++                goto out;
+             }
+         } else {
+             io_res.id = filehandle->id;
+@@ -137,7 +138,11 @@ void rpc_io_open(pid_t pid, uint32_t correlation_id, size_t data_size, void* dat
+             free(int_source->res);
+             free(int_source);
+         }
+-    
++        else if ((filehandle->node->flags & LOSTIO_FLAG_READAHEAD) != 0) {
++            io_res.flags |= IO_RES_FLAG_READAHEAD;
++        }
++
++    out:
+         rpc_send_response(pid, correlation_id, sizeof(io_resource_t), (char*) &io_res);
+     }
+     //v();
+@@ -216,6 +221,45 @@ void rpc_io_read(pid_t pid, uint32_t correlation_id, size_t data_size, void* dat
+     //v();
+ }
+ 
++void rpc_io_readahead(pid_t pid, uint32_t correlation_id, size_t data_size,
++    void* data)
++{
++    io_read_request_t* read_request = (io_read_request_t*) data;
++
++    lostio_filehandle_t* filehandle = get_filehandle(pid, read_request->id);
++
++    if(filehandle == NULL) {
++        rpc_send_dword_response(pid, correlation_id, 0);
++        return;
++    }
++
++    typehandle_t* typehandle = get_typehandle(filehandle->node->type);
++
++    // Wenn kein Handler fuer read registriert ist, abbrechen
++    if ((typehandle == NULL) || (typehandle->readahead == NULL)) {
++        rpc_send_dword_response(pid, correlation_id, 0);
++        return;
++    }
++
++    // Falls kein Shared Memory uebergeben wurde, temporaeren Buffer auf dem
++    // Stack anlegen und per RPC zurueckschicken
++    if (read_request->shared_mem_id == 0) {
++        uint8_t buf[read_request->blocksize * read_request->blockcount];
++        size_t size = typehandle->readahead(filehandle, buf,
++            read_request->blocksize, read_request->blockcount);
++
++        rpc_send_response(pid, correlation_id, size, (char*) buf);
++        return;
++    }
++
++    // Ansonsten direkt in den SHM einlesen
++    void* shm_ptr = open_shared_memory(read_request->shared_mem_id);
++    size_t size = typehandle->readahead(filehandle, shm_ptr,
++            read_request->blocksize, read_request->blockcount);
++    close_shared_memory(read_request->shared_mem_id);
++
++    rpc_send_dword_response(pid, correlation_id, size);
++}
+ 
+ /**
+  * Ein Prozess hat ein fwrite auf einem File-Handle dieses Treibers ausgefuehrt
+diff --git a/src/modules/lib/lostio/include/lostio_internal.h b/src/modules/lib/lostio/include/lostio_internal.h
+index 9739205..4d65bad 100644
+--- a/src/modules/lib/lostio/include/lostio_internal.h
++++ b/src/modules/lib/lostio/include/lostio_internal.h
+@@ -54,6 +54,9 @@ void    rpc_io_close(pid_t pid, uint32_t correlation_id, size_t data_size, void*
+ 
+ ///RPC-Handler fuer ein read
+ void    rpc_io_read(pid_t pid, uint32_t correlation_id, size_t data_size, void* data);
++//
++///RPC-Handler fuer ein readahead
++void    rpc_io_readahead(pid_t pid, uint32_t correlation_id, size_t data_size, void* data);
+ 
+ ///RPC-Handler fuer ein write
+ void    rpc_io_write(pid_t pid, uint32_t correlation_id, size_t data_size, void* data);
+diff --git a/src/modules/lib/lostio/lostio.c b/src/modules/lib/lostio/lostio.c
+index 505f0a1..3cbc3b1 100644
+--- a/src/modules/lib/lostio/lostio.c
++++ b/src/modules/lib/lostio/lostio.c
+@@ -65,6 +65,7 @@ void lostio_init()
+     register_message_handler("IO_OPEN ", &rpc_io_open);
+     register_message_handler("IO_CLOSE", &rpc_io_close);
+     register_message_handler("IO_READ ", &rpc_io_read);
++    register_message_handler("IO_READA", &rpc_io_readahead);
+     register_message_handler("IO_WRITE", &rpc_io_write);
+     register_message_handler("IO_SEEK ", &rpc_io_seek);
+     register_message_handler("IO_EOF  ", &rpc_io_eof);
+-- 
+1.7.7
+
+
+From kevin at tyndur.org  Sat May 12 23:19:43 2012
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 12 May 2012 23:19:43 +0200
+Subject: [PATCH 0/6] libc: Lesepuffer fÃ¼r stdio.h
+Message-ID: <1336857589-6603-1-git-send-email-kevin@tyndur.org>
+
+Hat vermutlich noch die eine oder andere Kaputtheit im Detail, aber es
+kompiliert, es bootet und mutt tut auch irgendwas halbwegs sinnvolles.
+
+Kevin Wolf (6):
+  LIOv1: Readahead
+  shell: bench -s
+  libc: Lesepuffer in fread
+  cdi/fs: Readahead implementiert
+  tcpip: Readahead-Unterstützung für TCP
+  stdio.h: BUFSIZ auf 64k erhöht
+
+ src/modules/c/shell/cmds/bench.c                 |   45 +++++-
+ src/modules/c/shell/lang/lang_en.c               |    2 +-
+ src/modules/cdi/lib/fs/fs.c                      |    3 +
+ src/modules/cdi/lib/fs/lostio_if.c               |   22 ++-
+ src/modules/include/io_struct.h                  |    3 +
+ src/modules/include/lostio.h                     |   10 ++
+ src/modules/include/stdio.h                      |    2 +-
+ src/modules/lib/lostio/client/file.c             |   40 ++++-
+ src/modules/lib/lostio/handler.c                 |   46 ++++++-
+ src/modules/lib/lostio/include/lostio_internal.h |    3 +
+ src/modules/lib/lostio/lostio.c                  |    1 +
+ src/modules/lib/stdlibc/file.c                   |  180 ++++++++++++++++++++--
+ src/modules/tcpip/lostio_if.c                    |   46 ++++++-
+ 13 files changed, 363 insertions(+), 40 deletions(-)
+
+-- 
+1.7.7
+
+
+From kevin at tyndur.org  Sat May 12 23:19:45 2012
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 12 May 2012 23:19:45 +0200
+Subject: [tyndur-devel] [PATCH 2/6] shell: bench -s
+In-Reply-To: <1336857589-6603-1-git-send-email-kevin@tyndur.org>
+References: <1336857589-6603-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1336857589-6603-3-git-send-email-kevin@tyndur.org>
+
++ shell: bench -s macht sehr kurz Reads (16 und 1 Byte), dass man den
+  Effekt von Readahead in stdio.h messen kann
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/c/shell/cmds/bench.c   |   45 ++++++++++++++++++++++++++++++-----
+ src/modules/c/shell/lang/lang_en.c |    2 +-
+ 2 files changed, 39 insertions(+), 8 deletions(-)
+
+diff --git a/src/modules/c/shell/cmds/bench.c b/src/modules/c/shell/cmds/bench.c
+index 09493dd..fae16fe 100644
+--- a/src/modules/c/shell/cmds/bench.c
++++ b/src/modules/c/shell/cmds/bench.c
+@@ -39,9 +39,15 @@
+ #include <stdio.h>
+ #include <string.h>
+ #include <tms.h>
++#include <getopt.h>
+ 
+ #define MAX_BLOCK_SIZE 524288
+ 
++static void usage(void)
++{
++    printf(TMS(bench_usage, "\nAufruf: bench [-s] <Dateiname> <Kilobytes>\n"));
++}
++
+ #ifdef CONFIG_SHELL_BUILTIN_ONLY
+     int shell_command_bench(int argc, char* argv[], const char* args)
+ #else
+@@ -50,24 +56,49 @@
+ {
+     char buffer[MAX_BLOCK_SIZE];
+     size_t count, n, size, rsize;
+-    size_t bs[] = { 524288, 65536, 4096, 512, 0 };
++    size_t bs_large[] = { 524288, 65536, 4096, 512, 0 };
++    size_t bs_small[] = { 16, 1, 0 };
++    size_t* bs;
+     int i;
++    char* path;
+     FILE* file;
+     uint64_t tick_start, tick_end, diff;
++    bool small_reads = false;
++
++    optind = 1;
++    while (optind < argc) {
++        int result = getopt(argc, argv, "s");
++        if (result == -1) {
++            break;
++        }
+ 
+-    if (argc != 3) {
+-        printf(TMS(bench_usage, "\nAufruf: bench <Dateiname> <Kilobytes>\n"));
+-        return -1;
++        switch (result) {
++            case 's':
++                small_reads = true;
++                break;
++            default:
++                usage();
++                return EXIT_FAILURE;
++        }
+     }
+ 
+-    char* path = argv[1];
++    if (optind != argc - 2) {
++        usage();
++        return EXIT_FAILURE;
++    }
+ 
++    path = argv[optind++];
++    count = atoi(argv[optind++]);
+ 
+-    count = atoi(argv[2]);
++    bs = small_reads ? bs_small : bs_large;
+ 
+     for (i = 0; bs[i]; i++)
+     {
+-        n = ((count + 63) & ~63) * 1024;
++        if (small_reads) {
++            n = count * 1024;
++        } else {
++            n = ((count + 63) & ~63) * 1024;
++        }
+ 
+         puts("");
+ 
+diff --git a/src/modules/c/shell/lang/lang_en.c b/src/modules/c/shell/lang/lang_en.c
+index 6a7c050..3366190 100644
+--- a/src/modules/c/shell/lang/lang_en.c
++++ b/src/modules/c/shell/lang/lang_en.c
+@@ -116,7 +116,7 @@ static const struct tms_strings dict[] = {
+ 
+ 
+     &__tms_bench_usage,
+-    "\nUsage: bench <filename> <kilobytes>\n",
++    "\nUsage: bench [-s] <filename> <kilobytes>\n",
+ 
+     &__tms_bench_opening_error,
+     "Couldn't open '%s' for reading!\n",
+-- 
+1.7.7
+
+
+From kevin at tyndur.org  Sat May 12 23:19:46 2012
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 12 May 2012 23:19:46 +0200
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH_3/6=5D_libc=3A_Lesepuffer_in_fr?=
+	=?utf-8?q?ead?=
+In-Reply-To: <1336857589-6603-1-git-send-email-kevin@tyndur.org>
+References: <1336857589-6603-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1336857589-6603-4-git-send-email-kevin@tyndur.org>
+
++ libc: Einen ziemlich simplen Lesepuffer in fread eingebaut. Vermutlich
+  trotzdem kompliziert genug, dass er alles kaputtmacht.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/include/lostio.h   |    4 +
+ src/modules/lib/stdlibc/file.c |  180 ++++++++++++++++++++++++++++++++++++----
+ 2 files changed, 168 insertions(+), 16 deletions(-)
+
+diff --git a/src/modules/include/lostio.h b/src/modules/include/lostio.h
+index 4b31fba..38c8164 100644
+--- a/src/modules/include/lostio.h
++++ b/src/modules/include/lostio.h
+@@ -131,9 +131,13 @@ struct lostio_internal_file {
+     void*           buffer_ptr;
+     size_t          buffer_size;
+     size_t          buffer_pos;
++    size_t          buffer_filled;
+     uint8_t         buffer_mode;
++    bool            buffer_writes;
+     bool            free_buffer;
+ 
++    uint64_t        cur_pos;
++
+     /*
+      * Achtung: os_eof ist _nicht_ der EOF-Marker aus der C-Spezifikation, der
+      * erst gesetzt wird, wenn das Programm aus dem Puffer das letzte Byte
+diff --git a/src/modules/lib/stdlibc/file.c b/src/modules/lib/stdlibc/file.c
+index 89b95e6..7aab88f 100644
+--- a/src/modules/lib/stdlibc/file.c
++++ b/src/modules/lib/stdlibc/file.c
+@@ -118,6 +118,7 @@ FILE* fopen (const char* filename, const char* mode)
+     setvbuf(int_res, malloc(BUFSIZ), _IOFBF, BUFSIZ);
+     int_res->free_buffer = true;
+ 
++    int_res->cur_pos = 0;
+     int_res->error = false;
+     int_res->os_eof = false;
+ 
+@@ -175,6 +176,64 @@ int fclose (FILE* io_res)
+     return result ? EOF : 0;
+ }
+ 
++static void prepare_buffer(FILE* io_res, bool is_write)
++{
++    if (io_res->buffer_writes == is_write) {
++        return;
++    }
++
++    if (io_res->buffer_writes == false) {
++        lio_compat_seek(io_res->res, io_res->buffer_pos, LIO_SEEK_CUR);
++        io_res->cur_pos += io_res->buffer_pos;
++    } else {
++        fflush(io_res);
++    }
++
++    io_res->buffer_pos = 0;
++    io_res->buffer_filled = 0;
++    io_res->buffer_writes = is_write;
++}
++
++size_t fread_buffered(void* dest, size_t bytes, FILE* io_res)
++{
++    if ((io_res->res->flags & IO_RES_FLAG_READAHEAD) == 0) {
++        return 0;
++    }
++
++    if (io_res->buffer_ptr == NULL) {
++        return 0;
++    }
++
++    if (io_res->buffer_pos < io_res->buffer_filled) {
++        size_t len = io_res->buffer_filled - io_res->buffer_pos;
++        if (len > bytes) {
++            len = bytes;
++        }
++        memcpy(dest, io_res->buffer_ptr + io_res->buffer_pos, len);
++        io_res->buffer_pos += len;
++        return len;
++    }
++
++    io_res->buffer_filled = 0;
++    lio_compat_seek(io_res->res, io_res->buffer_pos, LIO_SEEK_CUR);
++    io_res->cur_pos += io_res->buffer_pos;
++
++    if (bytes > io_res->buffer_size / 4) {
++        return 0;
++    }
++
++    io_res->buffer_filled = lio_compat_readahead(io_res->buffer_ptr,
++       io_res->buffer_size, io_res->res);
++    if (io_res->buffer_filled < bytes) {
++        io_res->buffer_filled = 0;
++        return 0;
++    }
++
++    memcpy(dest, io_res->buffer_ptr, bytes);
++    io_res->buffer_pos = bytes;
++
++    return bytes;
++}
+ 
+ /**
+  * Teil aus der Datei lesen
+@@ -225,20 +284,33 @@ size_t fread(void* dest, size_t blocksize, size_t blockcount, FILE* io_res)
+         }
+     }
+ 
+-    // Der Buffer wird noch geleert, damit auch wirklich die Aktuellsten
++    // Ein Schreibpuffer wird noch geleert, damit auch wirklich die Aktuellsten
+     // Daten gelesen werden.
+-    fflush(io_res);
++    prepare_buffer(io_res, false);
+ 
+-    ret = lio_compat_read(dest + read_bytes,
+-        (blocksize * blockcount) - read_bytes, 1, io_res->res);
++    read_bytes += fread_buffered(dest + read_bytes,
++        (blocksize * blockcount) - read_bytes, io_res);
+ 
+-    if (ret == -EAGAIN) {
+-        return 0;
+-    } else if (ret < 0) {
+-        io_res->error = true;
+-        return 0;
+-    } else if (!ret) {
+-        io_res->os_eof = true;
++    if (blocksize * blockcount > read_bytes) {
++        lio_compat_seek(io_res->res, io_res->buffer_pos, LIO_SEEK_CUR);
++        io_res->cur_pos += io_res->buffer_pos;
++
++        io_res->buffer_filled = 0;
++        ret = lio_compat_read(dest + read_bytes,
++            (blocksize * blockcount) - read_bytes, 1, io_res->res);
++
++        if (ret == -EAGAIN) {
++            return 0;
++        } else if (ret < 0) {
++            io_res->error = true;
++            return 0;
++        } else if (!ret) {
++            io_res->os_eof = true;
++        } else {
++            io_res->cur_pos += ret;
++        }
++    } else {
++        ret = 0;
+     }
+ 
+     return (read_bytes + ret) / blocksize;
+@@ -368,6 +440,9 @@ size_t fwrite(const void* data, size_t blocksize, size_t blockcount,
+         free(io_res->ungetc_buffer);
+     }
+ 
++    // Puffer leeren, wenn es ein Lesepuffer ist
++    prepare_buffer(io_res, true);
++
+ 	//Wenn kein Buffer gesetzt ist, aber das Zwischenspeichern nicht deaktivert
+ 	// ist, wird das hier gemacht. Das schuetzt vor Pagefaults ;-).
+ 	if ((io_res->buffer_ptr == NULL) && (io_res->buffer_mode != 
+@@ -385,6 +460,7 @@ size_t fwrite(const void* data, size_t blocksize, size_t blockcount,
+                 io_res->error = true;
+                 return 0;
+             } else {
++                io_res->cur_pos += ret;
+                 return ret / blocksize;
+             }
+             break;
+@@ -408,6 +484,7 @@ size_t fwrite(const void* data, size_t blocksize, size_t blockcount,
+                     io_res->error = true;
+                     return 0;
+                 } else {
++                    io_res->cur_pos += ret;
+                     return ret / blocksize;
+                 }
+             }
+@@ -429,6 +506,7 @@ size_t fwrite(const void* data, size_t blocksize, size_t blockcount,
+                     io_res->error = true;
+                     return 0;
+                 } else {
++                    io_res->cur_pos += ret;
+                     return ret / blocksize;
+                 }
+             } else {
+@@ -496,11 +574,37 @@ int fputs(const char *str, FILE *io_res)
+  */
+ int fseek (FILE* io_res, long int offset, int origin)
+ {
++    int ret;
++
+     // Ungueltige Handles abfangen
+     if (!is_valid_res(io_res)) {
+         return -1;
+     }
+ 
++    // Wenn innerhalb von einem Lesepuffer herumgesprungen wird, brauchen wir
++    // nichts neues von der Platte zu laden
++    if (io_res->buffer_writes == false) {
++        switch (origin) {
++            case SEEK_SET:
++                if (offset >= io_res->cur_pos &&
++                    offset < io_res->cur_pos + io_res->buffer_filled)
++                {
++                    io_res->buffer_pos = offset - io_res->cur_pos;
++                    return 0;
++                }
++                break;
++            case SEEK_CUR:
++                if (io_res->buffer_pos + offset >= 0 &&
++                    io_res->buffer_pos + offset < io_res->buffer_filled)
++                {
++                    io_res->buffer_pos += offset;
++                }
++                break;
++        }
++    }
++
++    // Ansonsten müssen wir den Puffer wegwerfen bzw. zurückschreiben
++    prepare_buffer(io_res, true);
+     fflush(io_res);
+ 
+     // ungetc-Buffer leeren
+@@ -509,7 +613,23 @@ int fseek (FILE* io_res, long int offset, int origin)
+         free(io_res->ungetc_buffer);
+     }
+ 
+-    return (lio_compat_seek(io_res->res, offset, origin) ? 0 : -1);
++    ret = (lio_compat_seek(io_res->res, offset, origin) ? 0 : -1);
++
++    if (ret == 0) {
++        switch (origin) {
++            case SEEK_SET:
++                io_res->cur_pos = offset;
++                break;
++            case SEEK_CUR:
++                io_res->cur_pos += offset;
++                break;
++            case SEEK_END:
++                io_res->cur_pos = ftell(io_res);
++                break;
++        }
++    }
++
++    return ret;
+ }
+ 
+ 
+@@ -522,6 +642,8 @@ int fseek (FILE* io_res, long int offset, int origin)
+  */
+ long ftell(FILE* io_res)
+ {
++    long result;
++
+     //Ungueltige Handles abfangen
+     if (!is_valid_res(io_res)) {
+         return EOF;
+@@ -529,11 +651,11 @@ long ftell(FILE* io_res)
+ 
+     if (IS_LIO2_FILE(io_res)) {
+         int64_t pos = lio_seek(io_res->res->lio2_stream, 0, LIO_SEEK_CUR);
+-        return (pos < 0 ? -1 : pos);
++        result = (pos < 0 ? -1 : pos);
++        goto out;
+     }
+ 
+     io_tell_request_t tell_request;
+-    long result;
+     tell_request.id = io_res->res->id;
+     
+     //Sonst könnte die Angabe falsch sein
+@@ -548,7 +670,11 @@ long ftell(FILE* io_res)
+     //Antwort und Daten wieder freigeben
+     free(resp->data);
+     free(resp);
+-    
++
++out:
++    if (result >= 0) {
++        result += io_res->buffer_pos;
++    }
+     return result;
+ }
+ 
+@@ -572,6 +698,12 @@ int feof(FILE* io_res)
+         return 0;
+     }
+ 
++    if (io_res->buffer_writes == false &&
++        io_res->buffer_pos < io_res->buffer_filled)
++    {
++        return 0;
++    }
++
+     if (IS_LIO2_FILE(io_res)) {
+         // FIXME: EOF ist hier eigentlich doof, aber irgend ein Idiot hat das
+         // mal so implementiert und das wird teilweise so geprüft... ;-)
+@@ -579,6 +711,7 @@ int feof(FILE* io_res)
+     }
+ 
+     //Auch hier könnte mit Daten im Buffer ein falsches Ergebnis rauskommen
++    prepare_buffer(io_res, true);
+     fflush(io_res);
+ 
+     return lio_compat_eof(io_res->res);
+@@ -646,9 +779,17 @@ int fflush(FILE* io_res)
+         return 0;
+     }
+ 
++    // Wenn es ein Lesepuffer ist, gibt es auch nichts zu schreiben
++    if (!io_res->buffer_writes) {
++        return 0;
++    }
++
+     size_t size = lio_compat_write(io_res->buffer_ptr,
+         1, io_res->buffer_pos, io_res->res);
+-    
++    if (size > 0) {
++        io_res->cur_pos += size;
++    }
++
+     if (size == io_res->buffer_pos) {
+         io_res->buffer_pos = 0;
+         return 0;
+@@ -668,6 +809,7 @@ int fflush(FILE* io_res)
+  */
+ int fpurge(FILE* io_res)
+ {
++    prepare_buffer(io_res, true);
+ 	io_res->buffer_pos = 0;
+     return 0;
+ }
+@@ -714,6 +856,8 @@ int setvbuf(FILE* io_res, char* buffer, int mode, size_t size)
+ 			io_res->buffer_ptr = NULL;
+             io_res->buffer_pos = 0;
+             io_res->buffer_size = 0;
++            io_res->buffer_filled = 0;
++            io_res->buffer_writes = true;
+ 			io_res->buffer_mode = IO_BUFFER_MODE_NONE;
+ 			break;
+ 			
+@@ -722,6 +866,8 @@ int setvbuf(FILE* io_res, char* buffer, int mode, size_t size)
+ 			io_res->buffer_ptr = buffer;
+ 			io_res->buffer_pos = 0;
+ 			io_res->buffer_size = size;
++            io_res->buffer_filled = 0;
++            io_res->buffer_writes = true;
+ 			io_res->buffer_mode = IO_BUFFER_MODE_FULL;
+ 			break;
+ 		
+@@ -730,6 +876,8 @@ int setvbuf(FILE* io_res, char* buffer, int mode, size_t size)
+ 			io_res->buffer_ptr = buffer;
+ 			io_res->buffer_pos = 0;
+ 			io_res->buffer_size = size;
++            io_res->buffer_filled = 0;
++            io_res->buffer_writes = true;
+ 			io_res->buffer_mode = IO_BUFFER_MODE_LINE;
+ 			break;
+ 		
+-- 
+1.7.7
+
+
+From kevin at tyndur.org  Sat May 12 23:19:47 2012
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 12 May 2012 23:19:47 +0200
+Subject: [tyndur-devel] [PATCH 4/6] cdi/fs: Readahead implementiert
+In-Reply-To: <1336857589-6603-1-git-send-email-kevin@tyndur.org>
+References: <1336857589-6603-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1336857589-6603-5-git-send-email-kevin@tyndur.org>
+
++ cdi/fs: Für Dateien (nicht für Verzeichnisse) wird das Readahead-Flag
+  gesetzt. read ist jetzt ein Wrapper um readahead.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/cdi/lib/fs/fs.c        |    3 +++
+ src/modules/cdi/lib/fs/lostio_if.c |   22 +++++++++++++++++-----
+ 2 files changed, 20 insertions(+), 5 deletions(-)
+
+diff --git a/src/modules/cdi/lib/fs/fs.c b/src/modules/cdi/lib/fs/fs.c
+index 11777eb..dddf9ee 100644
+--- a/src/modules/cdi/lib/fs/fs.c
++++ b/src/modules/cdi/lib/fs/fs.c
+@@ -49,6 +49,8 @@ bool lostio_not_found_handler(char** path, uint8_t args, pid_t pid,
+     FILE* source);
+ bool lostio_pre_open_handler(char** path, uint8_t args, pid_t pid,
+     FILE* source);
++size_t lostio_readahead_handler(lostio_filehandle_t* fh, void* buf,
++    size_t bs, size_t bc);
+ size_t lostio_read_handler(lostio_filehandle_t* fh, void* buf,
+     size_t bs, size_t bc);
+ size_t lostio_write_handler(lostio_filehandle_t* fh, size_t bs, size_t bc,
+@@ -66,6 +68,7 @@ typehandle_t cdi_typehandle = {
+     .pre_open = &lostio_pre_open_handler,
+     .post_open = NULL,
+     .read = &lostio_read_handler,
++    .readahead = &lostio_readahead_handler,
+     .write = &lostio_write_handler,
+     .seek = &lostio_seek_handler,
+     .unlink = &lostio_unlink_handler,
+diff --git a/src/modules/cdi/lib/fs/lostio_if.c b/src/modules/cdi/lib/fs/lostio_if.c
+index 4f3271e..e3375dd 100644
+--- a/src/modules/cdi/lib/fs/lostio_if.c
++++ b/src/modules/cdi/lib/fs/lostio_if.c
+@@ -131,6 +131,7 @@ static int handle_dirent(struct cdi_fs_res* res, vfstree_node_t* node)
+ 
+         if (res->file) {
+             size = res->res->meta_read(s, CDI_FS_META_SIZE);
++            flags |= LOSTIO_FLAG_READAHEAD;
+         }
+     }
+ 
+@@ -378,7 +379,7 @@ bool lostio_pre_open_handler(char** path, uint8_t args, pid_t pid,
+     return true;
+ }
+ 
+-size_t lostio_read_handler(lostio_filehandle_t* fh, void* buf,
++size_t lostio_readahead_handler(lostio_filehandle_t* fh, void* buf,
+     size_t bs, size_t bc)
+ {
+     size_t size = 0;
+@@ -404,16 +405,27 @@ size_t lostio_read_handler(lostio_filehandle_t* fh, void* buf,
+ 
+     size = dh->res->file->read(dh, fh->pos, size, buf);
+ 
+-    fh->pos += size;
++out:
++    v();
++    return size;
++}
++
++size_t lostio_read_handler(lostio_filehandle_t* fh, void* buf,
++    size_t bs, size_t bc)
++{
++    size_t ret;
++
++    p();
++    ret = lostio_readahead_handler(fh, buf, bs, bc);
++    fh->pos += ret;
+     if(fh->pos >= fh->node->size) {
+         fh->flags |= LOSTIO_FLAG_EOF;
+     } else {
+         fh->flags &= ~LOSTIO_FLAG_EOF;
+     }
+-
+-out:
+     v();
+-    return size;
++
++    return ret;
+ }
+ 
+ size_t lostio_write_handler(lostio_filehandle_t* fh, size_t bs, size_t bc,
+-- 
+1.7.7
+
+
+From kevin at tyndur.org  Sat May 12 23:19:48 2012
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 12 May 2012 23:19:48 +0200
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH_5/6=5D_tcpip=3A_Readahead-Unter?=
+	=?utf-8?b?c3TDvHR6dW5nIGbDvHIgVENQ?=
+In-Reply-To: <1336857589-6603-1-git-send-email-kevin@tyndur.org>
+References: <1336857589-6603-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1336857589-6603-6-git-send-email-kevin@tyndur.org>
+
++ tcpip: readahead-Callback für TCP implementiert
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/tcpip/lostio_if.c |   46 ++++++++++++++++++++++++++++++++++++++++-
+ 1 files changed, 45 insertions(+), 1 deletions(-)
+
+diff --git a/src/modules/tcpip/lostio_if.c b/src/modules/tcpip/lostio_if.c
+index 6269da9..367f682 100644
+--- a/src/modules/tcpip/lostio_if.c
++++ b/src/modules/tcpip/lostio_if.c
+@@ -79,6 +79,7 @@ typehandle_t typehandle3;
+ bool   lostio_tcp_not_found(char**, uint8_t, pid_t,FILE*);
+ bool   lostio_tcp_pre_open(char**, uint8_t, pid_t,FILE*);
+ size_t lostio_tcp_read(lostio_filehandle_t*,void*,size_t,size_t);
++size_t lostio_tcp_readahead(lostio_filehandle_t*,void*,size_t,size_t);
+ size_t lostio_tcp_write(lostio_filehandle_t*,size_t,size_t,void*);
+ int    lostio_tcp_close(lostio_filehandle_t*);
+ size_t lostio_netconfig_read(lostio_filehandle_t*,void*,size_t,size_t);
+@@ -99,6 +100,7 @@ void init_lostio_interface(void)
+     typehandle.pre_open    = &lostio_tcp_pre_open;
+     typehandle.post_open   = NULL;
+     typehandle.read        = &lostio_tcp_read;
++    typehandle.readahead   = &lostio_tcp_readahead;
+     typehandle.write       = &lostio_tcp_write;
+     typehandle.seek        = NULL;
+     typehandle.close       = &lostio_tcp_close;;
+@@ -202,7 +204,8 @@ bool lostio_tcp_not_found(char** path, uint8_t flags, pid_t pid,
+         return vfstree_create_node(*path, LOSTIO_TYPES_RAMFILE,
+             16 * result->ip_count, data, 0);
+     } else {
+-        return vfstree_create_node(*path, LOSTIO_TYPES_TCPPORT, 0, NULL, 0);
++        return vfstree_create_node(*path, LOSTIO_TYPES_TCPPORT, 0, NULL,
++            LOSTIO_FLAG_READAHEAD);
+     }
+ }
+ 
+@@ -268,6 +271,47 @@ bool lostio_tcp_pre_open(char** path, uint8_t flags, pid_t pid,
+     return true;
+ }
+ 
++size_t lostio_tcp_readahead(lostio_filehandle_t* fh, void* buf,
++    size_t bs, size_t bc)
++{
++    struct tcp_connection* conn = fh->node->data;
++    size_t remaining = bs * bc;
++    struct tcp_in_buffer* src;
++    char* dest = buf;
++    size_t bytes_read = 0;
++    int bufidx = 0;
++
++    p();
++    if ((conn->status == TCPS_CLOSED) && (list_is_empty(conn->to_lostio))) {
++        fh->flags |= LOSTIO_FLAG_EOF;
++    }
++
++    while (remaining > 0) {
++        size_t cur_offset;
++        size_t cur_bytes;
++
++        src = list_get_element_at(conn->to_lostio, bufidx++);
++        if (src == NULL) {
++            break;
++        }
++
++        cur_offset = bufidx ? 0 : src->seq;
++        cur_bytes = src->size - src->seq;
++
++        if (cur_bytes > remaining) {
++            cur_bytes = remaining;
++        }
++
++        memcpy(dest, src->data + cur_offset, cur_bytes);
++        remaining -= cur_bytes;
++        dest += cur_bytes;
++        bytes_read += cur_bytes;
++    }
++
++    v();
++    return bytes_read;
++}
++
+ size_t lostio_tcp_read(lostio_filehandle_t* fh, void* buf,
+     size_t blocksize, size_t count)
+ {
+-- 
+1.7.7
+
+
+From kevin at tyndur.org  Sat May 12 23:19:49 2012
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 12 May 2012 23:19:49 +0200
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH_6/6=5D_stdio=2Eh=3A_BUFSIZ_auf_?=
+	=?utf-8?q?64k_erh=C3=B6ht?=
+In-Reply-To: <1336857589-6603-1-git-send-email-kevin@tyndur.org>
+References: <1336857589-6603-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1336857589-6603-7-git-send-email-kevin@tyndur.org>
+
+* stdio.h: So ein Lesepuffer lohnt sich erst richtig, wenn auch ein
+  bisschen was reinpasst.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/include/stdio.h |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/src/modules/include/stdio.h b/src/modules/include/stdio.h
+index 3cc139f..5bb6c03 100644
+--- a/src/modules/include/stdio.h
++++ b/src/modules/include/stdio.h
+@@ -46,7 +46,7 @@
+ #define _IOLBF 3
+ 
+ #define FILENAME_MAX 4096
+-#define BUFSIZ 512
++#define BUFSIZ 65536
+ 
+ #define P_tmpdir "file:/tmp"
+ 
+-- 
+1.7.7
+
+

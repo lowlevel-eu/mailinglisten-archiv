@@ -1,0 +1,324 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] kernel2: Virtuell,	aber nicht physisch zusammenhaengender Speicher
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20kernel2%3A%20Virtuell%2C%0A%09aber%20nicht%20physisch%20zusammenhaengender%20Speicher&In-Reply-To=%3C1249465874-9112-1-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001183.html">
+   <LINK REL="Next"  HREF="001182.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] kernel2: Virtuell,	aber nicht physisch zusammenhaengender Speicher</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20kernel2%3A%20Virtuell%2C%0A%09aber%20nicht%20physisch%20zusammenhaengender%20Speicher&In-Reply-To=%3C1249465874-9112-1-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH] kernel2: Virtuell,	aber nicht physisch zusammenhaengender Speicher">kevin at tyndur.org
+                  </A><BR>
+    <I>Mi Aug  5 11:51:14 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001183.html">[tyndur-devel] [PATCH] kernel2: Syscall SYSCALL_PM_ENUMERATE_TASKS
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001182.html">[tyndur-devel] [PATCH] kernel2: Virtuell, aber nicht physisch zusammenhaengender Speicher
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1167">[ Datum ]</a>
+              <a href="thread.html#1167">[ Thema ]</a>
+              <a href="subject.html#1167">[ Betreff (Subject) ]</a>
+              <a href="author.html#1167">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ kernel2: mmc_valloc() alloziert virtuell zusammenhaengenden Speicher,
+  der aber physisch nicht zusammenhaengend sein muss
+! kernel2: Entsprechende FIXMEs geloest, wo bisher unnoetigerweise
+  physisch zusammenhaengender Speicher reserviert wurde
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/kernel2/include/mm.h                  |   32 ++++++++++++++
+ src/kernel2/src/arch/i386/mm/mm_context.c |   64 +++++++++++++++++++++++++++++
+ src/kernel2/src/mm/shm.c                  |   34 +++++++++++----
+ src/kernel2/src/syscalls/mem.c            |   17 ++++----
+ src/kernel2/src/syscalls/pm.c             |    6 +--
+ 5 files changed, 131 insertions(+), 22 deletions(-)
+
+diff --git a/src/kernel2/include/mm.h b/src/kernel2/include/mm.h
+index e143fb7..0144aca 100644
+--- a/src/kernel2/include/mm.h
++++ b/src/kernel2/include/mm.h
+@@ -74,6 +74,9 @@ void vmm_kernel_unmap(vaddr_t start, size_t size);
+ 
+ /*
+  * MM-Kontext
++ *
++ * FIXME Den ganzen generischen Funktionen i386-spezifische Flags zu geben, ist
++ * moeglicherweise keine gute Idee...
+  */
+ 
+ mmc_context_t mmc_create(void);
+@@ -93,6 +96,35 @@ vaddr_t mmc_automap_user(mmc_context_t* target_ctx, mmc_context_t* source_ctx,
+     vaddr_t start, size_t count, uintptr_t lower_limit, uintptr_t upper_limit,
+     int flags);
+ 
++/**
++ * Alloziert einen virtuell (aber nicht zwingend physisch) zusammenhaengenden
++ * Speicherbereich
++ *
++ * @param context Speicherkontext, in den die Seiten gemappt werden sollen
++ * @param num_pages Anzahl der zu mappenden Seiten
++ * @param phys_lower_limit Niedrigste zulaessige physische Adresse
++ * @param phys_upper_limit Hoechste zulaessige physische Adresse. Wenn der Wert
++ * NULL ist, werden die zulaessigen physischen Adressen nicht eingeschraenkt.
++ * @param virt_lower_limit Niedrigste zulaessige virtuelle Adresse
++ * @param virt_upper_limit Hoechste zulaessige virtuelle Adresse
++ * @param flags Flags fuer die Pagetable
++ */
++vaddr_t mmc_valloc_limits(mmc_context_t* context, size_t num_pages,
++    paddr_t phys_lower_limit, paddr_t phys_upper_limit,
++    uintptr_t virt_lower_limit, uintptr_t virt_upper_limit, int flags);
++
++/**
++ * Alloziert einen virtuell (aber nicht zwingend physisch) zusammenhaengenden
++ * Speicherbereich. Dies ist eine abkuerzende Variante von mmc_valloc_limits,
++ * die die Standardlimits fuer User- bzw. Kernelspace benutzt, je nachdem ob
++ * PTE_U in den Flags gesetzt ist oder nicht.
++ *
++ * @param context Speicherkontext, in den die Seiten gemappt werden sollen
++ * @param num_pages Anzahl der zu mappenden Seiten
++ * @param flags Flags fuer die Pagetable
++ */
++vaddr_t mmc_valloc(mmc_context_t* context, size_t num_pages, int flags);
++
+ void mmc_activate(mmc_context_t* context);
+ 
+ #define mmc_current_context() (*cpu_get_current()-&gt;mm_context)
+diff --git a/src/kernel2/src/arch/i386/mm/mm_context.c b/src/kernel2/src/arch/i386/mm/mm_context.c
+index 722d052..34ac946 100644
+--- a/src/kernel2/src/arch/i386/mm/mm_context.c
++++ b/src/kernel2/src/arch/i386/mm/mm_context.c
+@@ -574,3 +574,67 @@ vaddr_t mmc_automap_user(mmc_context_t* target_ctx, mmc_context_t* source_ctx,
+ 
+     return free_page;
+ }
++
++/**
++ * Alloziert einen virtuell (aber nicht zwingend physisch) zusammenhaengenden
++ * Speicherbereich
++ *
++ * @param context Speicherkontext, in den die Seiten gemappt werden sollen
++ * @param num_pages Anzahl der zu mappenden Seiten
++ * @param phys_lower_limit Niedrigste zulaessige physische Adresse
++ * @param phys_upper_limit Hoechste zulaessige physische Adresse. Wenn der Wert
++ * NULL ist, werden die zulaessigen physischen Adressen nicht eingeschraenkt.
++ * @param virt_lower_limit Niedrigste zulaessige virtuelle Adresse
++ * @param virt_upper_limit Hoechste zulaessige virtuelle Adresse
++ * @param flags Flags fuer die Pagetable
++ */
++inline vaddr_t mmc_valloc_limits(mmc_context_t* context, size_t num_pages,
++    paddr_t phys_lower_limit, paddr_t phys_upper_limit,
++    uintptr_t virt_lower_limit, uintptr_t virt_upper_limit, int flags)
++{
++    size_t i;
++    paddr_t paddr;
++    vaddr_t vaddr;
++    vaddr_t free_page = find_contiguous_pages(context, num_pages,
++        virt_lower_limit, virt_upper_limit);
++
++    if (free_page == NULL) {
++        return NULL;
++    }
++
++    for (i = 0; i &lt; num_pages; i++) {
++        if (!phys_upper_limit) {
++            paddr = pmm_alloc(1);
++        } else {
++            paddr = pmm_alloc_limits(phys_lower_limit, phys_upper_limit, 1);
++        }
++        vaddr = free_page + (i * PAGE_SIZE);
++        if (!mmc_map(context, vaddr, paddr, flags, 1)) {
++            mmc_unmap(context, free_page, i);
++            return NULL;
++        }
++    }
++
++    return free_page;
++}
++
++/**
++ * Alloziert einen virtuell (aber nicht zwingend physisch) zusammenhaengenden
++ * Speicherbereich. Dies ist eine abkuerzende Variante von mmc_valloc_limits,
++ * die die Standardlimits fuer User- bzw. Kernelspace benutzt, je nachdem ob
++ * PTE_U in den Flags gesetzt ist oder nicht.
++ *
++ * @param context Speicherkontext, in den die Seiten gemappt werden sollen
++ * @param num_pages Anzahl der zu mappenden Seiten
++ * @param flags Flags fuer die Pagetable
++ */
++vaddr_t mmc_valloc(mmc_context_t* context, size_t num_pages, int flags)
++{
++    if (flags &amp; PTE_U) {
++        return mmc_valloc_limits(context, num_pages, NULL, NULL,
++            MM_USER_START, MM_USER_END, flags);
++    } else {
++        return mmc_valloc_limits(context, num_pages, NULL, NULL,
++            KERNEL_MEM_START, KERNEL_MEM_END, flags);
++    }
++}
+diff --git a/src/kernel2/src/mm/shm.c b/src/kernel2/src/mm/shm.c
+index 72c5eac..67b4831 100644
+--- a/src/kernel2/src/mm/shm.c
++++ b/src/kernel2/src/mm/shm.c
+@@ -46,7 +46,6 @@ struct shm_desc {
+     uint64_t            id;
+     struct tree_item    tree_item;
+ 
+-    paddr_t             paddr;
+     size_t              num_pages;
+     list_t*             processes;
+ };
+@@ -75,8 +74,6 @@ void shm_init(void)
+  */
+ uint32_t shm_create(size_t size)
+ {
+-    // FIXME Die Pages muessen nicht physisch zusammenhaengend sein
+-    paddr_t shm_phys = pmm_alloc(NUM_PAGES(size));
+     uint32_t id = ++shm_last_id;
+     struct shm_desc* shm;
+ 
+@@ -87,7 +84,6 @@ uint32_t shm_create(size_t size)
+     shm = calloc(1, sizeof(*shm));
+     shm-&gt;id = id;
+     shm-&gt;num_pages = NUM_PAGES(size);
+-    shm-&gt;paddr = shm_phys;
+     shm-&gt;processes = list_create();
+ 
+     tree_insert(shms, shm);
+@@ -112,8 +108,17 @@ void* shm_attach(uint32_t id)
+         return NULL;
+     }
+ 
+-    ret = mmc_automap(&amp;mmc_current_context(), shm-&gt;paddr, shm-&gt;num_pages,
+-        MM_USER_START, MM_USER_END, MM_FLAGS_USER_DATA);
++    if (list_is_empty(shm-&gt;processes)) {
++        // Erster Prozess, der den SHM oeffnet: Speicher allozieren
++        ret = mmc_valloc(&amp;mmc_current_context(), shm-&gt;num_pages,
++            MM_FLAGS_USER_DATA);
++    } else {
++        // Ansonsten Mapping von einem anderen Prozess uebernehmen
++        struct shm_process* first = list_get_element_at(shm-&gt;processes, 0);
++        ret = mmc_automap_user(&amp;mmc_current_context(),
++            &amp;first-&gt;process-&gt;context, first-&gt;vaddr, shm-&gt;num_pages,
++            MM_USER_START, MM_USER_END, MM_FLAGS_USER_DATA);
++    }
+ 
+     if (ret == NULL) {
+         return NULL;
+@@ -155,13 +160,24 @@ void shm_detach(uint32_t id)
+ 
+ found:
+ 
+-    mmc_unmap(&amp;mmc_current_context(), shm_proc-&gt;vaddr, shm-&gt;num_pages);
+-
+     // Wenn es der letzte Benutzer war, SHM loeschen
+     if (list_is_empty(shm-&gt;processes)) {
++        for (i = 0; i &lt; shm-&gt;num_pages; i++) {
++            pmm_free(mmc_resolve(&amp;mmc_current_context(),
++                shm_proc-&gt;vaddr + (i * PAGE_SIZE)), 1);
++        }
++
+         list_destroy(shm-&gt;processes);
+-        pmm_free(shm-&gt;paddr, shm-&gt;num_pages);
++        shm-&gt;processes = NULL;
+         tree_remove(shms, shm);
++    }
++
++    // Virtuellen Speicher freigeben
++    mmc_unmap(&amp;mmc_current_context(), shm_proc-&gt;vaddr, shm-&gt;num_pages);
++
++
++    free(shm_proc);
++    if (shm-&gt;processes == NULL) {
+         free(shm);
+     }
+ 
+diff --git a/src/kernel2/src/syscalls/mem.c b/src/kernel2/src/syscalls/mem.c
+index 91457da..ff66fa0 100644
+--- a/src/kernel2/src/syscalls/mem.c
++++ b/src/kernel2/src/syscalls/mem.c
+@@ -54,20 +54,19 @@ vaddr_t syscall_mem_allocate(size_t bytes, syscall_arg_t flags, paddr_t* phys)
+     vaddr_t address = NULL;
+     size_t page_count = NUM_PAGES(PAGE_ALIGN_ROUND_UP(bytes));
+ 
+-    // Der Speicher muss nicht physisch zusamenhaengend sein.
+     if (flags &amp; 0x80) {
++        // ISA-DMA-Speicher
++        // Physisch zusammenhaengend und nur in den ersten 16 MB
++        // FIXME Eigentlich muesste man hier auf 64k-Grenzen aufpassen
+         *phys = pmm_alloc_limits((paddr_t) 0, (paddr_t) (16 * 1024 * 1024),
+             page_count);
++        address = mmc_automap(&amp;mmc_current_context(), *phys, page_count,
++            USER_MEM_START, USER_MEM_END, MM_FLAGS_USER_DATA);
+     } else {
+-        *phys = pmm_alloc(page_count);
+-    }
+-
+-    address = mmc_automap(&amp;mmc_current_context(), *phys, page_count,
+-        USER_MEM_START, USER_MEM_END, MM_FLAGS_USER_DATA);
+-
+-    // Die physische Adresse gibt es nur fuer DMA
+-    if ((flags &amp; 0x80) == 0) {
++        // Normaler Speicher, muss nicht zusammenhaengend sein
+         *phys = 0;
++        address = mmc_valloc(&amp;mmc_current_context(), page_count,
++            MM_FLAGS_USER_DATA);
+     }
+ 
+     return address;
+diff --git a/src/kernel2/src/syscalls/pm.c b/src/kernel2/src/syscalls/pm.c
+index 750d3dc..df99961 100644
+--- a/src/kernel2/src/syscalls/pm.c
++++ b/src/kernel2/src/syscalls/pm.c
+@@ -262,10 +262,8 @@ void* syscall_pm_enumerate_tasks(void)
+ 
+     // Jetzt wird eine freie Stelle im Adressraum des Prozesses
+     // gesucht, wo die Task-Infos hingemappt werden koennen
+-    // FIXME Die Seiten muessen nicht physisch zusammenhaengend sein
+-    task_info_t* task_info = mmc_automap(&amp;mmc_current_context(),
+-        pmm_alloc(result_page_count), result_page_count, MM_USER_START,
+-        MM_USER_END, PTE_P | PTE_W | PTE_U);
++    task_info_t* task_info = mmc_valloc(&amp;mmc_current_context(),
++        result_page_count, MM_FLAGS_USER_DATA);
+ 
+     // Der Groessen-Eintrag ist nur da, damit der Task die Pages
+     // freigeben koennte.
+-- 
+1.6.0.2
+
+</PRE>
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001183.html">[tyndur-devel] [PATCH] kernel2: Syscall SYSCALL_PM_ENUMERATE_TASKS
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001182.html">[tyndur-devel] [PATCH] kernel2: Virtuell, aber nicht physisch zusammenhaengender Speicher
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1167">[ Datum ]</a>
+              <a href="thread.html#1167">[ Thema ]</a>
+              <a href="subject.html#1167">[ Betreff (Subject)]</a>
+              <a href="author.html#1167">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

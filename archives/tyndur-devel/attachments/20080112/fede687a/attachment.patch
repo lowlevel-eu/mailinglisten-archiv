@@ -1,0 +1,435 @@
+Index: src/kernel/include/tasks.h
+===================================================================
+--- src/kernel/include/tasks.h	(Revision 687)
++++ src/kernel/include/tasks.h	(Arbeitskopie)
+@@ -63,6 +63,8 @@
+ void schedule_to_task(struct task* target_task, dword* esp);
+ void set_io_bitmap();
+ 
++// TODO: Nur wegen vm86.c hier
++pid_t generate_pid();
+ struct task * create_task(void * entry, const char* cmdline, pid_t parent);
+ void destroy_task(struct task* task);
+ struct task * get_task(pid_t pid);
+Index: src/kernel/src/vm86.c
+===================================================================
+--- src/kernel/src/vm86.c	(Revision 687)
++++ src/kernel/src/vm86.c	(Arbeitskopie)
+@@ -40,6 +40,9 @@
+ #include "paging.h"
+ #include "intr.h"
+ #include "kprintf.h"
++#include "kmm.h"
++#include "kernel.h"
++#include <ports.h>
+ 
+ extern int num_tasks;
+ 
+@@ -252,7 +255,7 @@
+     //puts("vm86 Exception.\n");
+     if (isf->interrupt_number == 13) {
+         // GPF, wurde vermutlich durch einen nicht erlaubten Befehl verursacht
+-        byte *ops = (char*)(isf->eip + (isf->cs << 4));
++        byte *ops = (byte*)(isf->eip + (isf->cs << 4));
+         if (ops[0] == 0xCD) { // int
+             //kprintf("VM86: int 0x%x\n", ops[1]);
+             // Derzeitige Adresse auf den Stack pushen und neue Codeadresse setzen
+@@ -294,8 +297,7 @@
+                 }
+                 // Register speichern
+                 dword *phys_regs = resolve_vaddr(task->parent_task->cr3, (dword*)((dword)info->regs & ~0xFFF));
+-                dword regs = find_contiguous_kernel_pages(1);
+-                map_page(kernel_page_directory, (dword*)regs, phys_regs, PTE_P | PTE_W);
++                dword regs = (dword) map_phys_addr(phys_regs, PAGE_SIZE);
+                 vm86_regs_t * vm86_regs = (vm86_regs_t *)(regs + ((dword)info->regs & 0xFFF));
+                 vm86_regs->ax = isf->eax;
+                 vm86_regs->bx = isf->ebx;
+@@ -305,7 +307,7 @@
+                 vm86_regs->di = isf->edi;
+                 vm86_regs->ds = ((dword*)(isf + 1))[0];
+                 vm86_regs->es = ((dword*)(isf + 1))[1];
+-                unmap_page(kernel_page_directory, (dword*)regs);
++                free_phys_addr((void*) regs, PAGE_SIZE);
+                 // Speicher freigeben
+                 // - Stack
+                 unmap_page(task->cr3, (vaddr_t)0x90000);
+@@ -321,7 +323,7 @@
+                 }
+                 // Task beenden
+                 if (!unblock_task(task->parent_task, task->pid)) {
+-                    puts("VM86: Konnte aufrufenden Task nicht wecken!\n");
++                    panic("VM86: Konnte aufrufenden Task nicht wecken!");
+                 }
+                 schedule(esp);
+                 destroy_task(task);
+@@ -372,7 +374,7 @@
+             isf->eip++;
+             return TRUE;
+         } else {
+-            kprintf("VM86: Unbekannter Opcode: %x\n", ops[0]);
++            abort_task("VM86: Unbekannter Opcode: %x\n", ops[0]);
+             return FALSE;
+         }
+     } else {
+Index: src/kernel/src/init.c
+===================================================================
+--- src/kernel/src/init.c	(Revision 687)
++++ src/kernel/src/init.c	(Arbeitskopie)
+@@ -56,6 +56,7 @@
+ #include "io.h"
+ #include "timer.h"
+ #include "shm.h"
++#include "vm86.h"
+ 
+ struct multiboot_info multiboot_info;
+ 
+Index: src/kernel/src/syscall.c
+===================================================================
+--- src/kernel/src/syscall.c	(Revision 687)
++++ src/kernel/src/syscall.c	(Arbeitskopie)
+@@ -283,7 +283,7 @@
+         {
+             vaddr_t address = *((vaddr_t*) isf->esp);
+             if (is_userspace(address, 1)) {
+-                isf->eax = resolve_vaddr(current_task->cr3, address);
++                isf->eax = (dword) resolve_vaddr(current_task->cr3, address);
+             } else {
+                 isf->eax = 0;
+             }
+@@ -434,7 +434,6 @@
+             // Das PD-des neuen tasks mappen
+             page_directory_t new_task_pd = new_task->cr3;
+             
+-            dword written = 0;
+             // Speicher wird kopiert, nicht gemappt.
+             while(num--) {
+                 if (!resolve_vaddr(new_task_pd, dest)) {
+@@ -752,7 +751,7 @@
+         case SYSCALL_DEBUG_STACKTRACE:
+         {
+             pid_t pid = *((dword*) (isf->esp));
+-            struct task* task = get_task(*((dword*) (isf->esp)));
++            struct task* task = get_task(pid);
+ 
+             // FIXME: Was bei einem Fehler
+             if (task != NULL) {
+Index: src/include/string.h
+===================================================================
+--- src/include/string.h	(Revision 687)
++++ src/include/string.h	(Arbeitskopie)
+@@ -18,10 +18,6 @@
+ int strcmp(const char* s1, const char* s2);
+ int strncmp(const char* s1, const char* s2, size_t n);
+ 
+-/* => strings.h
+-int strcasecmp(const char *s1, const char *s2);
+-int strncasecmp(const char *s1, const char *s2, size_t n);*/
+-
+ size_t strlen(const char* s);
+ size_t strnlen(const char* s, size_t maxlen);
+ 
+Index: src/include/stdlib.h
+===================================================================
+--- src/include/stdlib.h	(Revision 687)
++++ src/include/stdlib.h	(Arbeitskopie)
+@@ -44,6 +44,7 @@
+ 
+ void exit(int result);
+ void abort();
++int atexit(void (*function)(void));
+ 
+ void* malloc(size_t size);
+ void free(void* address);
+Index: src/lib/string/strcasecmp.c
+===================================================================
+--- src/lib/string/strcasecmp.c	(Revision 687)
++++ src/lib/string/strcasecmp.c	(Arbeitskopie)
+@@ -28,8 +28,9 @@
+  */
+ 
+ 
+-#include <string.h>
++#include <strings.h>
+ #include <ctype.h>
++#include <bsdtypes.h>
+ int
+ strcasecmp(s1, s2)
+ 	const char *s1, *s2;
+Index: src/lib/string/strcasestr.c
+===================================================================
+--- src/lib/string/strcasestr.c	(Revision 687)
++++ src/lib/string/strcasestr.c	(Arbeitskopie)
+@@ -31,9 +31,9 @@
+  */
+ 
+ 
+-
+-#include "string.h"
+-
++#include <string.h>
++#include <strings.h>
++#include <ctype.h>
+ /*
+  * Find the first occurrence of find in s, ignore case.
+  */
+Index: src/lib/string.c
+===================================================================
+--- src/lib/string.c	(Revision 687)
++++ src/lib/string.c	(Arbeitskopie)
+@@ -97,7 +97,7 @@
+         return 0;
+     }
+     int positive = 1;
+-    long result;
++    long result = 0;
+     int length = 0;
+     //Vorzeichen
+     if (*str == '-') {
+Index: src/modules/kbc/keyboard.c
+===================================================================
+--- src/modules/kbc/keyboard.c	(Revision 687)
++++ src/modules/kbc/keyboard.c	(Arbeitskopie)
+@@ -23,7 +23,7 @@
+     {27,             27},         // 0x01
+     {'1',           '|'},         // 0x02
+     {'2',           '"'},         // 0x03 F5
+-    {'3',           '§'},         // 0x04 F3
++    {'3',             0},         // 0x04 F3
+     {'4',           '$'},         // 0x05 F1
+     {'5',           '%'},         // 0x06 F2
+     {'6',           '&'},         // 0x07 F12
+Index: src/modules/cdi/lib/cdi.c
+===================================================================
+--- src/modules/cdi/lib/cdi.c	(Revision 687)
++++ src/modules/cdi/lib/cdi.c	(Arbeitskopie)
+@@ -101,8 +101,3 @@
+     init_service_register((char*) driver->name);
+ }
+ 
+-
+-// FIXME
+-int atexit(void (*function)(void)) {
+-    return -1;
+-}
+Index: src/modules/cdi/sis900/device.c
+===================================================================
+--- src/modules/cdi/sis900/device.c	(Revision 687)
++++ src/modules/cdi/sis900/device.c	(Arbeitskopie)
+@@ -208,7 +208,6 @@
+ {
+     struct sis900_device* netcard = (struct sis900_device*) device;
+ 
+-retry:
+     // Transmitter stoppen
+     reg_outl(netcard, REG_COMMAND, CR_DISABLE_TX);
+     
+Index: src/modules/cdi/floppy/device.c
+===================================================================
+--- src/modules/cdi/floppy/device.c	(Revision 687)
++++ src/modules/cdi/floppy/device.c	(Arbeitskopie)
+@@ -284,7 +284,7 @@
+     // Der optimale Wert kann nach OSdev-Wiki folgendermassen errechnet werden:
+     //      head_load_time = seconds * data_rate / 1000
+     // Die vorgeschlagene Zeit liegt bei 10 Millisekunden.
+-    head_unload_time = 20 * FLOPPY_DATA_RATE(device) / 1000 / 1000;
++    head_load_time = 20 * FLOPPY_DATA_RATE(device) / 1000 / 1000;
+ 
+     // Mit der step rate time wird die Zeit bestimmt, die der Kontroller warten
+     // soll, wenn der den Kopf zwischen den einzelnen Spuren bewegt. Wozu das
+Index: src/modules/lib/stdlibc/gmtime.c
+===================================================================
+--- src/modules/lib/stdlibc/gmtime.c	(Revision 687)
++++ src/modules/lib/stdlibc/gmtime.c	(Arbeitskopie)
+@@ -35,6 +35,7 @@
+ 
+ #include <sys/types.h>
+ #include <time.h>
++#include <string.h>
+ 
+ struct tm tm;
+ 
+Index: src/modules/lib/stdlibc/exit.c
+===================================================================
+--- src/modules/lib/stdlibc/exit.c	(Revision 687)
++++ src/modules/lib/stdlibc/exit.c	(Arbeitskopie)
+@@ -36,8 +36,14 @@
+ #include <syscall.h>
+ #include <stdlib.h>
+ #include <unistd.h>
++#include <collections.h>
++#include <errno.h>
+ #include "init.h"
+ 
++// Liste mit den Funktionen die ausgefuehrt werden sollen, sobald der Prozess
++// beendet wird.
++static list_t* atexit_list = NULL;
++
+ /**
+  * Alle Puffer flushen und mit atexit gesetzte Funktion ausfuehren und den
+  * Prozess anschliessend beenden.
+@@ -46,7 +52,18 @@
+  */
+ void exit(int result)
+ {
+-    // TODO: Buffer und atexit
++    // Mit atexit registrierte Funktionen ausfuehren
++    if (atexit_list != NULL) {
++        int i;
++        void (*function)(void);
++
++        // Listeneintraege durchgehen und aufrufen
++        for (i = 0; (function = list_get_element_at(atexit_list, i)); i++) {
++            function();
++        }
++    }
++
++    // TODO: Buffer
+     _exit(result);
+ }
+ 
+@@ -59,6 +76,28 @@
+ }
+ 
+ /**
++ * Funktion registrieren, die beim Beenden ausgefuehrt werden soll
++ */
++int atexit(void (*function)(void))
++{
++    // Liste erstellen, falls sie nicht existiert
++    if (atexit_list == NULL) {
++        atexit_list = list_create();
++
++        // Wenn das erstellen nicht klappt, fehlt ist nicht genug Speicher
++        // vorhanden
++        if (atexit_list == NULL) {
++            errno = ENOMEM;
++            return -1;
++        }
++    }
++    
++    // Element an liste anhaengen
++    list_push(atexit_list, function);
++    return 0;
++}
++
++/**
+  * Prozess beenden
+  *
+  * @param result Rueckgabewert des Prozesses
+Index: src/modules/lib/stdlibc/jprintf.c
+===================================================================
+--- src/modules/lib/stdlibc/jprintf.c	(Revision 687)
++++ src/modules/lib/stdlibc/jprintf.c	(Arbeitskopie)
+@@ -55,8 +55,6 @@
+  */
+ unsigned long long divmod(unsigned long long dividend, unsigned int divisor, unsigned int * remainder)
+ {
+-    unsigned int highword = dividend >> 32;
+-    unsigned int lowword = dividend & 0xffffffff;
+     unsigned long long quotient;
+     unsigned int rem;
+ 
+Index: src/modules/lib/gui/gui.c
+===================================================================
+--- src/modules/lib/gui/gui.c	(Revision 687)
++++ src/modules/lib/gui/gui.c	(Arbeitskopie)
+@@ -37,6 +37,7 @@
+ #include "gui/commands.h"
+ #include "gui/widgets.h"
+ #include "video/bitmap.h"
++#include "video/color.h"
+ 
+ #include "types.h"
+ #include "stdio.h"
+@@ -284,12 +285,9 @@
+ 
+ int render_char(bitmap_t bitmap, font_t *font, unsigned char c, int x, int y)
+ {
+-    int glyph_index = ((int*)font->data)[c];
+-    //printf("Index: %d\n", glyph_index);
+     int offset = ((int*)font->data)[257 + c];
+     //printf("Offset: %d\n", offset);
+     int *glyph_data = (int*)(((char*)font->data) + offset);
+-    int width = glyph_data[0];
+     int bearing_x = glyph_data[2];
+     int bearing_y = glyph_data[3];
+     int advance = glyph_data[4];
+Index: src/modules/lib/gui/widgets.c
+===================================================================
+--- src/modules/lib/gui/widgets.c	(Revision 687)
++++ src/modules/lib/gui/widgets.c	(Arbeitskopie)
+@@ -129,7 +129,7 @@
+                         ((char*)widget->data) + 4 + widget->data[0],
+                         strlen((char*)(widget->data + 1)) + 1 - widget->data[0]);
+                     free(widget->data);
+-                    widget->data = widgetdata;
++                    widget->data = (dword*) widgetdata;
+                     gui_repaint_window(window);
+                     widget->data[0]++;
+                 }
+Index: src/modules/lib/posix/stat.c
+===================================================================
+--- src/modules/lib/posix/stat.c	(Revision 687)
++++ src/modules/lib/posix/stat.c	(Arbeitskopie)
+@@ -35,8 +35,8 @@
+ 
+ #include <sys/stat.h>
+ #include <stdio.h>
++#include <dir.h>
+ 
+-
+ /**
+  * Modus einer Datei Aendern. Der Modus entscheidet unter anderem ueber
+  * Zugriffsberechtigungen.
+Index: src/modules/lib/envvars.c
+===================================================================
+--- src/modules/lib/envvars.c	(Revision 687)
++++ src/modules/lib/envvars.c	(Arbeitskopie)
+@@ -38,6 +38,7 @@
+ #include "stdlib.h"
+ #include "string.h"
+ #include "collections.h"
++#include <io.h>
+ 
+ typedef struct {
+     char* name;
+Index: src/modules/lib/video/bitmap.c
+===================================================================
+--- src/modules/lib/video/bitmap.c	(Revision 687)
++++ src/modules/lib/video/bitmap.c	(Arbeitskopie)
+@@ -475,7 +475,7 @@
+         height = bitmap.height - y - offsety;
+     }
+     //Bitmap zeichnen
+-    int ix, iy;
++    int iy;
+     switch (bitmap.bpp)
+     {
+         case 1:
+Index: src/modules/lib/lostio/include/lostio_internal.h
+===================================================================
+--- src/modules/lib/lostio/include/lostio_internal.h	(Revision 687)
++++ src/modules/lib/lostio/include/lostio_internal.h	(Arbeitskopie)
+@@ -87,6 +87,9 @@
+ ///Filehandle aus der Liste holen
+ lostio_filehandle_t* get_filehandle(pid_t pid, dword id);
+ 
++///Verarbeiten von Anfragen fuer synchrones Lesen
++void lostio_sync_dispatch();
++
+ /*! @} */
+ 
+ #endif
+Index: config.sh
+===================================================================
+--- config.sh	(Revision 687)
++++ config.sh	(Arbeitskopie)
+@@ -26,7 +26,7 @@
+     LOST_TOOLS_AR=$COMPILER_PREFIX"ar"
+     LOST_TOOLS_AS=$COMPILER_PREFIX"as -32"
+     LOST_TOOLS_LD=$COMPILER_PREFIX"ld -m elf_i386"
+-    LOST_TOOLS_GCC=$COMPILER_PREFIX"gcc -m32 -g -c -nostdinc -fno-leading-underscore -fno-omit-frame-pointer -Wall -fno-strict-aliasing -O0 -fno-builtin -I . -I-"
++    LOST_TOOLS_GCC=$COMPILER_PREFIX"gcc -m32 -g -c -nostdinc -fno-leading-underscore -fno-omit-frame-pointer -Wall -Werror -fno-strict-aliasing -O2 -fno-builtin -I . -I-"
+     LOST_TOOLS_GPP=$COMPILER_PREFIX"g++ -m32 -g -c -fno-leading-underscore -fno-omit-frame-pointer -Wall -fno-strict-aliasing -nostdlib -fno-builtin -fno-rtti -fno-exceptions -fno-use-cxa-atexit -O0"
+     LOST_TOOLS_OBJCOPY=$COMPILER_PREFIX"objcopy -B i386:i386"
+     LOST_TOOLS_STRIP=$COMPILER_PREFIX"strip -F elf32-i386"

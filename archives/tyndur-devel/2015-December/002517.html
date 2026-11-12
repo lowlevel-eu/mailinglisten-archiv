@@ -1,0 +1,174 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 10/11] servmgr: Auf Root-Dateisystem warten
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%2010/11%5D%20servmgr%3A%20Auf%20Root-Dateisystem%20warten&In-Reply-To=%3C1449959291-24784-11-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002516.html">
+   <LINK REL="Next"  HREF="002518.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 10/11] servmgr: Auf Root-Dateisystem warten</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%2010/11%5D%20servmgr%3A%20Auf%20Root-Dateisystem%20warten&In-Reply-To=%3C1449959291-24784-11-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 10/11] servmgr: Auf Root-Dateisystem warten">kevin at tyndur.org
+                  </A><BR>
+    <I>Sa Dez 12 23:28:10 CET 2015</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002516.html">[tyndur-devel] [PATCH 09/11] cdi/storage: Dateisystem proben
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002518.html">[tyndur-devel] [PATCH 11/11] build: Root-Dateisystem nach	Volumenamen bestimmen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2517">[ Datum ]</a>
+              <a href="thread.html#2517">[ Thema ]</a>
+              <a href="subject.html#2517">[ Betreff (Subject) ]</a>
+              <a href="author.html#2517">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ servmgr: Anstatt davon auszugehen, dass das Root-Dateisystem bereit
+  ist, sobald alle Multiboot-Services geladen sind, lassen wir dem
+  Dateisystem jetzt ein bisschen Zeit, um aufzutauchen. Mit Probing
+  läuft die Erstellung des Symlinks im Hintergrund, während der
+  Storagetreiber sich schon als Service registriert hat.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/servmgr/lang/lang_en.c |  3 +++
+ src/modules/servmgr/lang/resstr.h  |  1 +
+ src/modules/servmgr/main.c         | 46 ++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 50 insertions(+)
+
+diff --git a/src/modules/servmgr/lang/lang_en.c b/src/modules/servmgr/lang/lang_en.c
+index 390ce0e..82b6997 100644
+--- a/src/modules/servmgr/lang/lang_en.c
++++ b/src/modules/servmgr/lang/lang_en.c
+@@ -47,6 +47,9 @@ static const struct tms_strings dict[] = {
+     &amp;__tms_main_not_running,
+     &quot;service '%s' is not running!\n&quot;,
+ 
++    &amp;__tms_main_no_root,
++    &quot;servmgr: timeout while waiting for root filesystem\n&quot;,
++
+     &amp;__tms_service_not_found,
+     &quot;servmgr: service not found: '%s'\n&quot;,
+ 
+diff --git a/src/modules/servmgr/lang/resstr.h b/src/modules/servmgr/lang/resstr.h
+index 9664fed..91cfc84 100644
+--- a/src/modules/servmgr/lang/resstr.h
++++ b/src/modules/servmgr/lang/resstr.h
+@@ -34,6 +34,7 @@ extern void* __tms_config_dir_open;
+ 
+ extern void* __tms_main_usage;
+ extern void* __tms_main_not_running;
++extern void* __tms_main_no_root;
+ 
+ extern void* __tms_service_not_found;
+ extern void* __tms_service_dependency;
+diff --git a/src/modules/servmgr/main.c b/src/modules/servmgr/main.c
+index 09d17fd..86c70d4 100644
+--- a/src/modules/servmgr/main.c
++++ b/src/modules/servmgr/main.c
+@@ -38,6 +38,7 @@
+ #include &lt;collections.h&gt;
+ #include &lt;unistd.h&gt;
+ #include &lt;stdlib.h&gt;
++#include &lt;string.h&gt;
+ #include &lt;init.h&gt;
+ #include &lt;rpc.h&gt;
+ 
+@@ -122,6 +123,44 @@ static bool wait_startup_services(void)
+ }
+ 
+ /**
++ * Auf Root-Dateisystem warten
++ *
++ * @return true wenn das Dateisystem da ist, false sonst.
++ */
++static bool wait_root_dir(void)
++{
++    uint64_t timeout = get_tick_count() + 5000000;
++    lio_resource_t res;
++    lio_stream_t s;
++
++    while (timeout &gt; get_tick_count()) {
++        res = lio_resource(root_dir, false);
++        if (res &gt;= 0) {
++            goto found;
++        }
++
++        // Das System nicht mit Dauerpolling verstopfen
++        timer_register(do_nothing, 50000);
++        wait_for_rpc();
++    }
++    return false;
++
++found:
++    s = lio_open(res, LIO_SYMLINK | LIO_READ);
++    if (s &gt;= 0) {
++        char buf[1024];
++        int ret;
++        ret = lio_read(s, sizeof(buf), buf);
++        if (ret &gt; 0) {
++            root_dir = strdup(buf);
++            chdir(root_dir);
++        }
++        lio_close(s);
++    }
++    return true;
++}
++
++/**
+  * Startup-Services anzeigen, die nicht gestartet wurden.
+  */
+ static void failed_startup_services(void)
+@@ -163,6 +202,13 @@ int main(int argc, char* argv[])
+         return EXIT_FAILURE;
+     }
+ 
++    // Auf Rootdateisystem warten
++    if (!wait_root_dir()) {
++        printf(TMS(no_root, &quot;servmgr: Timeout beim Warten auf das &quot;
++                            &quot;Rootdateisystem\n&quot;));
++        return EXIT_FAILURE;
++    }
++
+     // Konfiguration einlesen
+     if (config_read()) {
+         config_done = true;
+-- 
+2.1.4
+
+</PRE>
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002516.html">[tyndur-devel] [PATCH 09/11] cdi/storage: Dateisystem proben
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002518.html">[tyndur-devel] [PATCH 11/11] build: Root-Dateisystem nach	Volumenamen bestimmen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2517">[ Datum ]</a>
+              <a href="thread.html#2517">[ Thema ]</a>
+              <a href="subject.html#2517">[ Betreff (Subject)]</a>
+              <a href="author.html#2517">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

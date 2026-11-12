@@ -1,0 +1,1344 @@
+From kevin at tyndur.org  Sun Jan  1 23:35:34 2017
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  1 Jan 2017 23:35:34 +0100
+Subject: [tyndur-devel] [PATCH 0/7] Eine dynamisch gelinkte libc
+Message-ID: <1483310141-25674-1-git-send-email-kevin@tyndur.org>
+
+Am Ende der Serie sind alle Programme in src/modules/c dynamisch mit der libc
+gelinkt. Vorläufig muss das explizit in einer Makefile.conf aktiviert werden,
+weil alles, was potentiell während dem frühen Bootvorgang benötigt wird,
+natürlich keine .so von der Platte nachladen kann. Später könnte man vielleicht
+auch eine libc als Multiboot-Modul reingeben, dann müsste nur noch init
+statisch gelinkt sein.
+
+Es geht hier um dynamisches Linken, was uns im Moment ein bisschen Plattenplatz
+spart (mein file:/apps hat jetzt statt 1,2 MB nur noch 764k), aber der
+eigentliche Nutzen kommt dann, sobalds lbuilds das nutzen können. Zum einen
+sind dort ein paar richtig fette Libs drin, und zum anderen kann man dann die
+libc ersetzen, ohne alles neu zu bauen, was bisher ein bisschen nervig war.
+
+Echte Shared Libs sind das allerdings noch nicht, sondern jeder Prozess hat
+seine eigene Kopie im Speicher. RAM wird also erst einmal tendenziell mehr
+verbraucht als vorher.
+
+Kevin Wolf (7):
+  libc: SLIST-Makros aus sys/queue.h
+  libc: ELF-32-Loader ein bisschen umgebaut
+  init: loader_get_library() implementiert
+  libc: Einfacher dynmaischer Linker für den ELF-Loader
+  user-i386.ld: Linkerskript .so-tauglich machen
+  Buildsystem: libc in src/modules/c dynamisch linken
+  libc: Mit -fPIC kompilieren
+
+ buildmk.sh                            |  14 +-
+ src/include/elf32.h                   |   4 +-
+ src/include/loader.h                  |  11 +
+ src/include/sys/queue.h               |  48 +++
+ src/kernel2/src/tasks/modules.c       |   9 +
+ src/lib/bin_loader/elf32.c            | 573 ++++++++++++++++++++++++++++++++--
+ src/modules/c/Makefile.conf           |   1 +
+ src/modules/init/loader.c             |  82 +++++
+ src/modules/lib/Makefile.all          |   4 +
+ src/modules/lib/Makefile.conf         |   1 +
+ src/modules/lib/rpc/Makefile.all      |   1 -
+ src/modules/lib/syscalls/Makefile.all |   1 -
+ src/modules/lib/syscalls/lostio.c     |   6 +-
+ src/modules/user-i386.ld              |  15 +-
+ 14 files changed, 725 insertions(+), 45 deletions(-)
+ create mode 100644 src/include/sys/queue.h
+ create mode 100644 src/modules/c/Makefile.conf
+ create mode 100644 src/modules/lib/Makefile.conf
+ delete mode 100644 src/modules/lib/rpc/Makefile.all
+ delete mode 100644 src/modules/lib/syscalls/Makefile.all
+
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Sun Jan  1 23:35:35 2017
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  1 Jan 2017 23:35:35 +0100
+Subject: [tyndur-devel] [PATCH 1/7] libc: SLIST-Makros aus sys/queue.h
+In-Reply-To: <1483310141-25674-1-git-send-email-kevin@tyndur.org>
+References: <1483310141-25674-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1483310141-25674-2-git-send-email-kevin@tyndur.org>
+
++ libc: Ein Satz sys/queue.h-Makros für einfach verkettete Listen
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/include/sys/queue.h | 48 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 48 insertions(+)
+ create mode 100644 src/include/sys/queue.h
+
+diff --git a/src/include/sys/queue.h b/src/include/sys/queue.h
+new file mode 100644
+index 0000000..f539bc6
+--- /dev/null
++++ b/src/include/sys/queue.h
+@@ -0,0 +1,48 @@
++/*
++ * Copyright (c) 2016 Kevin Wolf
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it
++ * and/or modify it under the terms of the Do What The Fuck You Want
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * http://sam.zoy.org/projects/COPYING.WTFPL for more details.
++ */
++
++#ifndef _SYS_QUEUE_H
++#define _SYS_QUEUE_H
++
++#include <stddef.h>
++
++#define SLIST_ENTRY(type) \
++    struct { struct type* next; }
++
++#define SLIST_HEAD(head_name, type) \
++    struct head_name { struct type* first; }
++
++#define SLIST_INIT(head) \
++    do { head->first = NULL; } while (0)
++
++#define SLIST_HEAD_INITIALIZER(head) \
++    { .first = NULL }
++
++#define SLIST_INSERT_AFTER(old_entry, new_entry, link) \
++    do { \
++        (new_entry)->link.next = (old_entry)->link.next; \
++        (old_entry)->link.next = (new_entry); \
++    } while (0)
++
++#define SLIST_INSERT_HEAD(head, new_entry, link) \
++    do { \
++        (new_entry)->link.next = (head)->first; \
++        (head)->first = (new_entry); \
++    } while (0)
++
++#define SLIST_FOREACH(var, head, link) \
++    for ((var) = (head)->first; (var) != NULL; (var) = (var)->link.next)
++
++#define SLIST_FOREACH_SAFE(var, head, link) \
++    for (typeof(var) next = NULL, (var) = (head)->first; \
++         (var) != NULL && (next = (var)->link.next, 1); \
++         (var) = (next))
++
++#endif
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Sun Jan  1 23:35:36 2017
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  1 Jan 2017 23:35:36 +0100
+Subject: [tyndur-devel] [PATCH 2/7] libc: ELF-32-Loader ein bisschen umgebaut
+In-Reply-To: <1483310141-25674-1-git-send-email-kevin@tyndur.org>
+References: <1483310141-25674-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1483310141-25674-3-git-send-email-kevin@tyndur.org>
+
+* libc: Als Vorbereitung für die Erweiterungen erst ein bisschen
+  Refactoring für den bestehenden Loader machen. Der wird dabei so
+  umgebaut, dass er davon ausgeht, dass es mal mehrere Images zu laden
+  geben könnte.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/lib/bin_loader/elf32.c | 168 ++++++++++++++++++++++++++++++++++++---------
+ 1 file changed, 137 insertions(+), 31 deletions(-)
+
+diff --git a/src/lib/bin_loader/elf32.c b/src/lib/bin_loader/elf32.c
+index fb3d3e6..97dd729 100644
+--- a/src/lib/bin_loader/elf32.c
++++ b/src/lib/bin_loader/elf32.c
+@@ -29,12 +29,16 @@
+ #include <types.h>
+ #include <string.h>
+ #include <stdint.h>
++#include <stdlib.h>
+ #include <stdbool.h>
+ #include <page.h>
+ #include <elf_common.h>
+ #include <elf32.h>
++#include <errno.h>
+ #include <loader.h>
+ #include <lost/config.h>
++#include <sys/queue.h>
++
+ #define ELF_MAGIC (ELFMAG0 | (ELFMAG1 << 8) | (ELFMAG2 << 16) | (ELFMAG3 << 24))
+ 
+ /**
+@@ -63,38 +67,65 @@ bool loader_is_elf32(vaddr_t image_start, size_t image_size)
+     return true;
+ }
+ 
++#if CONFIG_ARCH == ARCH_AMD64
+ 
+-/**
+- * Laedt ein ELF-32-Image
+- */
+ bool loader_elf32_load_image(pid_t process, vaddr_t image_start,
+     size_t image_size)
+ {
+-
+-#if CONFIG_ARCH == ARCH_AMD64
+ 	return false;
++}
++
+ #else
+-    Elf32_Ehdr* elf_header = (Elf32_Ehdr*) image_start;
+ 
+-    // Nur gueltige ELF-Images laden
+-    if (elf_header->e_magic != ELF_MAGIC) {
+-        return false;
+-    }
++struct elf32_image {
++    Elf32_Ehdr*                 header;
++    size_t                      size;
+ 
+-    // Hauptthread erstellen
+-    loader_create_thread(process, (vaddr_t) elf_header->e_entry);
++    uintptr_t                   min_addr;
++    size_t                      num_pages;
++    uint8_t*                    child_mem;
++
++    SLIST_ENTRY(elf32_image)    next;
++};
+ 
+-    // Pointer auf den ersten Program-Header, dieser wird von e_phnum weiteren
+-    // PHs gefolgt
+-    Elf32_Phdr* program_header = (Elf32_Phdr*) (((uintptr_t) elf_header) +
+-        elf_header->e_phoff);
++struct elf32_loader_state {
++    pid_t                       process;
++    SLIST_HEAD(, elf32_image)   images;
++    struct elf32_image*         last;
++};
+ 
+-    // Groesse des gesamten Zielspeichers bestimmen
++static int queue_image(struct elf32_loader_state* s,
++                       uint8_t* image_start, size_t image_size, int type)
++{
++    Elf32_Ehdr* elf_header = (Elf32_Ehdr*) image_start;
++    Elf32_Phdr* program_header;
++    struct elf32_image* im;
+     uintptr_t min_addr = -1;
+     uintptr_t max_addr = 0;
+-    size_t num_pages;
+     int i;
+ 
++    /* Nur gültige ELF-Images vom richtigen Typ laden */
++    if (elf_header->e_magic != ELF_MAGIC || elf_header->e_type != ET_EXEC) {
++        return -EINVAL;
++    }
++
++    /* In die Liste einfügen */
++    im = malloc(sizeof(*im));
++
++    if (im == NULL) {
++        return -ENOMEM;
++    }
++    *im = (struct elf32_image) {
++        .header = elf_header,
++        .size   = image_size,
++    };
++    SLIST_INSERT_HEAD(&s->images, im, next);
++    s->last = im;
++
++    /* Erster Program Header, dieser wird von e_phnum weiteren PHs gefolgt */
++    program_header = (Elf32_Phdr*) (image_start + elf_header->e_phoff);
++
++    /* Größe des gesamten Zielspeichers bestimmen */
+     for (i = 0; i < elf_header->e_phnum; i++) {
+         if (program_header[i].p_type != PT_LOAD) {
+             continue;
+@@ -107,32 +138,107 @@ bool loader_elf32_load_image(pid_t process, vaddr_t image_start,
+         }
+     }
+ 
+-    num_pages = (max_addr >> PAGE_SHIFT) - (min_addr >> PAGE_SHIFT) + 1;
+-    min_addr &= PAGE_MASK;
++    im->num_pages = (max_addr >> PAGE_SHIFT) - (min_addr >> PAGE_SHIFT) + 1;
++    im->min_addr = min_addr & PAGE_MASK;
+ 
+-    // Jetzt werden die einzelnen Program-Header geladen
+-    uint8_t* src_mem = image_start;
+-    uint8_t* child_mem = loader_allocate_mem(num_pages * PAGE_SIZE);
+-    memset(child_mem, 0, num_pages * PAGE_SIZE);
++    return 0;
++}
+ 
+-    for (i = 0; i < elf_header->e_phnum; i++) {
+-        // Nur ladbare PHs laden ;-)
++static int create_flat_image(struct elf32_loader_state* s,
++                             struct elf32_image* im)
++{
++    Elf32_Phdr* program_header;
++    uint8_t* src_mem = (uint8_t*) im->header;
++    uint8_t* child_mem;
++    int i;
++
++    /* Speicher für dieses Image anfordern */
++    child_mem = loader_allocate_mem(im->num_pages * PAGE_SIZE);
++    if (child_mem == NULL) {
++        return -ENOMEM;
++    }
++    memset(child_mem, 0, im->num_pages * PAGE_SIZE);
++
++    /* Jetzt werden die einzelnen Program-Header geladen */
++    program_header = (Elf32_Phdr*) (src_mem + im->header->e_phoff);
++    for (i = 0; i < im->header->e_phnum; i++) {
++        /* Nur ladbare PHs laden ;-) */
+         if (program_header->p_type == PT_LOAD) {
+             memcpy(
+-                &child_mem[program_header->p_vaddr - min_addr],
++                &child_mem[program_header->p_vaddr - im->min_addr],
+                 &src_mem[program_header->p_offset],
+                 program_header->p_filesz);
+         }
+         program_header++;
+     }
+ 
++    im->child_mem = child_mem;
++    return 0;
++}
++
++static int assign_flat_image(struct elf32_loader_state* s,
++                             struct elf32_image* im)
++{
++    int ret;
++
+     // Den geladenen Speicher in den Adressraum des Prozesses
+     // verschieben
+-    loader_assign_mem(process, (void*) min_addr, child_mem,
+-        num_pages * PAGE_SIZE);
++    ret = loader_assign_mem(s->process, (void*) im->min_addr, im->child_mem,
++                            im->num_pages * PAGE_SIZE);
++    if (!ret) {
++        /* FIXME child_mem wird geleakt */
++        return -EFAULT;
++    }
+ 
+-    return true;
+-#endif
++    return 0;
+ }
+ 
++/**
++ * Laedt ein ELF-32-Image
++ */
++bool loader_elf32_load_image(pid_t process, vaddr_t image_start,
++    size_t image_size)
++{
++    Elf32_Ehdr* elf_header = (Elf32_Ehdr*) image_start;
++    struct elf32_loader_state s = {
++        .process    = process,
++        .images     = SLIST_HEAD_INITIALIZER(&images),
++        .last       = NULL,
++    };
++    struct elf32_image* im;
++    int ret;
++
++    /* Das Hauptimage selber in die Liste eintragen */
++    ret = queue_image(&s, image_start, image_size, ET_EXEC);
++    if (ret < 0) {
++        return false;
++    }
++
++    /* Hauptthread erstellen */
++    loader_create_thread(process, (vaddr_t) elf_header->e_entry);
++
++    /* Und jetzt alles laden */
++    SLIST_FOREACH(im, &s.images, next) {
++        ret = create_flat_image(&s, im);
++        if (ret < 0) {
++            /* FIXME Der komplette neue Prozess wird geleakt */
++            goto fail;
++        }
++
++        ret = assign_flat_image(&s, im);
++        if (ret < 0) {
++            /* FIXME Der komplette neue Prozess wird geleakt */
++            goto fail;
++        }
++    }
++
++    ret = 0;
++fail:
++    SLIST_FOREACH_SAFE(im, &s.images, next) {
++        free(im);
++    }
+ 
++    return (ret == 0);
++}
++
++#endif
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Sun Jan  1 23:35:37 2017
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  1 Jan 2017 23:35:37 +0100
+Subject: [tyndur-devel] [PATCH 3/7] init: loader_get_library() implementiert
+In-Reply-To: <1483310141-25674-1-git-send-email-kevin@tyndur.org>
+References: <1483310141-25674-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1483310141-25674-4-git-send-email-kevin@tyndur.org>
+
++ libc: Ein neuer Callback loader_get_library() für den ELF-Loader, der
+  ein ELF-Image einer Shared Library in den Speicher lädt
+
++ init: Implementierung von loader_get_library()
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/include/loader.h            | 11 ++++++
+ src/kernel2/src/tasks/modules.c |  9 +++++
+ src/modules/init/loader.c       | 82 +++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 102 insertions(+)
+
+diff --git a/src/include/loader.h b/src/include/loader.h
+index 55c982b..0084613 100644
+--- a/src/include/loader.h
++++ b/src/include/loader.h
+@@ -88,6 +88,17 @@ bool loader_assign_mem(pid_t process, vaddr_t dest_address,
+     vaddr_t src_address, size_t size);
+ 
+ /**
++ * Lädt eine Shared Library in den Speicher.
++ *
++ * @param name Name der Shared Library
++ * @param image Enthält bei Erfolg einen Pointer auf ein Binärimage
++ * @param size Enthält bei Erfolg die Größe des Binärimages in Bytes
++ *
++ * @return 0 bei Erfolg, -errno im Fehlerfall
++ */
++int loader_get_library(const char* name, void** image, size_t* size);
++
++/**
+  * Erstellt einen neuen Thread.
+  *
+  * @param process PID
+diff --git a/src/kernel2/src/tasks/modules.c b/src/kernel2/src/tasks/modules.c
+index 610498c..8d3c090 100644
+--- a/src/kernel2/src/tasks/modules.c
++++ b/src/kernel2/src/tasks/modules.c
+@@ -40,6 +40,7 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <loader.h>
++#include <errno.h>
+ #include <syscall_structs.h>
+ 
+ #include "multiboot.h"
+@@ -275,6 +276,14 @@ bool loader_assign_mem(pid_t pid, vaddr_t dest_address,
+ }
+ 
+ /**
++ * Lädt eine Shared Library in den Speicher.
++ */
++int loader_get_library(const char* name, void** image, size_t* size)
++{
++    return -ENOSYS;
++}
++
++/**
+  * Erstellt einen Thread in einem Prozess der anhand seiner PID gefunden wird.
+  */
+ bool loader_create_thread(pid_t pid, vaddr_t address) {
+diff --git a/src/modules/init/loader.c b/src/modules/init/loader.c
+index 58649e2..e3d67ba 100644
+--- a/src/modules/init/loader.c
++++ b/src/modules/init/loader.c
+@@ -38,6 +38,9 @@
+ #include <loader.h>
+ #include <lock.h>
+ #include <init.h>
++#include <errno.h>
++#include <lostio.h>
++#include <stdlib.h>
+ 
+ static struct {
+     pid_t   pid;
+@@ -46,6 +49,8 @@ static struct {
+     lock_t  lock;
+ } loader_state;
+ 
++size_t ainflate(void* src, size_t len, void** dest_ptr);
++
+ /**
+  * Speicher allozieren um ihn spaeter in einen neuen Prozess zu mappen. Diese
+  * Funktion sollte nicht fuer "normale" Allokationen benutzt werden, da immer
+@@ -80,6 +85,83 @@ bool loader_assign_mem(pid_t process, vaddr_t dest_address,
+     return true;
+ }
+ 
++/**
++ * Lädt eine Shared Library in den Speicher.
++ *
++ * @param name Name der Shared Library
++ * @param image Enthält bei Erfolg einen Pointer auf ein Binärimage
++ * @param size Enthält bei Erfolg die Größe des Binärimages in Bytes
++ *
++ * @return 0 bei Erfolg, -errno im Fehlerfall
++ */
++int loader_get_library(const char* name, void** image, size_t* size)
++{
++    io_resource_t* fd;
++    char* path;
++    void* p;
++    int ret;
++
++    ret = asprintf(&path, "file:/system/%s.so", name);
++    if (ret < 0) {
++        return -ENOMEM;
++    }
++
++    fd = lio_compat_open(path, IO_OPEN_MODE_READ);
++    free(path);
++    if (fd == NULL) {
++        return -ENOENT;
++    }
++
++    if (!lio_compat_seek(fd, 0, SEEK_END)) {
++        ret = -EIO;
++        goto fail;
++    }
++
++    ret = lio_compat_tell(fd);
++    if (ret < 0) {
++        goto fail;
++    }
++    *size = ret;
++
++    if (!lio_compat_seek(fd, 0, SEEK_SET)) {
++        ret = -EIO;
++        goto fail;
++    }
++
++    p = malloc(*size);
++    if (p == NULL) {
++        ret = -ENOMEM;
++        goto fail;
++    }
++
++    ret = lio_compat_read(p, 1, *size, fd);
++    if (ret < 0) {
++        free(p);
++        goto fail;
++    }
++
++    if (*(uint16_t*) p == 0x8b1f) {
++        /* gzip, erstmal entpacken */
++        void* buf;
++        size_t buf_len;
++
++        buf_len = ainflate(p, *size, &buf);
++        if (buf_len == 0) {
++            ret = -EINVAL;
++            goto fail;
++        }
++
++        free(p);
++        p = buf;
++        *size = buf_len;
++    }
++
++    *image = p;
++    ret = 0;
++fail:
++    lio_compat_close(fd);
++    return ret;
++}
+ 
+ /**
+  * Erstellt einen neuen Thread.
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Sun Jan  1 23:35:38 2017
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  1 Jan 2017 23:35:38 +0100
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH_4/7=5D_libc=3A_Einfacher_dynmai?=
+	=?utf-8?q?scher_Linker_f=C3=BCr_den_ELF-Loader?=
+In-Reply-To: <1483310141-25674-1-git-send-email-kevin@tyndur.org>
+References: <1483310141-25674-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1483310141-25674-5-git-send-email-kevin@tyndur.org>
+
++ libc: Der ELF-32-Loader kann jetzt Shared Libraries nachladen, wenn
+  die Binary einen DYNAMIC-Program-Header hat, der das verlangt. Dabei
+  werden die nötigen Relokationen direkt ausgeführt (d.h. es gibt im
+  Moment kein Lazy Binding, sondern alle Symbole, ob benötigt oder
+  nicht, werden aufgelöst).
+
+  Was hier implementiert ist, ist zwar dynamisches Linken, aber keine
+  echten Shared Libraries, weil nämlich nichts gesharet wird. Das kann
+  etwas Plattenplatz sparen, weil die Bibliotheken nur noch einmal
+  vorhanden sein müssen statt überall statisch dazugelinkt, aber in
+  Sachen RAM liegt weiter für jeden Prozess eine Kopie im Speicher.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/include/elf32.h        |   4 +-
+ src/lib/bin_loader/elf32.c | 423 ++++++++++++++++++++++++++++++++++++++++++++-
+ 2 files changed, 416 insertions(+), 11 deletions(-)
+
+diff --git a/src/include/elf32.h b/src/include/elf32.h
+index 99646a5..ea7287d 100644
+--- a/src/include/elf32.h
++++ b/src/include/elf32.h
+@@ -145,8 +145,8 @@ typedef struct {
+ #define R_386_PC32 2
+ 
+ #define R_386_COPY 5
+-#define R_368_GLOB_DAT 6
+-#define R_368_JMP_SLOT 7
++#define R_386_GLOB_DAT 6
++#define R_386_JUMP_SLOT 7
+ #define R_386_RELATIVE 8
+ 
+ /*
+diff --git a/src/lib/bin_loader/elf32.c b/src/lib/bin_loader/elf32.c
+index 97dd729..573e2d6 100644
+--- a/src/lib/bin_loader/elf32.c
++++ b/src/lib/bin_loader/elf32.c
+@@ -82,9 +82,25 @@ struct elf32_image {
+     size_t                      size;
+ 
+     uintptr_t                   min_addr;
++    uintptr_t                   reloc_addr;
+     size_t                      num_pages;
+     uint8_t*                    child_mem;
+ 
++    const char*                 strtab;
++    size_t                      strtabsz;
++
++    Elf32_Sym*                  symtab;
++    uint32_t*                   hashtab;
++    uint32_t                    hashtab_nbucket;
++    uint32_t                    hashtab_nchain;
++
++    void*                       jmprel;
++    uint32_t                    pltrel;
++    uint32_t                    pltrelsz;
++
++    void*                       rel;
++    uint32_t                    relsz;
++
+     SLIST_ENTRY(elf32_image)    next;
+ };
+ 
+@@ -100,12 +116,13 @@ static int queue_image(struct elf32_loader_state* s,
+     Elf32_Ehdr* elf_header = (Elf32_Ehdr*) image_start;
+     Elf32_Phdr* program_header;
+     struct elf32_image* im;
++    struct elf32_image* last;
+     uintptr_t min_addr = -1;
+     uintptr_t max_addr = 0;
+     int i;
+ 
+     /* Nur gültige ELF-Images vom richtigen Typ laden */
+-    if (elf_header->e_magic != ELF_MAGIC || elf_header->e_type != ET_EXEC) {
++    if (elf_header->e_magic != ELF_MAGIC || elf_header->e_type != type) {
+         return -EINVAL;
+     }
+ 
+@@ -119,7 +136,13 @@ static int queue_image(struct elf32_loader_state* s,
+         .header = elf_header,
+         .size   = image_size,
+     };
+-    SLIST_INSERT_HEAD(&s->images, im, next);
++
++    if (!s->last) {
++        SLIST_INSERT_HEAD(&s->images, im, next);
++    } else {
++        SLIST_INSERT_AFTER(s->last, im, next);
++    }
++    last = s->last;
+     s->last = im;
+ 
+     /* Erster Program Header, dieser wird von e_phnum weiteren PHs gefolgt */
+@@ -141,6 +164,12 @@ static int queue_image(struct elf32_loader_state* s,
+     im->num_pages = (max_addr >> PAGE_SHIFT) - (min_addr >> PAGE_SHIFT) + 1;
+     im->min_addr = min_addr & PAGE_MASK;
+ 
++    if (elf_header->e_type == ET_DYN) {
++        im->reloc_addr = last->min_addr + (last->num_pages * PAGE_SIZE);
++    } else {
++        im->reloc_addr = im->min_addr;
++    }
++
+     return 0;
+ }
+ 
+@@ -176,6 +205,363 @@ static int create_flat_image(struct elf32_loader_state* s,
+     return 0;
+ }
+ 
++static const char* get_string(struct elf32_image* im, int index)
++{
++    if (index > im->strtabsz) {
++        return NULL;
++    }
++
++    return im->strtab + index;
++}
++
++static int handle_dynamic_ph(struct elf32_loader_state* s,
++                             struct elf32_image* im)
++{
++    uint8_t* src_mem = (uint8_t*) im->header;
++    size_t child_memsz = im->num_pages * PAGE_SIZE;
++    Elf32_Phdr* program_header;
++    Elf32_Dyn* dyn = NULL;
++    Elf32_Dyn* p;
++    uint32_t strtab = 0;
++    uint32_t symtab = 0;
++    uint32_t hashtab = 0;
++    uint32_t jmprel = 0;
++    uint32_t rel = 0;
++    uint32_t strtabsz = 0;
++    uint32_t pltrel = 0;
++    uint32_t pltrelsz = 0;
++    uint32_t relsz = 0;
++    char* str;
++    int i, ret;
++
++    /* DYNAMIC-Program-Header suchen */
++    program_header = (Elf32_Phdr*) (src_mem + im->header->e_phoff);
++
++    for (i = 0; i < im->header->e_phnum; i++) {
++        if (program_header[i].p_type == PT_DYNAMIC) {
++            dyn = (Elf32_Dyn*) (src_mem + program_header[i].p_offset);
++            break;
++        }
++    }
++    if (dyn == NULL) {
++        return 0;
++    }
++
++    /* Diverse Pointer und Längen aus dem PH lesen */
++    for (p = dyn; p->d_tag != DT_NULL; p++) {
++        switch (p->d_tag) {
++            case DT_HASH:
++                hashtab = p->d_un.d_ptr - im->min_addr;
++                break;
++            case DT_STRTAB:
++                strtab = p->d_un.d_ptr - im->min_addr;
++                break;
++            case DT_STRSZ:
++                strtabsz = p->d_un.d_val;
++                break;
++            case DT_SYMTAB:
++                symtab = p->d_un.d_ptr - im->min_addr;
++                break;
++            case DT_JMPREL:
++                jmprel = p->d_un.d_ptr - im->min_addr;
++                break;
++            case DT_PLTREL:
++                pltrel = p->d_un.d_val;
++                break;
++            case DT_PLTRELSZ:
++                pltrelsz = p->d_un.d_val;
++                break;
++            case DT_REL:
++                rel = p->d_un.d_ptr - im->min_addr;
++                break;
++            case DT_RELSZ:
++                relsz = p->d_un.d_val;
++                break;
++        }
++    }
++
++    /* Stringtabelle */
++    if (strtabsz > UINT32_MAX - strtab || strtab + strtabsz > child_memsz) {
++        return -EINVAL;
++    }
++
++    str = (char*) &im->child_mem[strtab];
++    if (str[strtabsz - 1] != '\0') {
++        return -EINVAL;
++    }
++    im->strtab = str;
++    im->strtabsz = strtabsz;
++
++    /* (Dynamische) Symboltabelle */
++    if (symtab > child_memsz) {
++        return -EINVAL;
++    }
++    im->symtab = (Elf32_Sym*) (im->child_mem + symtab);
++
++    if (hashtab > child_memsz - 8) {
++        return -EINVAL;
++    }
++
++    /* Hashtabelle für Symbolname -> Symboltabellenindex */
++    im->hashtab = (uint32_t*) (im->child_mem + hashtab);
++    im->hashtab_nbucket = im->hashtab[0];
++    im->hashtab_nchain = im->hashtab[1];
++
++    if (im->hashtab_nbucket > UINT32_MAX - im->hashtab_nchain ||
++        im->hashtab_nbucket + im->hashtab_nchain > (child_memsz - hashtab) / 4)
++    {
++        return -EINVAL;
++    }
++
++    /* Relokationstabelle JMPREL */
++    if (pltrelsz > UINT32_MAX - jmprel || jmprel + pltrelsz > child_memsz) {
++        return -EINVAL;
++    }
++    if (jmprel) {
++        im->jmprel = (uint32_t*) (im->child_mem + jmprel);
++        im->pltrel = pltrel;
++        im->pltrelsz = pltrelsz;
++    } else {
++        im->jmprel = NULL;
++    }
++
++    /* Relokationstabelle REL */
++    if (relsz > UINT32_MAX - rel || rel + relsz > child_memsz) {
++        return -EINVAL;
++    }
++    if (rel) {
++        im->rel = (uint32_t*) (im->child_mem + rel);
++        im->relsz = relsz;
++    } else {
++        im->rel = NULL;
++    }
++
++    /* Schauen, ob wir Shared Libs dazuladen müssen */
++    for (p = dyn; p->d_tag != DT_NULL; p++) {
++        if (p->d_tag == DT_NEEDED) {
++            uint32_t libname_off = p->d_un.d_val;
++            void* lib_image;
++            size_t lib_size;
++
++            if (libname_off > strtabsz) {
++                return -EINVAL;
++            }
++
++            ret = loader_get_library(str + libname_off, &lib_image, &lib_size);
++            if (ret < 0) {
++                return ret;
++            }
++
++            ret = queue_image(s, lib_image, lib_size, ET_DYN);
++            if (ret < 0) {
++                return ret;
++            }
++        }
++    }
++
++    return 0;
++}
++
++/* Direkt aus der Spec übernommen */
++static uint32_t elf32_hash(const char* name)
++{
++    uint32_t h = 0, g;
++
++    while (*name) {
++        h = (h << 4) + *name++;
++        if ((g = h & 0xf0000000)) {
++            h ^= g >> 24;
++        }
++        h &= ~g;
++    }
++
++    return h;
++}
++
++static int lookup_symbol(struct elf32_loader_state* s,
++                         struct elf32_image* for_im,
++                         const char* name,
++                         Elf32_Sym** result,
++                         struct elf32_image** provider)
++{
++    struct elf32_image* im;
++    uint32_t hash = elf32_hash(name);
++    uint32_t idx;
++
++    SLIST_FOREACH(im, &s->images, next) {
++        uint32_t nbucket = im->hashtab_nbucket;
++        uint32_t nchain = im->hashtab_nchain;
++        uint32_t* buckets = &im->hashtab[2];
++        uint32_t* chain = &im->hashtab[2 + nbucket];
++        Elf32_Sym* sym;
++        const char* sym_name;
++
++        idx = buckets[hash % nbucket];
++        while (idx != STN_UNDEF) {
++            if (idx > nchain) {
++                return -EINVAL;
++            }
++
++            sym = &im->symtab[idx];
++            sym_name = get_string(im, sym->st_name);
++            if (sym_name == NULL) {
++                return -EINVAL;
++            }
++            if (!strcmp(sym_name, name)) {
++                if (sym->st_shndx != SHN_UNDEF) {
++                    *result = sym;
++                    if (provider) {
++                        *provider = im;
++                    }
++                    return 0;
++                } else {
++                    /* Symbol ist zwar drin, aber leider undefiniert */
++                    break;
++                }
++            }
++            idx = chain[idx];
++        }
++    }
++
++    return -ENOENT;
++}
++
++static int lookup_undef_symbol(struct elf32_loader_state* s,
++                               struct elf32_image* im,
++                               int symtab_idx,
++                               Elf32_Sym** result,
++                               struct elf32_image** provider)
++{
++    const char* name;
++
++    if (symtab_idx > im->hashtab_nchain) {
++        return -EINVAL;
++    }
++
++    name = get_string(im, im->symtab[symtab_idx].st_name);
++    if (name == NULL) {
++        return -EINVAL;
++    }
++
++    return lookup_symbol(s, im, name, result, provider);
++}
++
++static int lookup_undef_symbol_addr(struct elf32_loader_state* s,
++                                    struct elf32_image* im,
++                                    int symtab_idx,
++                                    uintptr_t* result)
++{
++    struct elf32_image* provider;
++    Elf32_Sym* sym;
++    int ret;
++
++    ret = lookup_undef_symbol(s, im, symtab_idx, &sym, &provider);
++    if (ret < 0) {
++        return ret;
++    }
++
++    *result = (provider->reloc_addr - provider->min_addr) + sym->st_value;
++    return 0;
++}
++
++static int relocate_rel(struct elf32_loader_state* s,
++                        struct elf32_image* im,
++                        Elf32_Rel* rel, size_t bytes)
++{
++    Elf32_Rel* end = rel + (bytes / sizeof(*rel));
++
++    while (rel < end) {
++        uint32_t* reloc = (uint32_t*) (im->child_mem +
++                                       rel->r_offset - im->min_addr);
++        uint32_t symbol = ELF32_R_SYM(rel->r_info);
++        uintptr_t new_addr;
++        int ret;
++
++        switch (ELF32_R_TYPE(rel->r_info)) {
++            case R_386_JUMP_SLOT:
++            case R_386_GLOB_DAT:
++                ret = lookup_undef_symbol_addr(s, im, symbol, &new_addr);
++                if (ret < 0) {
++                    return ret;
++                }
++                break;
++            case R_386_32:
++                ret = lookup_undef_symbol_addr(s, im, symbol, &new_addr);
++                if (ret < 0) {
++                    return ret;
++                }
++                new_addr += *reloc;
++                break;
++            case R_386_PC32:
++                ret = lookup_undef_symbol_addr(s, im, symbol, &new_addr);
++                if (ret < 0) {
++                    return ret;
++                }
++                new_addr -= (rel->r_offset + im->reloc_addr);
++                new_addr += *reloc;
++                break;
++            case R_386_RELATIVE:
++                new_addr = im->reloc_addr;
++                new_addr += *reloc;
++                break;
++            case R_386_NONE:
++                new_addr = *reloc;
++                break;
++            case R_386_COPY:
++            {
++                struct elf32_image* provider;
++                Elf32_Sym* sym;
++                void* src;
++
++                ret = lookup_undef_symbol(s, im, symbol, &sym, &provider);
++                if (ret < 0) {
++                    return ret;
++                }
++
++                src = provider->child_mem + sym->st_value - provider->min_addr;
++                memcpy(reloc, src, sym->st_size);
++                break;
++            }
++            default:
++                /* TODO */
++                return -ENOSYS;
++        }
++
++        if (ELF32_R_TYPE(rel->r_info) != R_386_COPY) {
++            *reloc = new_addr;
++        }
++        rel++;
++    }
++
++    return 0;
++}
++
++static int relocate(struct elf32_loader_state* s,
++                    struct elf32_image* im)
++{
++    int ret;
++
++    if (im->jmprel) {
++        if (im->pltrel != DT_REL) {
++            /* TODO DT_RELA */
++            return -ENOSYS;
++        }
++        ret = relocate_rel(s, im, im->jmprel, im->pltrelsz);
++        if (ret < 0) {
++            return ret;
++        }
++    }
++
++    if (im->rel) {
++        ret = relocate_rel(s, im, im->rel, im->relsz);
++        if (ret < 0) {
++            return ret;
++        }
++    }
++
++    return 0;
++}
++
+ static int assign_flat_image(struct elf32_loader_state* s,
+                              struct elf32_image* im)
+ {
+@@ -183,7 +569,7 @@ static int assign_flat_image(struct elf32_loader_state* s,
+ 
+     // Den geladenen Speicher in den Adressraum des Prozesses
+     // verschieben
+-    ret = loader_assign_mem(s->process, (void*) im->min_addr, im->child_mem,
++    ret = loader_assign_mem(s->process, (void*) im->reloc_addr, im->child_mem,
+                             im->num_pages * PAGE_SIZE);
+     if (!ret) {
+         /* FIXME child_mem wird geleakt */
+@@ -214,27 +600,46 @@ bool loader_elf32_load_image(pid_t process, vaddr_t image_start,
+         return false;
+     }
+ 
+-    /* Hauptthread erstellen */
+-    loader_create_thread(process, (vaddr_t) elf_header->e_entry);
+-
+-    /* Und jetzt alles laden */
++    /* Alle Bibliotheken laden */
+     SLIST_FOREACH(im, &s.images, next) {
+         ret = create_flat_image(&s, im);
+         if (ret < 0) {
+-            /* FIXME Der komplette neue Prozess wird geleakt */
+             goto fail;
+         }
+ 
++        ret = handle_dynamic_ph(&s, im);
++        if (ret < 0) {
++            goto fail;
++        }
++    }
++
++    /* Dynamische Relokationen durchführen, wenn nötig */
++    SLIST_FOREACH(im, &s.images, next) {
++        ret = relocate(&s, im);
++        if (ret < 0) {
++            goto fail;
++        }
++    }
++
++    /* Hauptthread erstellen */
++    loader_create_thread(process, (vaddr_t) elf_header->e_entry);
++
++    /* Speicher dem neuen Thread zuweisen. im->child_mem ist anschließend
++     * in diesem Prozess nicht mehr gemappt. */
++    SLIST_FOREACH(im, &s.images, next) {
+         ret = assign_flat_image(&s, im);
+         if (ret < 0) {
+-            /* FIXME Der komplette neue Prozess wird geleakt */
+             goto fail;
+         }
+     }
+ 
+     ret = 0;
+ fail:
++    /* FIXME Im Fehlerfall wird der komplette neue Prozess geleakt */
+     SLIST_FOREACH_SAFE(im, &s.images, next) {
++        if (im->header->e_type == ET_DYN) {
++            free(im->header);
++        }
+         free(im);
+     }
+ 
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Sun Jan  1 23:35:39 2017
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  1 Jan 2017 23:35:39 +0100
+Subject: [tyndur-devel] [PATCH 5/7] user-i386.ld: Linkerskript .so-tauglich
+	machen
+In-Reply-To: <1483310141-25674-1-git-send-email-kevin@tyndur.org>
+References: <1483310141-25674-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1483310141-25674-6-git-send-email-kevin@tyndur.org>
+
+! user-i386.ld: Wenn man __ctor/dtor_start/end__ innerhalb der Input
+  Section Description anlegt statt außenrum, kommt ld nicht auf die
+  Idee, irgendwelche Orphaned Sections dazwischenzupacken, die als
+  Konstruktoren interpretiert nicht so richtig viel Sinn ergeben.
+
++ user-i386.ld: .dynbss explizit hinzugefügt (das hatte sich ohne den
+  Fix zwischen die Konstruktoren gemogelt)
+
++ user-i386.ld: tmslang-Sektion immer anlegen, auch wenn das Programm
+  kein TMS benutzt. Die libc hat Funktionen, die die Sektion benutzen,
+  und sobald sie eine .so ist, werden alle Funktionen reingepackt und es
+  linkt nicht mehr ohne die Sektion.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/user-i386.ld | 15 +++++++++++----
+ 1 file changed, 11 insertions(+), 4 deletions(-)
+
+diff --git a/src/modules/user-i386.ld b/src/modules/user-i386.ld
+index 4709d66..0e3885e 100644
+--- a/src/modules/user-i386.ld
++++ b/src/modules/user-i386.ld
+@@ -14,6 +14,12 @@ SECTIONS
+ 	{
+ 		*(.rodata)
+ 	}
++    tmslang : {
++        . = .;
++        __start_tmslang = .;
++        *(tmslang)
++        __stop_tmslang = .;
++    }
+ 	.data ALIGN(4096) : AT(ADDR(.data))
+ 	{
+ 		*(.data)
+@@ -21,18 +27,19 @@ SECTIONS
+ 	.bss ALIGN(4096) : AT(ADDR(.bss))
+ 	{
+ 		*(.bss)
++		*(.dynbss)
+ 	}
+ 
+-    __ctor_start__ = .;
+     .ctors : AT(ADDR(.ctors)) {
++        __ctor_start__ = .;
+         *(.ctors)
++        __ctor_end__ = .;
+     }
+-    __ctor_end__ = .;
+ 
+-    __dtor_start__ = .;
+     .dtors : {
++        __dtor_start__ = .;
+         *(.dtors)
++        __dtor_end__ = .;
+     }
+-    __dtor_end__ = .;
+ }
+ 
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Sun Jan  1 23:35:40 2017
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  1 Jan 2017 23:35:40 +0100
+Subject: [tyndur-devel] [PATCH 6/7] Buildsystem: libc in src/modules/c
+	dynamisch linken
+In-Reply-To: <1483310141-25674-1-git-send-email-kevin@tyndur.org>
+References: <1483310141-25674-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1483310141-25674-7-git-send-email-kevin@tyndur.org>
+
++ libc: Zusätzlich zur statischen Bibliothek auch eine dynamische bauen
+
++ modules/c/*: Die libc dynamisch linken
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ buildmk.sh                            | 13 +++++++++++--
+ src/modules/c/Makefile.conf           |  1 +
+ src/modules/lib/Makefile.all          |  4 ++++
+ src/modules/lib/rpc/Makefile.all      |  1 -
+ src/modules/lib/syscalls/Makefile.all |  1 -
+ 5 files changed, 16 insertions(+), 4 deletions(-)
+ create mode 100644 src/modules/c/Makefile.conf
+ delete mode 100644 src/modules/lib/rpc/Makefile.all
+ delete mode 100644 src/modules/lib/syscalls/Makefile.all
+
+diff --git a/buildmk.sh b/buildmk.sh
+index abbd359..ea0b22f 100644
+--- a/buildmk.sh
++++ b/buildmk.sh
+@@ -69,7 +69,11 @@ if [ -d lib ]; then
+     if [ -f lib/crt0.c ]; then
+         LIBDIRS="`pwd`/lib/crt0.o $LIBDIRS"
+     fi
+-    LIBDIRS="`pwd`/lib/library.a $LIBDIRS"
++    if (grep library.so lib/Makefile.all > /dev/null 2>&1); then
++        LIBDIRS="`pwd`/lib/library.so $LIBDIRS"
++    else
++        LIBDIRS="`pwd`/lib/library.a $LIBDIRS"
++    fi
+ fi
+ 
+ if [ -f "user-$LOST_ARCH.ld" ]; then
+@@ -146,7 +150,12 @@ EOF
+ fi
+ 
+ if [ -f Makefile.all ]; then
+-  echo -e \\tLOST_BUILDMK_ROOT="$LOST_BUILDMK_ROOT" LDSCRIPT="'$LDSCRIPT'" bash Makefile.all '$(BUILD_ROOT)' \'$LIBDIRS $LIB_GCC\' \'$LOST_BUILDMK_ROOT\' >> Makefile
++    if [ -z "$ENABLE_SHARED" ]; then
++        LOCAL_LIBDIRS="$(echo "$LIBDIRS" | sed -e 's/\.so/\.a/g')"
++    else
++        LOCAL_LIBDIRS="$LIBDIRS"
++    fi
++    echo -e \\tLOST_BUILDMK_ROOT="$LOST_BUILDMK_ROOT" LDSCRIPT="'$LDSCRIPT'" bash Makefile.all '$(BUILD_ROOT)' \'$LOCAL_LIBDIRS $LIB_GCC\' \'$LOST_BUILDMK_ROOT\' >> Makefile
+ fi
+ 
+ cat <<EOF >> Makefile
+diff --git a/src/modules/c/Makefile.conf b/src/modules/c/Makefile.conf
+new file mode 100644
+index 0000000..66f20c5
+--- /dev/null
++++ b/src/modules/c/Makefile.conf
+@@ -0,0 +1 @@
++export ENABLE_SHARED=1
+diff --git a/src/modules/lib/Makefile.all b/src/modules/lib/Makefile.all
+index 6c3c3a4..e20a908 100644
+--- a/src/modules/lib/Makefile.all
++++ b/src/modules/lib/Makefile.all
+@@ -2,3 +2,7 @@ echo "AR   library.a"
+ source $LOST_BUILDMK_ROOT/config.sh
+ 
+ $LOST_TOOLS_AR rs library.a *.o */*.o */*/*.o
++
++echo "LD   library.so"
++$LOST_TOOLS_LD -shared -soname=libc -olibrary.so *.o */*.o */*/*.o $LIB_GCC
++$LOST_TOOLS_STRIP -s library.so -o $1/system/libc.so
+diff --git a/src/modules/lib/rpc/Makefile.all b/src/modules/lib/rpc/Makefile.all
+deleted file mode 100644
+index e9b03f4..0000000
+--- a/src/modules/lib/rpc/Makefile.all
++++ /dev/null
+@@ -1 +0,0 @@
+-cp *.o ..
+diff --git a/src/modules/lib/syscalls/Makefile.all b/src/modules/lib/syscalls/Makefile.all
+deleted file mode 100644
+index e9b03f4..0000000
+--- a/src/modules/lib/syscalls/Makefile.all
++++ /dev/null
+@@ -1 +0,0 @@
+-cp *.o ..
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Sun Jan  1 23:35:41 2017
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  1 Jan 2017 23:35:41 +0100
+Subject: [tyndur-devel] [PATCH 7/7] libc: Mit -fPIC kompilieren
+In-Reply-To: <1483310141-25674-1-git-send-email-kevin@tyndur.org>
+References: <1483310141-25674-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1483310141-25674-8-git-send-email-kevin@tyndur.org>
+
+* libc: Wenn man mit -fPIC kompiliert, sind statt über 3300 Relokationen
+  nur noch knapp 650 übrig. Und für echte Shared Libraries will man das
+  früher oder später sowieso, weil damit dann alle Relokationen direkt
+  nebeneinander liegen und man nicht überall COW machen muss.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ buildmk.sh                        | 1 -
+ src/modules/lib/Makefile.conf     | 1 +
+ src/modules/lib/syscalls/lostio.c | 6 +++---
+ 3 files changed, 4 insertions(+), 4 deletions(-)
+ create mode 100644 src/modules/lib/Makefile.conf
+
+diff --git a/buildmk.sh b/buildmk.sh
+index ea0b22f..432e27e 100644
+--- a/buildmk.sh
++++ b/buildmk.sh
+@@ -81,7 +81,6 @@ if [ -f "user-$LOST_ARCH.ld" ]; then
+ fi
+ 
+ CC_FLAGS=
+-CC_FLAGS_APPEND=
+ if [ -f Makefile.conf ]; then
+     source Makefile.conf
+ fi
+diff --git a/src/modules/lib/Makefile.conf b/src/modules/lib/Makefile.conf
+new file mode 100644
+index 0000000..7141c4b
+--- /dev/null
++++ b/src/modules/lib/Makefile.conf
+@@ -0,0 +1 @@
++export CC_FLAGS_APPEND="-fPIC"
+diff --git a/src/modules/lib/syscalls/lostio.c b/src/modules/lib/syscalls/lostio.c
+index 888b76d..a4f63cc 100644
+--- a/src/modules/lib/syscalls/lostio.c
++++ b/src/modules/lib/syscalls/lostio.c
+@@ -280,7 +280,7 @@ ssize_t lio_readf(lio_stream_t s, uint64_t offset, size_t bytes,
+         "int $0x30;"
+         "add $0x18, %%esp;"
+     : : "i" (SYSCALL_LIO_READ), "r" (&s), "r" (&offset), "r" (bytes),
+-        "r" (buf), "r" (flags), "r" (&result) : "memory");
++        "r" (buf), "r" (flags), "g" (&result) : "memory");
+ 
+     return result;
+ }
+@@ -333,7 +333,7 @@ static ssize_t write_syscall(lio_stream_t s, uint64_t offset, size_t bytes,
+         "int $0x30;"
+         "add $0x18, %%esp;"
+     : : "i" (SYSCALL_LIO_WRITE), "r" (&s), "r" (&offset), "r" (bytes),
+-        "r" (buf), "r" (updatepos), "r" (&result) : "memory");
++        "r" (buf), "r" (updatepos), "g" (&result) : "memory");
+ 
+     return result;
+ }
+@@ -570,7 +570,7 @@ lio_resource_t lio_mksymlink(lio_resource_t parent,
+         "int $0x30;"
+         "add $0x18, %%esp;"
+     : : "i" (SYSCALL_LIO_MKSYMLINK), "r" (&parent), "r" (name), "r" (name_len),
+-        "r" (target), "r" (target_len), "r" (&result) : "memory");
++        "r" (target), "r" (target_len), "g" (&result) : "memory");
+ 
+     return result;
+ }
+-- 
+2.1.4
+
+

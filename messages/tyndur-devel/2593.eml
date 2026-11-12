@@ -1,0 +1,92 @@
+Delivered-To: mlmmj-tyndur-devel
+Received: from sv1.famkaufmann.info [176.9.73.67]
+	by 57269a166aaa with IMAP (fetchmail-6.3.26)
+	for <mlmmj@localhost> (single-drop); Sat, 25 Jan 2020 14:51:57 +0000 (GMT)
+Received: from 4e0d9c617c68 ([172.29.0.2])
+	by sv1.famkaufmann.info (Dovecot) with LMTP id KcHpNgdWLF7rPQAAM0Xwgw
+	for <mlmmj-tyndur-devel>; Sat, 25 Jan 2020 14:51:51 +0000
+Delivered-To: tyndur-devel@tyndur.org
+Received: from faunus.fritz.box (p200300F3F7228500AFEE4A56EAA43362.dip0.t-ipconnect.de [IPv6:2003:f3:f722:8500:afee:4a56:eaa4:3362])
+	by sv1.famkaufmann.info (OpenSMTPD) with ESMTPSA id b258687c
+	TLS version=TLSv1.2 cipher=ECDHE-RSA-AES128-GCM-SHA256 bits=128 verify=NO
+	for <tyndur-devel@tyndur.org>;
+	Sat, 25 Jan 2020 14:51:51 +0000 (UTC)
+From: Kevin Wolf <kevin@tyndur.org>
+To: tyndur-devel@tyndur.org
+Subject: [PATCH] =?UTF-8?q?libc:=20fsync()=20f=C3=BCr=20LIOv2-Ressourcen?= =?UTF-8?q?=20implementiert?=
+Date: Sat, 25 Jan 2020 15:51:48 +0100
+Message-Id: <20200125145148.30862-1-kevin@tyndur.org>
+X-Mailer: git-send-email 2.16.4
+Errors-To: toni@tyndur.org
+Precedence: list
+Reply-To: tyndur-Patches <tyndur-devel@tyndur.org>
+List-Id: tyndur-Patches <tyndur-devel.tyndur.org>
+List-Unsubscribe: <mailto:tyndur-devel+unsubscribe@tyndur.org>
+List-Post: <mailto:tyndur-devel@tyndur.org>
+List-Help: <mailto:tyndur-devel+help@tyndur.org>
+List-Subscribe: <mailto:tyndur-devel+subscribe@tyndur.org>
+List-Owner: <mailto:toni@tyndur.org>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
++ libc: Für Dateideskriptoren, die auf eine LIOv2-Ressource zeigen, ruft
+  das neue fsync() jetzt einfach lio_sync() auf. Für alles andere gibt
+  es EBADF zurück.
+
+Signed-off-by: Kevin Wolf <kevin@tyndur.org>
+---
+ src/modules/include/unistd.h        |  3 +++
+ src/modules/lib/posix/posix_files.c | 22 ++++++++++++++++++++++
+ 2 files changed, 25 insertions(+)
+
+diff --git a/src/modules/include/unistd.h b/src/modules/include/unistd.h
+index 219a2c7cb..58eaf8dfa 100644
+--- a/src/modules/include/unistd.h
++++ b/src/modules/include/unistd.h
+@@ -55,6 +55,9 @@ extern "C" {
+ ///  Prüft, ob es sich um ein Terminal handelt
+ int isatty(int fd);
+ 
++/// Schreibt alle ausstehenden Änderungen aus Caches zurück
++int fsync(int fd);
++
+ /// PID des aktuellen Prozesses auslesen
+ pid_t getpid(void);
+ 
+diff --git a/src/modules/lib/posix/posix_files.c b/src/modules/lib/posix/posix_files.c
+index 921f064c0..67a251614 100644
+--- a/src/modules/lib/posix/posix_files.c
++++ b/src/modules/lib/posix/posix_files.c
+@@ -625,6 +625,28 @@ int isatty(int fd)
+     return 1;
+ }
+ 
++/**
++ * Schreibt alle ausstehenden Änderungen aus Caches zurück.
++ */
++int fsync(int fd)
++{
++    io_resource_t* file = fd_to_file(fd);
++    int ret;
++
++    if (file == NULL || !IS_LIO2(file)) {
++        errno = EBADF;
++        return -1;
++    }
++
++    ret = lio_sync(file->lio2_stream);
++    if (ret < 0) {
++        errno = -ret;
++        return -1;
++    }
++
++    return 0;
++}
++
+ 
+ #ifndef CONFIG_LIBC_NO_STUBS
+ /**
+-- 
+2.16.4
+

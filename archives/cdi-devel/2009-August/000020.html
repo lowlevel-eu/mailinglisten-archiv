@@ -1,0 +1,1275 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH] Introduced pipes, less parameters,	OHCI beginning
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%5D%20Introduced%20pipes%2C%20less%20parameters%2C%0A%09OHCI%20beginning&In-Reply-To=%3C1251318934-30143-1-git-send-email-max%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000019.html">
+   <LINK REL="Next"  HREF="000021.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH] Introduced pipes, less parameters,	OHCI beginning</H1>
+    <B>max at tyndur.org</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%5D%20Introduced%20pipes%2C%20less%20parameters%2C%0A%09OHCI%20beginning&In-Reply-To=%3C1251318934-30143-1-git-send-email-max%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH] Introduced pipes, less parameters,	OHCI beginning">max at tyndur.org
+       </A><BR>
+    <I>Wed Aug 26 22:35:34 CEST 2009</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000019.html">[cdi-devel] [PATCH] usb: Quarter of memory
+</A></li>
+        <LI>Next message: <A HREF="000021.html">[cdi-devel] [PATCH] usb: OHCI driver
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#20">[ date ]</a>
+              <a href="thread.html#20">[ thread ]</a>
+              <a href="subject.html#20">[ subject ]</a>
+              <a href="author.html#20">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>From: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+
++ Pipes are more standard compliant (for example DATA0/DATA1 must be
+  saved per pipe) and you need them for an OHCI driver
++ Beginning of an OHCI driver
+* You do not need to give for example the HCI if that is also saved
+  in the device structure
+
+Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+---
+ usb/include/ohci.h |  223 +++++++++++++++++++++++++++++++++++++
+ usb/include/usb.h  |   73 ++++++++++--
+ usb/main.c         |   73 ++++++++-----
+ usb/msd.c          |   50 +++++----
+ usb/ohci.c         |  311 ++++++++++++++++++++++++++++++++++++++++++++++++++++
+ usb/uhci.c         |   50 ++++----
+ 6 files changed, 693 insertions(+), 87 deletions(-)
+ create mode 100644 usb/include/ohci.h
+ create mode 100644 usb/ohci.c
+
+diff --git a/usb/include/ohci.h b/usb/include/ohci.h
+new file mode 100644
+index 0000000..5f6ad01
+--- /dev/null
++++ b/usb/include/ohci.h
+@@ -0,0 +1,223 @@
++/******************************************************************************
++ * Copyright (c) 2009 Max Reitz                                               *
++ *                                                                            *
++ * Permission is hereby granted,  free of charge,  to any  person obtaining a *
++ * copy of this software and associated documentation files (the &quot;Software&quot;), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use,  copy, modify, merge, publish,  distribute, sublicense, *
++ * and/or sell copies  of the  Software,  and to permit  persons to whom  the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF MERCHANTABILITY, *
++ * FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#ifndef _CDI__USB__OHCI_H
++#define _CDI__USB__OHCI_H
++
++#include &lt;stdint.h&gt;
++
++#include &quot;mempool.h&quot;
++#include &quot;usb.h&quot;
++
++#define OHC_USB_RESET       0x00000000
++#define OHC_USB_RESUME      0x00000040
++#define OHC_USB_OPERATIONAL 0x00000080
++#define OHC_USB_SUSPEND     0x000000C0
++
++#define OHC_CTRL_CBSR  0x00000003 //Verh&#195;&#164;ltnis zwischen Control und Bulk
++                                  //(cbsr+1 zu 1)
++#define OHC_CTRL_PLE   0x00000004 //Periodische Transfers aktivieren
++#define OHC_CTRL_IE    0x00000008 //Isochronous-Transfers aktivieren
++#define OHC_CTRL_CLE   0x00000010 //Control-Transfers aktivieren
++#define OHC_CTRL_BLE   0x00000020 //Bulk-Transfers aktivieren
++#define OHC_CTRL_HCFS  0x000000C0 //Status des HCs
++#define OHC_CTRL_IR    0x00000100 //Wenn gesetzt, dann werden IRQs zum SMB
++                                  //geleitet
++#define OHC_CTRL_RWC   0x00000200 //Remote wakeup unterset&#195;&#188;tzt
++#define OHC_CTRL_RW    0x00000400 //Remote wakeup aktivieren
++
++#define OHC_CMST_RESET 0x00000001 //Reset
++#define OHC_CMST_CLF   0x00000002 //Control list filled (muss gesetzt werden,
++                                  //wenn ein Eintrag zur Controlliste
++                                  //hinzugef&#195;&#188;gt wird)
++#define OHC_CMST_BLF   0x00000004 //Bulk list filled (muss gesetzt werden, wenn
++                                  //ein Eintrag zur Bulkliste hinzugef&#195;&#188;gt wird)
++#define OHC_CMST_OCR   0x00000008 //Ownership change request
++#define OHC_CMST_SOC   0x00030000 //Scheduling overrun count
++
++#define OHC_INT_SO     0x00000001 //Scheduling overrun
++#define OHC_INT_WDH    0x00000002 //Write back done head
++#define OHC_INT_SF     0x00000004 //Start of frame (wird bei SOF gesetzt)
++#define OHC_INT_RD     0x00000008 //Resume detected (wird bei einem von einem
++                                  //Ger&#195;&#164;t gesendeten Resume gesetzt)
++#define OHC_INT_UE     0x00000010 //Unrecoverable error (wird bei einem HC-
++                                  //Fehler gesetzt, der nichts mit USB zu tun
++                                  //hat)
++#define OHC_INT_FNO    0x00000020 //Frame number overflow (wird gesetzt, wenn
++                                  //die Framenummer gr&#195;&#182;&#195;&#159;er als 32767 und
++                                  //umgebrochen wird)
++#define OHC_INT_RHSC   0x00000040 //Root hub status change (wird gesetzt, wenn
++                                  //sich irgendwas am Roothub ge&#195;&#164;ndert hat)
++#define OHC_INT_OC     0x40000000 //Ownership change
++#define OHC_INT_MIE    0x80000000 //(De-)Aktiviert Interrupts
++
++#define OHC_RHA_NDP    0x000000FF //Anzahl an Rootports (1 bis 15)
++#define OHC_RHA_PSM    0x00000100 //Gesetzt, wenn man die Stromzufuhr zu
++                                  //einzelnen Ports unabh&#195;&#164;ngig setzen kann
++#define OHC_RHA_NPS    0x00000200 //Gel&#195;&#182;scht, wenn man die Stromzufuhr zu
++                                  //einzelnen Ports unabh&#195;&#164;ngig setzen kann
++#define OHC_RHA_DT     0x00000400 //Immer 0, zeigt so an, dass der Roothub kein
++                                  //Compound device ist.
++#define OHC_RHA_OCPM   0x00000800 //Gesetzt, wenn &#195;&#156;berspannungen f&#195;&#188;r jeden Port
++                                  //einzeln gemeldet werden
++#define OHC_RHA_NOCP   0x00001000 //Gesetzt, wenn keine &#195;&#156;berspannungen erkannt
++                                  //bzw. verhindert werden k&#195;&#182;nnen
++#define OHC_RHA_POTPGT 0xFF000000 //Power on to power good time (potpgt * 2)
++
++#define OHC_RHS_LPS    0x00000001 //R: 0
++                                  //W: Strom abdrehen
++#define OHC_RHS_OCI    0x00000002 //R: Unspezifische &#195;&#156;berspannung
++#define OHC_RHS_DRWE   0x00008000 //R: Irgendwas mit Remote Wakeup Enable
++                                  //W: Das aktivieren
++#define OHC_RHS_LPSC   0x00010000 //R: 0
++                                  //W: Strom andrehen
++#define OHC_RHS_OCIC   0x00020000 //R: Bei &#195;&#132;nderungen von OCI gesetzt
++                                  //W: Feld l&#195;&#182;schen
++#define OHC_RHS_CRWE   0x80000000 //W: Remote Wakeup Enable deaktivieren
++
++#define OHC_RP_CCS     0x00000001 //R: Ger&#195;&#164;t angeschlossen
++                                  //W: Deaktiviert den Port
++#define OHC_RP_PES     0x00000002 //R: Port aktiviert
++                                  //W: Aktiviert den Port
++#define OHC_RP_PSS     0x00000004 //R: Port schl&#195;&#164;ft
++                                  //W: Schl&#195;&#164;fert den Port ein
++#define OHC_RP_POCI    0x00000008 //R: &#195;&#156;berspannung
++                                  //W: Port aufwecken
++#define OHC_RP_PRS     0x00000010 //R: Reset l&#195;&#164;uft
++                                  //W: Reset treiben
++#define OHC_RP_PPS     0x00000100 //R: Strom an
++                                  //W: Strom andrehen
++#define OHC_RP_LSDA    0x00000200 //R: Low-Speed-Ger&#195;&#164;t
++                                  //W: Strom abdrehen
++#define OHC_RP_CSC     0x00010000 //R: Ger&#195;&#164;t an- oder abgezogen
++                                  //W: Bit l&#195;&#182;schen
++#define OHC_RP_PESC    0x00020000 //R: Port (de-)aktiviert
++                                  //W: Bit l&#195;&#182;schen
++#define OHC_RP_PSSC    0x00040000 //R: Port wurde geweckt
++                                  //W: Bit l&#195;&#182;schen
++#define OHC_RP_OCIC    0x00080000 //R: &#195;&#156;berspannungsbit ver&#195;&#164;ndert
++                                  //W: Bit l&#195;&#182;schen
++#define OHC_RP_PRSC    0x00100000 //R: Reset beendet
++                                  //W: Bit l&#195;&#182;schen
++
++struct ohci_registers {
++    uint32_t hc_revision; //Revision
++    volatile uint32_t hc_control;
++    volatile uint32_t hc_command_status;
++    volatile uint32_t hc_interrupt_status;
++    volatile uint32_t hc_interrupt_enable;
++    volatile uint32_t hc_interrupt_disable;
++    uint32_t hc_hcca; //Adresse des HCCA
++    volatile uint32_t hc_period_current_ed; //Adresse des aktuellen
++                                            //Endpointdescriptors der
++                                            //periodischen Transfers
++    uint32_t hc_control_head_ed; //Adresse des ersten Endpointdescriptors der
++                                 //Control-Transfers
++    volatile uint32_t hc_control_current_ed; //Adresse des aktuellen
++                                             //Endpointdescriptors der Control-
++                                             //Transfers
++    uint32_t hc_bulk_head_ed; //Adresse des ersten Endpointdescriptors der
++                              //Bulk-Transfers
++    volatile uint32_t hc_bulk_current_ed; //Adresse des aktuellen
++                                          //Endpointdescriptors der Bulk-
++                                          //Transfers
++    volatile uint32_t hc_done_head; //Adresse des zuletzt abgearbeiteten
++                                    //Transferdeskriptors, der der Done-Liste
++                                    //hinzugef&#195;&#188;gt wurde
++    uint32_t hc_fm_interval; //Gibt die L&#195;&#164;nge eines Frames und die maximale
++                             //Paketgr&#195;&#182;&#195;&#159;e an
++    volatile uint32_t hc_fm_remaining; //Verbleibende Takte des aktuellen Frames
++    volatile uint32_t hc_fm_number; //Nummer des aktuellen Frames
++    uint32_t hc_periodic_start; //10% von HcFmInterval, wenn HcFmInterval diesen
++                                //Wert erreicht, dann haben periodische
++                                //Transfers Vorrang
++    uint32_t hc_ls_threshold; //Besser nicht &#195;&#164;ndern
++    uint32_t hc_rh_descriptor_a;
++    uint32_t hc_rh_descriptor_b;
++    volatile uint32_t hc_rh_status;
++    volatile uint32_t hc_rh_port_status[];
++} __attribute__((packed));
++
++struct ohci_hcca {
++    uint32_t interrupt_table[32]; //Zeiger zu Interrupt-EDs
++    uint16_t frame_number; //Die Nummer des aktuellen Frames
++    uint16_t pad; //Wird auf 0 gesetzt, wenn frame_number neu geschrieben wird
++                  //(Ausrichten an DWord-Grenzen vermutlich)
++    uint32_t done_head;
++    uint8_t rsvd[116];
++} __attribute__((packed));
++
++struct ohci {
++    struct hci gen_hci;
++    struct ohci_registers* memory;
++    int root_ports;
++    struct ohci_hcca* hcca;
++
++    struct mempool* ed_pool;
++    struct mempool* transfer_pool;
++};
++
++#define OHC_ED_DIR_TD  0 //Richtung im TD definiert
++#define OHC_ED_DIR_OUT 1
++#define OHC_ED_DIR_IN  2
++
++struct ohci_ed {
++    unsigned function : 7; //USB-Adresse des Ger&#195;&#164;ts
++    unsigned endpoint : 4; //Nummer des Endpoints
++    unsigned direction : 2; //Richtung des Transfers
++    unsigned low_speed : 1;
++    unsigned skip : 1;
++    unsigned format : 1; //Bei Isochronous gesetzt
++    unsigned mps : 11; //Maximale Paketgr&#195;&#182;&#195;&#159;e
++    unsigned user : 5; //F&#195;&#188;r uns frei verf&#195;&#188;gbar
++    uint32_t td_queue_tail; //Letzter TD in der Warteschlange
++    uint32_t td_queue_head; //N&#195;&#164;chster TD in der Warteschlange
++    uint32_t next_ed; //N&#195;&#164;chster ED
++} __attribute__((packed));
++
++#define OHC_TD_DIR_SETUP 0
++#define OHC_TD_DIR_OUT   1
++#define OHC_TD_DIR_IN    2
++
++struct ohci_td {
++    unsigned user : 18; //F&#195;&#188;r uns frei verf&#195;&#188;gbar
++    unsigned rounding : 1; //Wenn gesetzt, dann sind zu kleine Pakete nicht so
++                           //schlimm
++    unsigned direction : 2; //Richtung/Typ des Transfers (nur g&#195;&#188;ltig, wenn das
++                            //&quot;direction&quot;-Feld im ED 00b oder 11b ist)
++    unsigned di : 3; //Gibt an, wie viele Frames der HC vor Ausl&#195;&#182;sen eines IRQs
++                     //warten soll
++    unsigned toggle : 2; //Datatoggle (00b oder 01b - Wert muss aus dem ED
++                         //ermittelt werden, 10b = DATA0, 11b = DATA1)
++    unsigned error : 2; //Anzahl der aufgetretenen Fehler - bei 11b wird der
++                        //Status im &quot;condition&quot;-Feld gespeichert
++    unsigned condition : 4; //Status
++    uint32_t current_buffer_pointer; //Pointer zu den Daten (bei 0 wurden alle
++                                     //Daten &#195;&#188;bertragen)
++    uint32_t next_td; //N&#195;&#164;chster TD
++    uint32_t buffer_end; //Letztes Datenbyte des Puffers
++} __attribute__((packed));
++
++struct cdi_driver* init_ohcd(void);
++void ohci_init(struct cdi_device* cdi_hci);
++
++#endif
+diff --git a/usb/include/usb.h b/usb/include/usb.h
+index 459a340..896afc7 100644
+--- a/usb/include/usb.h
++++ b/usb/include/usb.h
+@@ -138,14 +138,44 @@ struct cdi_hci {
+ 
+ struct usb_device;
+ struct usb_packet;
++struct usb_pipe;
+ 
+ struct hci {
+     struct cdi_pci_device* pcidev;
+     hci_type_t type;
+-    cdi_list_t (* find_devices)(struct hci*);
+-    void (* activate_device)(struct hci*, struct usb_device*);
+-    int (* do_packet)(struct usb_device*, struct usb_packet* packet);
+-    int (* get_frame)(struct hci*);
++
++    /**
++      * Listet alle Ger&#195;&#164;te auf, die an den Rootports h&#195;&#164;ngen
++      *
++      * @param hci Das HCI
++      *
++      * @return Die List der Ger&#195;&#164;te (nur NULL, wenn cdi_list_create()
++      *         fehlgeschlagen ist)
++      */
++    cdi_list_t (* find_devices)(struct hci* hci);
++
++    /**
++      * Aktiviert den zum angegebenen Ger&#195;&#164;t geh&#195;&#182;rigen Rootport
++      *
++      * @param device Das USB-Ger&#195;&#164;t (muss an einem Rootport h&#195;&#164;ngen)
++      */
++    void (* activate_device)(struct usb_device* device);
++
++    /**
++      * Verarbeitet ein USB-Paket
++      *
++      * @param packet Das Paket
++      *
++      * @return Gibt den Status an (z. B. USB_NO_ERROR f&#195;&#188;r keinen Fehler)
++      */
++    int (* do_packet)(struct usb_packet* packet);
++
++    /**
++      * Erstellt eine neue Pipe
++      *
++      * @param pipe Die Pipe
++      */
++    void (* add_pipe)(struct usb_pipe* pipe);
+ };
+ 
+ struct setup_packet {
+@@ -246,29 +276,34 @@ struct usb_device {
+     int id;
+     int port;
+     int low_speed;
+-    struct endpoint_desc* ep0;
++    struct usb_pipe* ep0;
+     struct device_desc* device;
+     struct config_desc* config;
+     struct interface_desc* interface;
+     struct class_data* classd;
+     int locked;
+     int expects;
+-    int data_toggle;
++
++    /**
++      * Setzt das Ger&#195;&#164;t zur&#195;&#188;ck (muss vom Hub- oder HC-Driver gesetzt werden)
++      *
++      * @param device Das Ger&#195;&#164;t
++      */
+     void (* reset)(struct usb_device* device);
+ };
+ 
+ struct msclass_data {
+     struct class_data gen_class;
+-    struct endpoint_desc* bulk_ep_in;
+-    struct endpoint_desc* bulk_ep_out;
++    struct usb_pipe* bulk_in;
++    struct usb_pipe* bulk_out;
+ };
+ 
+ /** Beschreibt ein USB-Paket */
+ struct usb_packet {
++    /// Die gewuenschte Pipe
++    struct usb_pipe* pipe;
+     /// Der Typ des Pakets (PACKET_IN, PACKET_OUT, PACKET_SETUP)
+     enum usb_packet_type type;
+-    /// Der gewuenschte Endpoint
+-    struct endpoint_desc* endpoint;
+     /// Zeiger auf den Datenpuffer
+     void* data;
+     /// Die Laenge des Puffers
+@@ -277,14 +312,28 @@ struct usb_packet {
+     int type_of_data;
+ };
+ 
++/// Beschreibt eine Pipe
++struct usb_pipe {
++    /// Ziel
++    struct usb_device* device;
++    /// Der Endpoint
++    struct endpoint_desc* endpoint;
++    /// Data-Toggle
++    int data_toggle;
++};
+ 
++
++#include &quot;ohci.h&quot;
+ #include &quot;uhci.h&quot;
+ 
+ 
+-#define HCI_STRUCT_SIZE sizeof(struct uhci)
++#ifndef max
++#define max(v1, v2) (((v1) &gt; (v2)) ? (v1) : (v2))
++#endif
++#define HCI_STRUCT_SIZE max(sizeof(struct ohci), sizeof(struct uhci))
+ 
+ 
+-int usb_do_packet(struct usb_device* device, struct usb_packet* packet);
++int usb_do_packet(struct usb_packet* packet);
+ void enumerate_hci(struct hci*);
+ struct cdi_driver* init_uhcd(void);
+ void init_msc_driver(void);
+diff --git a/usb/main.c b/usb/main.c
+index b09bfba..8861fcf 100644
+--- a/usb/main.c
++++ b/usb/main.c
+@@ -28,6 +28,8 @@
+ #include &quot;cdi/misc.h&quot;
+ #include &quot;cdi/pci.h&quot;
+ 
++#include &quot;ohci.h&quot;
++#include &quot;uhci.h&quot;
+ #include &quot;usb.h&quot;
+ 
+ #define DEBUG
+@@ -100,14 +102,16 @@ static const int next_data_type[9] = {
+ /**
+   * Verarbeitet ein USB-Paket.
+   *
+-  * @param device Das USB-Ger&#195;&#164;t
++  * @param packet Das Paket
+   */
+ 
+-int usb_do_packet(struct usb_device* device, struct usb_packet* packet)
++int usb_do_packet(struct usb_packet* packet)
+ {
+     int error = USB_NAK;
+     int tod_short, tod = packet-&gt;type_of_data;
+     int i = 0, mps;
++    struct usb_pipe* pipe = packet-&gt;pipe;
++    struct usb_device* device = pipe-&gt;device;
+ 
+     if (!(device-&gt;expects &amp; tod)) {
+         dprintf(&quot;0x%04X erwartet, 0x%04X bekommen...?\n&quot;, device-&gt;expects, tod);
+@@ -124,18 +128,18 @@ int usb_do_packet(struct usb_device* device, struct usb_packet* packet)
+     packet-&gt;type &amp;= 0xFF;
+ 
+     struct usb_packet send_packet = {
++        .pipe      = packet-&gt;pipe,
+         .type      = packet-&gt;type,
+-        .endpoint  = packet-&gt;endpoint,
+         .data      = packet-&gt;data
+     };
+-    mps = packet-&gt;endpoint-&gt;max_packet_size;
++    mps = pipe-&gt;endpoint-&gt;max_packet_size;
+ 
+     for (i = 0; (i &lt; packet-&gt;length) || (!i &amp;&amp; !packet-&gt;length); i += mps) {
+         send_packet.length =
+             (packet-&gt;length - i &gt; mps) ? mps : (packet-&gt;length - i);
+         error = USB_NAK;
+         while (error == USB_NAK) {
+-            error = device-&gt;hci-&gt;do_packet(device, &amp;send_packet);
++            error = device-&gt;hci-&gt;do_packet(&amp;send_packet);
+             if (error == USB_NAK) {
+                 cdi_sleep_ms(5);
+             }
+@@ -143,16 +147,16 @@ int usb_do_packet(struct usb_device* device, struct usb_packet* packet)
+         if (error != USB_NO_ERROR) {
+             i -= mps;
+         } else {
+-            device-&gt;data_toggle ^= 1;
++            pipe-&gt;data_toggle ^= 1;
+             send_packet.data += mps;
+         }
+         if (error == USB_STALLED) {
+-            printf(&quot;[usb] ENDPOINT %i DES GER&#195;&#132;TS %i STALLED!\n&quot;,
+-                packet-&gt;endpoint-&gt;endpoint_address,
++            printf(&quot;[usb] ENDPOINT 0x%02X DES GER&#195;&#132;TS %i STALLED!\n&quot;,
++                pipe-&gt;endpoint-&gt;endpoint_address,
+                 device-&gt;id);
+             do_control(device, HOST_TO_DEV | NO_DATA, NULL, 0, STD_REQUEST,
+                 REC_ENDPOINT, CLEAR_FEATURE, 0,
+-                packet-&gt;endpoint-&gt;endpoint_address);
++                pipe-&gt;endpoint-&gt;endpoint_address);
+         }
+     }
+     return error;
+@@ -180,14 +184,14 @@ static void* do_control(struct usb_device* device, int direction, void* buffer,
+     setup-&gt;length = length;
+ 
+     struct usb_packet setup_packet = {
++        .pipe         = device-&gt;ep0,
+         .type         = PACKET_SETUP,
+-        .endpoint     = device-&gt;ep0,
+         .data         = setup,
+         .length       = sizeof(*setup),
+         .type_of_data = USB_TOD_SETUP,
+     };
+ 
+-    if (usb_do_packet(device, &amp;setup_packet)) {
++    if (usb_do_packet(&amp;setup_packet)) {
+         return NULL;
+     }
+ 
+@@ -196,8 +200,8 @@ static void* do_control(struct usb_device* device, int direction, void* buffer,
+         buffer = (void*) 0xFFFFFFFF;    //Kein Fehler, aber auch keine Daten
+     } else {
+         struct usb_packet data_packet = {
++            .pipe         = device-&gt;ep0,
+             .type         = (direction == DEV_TO_HOST ? PACKET_IN : PACKET_OUT),
+-            .endpoint     = device-&gt;ep0,
+             .data         = buffer,
+             .length       = length,
+             .type_of_data =
+@@ -205,16 +209,16 @@ static void* do_control(struct usb_device* device, int direction, void* buffer,
+                  DEV_TO_HOST ? USB_TOD_SETUP_DATA_IN : USB_TOD_SETUP_DATA_OUT),
+         };
+ 
+-        rval = usb_do_packet(device, &amp;data_packet);
++        rval = usb_do_packet(&amp;data_packet);
+     }
+ 
+     if (rval == USB_NO_ERROR) {
+         struct usb_packet ack_packet = {
+-            .endpoint   = device-&gt;ep0,
++            .pipe       = device-&gt;ep0,
+             .data       = NULL,
+             .length     = 0,
+         };
+-        device-&gt;data_toggle = 1;
++        device-&gt;ep0-&gt;data_toggle = 1;
+ 
+         if (no_data || (direction == HOST_TO_DEV)) {
+             ack_packet.type = PACKET_IN;
+@@ -224,7 +228,7 @@ static void* do_control(struct usb_device* device, int direction, void* buffer,
+             ack_packet.type_of_data = USB_TOD_SETUP_ACK_OUT;
+         }
+ 
+-        rval = usb_do_packet(device, &amp;ack_packet);
++        rval = usb_do_packet(&amp;ack_packet);
+     }
+     return (rval == USB_NO_ERROR) ? buffer : NULL;
+ }
+@@ -234,7 +238,7 @@ static void usb_init(void)
+     struct cdi_pci_device* dev;
+     struct hci* hci;
+     struct cdi_hci* cdi_hci;
+-    struct cdi_driver* uhcd;
++    struct cdi_driver* uhcd, * ohcd;
+     char* dev_name;
+     int i;
+ 
+@@ -283,6 +287,7 @@ static void usb_init(void)
+             ehci), cdi_list_size(ohci), cdi_list_size(uhci));
+ 
+     uhcd = init_uhcd();
++    ohcd = init_ohcd();
+ 
+     for (i = 0; (hci = cdi_list_pop(uhci)) != NULL; i++) {
+         cdi_hci = malloc(sizeof(struct cdi_hci));
+@@ -299,6 +304,20 @@ static void usb_init(void)
+         uhci_init(&amp;cdi_hci-&gt;cdi_device);
+     }
+ 
++    for (i = 0; (hci = cdi_list_pop(ohci)) != NULL; i++) {
++        cdi_hci = malloc(sizeof(struct cdi_hci));
++        cdi_hci-&gt;cdi_device.type = CDI_UNKNOWN;
++        dev_name = malloc(10);
++        sprintf(dev_name, &quot;ohci%i&quot;, i);
++        cdi_hci-&gt;cdi_device.name = dev_name;
++        hci-&gt;find_devices = NULL;
++        cdi_hci-&gt;hci = hci;
++        //cdi_list_push(ohcd-&gt;devices, cdi_hci);
++        dprintf(&quot;%s registriert.\n&quot;, dev_name);
++        cdi_hci-&gt;cdi_device.driver = uhcd;
++        ohci_init(&amp;cdi_hci-&gt;cdi_device);
++    }
++
+     cdi_list_destroy(ehci);
+     cdi_list_destroy(ohci);
+     cdi_list_destroy(uhci);
+@@ -316,14 +335,16 @@ static void enum_device(struct usb_device* usbdev)
+     //Ger&#195;&#164;t und EP0 initialisieren
+     usbdev-&gt;locked = 0;
+     usbdev-&gt;expects = USB_TOD_SETUP | USB_TOD_COMMAND;
+-    usbdev-&gt;data_toggle = 0;
+     usbdev-&gt;ep0 = malloc(sizeof(*usbdev-&gt;ep0));
+-    usbdev-&gt;ep0-&gt;length = sizeof(*usbdev-&gt;ep0);
+-    usbdev-&gt;ep0-&gt;descriptor_type = DESC_ENDPOINT;
+-    usbdev-&gt;ep0-&gt;endpoint_address = 0;
+-    usbdev-&gt;ep0-&gt;attributes = 0;
+-    usbdev-&gt;ep0-&gt;max_packet_size = 8;
+-    usbdev-&gt;ep0-&gt;interval = 0;
++    usbdev-&gt;ep0-&gt;endpoint = malloc(sizeof(*usbdev-&gt;ep0-&gt;endpoint));
++    usbdev-&gt;ep0-&gt;endpoint-&gt;length = sizeof(*usbdev-&gt;ep0-&gt;endpoint);
++    usbdev-&gt;ep0-&gt;endpoint-&gt;descriptor_type = DESC_ENDPOINT;
++    usbdev-&gt;ep0-&gt;endpoint-&gt;endpoint_address = 0;
++    usbdev-&gt;ep0-&gt;endpoint-&gt;attributes = 0;
++    usbdev-&gt;ep0-&gt;endpoint-&gt;max_packet_size = 8;
++    usbdev-&gt;ep0-&gt;endpoint-&gt;interval = 0;
++    usbdev-&gt;ep0-&gt;device = usbdev;
++    usbdev-&gt;ep0-&gt;data_toggle = 0;
+ 
+     //Resetten
+     usbdev-&gt;reset(usbdev);
+@@ -337,7 +358,7 @@ static void enum_device(struct usb_device* usbdev)
+     if (dev_desc == NULL) {
+         return;
+     }
+-    usbdev-&gt;ep0-&gt;max_packet_size = dev_desc-&gt;max_packet_size0;
++    usbdev-&gt;ep0-&gt;endpoint-&gt;max_packet_size = dev_desc-&gt;max_packet_size0;
+ 
+     //Nochmals resetten
+     usbdev-&gt;reset(usbdev);
+@@ -515,7 +536,7 @@ void enumerate_hci(struct hci* hci)
+     if (hci-&gt;find_devices != NULL) {
+         usb_devices = hci-&gt;find_devices(hci);
+         while ((usbdev = cdi_list_pop(usb_devices)) != NULL) {
+-            hci-&gt;activate_device(hci, usbdev);
++            hci-&gt;activate_device(usbdev);
+             cdi_sleep_ms(50);
+             enum_device(usbdev);
+         }
+diff --git a/usb/msd.c b/usb/msd.c
+index a9f82a4..4410f37 100644
+--- a/usb/msd.c
++++ b/usb/msd.c
+@@ -163,26 +163,35 @@ void register_msd(struct usb_device* usbdev)
+         return;
+     }
+     usbdev-&gt;classd = (struct class_data*) msc;
+-    msc-&gt;bulk_ep_in = NULL;
+-    msc-&gt;bulk_ep_out = NULL;
++    msc-&gt;bulk_in = malloc(sizeof(*msc-&gt;bulk_in));
++    msc-&gt;bulk_in-&gt;device = usbdev;
++    msc-&gt;bulk_in-&gt;endpoint = NULL;
++    msc-&gt;bulk_in-&gt;data_toggle = 0;
++    msc-&gt;bulk_out = malloc(sizeof(*msc-&gt;bulk_out));
++    msc-&gt;bulk_out-&gt;device = usbdev;
++    msc-&gt;bulk_out-&gt;endpoint = NULL;
++    msc-&gt;bulk_out-&gt;data_toggle = 0;
+     address = (void*) usbdev-&gt;interface + sizeof(struct interface_desc);
+     for (i = 0; i &lt; usbdev-&gt;interface-&gt;num_endpoints; i++) {
+         ep_desc = address;
+         if ((ep_desc-&gt;endpoint_address &amp; 0x80) &amp;&amp;
+-            (ep_desc-&gt;attributes == 0x02) &amp;&amp; (msc-&gt;bulk_ep_in == NULL))
++            (ep_desc-&gt;attributes == 0x02) &amp;&amp;
++            (msc-&gt;bulk_in-&gt;endpoint == NULL))
+         {
+             //BULK-IN
+-            msc-&gt;bulk_ep_in = ep_desc;
++            msc-&gt;bulk_in-&gt;endpoint = ep_desc;
+         } else if (!(ep_desc-&gt;endpoint_address &amp; 0x80) &amp;&amp;
+                    (ep_desc-&gt;attributes == 0x02) &amp;&amp;
+-                   (msc-&gt;bulk_ep_out == NULL))
++                   (msc-&gt;bulk_out-&gt;endpoint == NULL))
+         {
+             //BULK-OUT
+-            msc-&gt;bulk_ep_out = ep_desc;
++            msc-&gt;bulk_out-&gt;endpoint = ep_desc;
+         }
+         address += sizeof(struct endpoint_desc);
+     }
+-    if ((msc-&gt;bulk_ep_in == NULL) || (msc-&gt;bulk_ep_out == NULL)) {
++    if ((msc-&gt;bulk_in-&gt;endpoint == NULL) ||
++        (msc-&gt;bulk_out-&gt;endpoint == NULL))
++    {
+         dprintf(&quot;Nicht gen&#195;&#188;gend Endpoints gefunden.\n&quot;);
+         return;
+     }
+@@ -197,10 +206,6 @@ void register_msd(struct usb_device* usbdev)
+         size *= bc;
+         dprintf(&quot;%s: %i * %i B (ca. %lld MB).\n&quot;, strgdev-&gt;dev.name, bc, bs,
+             size &gt;&gt; 20);
+-        dprintf(&quot;EP %i: %i; EP %i: %i\n&quot;, msc-&gt;bulk_ep_in-&gt;endpoint_address,
+-            msc-&gt;bulk_ep_in-&gt;max_packet_size,
+-            msc-&gt;bulk_ep_out-&gt;endpoint_address,
+-            msc-&gt;bulk_ep_out-&gt;max_packet_size);
+     }
+     cdi_storage_device_init(strgdev);
+     cdi_list_push(cdi_driver.drv.devices, strgdev);
+@@ -227,14 +232,14 @@ static int write_cmd(struct usb_device* usbdev, void* src)
+ {
+     struct msclass_data* msc = (struct msclass_data*) usbdev-&gt;classd;
+     struct usb_packet cmd_packet = {
++        .pipe         = msc-&gt;bulk_out,
+         .type         = PACKET_OUT,
+-        .endpoint     = msc-&gt;bulk_ep_out,
+         .data         = src,
+         .length       = 0x1F,
+         .type_of_data = USB_TOD_COMMAND,
+     };
+ 
+-    return usb_do_packet(usbdev, &amp;cmd_packet);
++    return usb_do_packet(&amp;cmd_packet);
+ }
+ 
+ /**
+@@ -254,14 +259,14 @@ static int read_status(struct usb_device* usbdev, uint32_t expected_tag)
+     int error;
+ 
+     struct usb_packet status_packet = {
++        .pipe         = msc-&gt;bulk_in,
+         .type         = PACKET_IN,
+-        .endpoint     = msc-&gt;bulk_ep_in,
+         .data         = csw,
+         .length       = 0x0D,
+         .type_of_data = USB_TOD_STATUS,
+     };
+ 
+-    error = usb_do_packet(usbdev, &amp;status_packet);
++    error = usb_do_packet(&amp;status_packet);
+     if (error != USB_NO_ERROR) {
+         return error;
+     }
+@@ -307,14 +312,14 @@ static int msd_get_capacity(struct usb_device* usbdev, uint32_t* block_size,
+     }
+ 
+     struct usb_packet in_packet = {
++        .pipe         = msc-&gt;bulk_in,
+         .type         = PACKET_IN,
+-        .endpoint     = msc-&gt;bulk_ep_in,
+         .data         = cap,
+         .length       = sizeof(*cap),
+         .type_of_data = USB_TOD_DATA_IN,
+     };
+ 
+-    if (usb_do_packet(usbdev, &amp;in_packet) != USB_NO_ERROR) {
++    if (usb_do_packet(&amp;in_packet) != USB_NO_ERROR) {
+         return 0;
+     }
+ 
+@@ -402,16 +407,13 @@ static int msd_cdi_read(struct cdi_storage_device* strgdev, uint64_t start,
+         }
+ #endif
+         bbs = (count - j &gt; MAX_ACCESS_BLOCKS) ? MAX_ACCESS_BLOCKS : count - j;
+-        _dprintf(&quot;/&quot;);
+         error = msd_read(usbdev, start + j, bbs, buffer + j * bs, bbs * bs);
+-        _dprintf(&quot;\\&quot;);
+         if (error != USB_NO_ERROR) {
+             dprintf(&quot;Lesefehler 0x%X bei Block %lld.\n&quot;, error, start + j);
+             usbdev-&gt;locked = 0;
+             return -1;
+         }
+     }
+-    _dprintf(&quot;\n&quot;);
+     usbdev-&gt;locked = 0;
+     return 0;
+ }
+@@ -452,14 +454,14 @@ static uint32_t msd_read(struct usb_device* usbdev, uint32_t lba,
+     }
+ 
+     struct usb_packet in_packet = {
++        .pipe         = msc-&gt;bulk_in,
+         .type         = PACKET_IN,
+-        .endpoint     = msc-&gt;bulk_ep_in,
+         .data         = buffer,
+         .length       = length,
+         .type_of_data = USB_TOD_DATA_IN,
+     };
+ 
+-    error = usb_do_packet(usbdev, &amp;in_packet);
++    error = usb_do_packet(&amp;in_packet);
+     if (error != USB_NO_ERROR) {
+         return error;
+     }
+@@ -553,14 +555,14 @@ static uint32_t msd_write(struct usb_device* usbdev, uint32_t lba,
+     }
+ 
+     struct usb_packet out_packet = {
++        .pipe         = msc-&gt;bulk_out,
+         .type         = PACKET_OUT,
+-        .endpoint     = msc-&gt;bulk_ep_out,
+         .data         = buffer,
+         .length       = length,
+         .type_of_data = USB_TOD_DATA_OUT,
+     };
+ 
+-    error = usb_do_packet(usbdev, &amp;out_packet);
++    error = usb_do_packet(&amp;out_packet);
+     if (error != USB_NO_ERROR) {
+         return error;
+     }
+diff --git a/usb/ohci.c b/usb/ohci.c
+new file mode 100644
+index 0000000..e4de271
+--- /dev/null
++++ b/usb/ohci.c
+@@ -0,0 +1,311 @@
++/******************************************************************************
++ * Copyright (c) 2009 Max Reitz                                               *
++ *                                                                            *
++ * Permission is hereby granted,  free of charge,  to any  person obtaining a *
++ * copy of this software and associated documentation files (the &quot;Software&quot;), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use,  copy, modify, merge, publish,  distribute, sublicense, *
++ * and/or sell copies  of the  Software,  and to permit  persons to whom  the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF MERCHANTABILITY, *
++ * FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#include &lt;string.h&gt;
++
++#include &quot;cdi/io.h&quot;
++#include &quot;cdi/misc.h&quot;
++#include &quot;cdi/pci.h&quot;
++
++#include &quot;mempool.h&quot;
++#include &quot;ohci.h&quot;
++
++#define DEBUG
++
++#ifdef DEBUG
++#include &lt;stdio.h&gt;
++#include &lt;stdarg.h&gt;
++#define dprintf(fmt, args...) printf(&quot;[ohci] &quot; fmt, ## args)
++#define _dprintf(fmt, args...) printf(fmt, ## args)
++#else
++static int dprintf(const char* fmt, ...)
++{
++    return 0;
++}
++
++#define _dprintf(fmt, args...) dprintf(fmt, ## args)
++#endif
++
++static struct cdi_driver cdi_driver;
++static const char* driver_name = &quot;ohcd&quot;;
++
++static void ohci_kill(struct cdi_driver* cdi_hcd);
++static void ohci_deinit(struct cdi_device* cdi_hci);
++void ohci_init(struct cdi_device* cdi_hci);
++static void ohci_handler(struct cdi_device* dev);
++static int ohci_do_packet(struct usb_packet* packet);
++static cdi_list_t get_devices(struct hci* gen_hci);
++static void activate_device(struct usb_device* device);
++static void ohci_reset_device(struct usb_device* device);
++static void ohci_establish_pipe(struct usb_pipe* pipe);
++
++struct cdi_driver* init_ohcd()
++{
++    cdi_driver.type = CDI_UNKNOWN;
++    cdi_driver.name = driver_name;
++    cdi_driver.init_device = &amp;ohci_init;
++    cdi_driver.remove_device = &amp;ohci_deinit;
++    cdi_driver.destroy = &amp;ohci_kill;
++    cdi_driver_init(&amp;cdi_driver);
++    cdi_driver_register(&amp;cdi_driver);
++    return &amp;cdi_driver;
++}
++
++static void ohci_kill(struct cdi_driver* cdi_hcd)
++{
++    //TODO: Da geht doch noch was
++}
++
++static void ohci_deinit(struct cdi_device* cdi_hci)
++{
++    cdi_outw(
++        ((struct uhci*) ((struct cdi_hci*) cdi_hci)-&gt;hci)-&gt;pbase + UHCI_USBCMD,
++        MAXP);                                                                                  //HC anhalten
++    //TODO: Hier doch auch
++}
++
++void ohci_init(struct cdi_device* cdi_hci)
++{
++    struct hci* gen_hci = ((struct cdi_hci*) cdi_hci)-&gt;hci;
++    struct ohci* ohci = (struct ohci*) gen_hci;
++    struct cdi_pci_resource* res;
++    int i;
++    uintptr_t phys_hcca;
++
++    ohci-&gt;memory = NULL;
++    for (i = 0; (res = cdi_list_get(gen_hci-&gt;pcidev-&gt;resources, i)) != NULL;
++         i++)
++    {
++        if (res-&gt;type == CDI_PCI_MEMORY) {
++            ohci-&gt;memory = cdi_alloc_phys_addr(res-&gt;length, res-&gt;start);
++            if (ohci-&gt;memory == NULL) {
++                dprintf(&quot;Speicher konnten nicht allokiert werden.\n&quot;);
++                return;
++            }
++            break;
++        }
++    }
++    if (ohci-&gt;memory == NULL) {
++        dprintf(&quot;Speicher nicht gefunden!\n&quot;);
++        return;
++    }
++    dprintf(&quot;Speicher @ 0x%08X\n&quot;, ohci-&gt;memory);
++    if ((ohci-&gt;memory-&gt;hc_revision &amp; 0xFF) != 0x10) {
++        dprintf(
++            &quot;Dieses OHCI k&#195;&#182;nnte inkompatibel mit dem Treiber sein (HCI %i.%i, HCD 1.0)\n&quot;,
++            (ohci-&gt;memory-&gt;hc_revision &amp; 0xF0) &gt;&gt; 4,
++            ohci-&gt;memory-&gt;hc_revision &amp; 0xF);
++    }
++    if (cdi_alloc_phys_mem(sizeof(*ohci-&gt;hcca), (void**) &amp;ohci-&gt;hcca,
++            (void**) &amp;phys_hcca) == -1)
++    {
++        dprintf(&quot;Konnte den HCCA nicht allokieren.\n&quot;);
++        return;
++    }
++    memset(ohci-&gt;hcca, 0, sizeof(*ohci-&gt;hcca));
++
++    dprintf(&quot;IRQ: %i\n&quot;, gen_hci-&gt;pcidev-&gt;irq);
++    cdi_register_irq(gen_hci-&gt;pcidev-&gt;irq, &amp;ohci_handler, cdi_hci);
++
++    ohci-&gt;ed_pool =
++        mempool_create(64 * sizeof(struct ohci_ed), sizeof(struct ohci_ed));
++    if (ohci-&gt;ed_pool == NULL) {
++        dprintf(&quot;ED-Speicherpool konnte nicht erzeugt werden!\n&quot;);
++        return;
++    }
++
++    ohci-&gt;transfer_pool = mempool_create(32 * (1023 + sizeof(struct ohci_td)),
++        1023 + sizeof(struct ohci_td));
++    if (ohci-&gt;transfer_pool == NULL) {
++        dprintf(&quot;Transfer-Speicherpool konnte nicht erzeugt werden!\n&quot;);
++        return;
++    }
++
++    ohci-&gt;memory-&gt;hc_interrupt_disable = OHC_INT_MIE;
++
++    if (ohci-&gt;memory-&gt;hc_control &amp; OHC_CTRL_IR) {
++        dprintf(&quot;&#195;&#156;bernahme der Kontrolle vom SMM... &quot;);
++        //&#195;&#132;nderung des &quot;Besitzers&quot; beantragen
++        ohci-&gt;memory-&gt;hc_command_status |= OHC_CMST_OCR;
++        for (i = 0; (ohci-&gt;memory-&gt;hc_control &amp; OHC_CTRL_IR) &amp;&amp; (i &lt; 1000);
++             i++)
++        {
++            cdi_sleep_ms(1);
++        }
++        if (i &lt; 100) {
++            _dprintf(&quot;Er hat mitgespielt.\n&quot;);
++        } else {
++            _dprintf(&quot;Idiot.\n&quot;);
++            ohci-&gt;memory-&gt;hc_control &amp;= ~OHC_CTRL_IR;
++        }
++    } else if ((ohci-&gt;memory-&gt;hc_control &amp; OHC_CTRL_CBSR) != OHC_USB_RESET) {
++        dprintf(&quot;BIOS aktiv\n&quot;);
++        if ((ohci-&gt;memory-&gt;hc_control &amp; OHC_CTRL_CBSR) !=
++            OHC_USB_OPERATIONAL)
++        {
++            dprintf(&quot;RESUME aktivieren...\n&quot;);
++            ohci-&gt;memory-&gt;hc_control =
++                (ohci-&gt;memory-&gt;hc_control &amp; ~OHC_CTRL_CBSR) | OHC_USB_RESUME;
++            cdi_sleep_ms(10);
++        }
++    } else { //Nix, weder BIOS noch SMM
++        dprintf(&quot;RESET abwarten\n&quot;);
++        cdi_sleep_ms(10); //Reset abwarten
++    }
++
++    dprintf(&quot;Resetten...\n&quot;);
++    ohci-&gt;memory-&gt;hc_command_status |= OHC_CMST_RESET;
++    //Normalerweise sollte man den Wert von hc_fm_interval von vor dem Reset
++    //wiederherstellen, aber ich finde das Schwachsinn. Die Werte sind so in
++    //Ordnung, wie sie jetzt sind.
++
++    cdi_sleep_ms(3); //10 &#194;&#181;s f&#195;&#188;r den Reset und 2 ms f&#195;&#188;r Resume
++    if ((ohci-&gt;memory-&gt;hc_control &amp; OHC_CTRL_CBSR) == OHC_USB_SUSPEND) { //Boah...
++        dprintf(&quot;Das Ding wurde nicht fertig...\n&quot;);
++        ohci-&gt;memory-&gt;hc_control =
++            (ohci-&gt;memory-&gt;hc_control &amp; ~OHC_CTRL_CBSR) | OHC_USB_RESUME;
++        cdi_sleep_ms(10);
++    }
++
++    ohci-&gt;memory-&gt;hc_interrupt_disable = OHC_INT_MIE;
++
++    ohci-&gt;memory-&gt;hc_hcca = phys_hcca;
++    ohci-&gt;memory-&gt;hc_interrupt_status = 0xFFFFFFFF;
++    ohci-&gt;memory-&gt;hc_interrupt_enable =
++        OHC_INT_SO   |  //Scheduling overrun
++        OHC_INT_WDH  |  //Write back done head
++        OHC_INT_RD   |  //Resume detected
++        OHC_INT_UE   |  //Schwerer Fehler
++        OHC_INT_RHSC |  //Root hub status change
++        OHC_INT_MIE;
++    //Eigentlich sollte man alle Transfers aktivieren. Aber wir wollen ja noch
++    //gar keine periodischen Transfers...
++    //Periodisches Zeug deaktivieren
++    ohci-&gt;memory-&gt;hc_control &amp;= ~(OHC_CTRL_PLE | OHC_CTRL_IE);
++    //Control und Bulk aktivieren
++    ohci-&gt;memory-&gt;hc_control |= OHC_CTRL_CLE | OHC_CTRL_BLE;
++    //Merkw&#195;&#188;rdigerweise soll das jetzt nicht auf 10 %, sondern auf 90 % gesetzt
++    //werden. Aber das klingt total bescheuert, weil nicht erkl&#195;&#164;rt wird, wann
++    //man es denn auf 10 % setzen soll. Deshalb machen wir das gleich.
++    ohci-&gt;memory-&gt;hc_periodic_start = 0x4B0;
++
++    dprintf(&quot;HC wird aktiviert.\n&quot;);
++
++    //DO IT, MAN!
++    ohci-&gt;memory-&gt;hc_control =
++        (ohci-&gt;memory-&gt;hc_control &amp; ~OHC_CTRL_CBSR) | OHC_USB_OPERATIONAL;
++
++    ohci-&gt;memory-&gt;hc_rh_status |= OHC_RHS_LPSC; //Strom andrehen
++    ohci-&gt;root_ports = ohci-&gt;memory-&gt;hc_rh_descriptor_a &amp; OHC_RHA_NDP;
++    cdi_sleep_ms((ohci-&gt;memory-&gt;hc_rh_descriptor_a &amp; OHC_RHA_POTPGT) &gt;&gt; 23);
++
++    dprintf(&quot;%i Rootports gefunden.\n&quot;, ohci-&gt;root_ports);
++
++    for (i = 0; i &lt; ohci-&gt;root_ports; i++) {
++        ohci-&gt;memory-&gt;hc_rh_port_status[i] |= OHC_RP_CCS; //Deaktivieren
++
++    }
++    gen_hci-&gt;find_devices = &amp;get_devices;
++    gen_hci-&gt;activate_device = &amp;activate_device;
++    gen_hci-&gt;do_packet = &amp;ohci_do_packet;
++    gen_hci-&gt;add_pipe = &amp;ohci_establish_pipe;
++
++    enumerate_hci(gen_hci);
++}
++
++static int ohci_do_packet(struct usb_packet* packet)
++{
++    return USB_STALLED;
++}
++
++static cdi_list_t get_devices(struct hci* gen_hci)
++{
++    struct ohci* ohci = (struct ohci*) gen_hci;
++    struct usb_device* dev;
++    cdi_list_t dlist = cdi_list_create();
++    int i;
++
++    dprintf(&quot;Ger&#195;&#164;te finden: &quot;);
++    for (i = 0; i &lt; ohci-&gt;root_ports; i++) {
++        if (!(ohci-&gt;memory-&gt;hc_rh_port_status[i] &amp; OHC_RP_CCS)) {
++            _dprintf(&quot;-&quot;);
++            continue;
++        }
++        _dprintf(&quot;!&quot;);
++        dev = malloc(sizeof(struct usb_device));
++        dev-&gt;hci = gen_hci;
++        dev-&gt;id = 0;
++        dev-&gt;port = i;
++        dev-&gt;low_speed = !!(ohci-&gt;memory-&gt;hc_rh_port_status[i] &amp; OHC_RP_LSDA);
++        dev-&gt;reset = &amp;ohci_reset_device;
++        cdi_list_push(dlist, dev);
++    }
++    _dprintf(&quot;\n&quot;);
++    return dlist;
++}
++
++static void activate_device(struct usb_device* device)
++{
++    struct ohci* ohci = (struct ohci*) device-&gt;hci;
++
++    dprintf(&quot;Ger&#195;&#164;t an Port %i wird aktiviert.\n&quot;, device-&gt;port);
++    ohci-&gt;memory-&gt;hc_rh_port_status[device-&gt;port] |= OHC_RP_PES;
++    cdi_sleep_ms(20);
++}
++
++static void ohci_reset_device(struct usb_device* device)
++{
++    struct ohci* ohci = (struct ohci*) device-&gt;hci;
++
++    ohci-&gt;memory-&gt;hc_rh_port_status[device-&gt;port] |= OHC_RP_PRS;
++    cdi_sleep_ms(20);
++}
++
++static void ohci_establish_pipe(struct usb_pipe* pipe)
++{
++}
++
++static void ohci_handler(struct cdi_device* dev)
++{
++    struct ohci* ohci = (struct ohci*) ((struct cdi_hci*) dev)-&gt;hci;
++    uint32_t status, done = 0;
++
++    status = ohci-&gt;memory-&gt;hc_interrupt_status;
++
++    if (status &amp; OHC_INT_RHSC) {
++        done |= OHC_INT_RHSC;
++    }
++    if (status &amp; OHC_INT_UE) {
++        dprintf(&quot;Schwerer HC-Fehler.\n&quot;);
++        //TODO HC anhalten
++        done |= OHC_INT_UE;
++    }
++    if (status &amp; OHC_INT_SF) { //&#195;&#150;hm... Na ja.
++        done |= OHC_INT_SF;
++    }
++
++    if (status &amp; ~done) {
++        dprintf(&quot;Nicht behandelter Interrupt: 0x%08X\n&quot;, status &amp; ~done);
++    }
++
++    ohci-&gt;memory-&gt;hc_interrupt_status = status;
++}
+diff --git a/usb/uhci.c b/usb/uhci.c
+index e80754c..cb7b857 100644
+--- a/usb/uhci.c
++++ b/usb/uhci.c
+@@ -28,9 +28,9 @@
+ #include &quot;cdi/misc.h&quot;
+ #include &quot;cdi/pci.h&quot;
+ 
++#include &quot;mempool.h&quot;
+ #include &quot;uhci.h&quot;
+ #include &quot;usb.h&quot;
+-#include &quot;mempool.h&quot;
+ 
+ #define DEBUG
+ 
+@@ -48,19 +48,19 @@ static int dprintf(const char* fmt, ...)
+ #define _dprintf(fmt, args...) dprintf(fmt, ## args)
+ #endif
+ 
+-static const char* driver_name = &quot;uhci&quot;;
++static const char* driver_name = &quot;uhcd&quot;;
+ 
+ static struct cdi_driver cdi_driver;
+ static cdi_list_t active_transfers;
+ 
+ static void uhci_handler(struct cdi_device* dev);
+-static int uhci_do_packet(struct usb_device* usbdev, struct usb_packet* packet);
++static int uhci_do_packet(struct usb_packet* packet);
+ static cdi_list_t get_devices(struct hci* gen_hci);
+-static void activate_device(struct hci* gen_hci, struct usb_device* device);
+-static int get_current_frame(struct hci* gen_hci);
++static void activate_device(struct usb_device* device);
+ static void uhci_deinit(struct cdi_device* cdi_hci);
+ static void uhci_kill(struct cdi_driver* cdi_hcd);
+ static void uhci_reset_device(struct usb_device* device);
++static void uhci_establish_pipe(struct usb_pipe* pipe);
+ 
+ 
+ struct cdi_driver* init_uhcd()
+@@ -115,10 +115,9 @@ void uhci_init(struct cdi_device* cdi_hci)
+         dprintf(&quot;I/O-Basis nicht gefunden!\n&quot;);
+         return;
+     }
+-
+     request_size =
+-        // Maximale Paketlaenge (TODO Stimmt das?)
+-        1024 +
++        // Maximale Paketl&#195;&#164;nge (Full Speed)
++        1023 +
+         // Transferdeskriptor
+         sizeof(struct uhci_td);
+ 
+@@ -135,10 +134,11 @@ void uhci_init(struct cdi_device* cdi_hci)
+         dprintf(&quot;QH-Speicher konnte nicht allociert werden!\n&quot;);
+         return;
+     }
++
+     if (cdi_alloc_phys_mem(4096, (void**) &amp;uhci-&gt;frame_list,
+             (void**) &amp;uhci-&gt;phys_frame_list) == -1)
+     {
+-        dprintf(&quot;Frame List konnte nicht allociert werden!\n&quot;);
++        dprintf(&quot;Frame List konnte nicht allokiert werden!\n&quot;);
+         return;
+     }
+ 
+@@ -185,7 +185,7 @@ void uhci_init(struct cdi_device* cdi_hci)
+     gen_hci-&gt;find_devices = &amp;get_devices;
+     gen_hci-&gt;activate_device = &amp;activate_device;
+     gen_hci-&gt;do_packet = &amp;uhci_do_packet;
+-    gen_hci-&gt;get_frame = &amp;get_current_frame;
++    gen_hci-&gt;add_pipe = &amp;uhci_establish_pipe;
+ 
+     enumerate_hci(gen_hci);
+ }
+@@ -227,9 +227,9 @@ static void uhci_reset_device(struct usb_device* device)
+     cdi_sleep_ms(20);
+ }
+ 
+-static void activate_device(struct hci* gen_hci, struct usb_device* device)
++static void activate_device(struct usb_device* device)
+ {
+-    struct uhci* uhci = (struct uhci*) gen_hci;
++    struct uhci* uhci = (struct uhci*) device-&gt;hci;
+ 
+     dprintf(&quot;Ger&#195;&#164;t an Port %i wird aktiviert.\n&quot;, device-&gt;port);
+     cdi_outw(uhci-&gt;pbase + UHCI_RPORTS + 2 * device-&gt;port,
+@@ -237,11 +237,6 @@ static void activate_device(struct hci* gen_hci, struct usb_device* device)
+     cdi_sleep_ms(20);
+ }
+ 
+-static int get_current_frame(struct hci* gen_hci)
+-{
+-    return cdi_inw(((struct uhci*) gen_hci)-&gt;pbase + UHCI_FRNUM);
+-}
+-
+ static inline int tsl(volatile int* variable)
+ {
+     int rval;
+@@ -252,8 +247,9 @@ static inline int tsl(volatile int* variable)
+ 
+ static volatile int locked = 0;
+ 
+-static int uhci_do_packet(struct usb_device* usbdev, struct usb_packet* packet)
++static int uhci_do_packet(struct usb_packet* packet)
+ {
++    struct usb_device* usbdev = packet-&gt;pipe-&gt;device;
+     struct uhci* uhci = (struct uhci*) usbdev-&gt;hci;
+     struct uhci_td td;
+     struct transfer addr;
+@@ -266,12 +262,12 @@ static int uhci_do_packet(struct usb_device* usbdev, struct usb_packet* packet)
+     td.next = 1; //Invalid
+     td.active = 1;
+     td.ioc = 1;
+-    td.data_toggle = usbdev-&gt;data_toggle;
++    td.data_toggle = packet-&gt;pipe-&gt;data_toggle;
+     td.low_speed = usbdev-&gt;low_speed;
+     td.errors = 1;
+     td.pid = packet-&gt;type;
+     td.device = usbdev-&gt;id;
+-    td.endpoint = packet-&gt;endpoint-&gt;endpoint_address &amp; 0x07;
++    td.endpoint = packet-&gt;pipe-&gt;endpoint-&gt;endpoint_address &amp; 0x07;
+     td.maxlen = packet-&gt;length ? packet-&gt;length - 1 : 0x7FF;
+     while (tsl(&amp;locked)) {
+ #ifndef CDI_STANDALONE
+@@ -284,16 +280,15 @@ static int uhci_do_packet(struct usb_device* usbdev, struct usb_packet* packet)
+         frame &amp;= 0x3FF;
+     }
+ 
+-   if (mempool_get(uhci-&gt;buffers, &amp;buf, &amp;pbuf) &lt; 0) {
+-       // FIXME Oder sowas
+-       return USB_NAK;
+-   }
++    if (mempool_get(uhci-&gt;buffers, &amp;buf, &amp;pbuf) &lt; 0) {
++        return USB_TRIVIAL_ERROR;
++    }
+ 
+     addr.virt = buf;
+     addr.phys = pbuf;
+     addr.error = 0xFFFF;
+ 
+-    buf = (void*)((uintptr_t) buf + sizeof(td));
++    buf = (void*) ((uintptr_t) buf + sizeof(td));
+     pbuf += sizeof(td);
+ 
+     if (!packet-&gt;length) {
+@@ -388,3 +383,8 @@ static void uhci_handler(struct cdi_device* cdi_hci)
+     }
+     cdi_outw(uhci-&gt;pbase + UHCI_USBSTS, status);
+ }
++
++static void uhci_establish_pipe(struct usb_pipe* pipe)
++{
++    //Macht nix, weil das bei UHCI nicht n&#195;&#182;tig ist
++}
+-- 
+1.6.3.3
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000019.html">[cdi-devel] [PATCH] usb: Quarter of memory
+</A></li>
+	<LI>Next message: <A HREF="000021.html">[cdi-devel] [PATCH] usb: OHCI driver
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#20">[ date ]</a>
+              <a href="thread.html#20">[ thread ]</a>
+              <a href="subject.html#20">[ subject ]</a>
+              <a href="author.html#20">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

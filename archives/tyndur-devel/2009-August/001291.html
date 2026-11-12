@@ -1,0 +1,283 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] rm folgende flags hinzugefügt: recursive, verbose, interactive
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH%3D5D_rm_folgende_flags_hinzugef%3F%3D%0A%09%3D%3Futf-8%3Fq%3F%3DC3%3DBCgt%3D3A_recursive%3D2C_verbose%3D2C_interactive%3F%3D&In-Reply-To=%3C1250367652-10439-1-git-send-email-patrick%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001290.html">
+   <LINK REL="Next"  HREF="001292.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] rm folgende flags hinzugefügt: recursive, verbose, interactive</H1>
+    <B>Patrick Kaufmann</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH%3D5D_rm_folgende_flags_hinzugef%3F%3D%0A%09%3D%3Futf-8%3Fq%3F%3DC3%3DBCgt%3D3A_recursive%3D2C_verbose%3D2C_interactive%3F%3D&In-Reply-To=%3C1250367652-10439-1-git-send-email-patrick%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH] rm folgende flags hinzugefügt: recursive, verbose, interactive">patrick at tyndur.org
+                  </A><BR>
+    <I>Sa Aug 15 22:20:52 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001290.html">[tyndur-devel] [PATCH] CDI NE2K driver
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001292.html">[tyndur-devel] [PATCH] rm folgende flags hinzugefügt: recursive, verbose, interactive
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1291">[ Datum ]</a>
+              <a href="thread.html#1291">[ Thema ]</a>
+              <a href="subject.html#1291">[ Betreff (Subject) ]</a>
+              <a href="author.html#1291">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>---
+ src/modules/c/shell/cmds/rm.c |  191 ++++++++++++++++++++++++++++++++++++++---
+ 1 files changed, 180 insertions(+), 11 deletions(-)
+
+diff --git a/src/modules/c/shell/cmds/rm.c b/src/modules/c/shell/cmds/rm.c
+index a9d160f..19a7cc7 100644
+--- a/src/modules/c/shell/cmds/rm.c
++++ b/src/modules/c/shell/cmds/rm.c
+@@ -39,8 +39,13 @@
+ #include &quot;unistd.h&quot;
+ #include &quot;dir.h&quot;
+ #include &lt;lost/config.h&gt;
++#include &lt;getopt.h&gt;
++#include &lt;collections.h&gt;
++#include &lt;types.h&gt;
++#include &lt;sys/stat.h&gt;
+ 
+ void rm_display_usage(void);
++int rm_recursive(char* src_path, bool recurse, bool verbose, int interactive);
+ 
+ #ifdef CONFIG_SHELL_BUILTIN_ONLY
+     int shell_command_rm(int argc, char* argv[], const char* args)
+@@ -48,25 +53,189 @@ void rm_display_usage(void);
+     int main(int argc, char* argv[])
+ #endif
+ {
+-    if (argc != 2) {
+-        rm_display_usage();
+-        return -1;
++    static const struct option long_options[] =
++    {
++        { &quot;recursive&quot;,   no_argument,       0, 'r' },
++        { &quot;help&quot;,        no_argument,       0, 'h' },
++        { &quot;verbose&quot;,     no_argument,       0, 'v' },
++        { &quot;interactive&quot;, optional_argument, 0, 'i' },
++        { &quot;interactive&quot;, optional_argument, 0, 'I' },
++        { 0, 0, 0, 0 }
++    };
++
++    int result = 0;
++    bool verbose = 0;
++    bool recursive = 0;
++    int directory = 0;
++    int interactive = 0;
++    char* src_path = NULL;
++
++    list_t* sources = list_create();
++
++    optind = 0;
++    opterr = 0;
++
++    while (optind &lt; argc) {
++        result = getopt_long(argc, argv, &quot;vriIh&quot;, long_options, NULL);
++        if (result == -1) {
++            break;
++        }
++        switch (result) {
++            case 'r':
++                recursive = 1;
++                break;
++            case 'v':
++                verbose = 1;
++                break;
++            case 'i':
++                if ((optarg != NULL)) {
++                    if (strcmp(&quot;always&quot;, optarg)) {
++                        interactive = 2;
++                    }
++                    if (strcmp(&quot;once&quot;, optarg)) {
++                        interactive = 1;
++                    }
++                } else {
++                    interactive = 1;
++                }
++                break;
++            case 'I':
++                if ((optarg != NULL)) {
++                    if (strcmp(&quot;always&quot;, optarg)) {
++                        interactive = 2;
++                    }
++                    if (strcmp(&quot;once&quot;, optarg)) {
++                        interactive = 1;
++                    }
++                } else {
++                    interactive = 2;
++                }
++                break;
++            case 'h':
++                rm_display_usage();
++                return EXIT_SUCCESS;
++            case '?':
++                printf(&quot;rm: Unbekannter Parameter: '%c'\n&quot;, optopt);
++                return EXIT_FAILURE;
++            default:
++                break;
++        }
+     }
+-    
+-    int result = io_remove_link(argv[1]);
+-    
+-    if (result != 0) {
+-        puts(&quot;Fehler beim Loeschen des Links&quot;);
++
++    if (!(optind &lt; argc)) {
++        printf(&quot;Probiere \'rm --help\' fuer mehr Informationen\n&quot;);
+         return EXIT_FAILURE;
+     }
++    while (optind &lt; argc) {
++        char* p = strdup(argv[optind++]);
++        int len = strlen(p);
++        if (p[len - 1] == '/') {
++            p[len - 1] = 0;
++        }
++        list_push(sources, p);
++    }
++
++    while ((src_path = list_pop(sources))) {
++
++        directory = is_directory(src_path);
++        if (directory) {
++            if (!recursive) {
++                printf(&quot;rm: \'%s/\' ist ein Ordner: Uebersprungen\n&quot;,
++                    src_path);
++                result = -1;
++            } else {
++                result += rm_recursive(src_path, TRUE, verbose, interactive);
++            }
++        } else {
++            result += rm_recursive(src_path, FALSE, verbose, interactive);
++        }
++    }
++    list_destroy(sources);
+ 
++
++    if (result != 0) {
++        return EXIT_FAILURE;
++    }
+     return EXIT_SUCCESS;
+ }
+ 
+ void rm_display_usage()
+ {
+-    puts(&quot;\nAufruf: rm &lt;Pfad&gt;&quot;);
+-    puts(&quot;\nHardlink an &lt;Pfad&gt; loeschen. Falls es sich um den Letzten &quot;
+-        &quot;handelt, wird die Datei/das Verzeichnis geloescht.&quot;);
++    puts(&quot;Aufruf: rm &lt;Pfad&gt;\n&quot;);
++    puts(&quot;Hardlink an &lt;Pfad&gt; loeschen. Falls es sich um den Letzten &quot;
++         &quot;handelt, wird die Datei/das Verzeichnis geloescht.\n&quot;
++         &quot;Optionen:\n&quot;
++         &quot;      -r --recursive      Verzeichnis rekursiv löschen\n&quot;
++         &quot;      -v --verbose        Statusmeldungen anzeigen\n&quot;
++         &quot;      -i --interactive    &quot;
++            &quot;Jedesmal fragen ob &lt;Pfad&gt; gelöscht werden soll\n&quot;
++         &quot;      -I --interactive    &quot;
++            &quot;Einmal fragen ob &lt;Pfad&gt; gelöscht werden soll\n&quot;
++         &quot;      -h --help           diese Hilfe anzeigen\n&quot;);
++}
++
++int rm_recursive(char* src_path, bool recurse, bool verbose, int interactive)
++{
++    int result = 0;
++    char* path = NULL;
++    io_resource_t* dir_res;
++    char c;
++    struct stat buf;
++    if ((stat(src_path, &amp;buf))) {
++        printf(&quot;rm: \'%s\' ist inexistent\n&quot;, src_path);
++        return -1;
++    }
++
++
++    switch (interactive) {
++        case 1:     // interactive_option = &quot;always&quot;
++            printf(&quot;rm: \'%s\' loeschen? \n&quot;, src_path);
++            fflush(stdout);
++            while ((c = getchar()) == EOF);
++            if (c != 'y') {
++                printf(&quot;rm: \'%s\' übersprungen\n&quot;, src_path);
++                return -1;      // Fehlschlag
++            }
++            break;
++        case 2:     // interactive_option = &quot;once&quot;
++            printf(&quot;rm: \'%s\' loeschen? \n&quot;, src_path);
++            fflush(stdout);
++            while ((c = getchar()) == EOF);
++            if (c != 'y') {
++                printf(&quot;rm: \'%s\' übersprungen\n&quot;, src_path);
++                return -1;
++            }
++            interactive = 0;
++            break;
++        default:    // interactive_option = NULL
++            break;
++    }
++    if (verbose) {
++        printf(&quot;removed \'%s\'\n&quot;, src_path);
++    }
++    if (recurse &amp;&amp; (dir_res = directory_open(src_path))) {
++        io_direntry_t* direntry;
++        list_t* fn_list = list_create();
++
++        while ((direntry = directory_read(dir_res))) {
++            asprintf(&amp;path, &quot;%s/%s&quot;, src_path, direntry-&gt;name);
++            list_push(fn_list, path);
++            free(direntry);
++        }
++        directory_close(dir_res);
++
++        while ((path = list_pop(fn_list))) {
++            rm_recursive(path, recurse, verbose, interactive);
++            free(path);
++        }
++        list_destroy(fn_list);
++        io_remove_link(src_path);
++    } else {
++        result = io_remove_link(src_path);
++        if (result != 0) {
++            printf(&quot;rm: \'%s/\' konnte nicht geloescht werden \n&quot;, src_path);
++        }
++    }
++    return result;
+ }
+ 
+-- 
+1.6.3.3
+
+</PRE>
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001290.html">[tyndur-devel] [PATCH] CDI NE2K driver
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001292.html">[tyndur-devel] [PATCH] rm folgende flags hinzugefügt: recursive, verbose, interactive
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1291">[ Datum ]</a>
+              <a href="thread.html#1291">[ Thema ]</a>
+              <a href="subject.html#1291">[ Betreff (Subject)]</a>
+              <a href="author.html#1291">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

@@ -1,0 +1,210 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 05/11] kernel2: pm_scheduler_kern_yield()
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%2005/11%5D%20kernel2%3A%20pm_scheduler_kern_yield%28%29&In-Reply-To=%3C1388708813-23390-6-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002450.html">
+   <LINK REL="Next"  HREF="002452.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 05/11] kernel2: pm_scheduler_kern_yield()</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%2005/11%5D%20kernel2%3A%20pm_scheduler_kern_yield%28%29&In-Reply-To=%3C1388708813-23390-6-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 05/11] kernel2: pm_scheduler_kern_yield()">kevin at tyndur.org
+                  </A><BR>
+    <I>Fr Jan  3 01:26:47 CET 2014</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002450.html">[tyndur-devel] [PATCH 04/11] kernel2: Privilegierte Syscalls
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002452.html">[tyndur-devel] [PATCH 06/11] kernel2: on_destroy-Handler für Threads
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2451">[ Datum ]</a>
+              <a href="thread.html#2451">[ Thema ]</a>
+              <a href="subject.html#2451">[ Betreff (Subject) ]</a>
+              <a href="author.html#2451">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ kernel2: Neue Funktion, um den aktuellen Thread aus dem Kernel
+  schlafen zu legen, mit optionalem neuen Thread und Status für den
+  alten Thread. Nutzt einen neuen privilegierten Syscall.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/include/syscallno.h           |    4 ++--
+ src/kernel2/include/syscall.h     |    3 +++
+ src/kernel2/include/tasks.h       |    3 +++
+ src/kernel2/src/syscall.c         |    6 ++++++
+ src/kernel2/src/syscalls/pm.c     |   24 ++++++++++++++++++++++++
+ src/kernel2/src/tasks/scheduler.c |   21 +++++++++++++++++++++
+ 6 files changed, 59 insertions(+), 2 deletions(-)
+
+diff --git a/src/include/syscallno.h b/src/include/syscallno.h
+index 917e58b..2a2f909 100644
+--- a/src/include/syscallno.h
++++ b/src/include/syscallno.h
+@@ -52,7 +52,7 @@
+ #define SYSCALL_PM_SET_UID 8
+ #define SYSCALL_PM_REQUEST_PORT 9
+ #define SYSCALL_PM_RELEASE_PORT 10
+-#define SYSCALL_PM_SLEEP 6
++#define KERN_SYSCALL_PM_SLEEP 124
+ 
+ #define SYSCALL_VM86 81
+ #define SYSCALL_VM86_BIOS_INT 83
+@@ -119,6 +119,6 @@
+ #define SYSCALL_LIO_SRV_NODE_REMOVE                 118
+ 
+ //ACHTUNG: Muss eine Zahl groesser als die Groesste Syscall-Nummer sein
+-#define SYSCALL_MAX 124
++#define SYSCALL_MAX 125
+ 
+ #endif
+diff --git a/src/kernel2/include/syscall.h b/src/kernel2/include/syscall.h
+index f4fcb57..51f0ff1 100644
+--- a/src/kernel2/include/syscall.h
++++ b/src/kernel2/include/syscall.h
+@@ -114,6 +114,9 @@ int syscall_pm_v_and_wait_for_rpc(void);
+ /// Die Kontrolle an einen anderen Task abgeben
+ void syscall_pm_sleep(void);
+ 
++/// Die Kontrolle an einen anderen Task abgeben
++void kern_syscall_pm_sleep(tid_t yield_to, int status);
++
+ /// Warten, bis ein RPC zu bearbeiten ist
+ void syscall_pm_wait_for_rpc(void);
+ 
+diff --git a/src/kernel2/include/tasks.h b/src/kernel2/include/tasks.h
+index 7bcebb3..55caae6 100644
+--- a/src/kernel2/include/tasks.h
++++ b/src/kernel2/include/tasks.h
+@@ -232,6 +232,9 @@ void pm_scheduler_push(pm_thread_t* thread);
+ /// Kontrolle vom aktuellen Kernelthread an einen anderen Thread abgeben
+ void pm_scheduler_yield(void);
+ 
++/// Kontrolle an einen bestimmten Thread abgeben, mit Folgezustand
++void pm_scheduler_kern_yield(tid_t tid, int status);
++
+ /// Versucht einen Taskwechsel zum übergebenen Thread
+ void pm_scheduler_try_switch(pm_thread_t* thread);
+ 
+diff --git a/src/kernel2/src/syscall.c b/src/kernel2/src/syscall.c
+index f663915..b6b06c5 100644
+--- a/src/kernel2/src/syscall.c
++++ b/src/kernel2/src/syscall.c
+@@ -123,6 +123,12 @@ void syscall_init()
+     syscall_register(SYSCALL_LIO_STAT, &amp;syscall_lio_stat, 2);
+     syscall_register(SYSCALL_LIO_UNLINK, &amp;syscall_lio_unlink, 3);
+     syscall_register(SYSCALL_LIO_SYNC_ALL, &amp;syscall_lio_sync_all, 0);
++
++    syscalls[KERN_SYSCALL_PM_SLEEP] = (syscall_t) {
++        .handler    = &amp;kern_syscall_pm_sleep,
++        .arg_count  = 2,
++        .privileged = true,
++    };
+ }
+ 
+ /**
+diff --git a/src/kernel2/src/syscalls/pm.c b/src/kernel2/src/syscalls/pm.c
+index 2bcabef..c316884 100644
+--- a/src/kernel2/src/syscalls/pm.c
++++ b/src/kernel2/src/syscalls/pm.c
+@@ -265,6 +265,30 @@ void syscall_pm_sleep(void)
+ }
+ 
+ /**
++ * Privilegierte Version von syscall_pm_sleep, die dem alten Task einen
++ * spezifischen neuen Zustand gibt und zu einem bestimmten anderen Task
++ * wechseln kann.
++ */
++void kern_syscall_pm_sleep(tid_t yield_to, int status)
++{
++    pm_thread_t* thread = NULL;
++
++    current_thread-&gt;status = status;
++
++    if (yield_to) {
++        thread = pm_thread_get(NULL, yield_to);
++    }
++
++    if (thread) {
++        pm_scheduler_get(thread);
++        thread-&gt;status = PM_STATUS_RUNNING;
++        current_thread = thread;
++    } else {
++        current_thread = pm_scheduler_pop();
++    }
++}
++
++/**
+  * Die Kontrolle an einen anderen Task abgeben und erst wieder aufwachen,
+  * wenn ein RPC zu bearbeiten ist
+  */
+diff --git a/src/kernel2/src/tasks/scheduler.c b/src/kernel2/src/tasks/scheduler.c
+index de95d83..d63ef13 100644
+--- a/src/kernel2/src/tasks/scheduler.c
++++ b/src/kernel2/src/tasks/scheduler.c
+@@ -239,6 +239,27 @@ void pm_scheduler_yield(void)
+ }
+ 
+ /**
++ * Kontrolle vom aktuellen Kernelthread an einen anderen Thread abgeben
++ *
++ * @tid TID des Threads, an den die Kontrolle übergeben werden soll, oder 0
++ * @status Thread-Status des alten Threads
++ */
++void pm_scheduler_kern_yield(tid_t tid, int status)
++{
++    asm volatile(
++        &quot;push %2;&quot;
++        &quot;push %1;&quot;
++        &quot;int $0x30;&quot;
++        &quot;add $8, %%esp;&quot;
++        : : &quot;a&quot; (KERN_SYSCALL_PM_SLEEP), &quot;r&quot; (tid), &quot;r&quot; (status));
++
++    // Es kann passieren, dass zwei Tasks im Kernel hin- und heryielden und
++    // auf irgendetwas warten, was von einem IRQ abhängt. Deshalb müssen wir
++    // dem IRQ eine Chance geben, anzukommen.
++    asm volatile(&quot;sti; nop; cli&quot;);
++}
++
++/**
+  * Macht den übergebenen Thread zum aktuellen Thread dieser CPU, wenn er
+  * momentan lauffähig ist. Wenn nicht, bleibt der bisherige Thread aktiv.
+  */
+-- 
+1.7.7
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002450.html">[tyndur-devel] [PATCH 04/11] kernel2: Privilegierte Syscalls
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002452.html">[tyndur-devel] [PATCH 06/11] kernel2: on_destroy-Handler für Threads
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2451">[ Datum ]</a>
+              <a href="thread.html#2451">[ Thema ]</a>
+              <a href="subject.html#2451">[ Betreff (Subject)]</a>
+              <a href="author.html#2451">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

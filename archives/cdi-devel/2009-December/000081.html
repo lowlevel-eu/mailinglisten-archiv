@@ -1,0 +1,770 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH 6/6] USB MSD
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%206/6%5D%20USB%20MSD&In-Reply-To=%3C1260640035-11473-7-git-send-email-max%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000080.html">
+   <LINK REL="Next"  HREF="000089.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH 6/6] USB MSD</H1>
+    <B>max at tyndur.org</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%206/6%5D%20USB%20MSD&In-Reply-To=%3C1260640035-11473-7-git-send-email-max%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH 6/6] USB MSD">max at tyndur.org
+       </A><BR>
+    <I>Sat Dec 12 18:47:15 CET 2009</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000080.html">[cdi-devel] [PATCH 5/6] USB 1.1
+</A></li>
+        <LI>Next message: <A HREF="000089.html">[cdi-devel] [PATCH 1/6] Mempool
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#81">[ date ]</a>
+              <a href="thread.html#81">[ thread ]</a>
+              <a href="subject.html#81">[ subject ]</a>
+              <a href="author.html#81">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>From: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+
++ Added USB mass storage driver (currently just bulk-only devices
+  supported)
+
+Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+---
+ usb-msd/include/msd.h |  121 ++++++++++++
+ usb-msd/main.c        |   68 +++++++
+ usb-msd/msd.c         |  486 +++++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 675 insertions(+), 0 deletions(-)
+ create mode 100644 usb-msd/include/msd.h
+ create mode 100644 usb-msd/main.c
+ create mode 100644 usb-msd/msd.c
+
+diff --git a/usb-msd/include/msd.h b/usb-msd/include/msd.h
+new file mode 100644
+index 0000000..bb6cf51
+--- /dev/null
++++ b/usb-msd/include/msd.h
+@@ -0,0 +1,121 @@
++/*****************************************************************************
++* Copyright (c) 2009 Max Reitz                                               *
++*                                                                            *
++* Permission is hereby granted,  free of charge,  to any  person obtaining a *
++* copy of this software and associated documentation files (the &quot;Software&quot;), *
++* to deal in the Software without restriction,  including without limitation *
++* the rights to use,  copy, modify, merge, publish,  distribute, sublicense, *
++* and/or sell copies  of the  Software,  and to permit  persons to whom  the *
++* Software is furnished to do so, subject to the following conditions:       *
++*                                                                            *
++* The above copyright notice and this permission notice shall be included in *
++* all copies or substantial portions of the Software.                        *
++*                                                                            *
++* THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++* IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF MERCHANTABILITY, *
++* FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT SHALL *
++* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++* LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++* FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++* DEALINGS IN THE SOFTWARE.                                                  *
++*****************************************************************************/
++
++#ifndef MSD_H
++#define MSD_H
++
++#include &lt;stdint.h&gt;
++#include &lt;stdio.h&gt;
++
++//#define DEBUG
++
++#ifdef DEBUG
++#define d1printf(...) printf(&quot;[usb-msd] &quot; __VA_ARGS__)
++#define _d1printf(...) printf(__VA_ARGS__)
++#else
++#define d1printf(...)
++#define _d1printf(...)
++#endif
++
++#define d0printf(...) printf(&quot;[usb-msd] &quot; __VA_ARGS__)
++#define _d0printf(...) printf(__VA_ARGS__)
++
++//&quot;USBC&quot;
++#define CBW_SIGNATURE 0x43425355
++struct command_block_wrapper
++{
++    uint32_t cbw_signature;
++    uint32_t cbw_tag;
++    uint32_t cbw_data_transfer_length;
++    uint8_t cbw_flags;
++    uint8_t cbw_lun;
++    uint8_t cbw_cb_length;
++    uint8_t cbw_cb[16];
++} __attribute__((packed));
++
++//&quot;USBS&quot;
++#define CSW_SIGNATURE 0x53425355
++struct command_status_wrapper
++{
++    uint32_t csw_signature;
++    uint32_t csw_tag;
++    uint32_t csw_data_residue;
++    uint8_t csw_status;
++} __attribute__((packed));
++
++struct msc_sense
++{
++    unsigned error : 7;
++    unsigned valid : 1;
++    uint8_t rsvd0;
++    unsigned sense_key : 4;
++    unsigned rsvd1 : 4;
++    uint32_t information;
++    uint8_t additional_length;
++    uint32_t rsvd2;
++    uint8_t additional_code;
++    uint8_t additional_code_qualifier;
++    uint32_t rsvd;
++} __attribute__((packed));
++
++struct msd_capacity
++{
++    uint32_t last_lba;
++    uint32_t block_length;
++} __attribute__((packed));
++
++struct cdi_msd
++{
++    struct cdi_storage_device cdi_device;
++    struct cdi_usb_device *usb_device;
++    struct cdi_usb_pipe *bulk_in;
++    struct cdi_usb_pipe *bulk_out;
++    uint32_t offset; //F&#195;&#188;r Partitionen
++};
++
++struct part_table_entry
++{
++    uint8_t active;
++    uint8_t begin_chs[3];
++    uint8_t type;
++    uint8_t end_chs[3];
++    uint32_t start;
++    uint32_t size;
++} __attribute__((packed));
++
++
++#define MSC_CMD_REZERO   0x01
++#define MSC_CMD_SENSE    0x03
++#define MSC_CMD_CAPACITY 0x25
++#define MSC_CMD_READ10   0x28
++#define MSC_CMD_WRITE10  0x2A
++#define MSC_CMD_SEEK     0x2B
++#define MSC_CMD_READ12   0xA8
++#define MSC_CMD_WRITE12  0xAA
++
++int check_msd(struct cdi_usb_device *device);
++int msd_read_blocks(struct cdi_storage_device *device, uint64_t start,
++    uint64_t count, void *buffer);
++int msd_write_blocks(struct cdi_storage_device *device, uint64_t start,
++    uint64_t count, void *buffer);
++
++#endif
+diff --git a/usb-msd/main.c b/usb-msd/main.c
+new file mode 100644
+index 0000000..c5c401f
+--- /dev/null
++++ b/usb-msd/main.c
+@@ -0,0 +1,68 @@
++/*****************************************************************************
++* Copyright (c) 2009 Max Reitz                                               *
++*                                                                            *
++* Permission is hereby granted,  free of charge,  to any  person obtaining a *
++* copy of this software and associated documentation files (the &quot;Software&quot;), *
++* to deal in the Software without restriction,  including without limitation *
++* the rights to use,  copy, modify, merge, publish,  distribute, sublicense, *
++* and/or sell copies  of the  Software,  and to permit  persons to whom  the *
++* Software is furnished to do so, subject to the following conditions:       *
++*                                                                            *
++* The above copyright notice and this permission notice shall be included in *
++* all copies or substantial portions of the Software.                        *
++*                                                                            *
++* THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++* IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF MERCHANTABILITY, *
++* FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT SHALL *
++* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++* LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++* FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++* DEALINGS IN THE SOFTWARE.                                                  *
++*****************************************************************************/
++
++#include &lt;cdi/misc.h&gt;
++#include &lt;cdi/storage.h&gt;
++#include &lt;cdi/usb.h&gt;
++
++#include &quot;msd.h&quot;
++
++#define DRIVER_NAME &quot;usb-msd&quot;
++
++static int init_msd(void);
++
++struct cdi_storage_driver msc_driver = {
++    .drv = {
++        .type          = CDI_STORAGE,
++        .name          = DRIVER_NAME,
++        .devices       = NULL,
++        .init_device   = NULL,
++        .remove_device = NULL,
++        .init          = &amp;init_msd,
++        .destroy       = NULL
++    },
++    .read_blocks       = &amp;msd_read_blocks,
++    .write_blocks      = &amp;msd_write_blocks
++};
++
++CDI_DRIVER(DRIVER_NAME, msc_driver)
++
++static struct cdi_usb_device_pattern msd_pattern = {
++    .vendor_id   = -1,
++    .device_id   = -1,
++    .class_id    = 8,
++    .subclass_id = -1,
++    .protocol_id = -1,
++
++    .take_usb_device = &amp;check_msd
++};
++
++static int init_msd()
++{
++    cdi_init();
++
++    cdi_storage_driver_init(&amp;msc_driver);
++
++    cdi_usb_register_device_pattern(&amp;msd_pattern);
++
++    return 0;
++}
+diff --git a/usb-msd/msd.c b/usb-msd/msd.c
+new file mode 100644
+index 0000000..336a250
+--- /dev/null
++++ b/usb-msd/msd.c
+@@ -0,0 +1,486 @@
++/*****************************************************************************
++* Copyright (c) 2009 Max Reitz                                               *
++*                                                                            *
++* Permission is hereby granted,  free of charge,  to any  person obtaining a *
++* copy of this software and associated documentation files (the &quot;Software&quot;), *
++* to deal in the Software without restriction,  including without limitation *
++* the rights to use,  copy, modify, merge, publish,  distribute, sublicense, *
++* and/or sell copies  of the  Software,  and to permit  persons to whom  the *
++* Software is furnished to do so, subject to the following conditions:       *
++*                                                                            *
++* The above copyright notice and this permission notice shall be included in *
++* all copies or substantial portions of the Software.                        *
++*                                                                            *
++* THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++* IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF MERCHANTABILITY, *
++* FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT SHALL *
++* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++* LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++* FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++* DEALINGS IN THE SOFTWARE.                                                  *
++*****************************************************************************/
++
++#include &lt;stdint.h&gt;
++#include &lt;stdlib.h&gt;
++#include &lt;string.h&gt;
++
++#include &lt;cdi/misc.h&gt;
++#include &lt;cdi/storage.h&gt;
++#include &lt;cdi/usb.h&gt;
++#include &lt;cdi/usb-hcd.h&gt;
++
++#include &quot;msd.h&quot;
++
++//TODO: CDI-Funktion w&#195;&#164;re hier sicher n&#195;&#188;tzlich...
++#define CPU_IS_LITTLE_ENDIAN
++
++#define change_endianess_32(_) ((((_) &amp; \
++                                  0xFF000000) &gt;&gt; \
++                                 24) | \
++                                (((_) &amp; \
++                                  0xFF0000) &gt;&gt; \
++                                 8) | \
++                                (((_) &amp; 0xFF00) &lt;&lt; 8) | (((_) &amp; 0xFF) &lt;&lt; 24))
++#ifdef CPU_IS_LITTLE_ENDIAN
++#define CPU2BE(_) change_endianess_32(_)
++#define CPU2LE(_) (_)
++#define BE2CPU(_) change_endianess_32(_)
++#define LE2CPU(_) (_)
++#else
++#define CPU2BE(_) (_)
++#define CPU2LE(_) change_endianess_32(_)
++#define BE2CPU(_) (_)
++#define LE2CPU(_) change_endianess_32(_)
++#endif
++
++extern struct cdi_storage_driver msc_driver;
++static uint32_t cbw_tag = 1;
++
++static int msd_cdi_read(struct cdi_storage_device *strgdev, uint64_t start,
++    uint64_t count, void *buffer);
++static int msd_cdi_write(struct cdi_storage_device *strgdev, uint64_t start,
++    uint64_t count, void *buffer);
++
++int msd_read_blocks(struct cdi_storage_device *device, uint64_t start,
++    uint64_t count, void *buffer)
++{
++    return msd_cdi_read(device, start, count, buffer);
++}
++
++int msd_write_blocks(struct cdi_storage_device *device, uint64_t start,
++    uint64_t count, void *buffer)
++{
++    return msd_cdi_write(device, start, count, buffer);
++}
++
++static int msd_get_capacity(struct cdi_usb_device *usbdev,
++    uint32_t *block_size, uint32_t *block_count);
++
++int check_msd(struct cdi_usb_device *device)
++{
++    struct cdi_storage_device *strgdev;
++    struct cdi_usb_endpoint *ep_desc;
++    struct cdi_msd *cdimsd;
++    struct cdi_usb_hcd *hcd;
++    void *address;
++    int i;
++    uint32_t bs, bc;
++    uint64_t size;
++    static int msdnum = 0;
++
++    //Nur Bulk-Only
++    if (device-&gt;protocol_id != 0x50) {
++        return 0;
++    }
++
++    d0printf(&quot;MSD detected.\n&quot;);
++
++    cdimsd = malloc(sizeof(struct cdi_msd));
++    if (cdimsd == NULL) {
++        return 0;
++    }
++    cdimsd-&gt;usb_device = device;
++    cdimsd-&gt;offset = 0;
++    strgdev = (struct cdi_storage_device *)cdimsd;
++    strgdev-&gt;dev.type = CDI_STORAGE;
++    strgdev-&gt;dev.name = malloc(10);
++    if (strgdev-&gt;dev.name == NULL) {
++        free(strgdev);
++        return 0;
++    }
++    sprintf((char *)strgdev-&gt;dev.name, &quot;usb-msd%i&quot;, msdnum++);
++    strgdev-&gt;dev.driver = (struct cdi_driver *)&amp;msc_driver;
++    device-&gt;driver_data = cdimsd;
++    cdimsd-&gt;bulk_in = malloc(sizeof(*cdimsd-&gt;bulk_in));
++    cdimsd-&gt;bulk_in-&gt;device = device;
++    cdimsd-&gt;bulk_in-&gt;endpoint = NULL;
++    cdimsd-&gt;bulk_in-&gt;data_toggle = 0;
++    cdimsd-&gt;bulk_out = malloc(sizeof(*cdimsd-&gt;bulk_out));
++    cdimsd-&gt;bulk_out-&gt;device = device;
++    cdimsd-&gt;bulk_out-&gt;endpoint = NULL;
++    cdimsd-&gt;bulk_out-&gt;data_toggle = 0;
++    address = (void *)((uintptr_t)device-&gt;interface_desc +
++        sizeof(struct cdi_usb_interface));
++    for (i = 0; i &lt; device-&gt;interface_desc-&gt;num_endpoints; i++) {
++        ep_desc = address;
++        if ((ep_desc-&gt;endpoint_address &amp; 0x80) &amp;&amp;
++            (ep_desc-&gt;attributes == 0x02) &amp;&amp;
++            (cdimsd-&gt;bulk_in-&gt;endpoint == NULL))
++        {
++            //BULK-IN
++            cdimsd-&gt;bulk_in-&gt;endpoint = ep_desc;
++        }
++        else if (!(ep_desc-&gt;endpoint_address &amp; 0x80) &amp;&amp;
++            (ep_desc-&gt;attributes == 0x02) &amp;&amp;
++            (cdimsd-&gt;bulk_out-&gt;endpoint == NULL))
++        {
++            //BULK-OUT
++            cdimsd-&gt;bulk_out-&gt;endpoint = ep_desc;
++        }
++        address = (void *)((uintptr_t)address +
++            sizeof(struct cdi_usb_endpoint));
++    }
++    if ((cdimsd-&gt;bulk_in-&gt;endpoint == NULL) ||
++        (cdimsd-&gt;bulk_out-&gt;endpoint == NULL))
++    {
++        d0printf(&quot;Not enough endpoints found.\n&quot;);
++        return 0;
++    }
++    hcd = (struct cdi_usb_hcd *)device-&gt;hc-&gt;dev.driver;
++    hcd-&gt;add_pipe(cdimsd-&gt;bulk_in);
++    hcd-&gt;add_pipe(cdimsd-&gt;bulk_out);
++    if (!msd_get_capacity(device, &amp;bs, &amp;bc)) {
++        strgdev-&gt;block_size = 0;
++        strgdev-&gt;block_count = 0;
++        d1printf(&quot;Wasn't able to determine size of %s.\n&quot;, strgdev-&gt;dev.name);
++    } else {
++        strgdev-&gt;block_size = bs;
++        strgdev-&gt;block_count = bc;
++        size = bs;
++        size *= bc;
++        d1printf(&quot;%s: %i * %i B (about %d MB).\n&quot;, strgdev-&gt;dev.name, bc, bs,
++            (int)(size &gt;&gt; 20));
++    }
++    cdi_storage_device_init(strgdev);
++    cdi_list_push(msc_driver.drv.devices, strgdev);
++
++    return 1;
++}
++
++static int write_cmd(struct cdi_usb_device *usbdev, void *src)
++{
++    struct cdi_msd *cdimsd = usbdev-&gt;driver_data;
++    struct cdi_usb_packet cmd_packet = {
++        .pipe         = cdimsd-&gt;bulk_out,
++        .type         = CDI_USB_PACKET_OUT,
++        .data         = src,
++        .length       = 0x1F,
++        .use_toggle   = TOGGLE_UNSPECIFIC
++    };
++
++    return usbdev-&gt;drv-&gt;send_packets(&amp;cmd_packet, 1);
++}
++
++/**
++ * Liest den Status von einem MSD
++ *
++ * @param usbdev Das bewusste Ger&#195;&#164;t
++ * @param expected_tag Das erwartete Tag
++ *
++ * @return Wenn der Status OK ist USB_NO_ERROR, sonst entsprechender Fehler
++ */
++
++static int read_status(struct cdi_usb_device *usbdev, uint32_t expected_tag)
++{
++    struct cdi_msd *msc = usbdev-&gt;driver_data;
++    struct command_status_wrapper _csw;
++    struct command_status_wrapper *csw = &amp;_csw;
++    cdi_usb_status_t error;
++
++    struct cdi_usb_packet status_packet = {
++        .pipe         = msc-&gt;bulk_in,
++        .type         = CDI_USB_PACKET_IN,
++        .data         = csw,
++        .length       = 0x0D,
++        .use_toggle   = TOGGLE_UNSPECIFIC
++    };
++
++    error = usbdev-&gt;drv-&gt;send_packets(&amp;status_packet, 1);
++    if (error != CDI_USB_NO_ERROR) {
++        return error;
++    }
++    if ((csw-&gt;csw_signature != CSW_SIGNATURE) ||
++        (csw-&gt;csw_tag != expected_tag) || csw-&gt;csw_status)
++    {
++        d1printf(&quot;0x%08X %i==%i 0x%08X\n&quot;, csw-&gt;csw_signature, csw-&gt;csw_tag,
++            expected_tag, csw-&gt;csw_status);
++        return CDI_USB_TRIVIAL_ERROR;
++    }
++
++    return CDI_USB_NO_ERROR;
++}
++
++static int msd_get_capacity(struct cdi_usb_device *usbdev,
++    uint32_t *block_size, uint32_t *block_count)
++{
++    struct cdi_msd *msc;
++    struct command_block_wrapper _cbw;
++    struct command_block_wrapper *cbw = &amp;_cbw;
++    struct msd_capacity _cap;
++    struct msd_capacity *cap = &amp;_cap;
++    uint32_t expected_tag;
++
++    if ((usbdev == NULL) || (block_size == NULL) || (block_count == NULL)) {
++        return 0;
++    }
++
++    msc = usbdev-&gt;driver_data;
++    memset(cbw, 0, 0x1F);
++    cbw-&gt;cbw_signature = CBW_SIGNATURE;
++    cbw-&gt;cbw_tag = (expected_tag = cbw_tag++);
++    cbw-&gt;cbw_data_transfer_length = sizeof(struct msd_capacity);
++    cbw-&gt;cbw_flags = 0x80; //IN
++    cbw-&gt;cbw_lun = 0; //Was wei&#195;&#159; ich, wie viele LUNs datt Dingens hat?
++    cbw-&gt;cbw_cb_length = 12;
++    cbw-&gt;cbw_cb[0] = MSC_CMD_CAPACITY;
++    cbw-&gt;cbw_cb[1] = 0; //LUN: 0
++
++    if (write_cmd(usbdev, cbw) != CDI_USB_NO_ERROR) {
++        return 0;
++    }
++
++    struct cdi_usb_packet in_packet = {
++        .pipe         = msc-&gt;bulk_in,
++        .type         = CDI_USB_PACKET_IN,
++        .data         = cap,
++        .length       = sizeof(*cap),
++        .use_toggle   = TOGGLE_UNSPECIFIC
++    };
++
++    if (usbdev-&gt;drv-&gt;send_packets(&amp;in_packet, 1) != CDI_USB_NO_ERROR) {
++        return 0;
++    }
++
++    if (read_status(usbdev, expected_tag) != CDI_USB_NO_ERROR) {
++        return 0;
++    }
++
++    *block_size = BE2CPU(cap-&gt;block_length);
++    *block_count = BE2CPU(cap-&gt;last_lba) + 1;
++
++    return 1;
++}
++
++#ifdef WAIT_FOR_MSD_READY
++static int msd_ready(struct cdi_usb_device *usbdev)
++{
++    struct msclass_data *msc;
++    struct command_block_wrapper _cbw;
++    struct command_block_wrapper *cbw = &amp;_cbw;
++    uint32_t expected_tag;
++
++    msc = (struct msclass_data *)usbdev-&gt;driver_data;
++    memset(cbw, 0, 0x1F);
++    cbw-&gt;cbw_signature = CBW_SIGNATURE;
++    cbw-&gt;cbw_tag = (expected_tag = cbw_tag++);
++    cbw-&gt;cbw_data_transfer_length = 0;
++    cbw-&gt;cbw_flags = 0x80; //IN
++    cbw-&gt;cbw_lun = 0; //Was wei&#195;&#159; ich, wie viele LUNs datt Dingens hat?
++    cbw-&gt;cbw_cb_length = 12; //Alles null, also &quot;Test unit ready&quot;
++
++    if (write_cmd(usbdev, cbw) != USB_NO_ERROR) {
++        return 0;
++    }
++
++    if (read_status(usbdev, expected_tag) != USB_NO_ERROR) {
++        return 0;
++    }
++
++    return 1;
++}
++#endif
++
++#define MAX_ACCESS_BLOCKS 32
++
++static uint32_t msd_read(struct cdi_usb_device *usbdev, uint32_t lba,
++    uint16_t sectors, void *buffer, size_t length);
++
++static int msd_cdi_read(struct cdi_storage_device *strgdev, uint64_t start,
++    uint64_t count, void *buffer)
++{
++    int bs = strgdev-&gt;block_size, error;
++#ifdef WAIT_FOR_MSD_READY
++    int i;
++#endif
++    struct cdi_usb_device *usbdev = ((struct cdi_msd *)strgdev)-&gt;usb_device;
++    int j, bbs;
++
++    d1printf(&quot;read(%i, %i)\n&quot;, (int)start, (int)count);
++    start += ((struct cdi_msd *)strgdev)-&gt;offset;
++
++    if (!count) {
++        d1printf(&quot;Empty read request.\n&quot;);
++        return 0;
++    }
++    for (j = 0; j &lt; (int)count; j += MAX_ACCESS_BLOCKS) {
++#ifdef WAIT_FOR_MSD_READY
++        for (i = 0; !msd_ready(usbdev) &amp;&amp; (i &lt; 10); i++) {
++            cdi_sleep_ms(20);
++        }
++#endif
++        bbs = (count - j &gt; MAX_ACCESS_BLOCKS) ? MAX_ACCESS_BLOCKS : count - j;
++        error = msd_read(usbdev, start + j, bbs,
++                         (void *)((uintptr_t)buffer + j * bs), bbs * bs);
++        if (error != CDI_USB_NO_ERROR) {
++            d0printf(&quot;Read error 0x%X at block %lld.\n&quot;, error, start + j);
++            return -1;
++        }
++    }
++    return 0;
++}
++
++static uint32_t msd_read(struct cdi_usb_device *usbdev, uint32_t lba,
++    uint16_t sectors, void *buffer, size_t length)
++{
++    struct cdi_msd *msc;
++    struct command_block_wrapper _cbw;
++    struct command_block_wrapper *cbw = &amp;_cbw;
++    uint32_t expected_tag;
++    int error;
++
++    if ((buffer == NULL) || !length) {
++        return CDI_USB_TRIVIAL_ERROR;
++    }
++    msc = usbdev-&gt;driver_data;
++    memset(cbw, 0, 0x1F);
++    cbw-&gt;cbw_signature = CBW_SIGNATURE;
++    cbw-&gt;cbw_tag = (expected_tag = cbw_tag++);
++    cbw-&gt;cbw_data_transfer_length = length;
++    cbw-&gt;cbw_flags = 0x80; //IN
++    cbw-&gt;cbw_lun = 0; //Was wei&#195;&#159; ich, wie viele LUNs datt Dingens hat?
++    cbw-&gt;cbw_cb_length = 12;
++    cbw-&gt;cbw_cb[0] = MSC_CMD_READ10;
++    cbw-&gt;cbw_cb[1] = 0; //LUN: 0
++    cbw-&gt;cbw_cb[2] = (lba &amp; 0xFF000000) &gt;&gt; 24;
++    cbw-&gt;cbw_cb[3] = (lba &amp; 0x00FF0000) &gt;&gt; 16;
++    cbw-&gt;cbw_cb[4] = (lba &amp; 0x0000FF00) &gt;&gt; 8;
++    cbw-&gt;cbw_cb[5] = lba &amp; 0x000000FF;
++    cbw-&gt;cbw_cb[7] = (sectors &amp; 0x0000FF00) &gt;&gt; 8;
++    cbw-&gt;cbw_cb[8] = sectors &amp; 0x000000FF;
++
++    error = write_cmd(usbdev, cbw);
++    if (error != CDI_USB_NO_ERROR) {
++        return error;
++    }
++
++    struct cdi_usb_packet in_packet = {
++        .pipe         = msc-&gt;bulk_in,
++        .type         = CDI_USB_PACKET_IN,
++        .data         = buffer,
++        .length       = length,
++        .use_toggle   = TOGGLE_UNSPECIFIC
++    };
++
++    error = usbdev-&gt;drv-&gt;send_packets(&amp;in_packet, 1);
++    if (error != CDI_USB_NO_ERROR) {
++        return error;
++    }
++
++    error = read_status(usbdev, expected_tag);
++    if (error != CDI_USB_NO_ERROR) {
++        return error;
++    }
++
++    return CDI_USB_NO_ERROR;
++}
++
++static uint32_t msd_write(struct cdi_usb_device *usbdev, uint32_t lba,
++    uint16_t sectors, void *buffer, size_t length);
++
++static int msd_cdi_write(struct cdi_storage_device *strgdev, uint64_t start,
++    uint64_t count, void *buffer)
++{
++    int bs = strgdev-&gt;block_size, error;
++#ifdef WAIT_FOR_MSD_READY
++    int i;
++#endif
++    struct cdi_usb_device *usbdev = ((struct cdi_msd *)strgdev)-&gt;usb_device;
++    int j, bbs;
++
++    d1printf(&quot;write(%i, %i)\n&quot;, (int)start, (int)count);
++    start += ((struct cdi_msd *)strgdev)-&gt;offset;
++
++    if (!count) {
++        d1printf(&quot;Empty write request.\n&quot;);
++        return 0;
++    }
++    for (j = 0; j &lt; (int)count; j += MAX_ACCESS_BLOCKS) {
++#ifdef WAIT_FOR_MSD_READY
++        for (i = 0; !msd_ready(usbdev) &amp;&amp; (i &lt; 10); i++)
++            cdi_sleep_ms(20);
++#endif
++        bbs = (count - j &gt; MAX_ACCESS_BLOCKS) ? MAX_ACCESS_BLOCKS : count - j;
++        error = msd_write(usbdev, start + j, bbs,
++            (void *)((uintptr_t)buffer + j * bs), bbs * bs);
++        if (error != CDI_USB_NO_ERROR) {
++            d0printf(&quot;Write error 0x%X at block %lld.\n&quot;, error, start + j);
++            return -1;
++        }
++    }
++    return 0;
++}
++
++static uint32_t msd_write(struct cdi_usb_device *usbdev, uint32_t lba,
++    uint16_t sectors, void *buffer, size_t length)
++{
++    struct cdi_msd *msc;
++    struct command_block_wrapper _cbw;
++    struct command_block_wrapper* cbw = &amp;_cbw;
++    uint32_t expected_tag;
++    int error;
++
++    if ((buffer == NULL) || !length) {
++        return CDI_USB_TRIVIAL_ERROR;
++    }
++    msc = usbdev-&gt;driver_data;
++    memset(cbw, 0, 0x1F);
++    cbw-&gt;cbw_signature = CBW_SIGNATURE;
++    cbw-&gt;cbw_tag = (expected_tag = cbw_tag++);
++    cbw-&gt;cbw_data_transfer_length = length;
++    cbw-&gt;cbw_flags = 0x00; //OUT
++    cbw-&gt;cbw_lun = 0; //Was wei&#195;&#159; ich, wie viele LUNs datt Dingens hat?
++    cbw-&gt;cbw_cb_length = 12;
++    cbw-&gt;cbw_cb[0] = MSC_CMD_WRITE10;
++    cbw-&gt;cbw_cb[1] = 0; //LUN: 0
++    cbw-&gt;cbw_cb[2] = (lba &amp; 0xFF000000) &gt;&gt; 24;
++    cbw-&gt;cbw_cb[3] = (lba &amp; 0x00FF0000) &gt;&gt; 16;
++    cbw-&gt;cbw_cb[4] = (lba &amp; 0x0000FF00) &gt;&gt; 8;
++    cbw-&gt;cbw_cb[5] = lba &amp; 0x000000FF;
++    cbw-&gt;cbw_cb[7] = (sectors &amp; 0x0000FF00) &gt;&gt; 8;
++    cbw-&gt;cbw_cb[8] = sectors &amp; 0x000000FF;
++
++    error = write_cmd(usbdev, cbw);
++    if (error != CDI_USB_NO_ERROR) {
++        return error;
++    }
++
++    struct cdi_usb_packet out_packet = {
++        .pipe         = msc-&gt;bulk_out,
++        .type         = CDI_USB_PACKET_OUT,
++        .data         = buffer,
++        .length       = length,
++        .use_toggle   = TOGGLE_UNSPECIFIC
++    };
++
++    error = usbdev-&gt;drv-&gt;send_packets(&amp;out_packet, 1);
++    if (error != CDI_USB_NO_ERROR) {
++        return error;
++    }
++
++    error = read_status(usbdev, expected_tag);
++    if (error != CDI_USB_NO_ERROR) {
++        return error;
++    }
++
++    return CDI_USB_NO_ERROR;
++}
+-- 
+1.6.4.2
+
+</PRE>
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000080.html">[cdi-devel] [PATCH 5/6] USB 1.1
+</A></li>
+	<LI>Next message: <A HREF="000089.html">[cdi-devel] [PATCH 1/6] Mempool
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#81">[ date ]</a>
+              <a href="thread.html#81">[ thread ]</a>
+              <a href="subject.html#81">[ subject ]</a>
+              <a href="author.html#81">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

@@ -1,0 +1,235 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 1/5] shell: Programme starten mit init_execv()
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%201/5%5D%20shell%3A%20Programme%20starten%20mit%20init_execv%28%29&In-Reply-To=%3C1471686656-28613-2-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002587.html">
+   <LINK REL="Next"  HREF="002589.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 1/5] shell: Programme starten mit init_execv()</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%201/5%5D%20shell%3A%20Programme%20starten%20mit%20init_execv%28%29&In-Reply-To=%3C1471686656-28613-2-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 1/5] shell: Programme starten mit init_execv()">kevin at tyndur.org
+                  </A><BR>
+    <I>Sa Aug 20 11:50:52 CEST 2016</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002587.html">[tyndur-devel] [PATCH 0/5] shell: Neuer Parser
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002589.html">[tyndur-devel] [PATCH 2/5] shell: Kommandozeile nicht mehr an	Builtin-Befehle weitergeben
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2588">[ Datum ]</a>
+              <a href="thread.html#2588">[ Thema ]</a>
+              <a href="subject.html#2588">[ Betreff (Subject) ]</a>
+              <a href="author.html#2588">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* shell: Mit der Benutzung von init_execv() wird der libc direkt ein
+  argv-Array übergeben statt der kompletten Kommandozeile. Sobald die
+  Shell mal anfängt, die Kommandozeile anständig zu parsen, ist das das
+  viel sinnvollere Format.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/c/shell/commands.c | 38 ++++++++++----------------------
+ src/modules/c/shell/shell.c    | 50 ++++++++++++++++++++++--------------------
+ 2 files changed, 38 insertions(+), 50 deletions(-)
+
+diff --git a/src/modules/c/shell/commands.c b/src/modules/c/shell/commands.c
+index 53a8cfe..c36f577 100644
+--- a/src/modules/c/shell/commands.c
++++ b/src/modules/c/shell/commands.c
+@@ -74,17 +74,12 @@
+ #endif
+ 
+ 
+-int shell_start_path_app(const char* cmd, bool wait)
++static int shell_start_path_app(char* argv[], bool wait)
+ {
+-    DEBUG_MSG1(&quot;Starte das Programm %s&quot;, cmd);
++    DEBUG_MSG1(&quot;Starte das Programm %s&quot;, argv[0]);
+     pid_t pid;
+ 
+-    // Fuehrende Leerzeichen im Befehl grosszuegig ueberspringen
+-    while (*cmd == ' ') {
+-        cmd++;
+-    }
+-
+-    pid = init_execute(cmd);
++    pid = init_execv(argv[0], (const char const**) argv);
+ 
+     // Fehler ist aufgetreten
+     if (pid == 0) {
+@@ -110,7 +105,7 @@ int shell_command_default(int argc, char* argv[], const char* cmd)
+         return 0;
+     }
+ 
+-    if (shell_start_path_app(cmd, true) == 0) {
++    if (shell_start_path_app(argv, true) == 0) {
+         return 0;
+     }
+ 
+@@ -123,7 +118,6 @@ int shell_command_default(int argc, char* argv[], const char* cmd)
+  */
+ int shell_command_start(int argc, char* argv[], const char* cmd)
+ {
+-    const char* program;
+     DEBUG_MSG(&quot;start&quot;);
+ 
+     if (argc &lt; 2) {
+@@ -131,12 +125,7 @@ int shell_command_start(int argc, char* argv[], const char* cmd)
+         return -1;
+     }
+ 
+-    program = strchr(cmd, ' ') + 1;
+-    if (program == NULL) {
+-        return -1;
+-    }
+-
+-    if (shell_start_path_app(program, false) == 0) {
++    if (shell_start_path_app(&amp;argv[1], false) == 0) {
+         return 0;
+     }
+ 
+@@ -150,19 +139,16 @@ int shell_command_start(int argc, char* argv[], const char* cmd)
+  */
+ int shell_command_help(int argc, char* argv[], const char* args)
+ {
+-    char* help_args = strchr(args, ' ');
+-    char* cmd;
++    char** thelp_args;
+     int ret;
+ 
+     // Erstmal versuchen, ob thelp installiert ist
+-    if (help_args == NULL) {
+-        cmd = strdup(&quot;thelp tyndur&quot;);
+-    } else {
+-        asprintf(&amp;cmd, &quot;thelp %s&quot;, help_args + 1);
+-    }
+-
+-    ret = shell_start_path_app(cmd, true);
+-    free(cmd);
++    thelp_args = (char*[]) {
++        &quot;thelp&quot;,
++        argc &gt; 1 ? argv[1] : &quot;tyndur&quot;,
++        NULL,
++    };
++    ret = shell_start_path_app(thelp_args, true);
+     if (ret == 0) {
+         return 0;
+     }
+diff --git a/src/modules/c/shell/shell.c b/src/modules/c/shell/shell.c
+index cdca2f1..b7ed005 100644
+--- a/src/modules/c/shell/shell.c
++++ b/src/modules/c/shell/shell.c
+@@ -259,6 +259,7 @@ int shell_do_cmd(void)
+     shell_command_t* command;
+     uint32_t i;
+     char* cmdstring = shell_command_buffer;
++    int argc, pos;
+ 
+     substitute_envvars();
+ 
+@@ -272,6 +273,30 @@ int shell_do_cmd(void)
+         return 0;
+     }
+ 
++    // argc und argv befüllen
++    char args[strlen(cmdstring) + 1];
++    memcpy(args, cmdstring, strlen(cmdstring) + 1);
++
++    argc = 1;
++    //Jetzt werden die Argumente gezaehlt.
++    for (pos = 0; pos &lt; strlen(args); pos++) {
++        if (args[pos] == ' ') {
++            argc++;
++        }
++    }
++
++    char* argv[argc + 1];
++    argv[0] = strtok(args, &quot; &quot;);
++    for(pos = 1; pos &lt; argc; pos++)
++    {
++        argv[pos] = strtok(NULL, &quot; &quot;);
++    }
++    argv[pos] = NULL;
++
++    while (argv[argc - 1] == NULL) {
++        argc--;
++    }
++
+ 
+     // Die Liste mit den Befehlen durchsuchen. Das wird solange gemacht, bis
+     // der NULL eintrag am Ende erreicht wird.
+@@ -279,33 +304,10 @@ int shell_do_cmd(void)
+     {
+         command = &amp;shell_commands[i];
+         if (shell_match_command(command-&gt;name, cmdstring) == true) {
+-            char args[strlen(cmdstring) + 1];
+-            memcpy(args, cmdstring, strlen(cmdstring) + 1);
+-
+-            int argc, pos;
+-            argc = 1;
+-            //Jetzt werden die Argumente gezaehlt.
+-            for (pos = 0; pos &lt; strlen(args); pos++) {
+-                if (args[pos] == ' ') {
+-                    argc++;
+-                }
+-            }
+-
+-            char* argv[argc];
+-            argv[0] = strtok(args, &quot; &quot;);
+-            for(pos = 1; pos &lt; argc; pos++)
+-            {
+-                argv[pos] = strtok(NULL, &quot; &quot;);
+-            }
+-
+-            while (argv[argc - 1] == NULL) {
+-                argc--;
+-            }
+-
+             return command-&gt;handler(argc, argv, cmdstring);
+         }
+     }
+-    return shell_command_default(0, 0, cmdstring);
++    return shell_command_default(argc, argv, cmdstring);
+ }
+ /**
+  * Shell-Skript ausfuehren
+-- 
+2.1.4
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002587.html">[tyndur-devel] [PATCH 0/5] shell: Neuer Parser
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002589.html">[tyndur-devel] [PATCH 2/5] shell: Kommandozeile nicht mehr an	Builtin-Befehle weitergeben
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2588">[ Datum ]</a>
+              <a href="thread.html#2588">[ Thema ]</a>
+              <a href="subject.html#2588">[ Betreff (Subject)]</a>
+              <a href="author.html#2588">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

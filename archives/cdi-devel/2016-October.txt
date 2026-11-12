@@ -1,0 +1,370 @@
+From kevin at tyndur.org  Mon Oct 17 00:48:35 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Mon, 17 Oct 2016 00:48:35 +0200
+Subject: [cdi-devel] [PATCH 0/5] e1000: Support qemu e1000e emulation
+Message-ID: <1476658120-27415-1-git-send-email-kevin@tyndur.org>
+
+This series adds support for qemu's e1000e emulation to the driver.
+
+Unfortunately, there is a bug in the emulation code (it clears rx descriptors
+after using them instead of leaving the buffer address around for reuse of the
+descriptor), so I sent a fix to qemu which will be required for our driver to
+work.
+
+Kevin Wolf (5):
+  e1000: Fix EERD reading for e1000e
+  e1000: Improve debugging code
+  e1000: Initialise status field in Rx Descriptors
+  e1000: Acknowledge interrupts explicitly by ICR write
+  e1000: Add model for qemu e1000e emulation
+
+ e1000/device.c     | 49 ++++++++++++++++++++++++++++++-------------------
+ e1000/device.h     |  7 +++++++
+ include/cdi/misc.h |  2 ++
+ 3 files changed, 39 insertions(+), 19 deletions(-)
+
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Mon Oct 17 00:48:36 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Mon, 17 Oct 2016 00:48:36 +0200
+Subject: [cdi-devel] [PATCH 1/5] e1000: Fix EERD reading for e1000e
+In-Reply-To: <1476658120-27415-1-git-send-email-kevin@tyndur.org>
+References: <1476658120-27415-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1476658120-27415-2-git-send-email-kevin@tyndur.org>
+
+The EERD reading function missed that the offset for the EEPROM address
+differs between e1000 and e1000e, too. Instead of adding yet another
+parameter to do_read_eerd() that has to be passed by model-specific
+wrappers, put the parameter directly in the model struct and take them
+from there.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ e1000/device.c | 32 +++++++++++++++-----------------
+ e1000/device.h |  6 ++++++
+ 2 files changed, 21 insertions(+), 17 deletions(-)
+
+diff --git a/e1000/device.c b/e1000/device.c
+index 95ca731..26a9233 100644
+--- a/e1000/device.c
++++ b/e1000/device.c
+@@ -213,40 +213,29 @@ static uint32_t e1000_read_uwire(struct e1000_device *device, uint16_t offset)
+     return data;
+ }
+ 
+-static uint32_t do_read_eerd(struct e1000_device *device, uint16_t offset,
+-                             uint32_t start_flag, uint32_t done_flag)
++static uint32_t e1000_read_eerd(struct e1000_device* device, uint16_t offset)
+ {
++    struct e1000_model* m = device->model;
+     uint32_t eerd, i;
+ 
+-    reg_outl(device, REG_EEPROM_READ, (offset << 8) | start_flag);
++    reg_outl(device, REG_EEPROM_READ,
++             (offset << m->eerd_addr_sh) | m->eerd_start);
+     for(i = 0; i < 100; i++)
+     {
+         eerd = reg_inl(device, REG_EEPROM_READ);
+-        if (eerd & done_flag) {
++        if (eerd & m->eerd_done) {
+             break;
+         }
+         cdi_sleep_ms(1);
+     }
+ 
+-    if (eerd & done_flag) {
++    if (eerd & m->eerd_done) {
+         return (eerd >> 16) & 0xFFFF;
+     } else {
+         return (uint32_t) -1;
+     }
+ }
+ 
+-static uint32_t e1000_read_eerd(struct e1000_device *device, uint16_t offset)
+-{
+-    return do_read_eerd(device, offset, EERD_E1000_START, EERD_E1000_DONE);
+-}
+-
+-#if 0
+-static uint32_t e1000e_read_eerd(struct e1000_device *device, uint16_t offset)
+-{
+-    return do_read_eerd(device, offset, EERD_E1000E_START, EERD_E1000E_DONE);
+-}
+-#endif
+-
+ static uint32_t e1000e_read_flash(struct e1000_device *device, uint16_t offset)
+ {
+     uint16_t hsfsts;
+@@ -436,16 +425,25 @@ static struct e1000_model models[] = {
+         .device_id      = 0x1004,
+         .tctl_flags     = TCTL_COLL_DIST_E1000,
+         .eeprom_read    = e1000_read_eerd,
++        .eerd_start     = EERD_E1000_START,
++        .eerd_done      = EERD_E1000_DONE,
++        .eerd_addr_sh   = EERD_E1000_ADDR_SHIFT,
+     }, {
+         .vendor_id      = 0x8086,
+         .device_id      = 0x100e,
+         .tctl_flags     = TCTL_COLL_DIST_E1000,
+         .eeprom_read    = e1000_read_eerd,
++        .eerd_start     = EERD_E1000_START,
++        .eerd_done      = EERD_E1000_DONE,
++        .eerd_addr_sh   = EERD_E1000_ADDR_SHIFT,
+     }, {
+         .vendor_id      = 0x8086,
+         .device_id      = 0x100f,
+         .tctl_flags     = TCTL_COLL_DIST_E1000,
+         .eeprom_read    = e1000_read_eerd,
++        .eerd_start     = EERD_E1000_START,
++        .eerd_done      = EERD_E1000_DONE,
++        .eerd_addr_sh   = EERD_E1000_ADDR_SHIFT,
+     }, {
+         .vendor_id      = 0x8086,
+         .device_id      = 0x10f5,
+diff --git a/e1000/device.h b/e1000/device.h
+index 85bca25..657192d 100644
+--- a/e1000/device.h
++++ b/e1000/device.h
+@@ -142,9 +142,11 @@ enum {
+ 
+ #define EERD_E1000_START    (1 <<  0)
+ #define EERD_E1000_DONE     (1 <<  4)
++#define EERD_E1000_ADDR_SHIFT 8
+ 
+ #define EERD_E1000E_START   (1 <<  0)
+ #define EERD_E1000E_DONE    (1 <<  1)
++#define EERD_E1000E_ADDR_SHIFT 2
+ 
+ /* EEPROM/Flash Control */
+ #define E1000_EECD_SK        0x00000001 /* EEPROM Clock */
+@@ -207,6 +209,10 @@ struct e1000_model {
+     uint16_t device_id;
+ 
+     uint32_t tctl_flags;
++
++    uint32_t eerd_start;
++    uint32_t eerd_done;
++    uint32_t eerd_addr_sh;
+     uint32_t (*eeprom_read)(struct e1000_device *device, uint16_t offset);
+ };
+ 
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Mon Oct 17 00:48:37 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Mon, 17 Oct 2016 00:48:37 +0200
+Subject: [cdi-devel] [PATCH 2/5] e1000: Improve debugging code
+In-Reply-To: <1476658120-27415-1-git-send-email-kevin@tyndur.org>
+References: <1476658120-27415-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1476658120-27415-3-git-send-email-kevin@tyndur.org>
+
+Fix a debug output format string: The buffer address is 64 bits.
+
+Also avoid printing a warning for Tx Queue Empty interrupts, these are
+normal and expected.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ e1000/device.c | 4 ++--
+ e1000/device.h | 1 +
+ 2 files changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/e1000/device.c b/e1000/device.c
+index 26a9233..ac9bc2d 100644
+--- a/e1000/device.c
++++ b/e1000/device.c
+@@ -386,7 +386,7 @@ static void reset_nic(struct e1000_device* netcard)
+         netcard->rx_desc[i].buffer = PHYS(netcard, rx_buffer[i * RX_BUFFER_SIZE]);
+ 
+ #ifdef DEBUG
+-        printf("e1000: [%d] Rx: Buffer @ phys %08x, Desc @ phys %08x\n",
++        printf("e1000: [%d] Rx: Buffer @ phys %08llx, Desc @ phys %08x\n",
+             i,
+             netcard->rx_desc[i].buffer,
+             PHYS(netcard, rx_desc[i]));
+@@ -637,7 +637,7 @@ static void e1000_handle_interrupt(struct cdi_device* device)
+             reg_outl(netcard, REG_RXDESC_TAIL, netcard->rx_cur_buffer);
+         }
+ 
+-    } else if (icr & ICR_TRANSMIT) {
++    } else if (icr & (ICR_TRANSMIT | ICR_TXQE)) {
+         // Nichts zu tun
+     } else if (icr & ICR_LINK_CHANGE) {
+         printf("e1000: Link %s\n",
+diff --git a/e1000/device.h b/e1000/device.h
+index 657192d..ff73135 100644
+--- a/e1000/device.h
++++ b/e1000/device.h
+@@ -105,6 +105,7 @@ enum {
+ 
+ enum {
+     ICR_TRANSMIT    = (1 <<  0),
++    ICR_TXQE        = (1 <<  1), /* TX Queue Empty */
+     ICR_LINK_CHANGE = (1 <<  2),
+     ICR_RECEIVE     = (1 <<  7),
+ };
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Mon Oct 17 00:48:38 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Mon, 17 Oct 2016 00:48:38 +0200
+Subject: [cdi-devel] [PATCH 3/5] e1000: Initialise status field in Rx
+	Descriptors
+In-Reply-To: <1476658120-27415-1-git-send-email-kevin@tyndur.org>
+References: <1476658120-27415-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1476658120-27415-4-git-send-email-kevin@tyndur.org>
+
+Checking whether bit 0 has been set in the status field only works for
+determining whether a descriptor has been used by the NIC if the bit is
+properly cleared before handing it to the device.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ e1000/device.c     | 4 ++++
+ include/cdi/misc.h | 2 ++
+ 2 files changed, 6 insertions(+)
+
+diff --git a/e1000/device.c b/e1000/device.c
+index ac9bc2d..cf5bc81 100644
+--- a/e1000/device.c
++++ b/e1000/device.c
+@@ -384,6 +384,7 @@ static void reset_nic(struct e1000_device* netcard)
+     for (i = 0; i < RX_BUFFER_NUM; i++) {
+         netcard->rx_desc[i].length = RX_BUFFER_SIZE;
+         netcard->rx_desc[i].buffer = PHYS(netcard, rx_buffer[i * RX_BUFFER_SIZE]);
++        netcard->rx_desc[i].status = 0;
+ 
+ #ifdef DEBUG
+         printf("e1000: [%d] Rx: Buffer @ phys %08llx, Desc @ phys %08x\n",
+@@ -626,6 +627,9 @@ static void e1000_handle_interrupt(struct cdi_device* device)
+                 &netcard->rx_buffer[netcard->rx_cur_buffer * RX_BUFFER_SIZE],
+                 size);
+ 
++            cdi_barrier();
++            netcard->rx_desc[netcard->rx_cur_buffer].status = 0;
++
+             netcard->rx_cur_buffer++;
+             netcard->rx_cur_buffer %= RX_BUFFER_NUM;
+         }
+diff --git a/include/cdi/misc.h b/include/cdi/misc.h
+index 9676b4a..2f0f500 100644
+--- a/include/cdi/misc.h
++++ b/include/cdi/misc.h
+@@ -25,6 +25,8 @@
+ extern "C" {
+ #endif
+ 
++#define cdi_barrier() do { asm volatile("" ::: "memory"); } while(0)
++
+ /**
+  * Registiert einen neuen IRQ-Handler.
+  *
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Mon Oct 17 00:48:39 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Mon, 17 Oct 2016 00:48:39 +0200
+Subject: [cdi-devel] [PATCH 4/5] e1000: Acknowledge interrupts explicitly by
+	ICR write
+In-Reply-To: <1476658120-27415-1-git-send-email-kevin@tyndur.org>
+References: <1476658120-27415-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1476658120-27415-5-git-send-email-kevin@tyndur.org>
+
+The old e1000 models used to clear the interrupt flags in ICR on read,
+but e1000e doesn't do this any more. Just writing the bits back is fine
+for both, so let's do just that.
+
+Clearing the bits must be done before actually processing the interrupt
+in order to avoid races with new events.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ e1000/device.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/e1000/device.c b/e1000/device.c
+index cf5bc81..49f1553 100644
+--- a/e1000/device.c
++++ b/e1000/device.c
+@@ -584,6 +584,7 @@ static void e1000_handle_interrupt(struct cdi_device* device)
+     struct e1000_device* netcard = (struct e1000_device*) device;
+ 
+     uint32_t icr = reg_inl(netcard, REG_INTR_CAUSE);
++    reg_outl(netcard, REG_INTR_CAUSE, icr);
+ 
+ #ifdef DEBUG
+     printf("e1000: Interrupt, ICR = %08x\n", icr);
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Mon Oct 17 00:48:40 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Mon, 17 Oct 2016 00:48:40 +0200
+Subject: [cdi-devel] [PATCH 5/5] e1000: Add model for qemu e1000e emulation
+In-Reply-To: <1476658120-27415-1-git-send-email-kevin@tyndur.org>
+References: <1476658120-27415-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1476658120-27415-6-git-send-email-kevin@tyndur.org>
+
+We have done everything to support qemu's e1000e emulation now. The only
+missing part is fixing qemu so that it doesn't zero the buffer address
+in descriptors after using them. The spec is explicit that the CDI
+driver is right here and qemu isn't.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ e1000/device.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/e1000/device.c b/e1000/device.c
+index 49f1553..d006fdd 100644
+--- a/e1000/device.c
++++ b/e1000/device.c
+@@ -447,6 +447,14 @@ static struct e1000_model models[] = {
+         .eerd_addr_sh   = EERD_E1000_ADDR_SHIFT,
+     }, {
+         .vendor_id      = 0x8086,
++        .device_id      = 0x10d3,
++        .tctl_flags     = TCTL_COLL_DIST_E1000E | TCTL_RRTHRESH,
++        .eeprom_read    = e1000_read_eerd,
++        .eerd_start     = EERD_E1000E_START,
++        .eerd_done      = EERD_E1000E_DONE,
++        .eerd_addr_sh   = EERD_E1000E_ADDR_SHIFT,
++    }, {
++        .vendor_id      = 0x8086,
+         .device_id      = 0x10f5,
+         .tctl_flags     = TCTL_COLL_DIST_E1000E | TCTL_RRTHRESH,
+         .eeprom_read    = e1000e_read_flash,
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Sat Oct 29 17:57:11 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 29 Oct 2016 17:57:11 +0200
+Subject: [cdi-devel] [PATCH 0/5] e1000: Support qemu e1000e emulation
+In-Reply-To: <1476658120-27415-1-git-send-email-kevin@tyndur.org>
+References: <1476658120-27415-1-git-send-email-kevin@tyndur.org>
+Message-ID: <20161029155710.GA5831@silvanus.fritz.box>
+
+On Mon, Oct 17, 2016 at 12:48:35AM +0200, Kevin Wolf wrote:
+> This series adds support for qemu's e1000e emulation to the driver.
+> 
+> Unfortunately, there is a bug in the emulation code (it clears rx descriptors
+> after using them instead of leaving the buffer address around for reuse of the
+> descriptor), so I sent a fix to qemu which will be required for our driver to
+> work.
+
+Without objection, series applied.
+
+Kevin
+

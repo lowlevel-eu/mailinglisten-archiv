@@ -1,0 +1,390 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH] Make e1000 work in VirtualBox
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%5D%20Make%20e1000%20work%20in%20VirtualBox&In-Reply-To=%3C1268472824-8328-1-git-send-email-matthew%40theiselins.net%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   
+   <LINK REL="Next"  HREF="000198.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH] Make e1000 work in VirtualBox</H1>
+    <B>Matthew Iselin</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%5D%20Make%20e1000%20work%20in%20VirtualBox&In-Reply-To=%3C1268472824-8328-1-git-send-email-matthew%40theiselins.net%3E"
+       TITLE="[cdi-devel] [PATCH] Make e1000 work in VirtualBox">matthew at theiselins.net
+       </A><BR>
+    <I>Sat Mar 13 10:33:44 CET 2010</I>
+    <P><UL>
+        
+        <LI>Next message: <A HREF="000198.html">[cdi-devel] [RFC] Getting the physical address of a virtual buffer
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#197">[ date ]</a>
+              <a href="thread.html#197">[ thread ]</a>
+              <a href="subject.html#197">[ subject ]</a>
+              <a href="author.html#197">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>Hi,
+
+This patch makes the e1000 driver work in VirtualBox. I'm working towards
+getting the driver working in VMWare as well, but VMWare emulates a
+different chip (82545 rather than 82540). Those fixes and adjustments
+will come in a different patch, at a later date.
+
+The biggest change here is that the driver now supports the microwire
+interface for reading from the EEPROM as well as the EERD.
+
+Cheers,
+
+Matt
+
+Signed-off-by: Matthew Iselin &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">matthew at theiselins.net</A>&gt;
+---
+ e1000/device.c    |  224 +++++++++++++++++++++++++++++++++++++++++++++++++----
+ e1000/device.h    |   22 +++++-
+ 3 files changed, 232 insertions(+), 18 deletions(-)
+
+diff --git a/e1000/device.c b/e1000/device.c
+index 1b31987..f1caa1f 100644
+--- a/e1000/device.c
++++ b/e1000/device.c
+@@ -48,14 +48,210 @@
+ static void e1000_handle_interrupt(struct cdi_device* device);
+ static uint64_t get_mac_address(struct e1000_device* device);
+ 
+-static uint16_t e1000_eeprom_read(struct e1000_device* device, uint16_t offset)
++static uint32_t e1000_reg_read(struct e1000_device *device, uint16_t offset)
++{
++    return reg_inl(device, offset);
++}
++
++static void e1000_reg_write(struct e1000_device *device, uint16_t offset, uint32_t value)
++{
++    reg_outl(device, offset, value);
++}
++
++static void e1000_write_flush(struct e1000_device *device)
++{
++    uint32_t temp = e1000_reg_read(device, REG_STATUS);
++}
++
++static void e1000_raise_eeprom_clock(struct e1000_device *device, uint32_t *eecd)
++{
++    *eecd |= E1000_EECD_SK;
++    e1000_reg_write(device, REG_EECD, *eecd);
++    e1000_write_flush(device);
++    cdi_sleep_ms(5);
++}
++
++static void e1000_lower_eeprom_clock(struct e1000_device *device, uint32_t *eecd)
++{
++    *eecd &amp;= ~E1000_EECD_SK;
++    e1000_reg_write(device, REG_EECD, *eecd);
++    e1000_write_flush(device);
++    cdi_sleep_ms(5);
++}
++
++static void e1000_write_eeprom_bits(struct e1000_device *device, uint16_t data, uint16_t bitcount)
++{
++    uint32_t eecd, mask;
++    
++    mask = 0x1 &lt;&lt; (bitcount - 1);
++    eecd = e1000_reg_read(device, REG_EECD);
++    eecd &amp;= ~(E1000_EECD_DO | E1000_EECD_DI);
++    do
++    {
++        eecd &amp;= ~E1000_EECD_DI;
++        if(data &amp; mask)
++            eecd |= E1000_EECD_DI;
++        e1000_reg_write(device, REG_EECD, eecd);
++        e1000_write_flush(device);
++        
++        cdi_sleep_ms(5);
++        
++        e1000_raise_eeprom_clock(device, &amp;eecd);
++        e1000_lower_eeprom_clock(device, &amp;eecd);
++        
++        mask &gt;&gt;= 1;
++    }
++    while(mask);
++    
++    eecd &amp;= ~E1000_EECD_DI;
++    e1000_reg_write(device, REG_EECD, eecd);
++}
++
++static uint16_t e1000_read_eeprom_bits(struct e1000_device *device)
++{
++    uint32_t eecd, i;
++    uint16_t data;
++    
++    eecd = e1000_reg_read(device, REG_EECD);
++    eecd &amp;= ~(E1000_EECD_DO | E1000_EECD_DI);
++    data = 0;
++    
++    for(i = 0; i &lt; 16; i++)
++    {
++        data &lt;&lt;= 1;
++        e1000_raise_eeprom_clock(device, &amp;eecd);
++        
++        eecd = e1000_reg_read(device, REG_EECD);
++        
++        eecd &amp;= ~E1000_EECD_DI;
++        if(eecd &amp; E1000_EECD_DO)
++            data |= 1;
++        
++        e1000_lower_eeprom_clock(device, &amp;eecd);
++    }
++    
++    return data;
++}
++
++static void e1000_prep_eeprom(struct e1000_device *device)
+ {
+-    uint32_t eerd;
++    uint32_t eecd = e1000_reg_read(device, REG_EECD);
++    
++    eecd &amp;= ~(E1000_EECD_SK | E1000_EECD_DI);
++    e1000_reg_write(device, REG_EECD, eecd);
++    
++    eecd |= E1000_EECD_CS;
++    e1000_reg_write(device, REG_EECD, eecd);
++}
++
++static void e1000_standby_eeprom(struct e1000_device *device)
++{
++    uint32_t eecd = e1000_reg_read(device, REG_EECD);
++    
++    eecd &amp;= ~(E1000_EECD_CS | E1000_EECD_SK);
++    e1000_reg_write(device, REG_EECD, eecd);
++    e1000_write_flush(device);
++    cdi_sleep_ms(5);
++    
++    eecd |= E1000_EECD_SK;
++    e1000_reg_write(device, REG_EECD, eecd);
++    e1000_write_flush(device);
++    cdi_sleep_ms(5);
++    
++    eecd |= E1000_EECD_CS;
++    e1000_reg_write(device, REG_EECD, eecd);
++    e1000_write_flush(device);
++    cdi_sleep_ms(5);
++    
++    eecd &amp;= ~(E1000_EECD_SK);
++    e1000_reg_write(device, REG_EECD, eecd);
++    e1000_write_flush(device);
++    cdi_sleep_ms(5);
++}
++
++static uint32_t e1000_read_uwire(struct e1000_device *device, uint16_t offset)
++{
++    uint32_t eecd, i = 0;
++    int large_eeprom = 0;
++    
++    // TODO: check for post-82544 chip, only run this handling if so
++    eecd = e1000_reg_read(device, REG_EECD);
++    if(eecd &amp; E1000_EECD_SIZE)
++        large_eeprom = 1;
++    eecd |= E1000_EECD_REQ;
++    e1000_reg_write(device, REG_EECD, eecd);
++    eecd = e1000_reg_read(device, REG_EECD);
++    while((!(eecd &amp; E1000_EECD_GNT)) &amp;&amp; (i++ &lt; 100))
++    {
++        cdi_sleep_ms(1);
++        eecd = e1000_reg_read(device, REG_EECD);
++    }
++    if(!(eecd &amp; E1000_EECD_GNT))
++    {
++        eecd &amp;= ~E1000_EECD_REQ;
++        e1000_reg_write(device, REG_EECD, eecd);
++        return (uint32_t) -1;
++    }
++    
++    e1000_prep_eeprom(device);
++    
++    e1000_write_eeprom_bits(device, EEPROM_READ_OPCODE, 3);
++    if(large_eeprom)
++        e1000_write_eeprom_bits(device, offset, 8);
++    else
++        e1000_write_eeprom_bits(device, offset, 6);
++    
++    uint32_t data = e1000_read_eeprom_bits(device);
++    
++    e1000_standby_eeprom(device);
++    
++    // TODO: check for post-82544 chip
++    eecd = e1000_reg_read(device, REG_EECD);
++    eecd &amp;= ~E1000_EECD_REQ;
++    e1000_reg_write(device, REG_EECD, eecd);
++    
++    return data;
++}
++
++static uint32_t e1000_read_eerd(struct e1000_device *device, uint16_t offset)
++{
++    uint32_t eerd, i;
+ 
+     reg_outl(device, REG_EEPROM_READ, (offset &lt;&lt; 8) | EERD_START);
+-    while (((eerd = reg_inl(device, REG_EEPROM_READ)) &amp; EERD_DONE) == 0);
+-    printf(&quot;eerd = %8x\n&quot;, eerd);
+-    return (eerd &gt;&gt; 16);
++    for(i = 0; i &lt; 100; i++)
++    {
++        eerd = reg_inl(device, REG_EEPROM_READ);
++        if(eerd &amp; EERD_DONE)
++            break;
++        cdi_sleep_ms(1);
++    }
++
++    if(eerd &amp; EERD_DONE)
++        return (eerd &gt;&gt; 16) &amp; 0xFFFF;
++    else
++        return (uint32_t) -1;
++}
++
++static uint16_t e1000_eeprom_read(struct e1000_device* device, uint16_t offset)
++{
++    static int eerd_safe = 1;
++    
++    uint32_t data = 0;
++    if(eerd_safe)
++        data = e1000_read_eerd(device, offset);
++    if(!eerd_safe || (data == ((uint32_t) -1)))
++    {
++        eerd_safe = 0;
++        
++        data = e1000_read_uwire(device, offset);
++        if(data == ((uint32_t) -1))
++        {
++            printf(&quot;e1000: couldn't read eeprom via EERD or uwire!&quot;);
++            return 0;
++        }
++    }
++    
++    return (uint16_t) (data &amp; 0xFFFF);
+ }
+ 
+ static void reset_nic(struct e1000_device* netcard)
+@@ -106,6 +302,9 @@ static void reset_nic(struct e1000_device* netcard)
+     reg_outl(netcard, REG_RECV_ADDR_LIST + 4,
+         ((mac &gt;&gt; 32) &amp; 0xFFFF) | RAH_VALID);
+ 
++    netcard-&gt;net.mac = mac;
++    printf(&quot;e1000: MAC-Adresse: %012llx\n&quot;, (uint64_t) netcard-&gt;net.mac);
++
+     // Rx-Deskriptoren aufsetzen
+     for (i = 0; i &lt; RX_BUFFER_NUM; i++) {
+         netcard-&gt;rx_desc[i].length = RX_BUFFER_SIZE;
+@@ -123,10 +322,6 @@ static void reset_nic(struct e1000_device* netcard)
+     netcard-&gt;tx_cur_buffer = 0;
+     netcard-&gt;rx_cur_buffer = 0;
+ 
+-    // Interrupts aktivieren
+-    reg_outl(netcard, REG_INTR_MASK_CLR, 0xFFFF);
+-    reg_outl(netcard, REG_INTR_MASK, 0xFFFF);
+-
+     // Rx/Tx aktivieren
+     reg_outl(netcard, REG_RX_CTL, RCTL_ENABLE | RCTL_BROADCAST);
+     reg_outl(netcard, REG_TX_CTL, TCTL_ENABLE | TCTL_PADDING
+@@ -153,7 +348,7 @@ struct cdi_device* e1000_init_device(struct cdi_bus_data* bus_data)
+     struct e1000_device* netcard;
+     struct cdi_mem_area* buf;
+ 
+-    if (!((pci-&gt;vendor_id == 0x8086) &amp;&amp; (pci-&gt;device_id == 0x100e))) {
++    if (!((pci-&gt;vendor_id == 0x8086) &amp;&amp; ((pci-&gt;device_id == 0x100e) || (pci-&gt;device_id == 0x100f)))) {
+         return NULL;
+     }
+ 
+@@ -191,11 +386,12 @@ struct cdi_device* e1000_init_device(struct cdi_bus_data* bus_data)
+     printf(&quot;e1000: Fuehre Reset der Karte durch\n&quot;);
+     reset_nic(netcard);
+ 
+-    netcard-&gt;net.mac = get_mac_address(netcard);
+-    printf(&quot;e1000: MAC-Adresse: %012llx\n&quot;, (uint64_t) netcard-&gt;net.mac);
+-
+     cdi_net_device_init(&amp;netcard-&gt;net);
+ 
++    // Interrupts aktivieren
++    reg_outl(netcard, REG_INTR_MASK_CLR, 0xFFFF);
++    reg_outl(netcard, REG_INTR_MASK, 0xFFFF);
++
+     return &amp;netcard-&gt;net.dev;
+ }
+ 
+diff --git a/e1000/device.h b/e1000/device.h
+index 2a10365..428edad 100644
+--- a/e1000/device.h
++++ b/e1000/device.h
+@@ -26,8 +26,8 @@
+  * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
+-#ifndef _SIS900_DEVICES_H_
+-#define _SIS900_DEVICES_H_
++#ifndef _E1000_DEVICE_H_
++#define _E1000_DEVICE_H_
+ 
+ #include &lt;stdint.h&gt;
+ 
+@@ -38,6 +38,8 @@
+ 
+ enum {
+     REG_CTL             =    0x0,
++    REG_STATUS          =    0x8,
++    REG_EECD            =   0x10, /* EEPROM Control */
+     REG_EEPROM_READ     =   0x14, /* EERD */
+     REG_VET             =   0x38, /* VLAN */
+ 
+@@ -104,6 +106,22 @@ enum {
+ #define EERD_START  (1 &lt;&lt;  0)
+ #define EERD_DONE   (1 &lt;&lt;  4)
+ 
++/* EEPROM/Flash Control */
++#define E1000_EECD_SK        0x00000001 /* EEPROM Clock */
++#define E1000_EECD_CS        0x00000002 /* EEPROM Chip Select */
++#define E1000_EECD_DI        0x00000004 /* EEPROM Data In */
++#define E1000_EECD_DO        0x00000008 /* EEPROM Data Out */
++#define E1000_EECD_FWE_MASK  0x00000030 
++#define E1000_EECD_FWE_DIS   0x00000010 /* Disable FLASH writes */
++#define E1000_EECD_FWE_EN    0x00000020 /* Enable FLASH writes */
++#define E1000_EECD_FWE_SHIFT 4
++#define E1000_EECD_SIZE      0x00000200 /* EEPROM Size (0=64 word 1=256 word) */
++#define E1000_EECD_REQ       0x00000040 /* EEPROM Access Request */
++#define E1000_EECD_GNT       0x00000080 /* EEPROM Access Grant */
++#define E1000_EECD_PRES      0x00000100 /* EEPROM Present */
++
++#define EEPROM_READ_OPCODE  0x6
++
+ /* Allgemeine Definitionen */
+ 
+ #define TX_BUFFER_SIZE  2048
+-- 
+1.6.4.msysgit.0
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	
+	<LI>Next message: <A HREF="000198.html">[cdi-devel] [RFC] Getting the physical address of a virtual buffer
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#197">[ date ]</a>
+              <a href="thread.html#197">[ thread ]</a>
+              <a href="subject.html#197">[ subject ]</a>
+              <a href="author.html#197">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

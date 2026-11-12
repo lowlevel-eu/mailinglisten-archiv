@@ -1,0 +1,499 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH 2/5] ehci: Implement interrupt transfers
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%202/5%5D%20ehci%3A%20Implement%20interrupt%20transfers&In-Reply-To=%3C1451347254-25755-3-git-send-email-max%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000358.html">
+   <LINK REL="Next"  HREF="000360.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH 2/5] ehci: Implement interrupt transfers</H1>
+    <B>Max Reitz</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%202/5%5D%20ehci%3A%20Implement%20interrupt%20transfers&In-Reply-To=%3C1451347254-25755-3-git-send-email-max%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH 2/5] ehci: Implement interrupt transfers">max at tyndur.org
+       </A><BR>
+    <I>Tue Dec 29 01:00:51 CET 2015</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000358.html">[cdi-devel] [PATCH 1/5] usb: Extend interface for interrupt	transfers
+</A></li>
+        <LI>Next message: <A HREF="000360.html">[cdi-devel] [PATCH 3/5] usb: Implement interrupt transfers
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#359">[ date ]</a>
+              <a href="thread.html#359">[ thread ]</a>
+              <a href="subject.html#359">[ subject ]</a>
+              <a href="author.html#359">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+---
+ ehci/ehci.c | 265 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++---
+ ehci/ehci.h |  20 +++++
+ ehci/main.c |  11 +--
+ 3 files changed, 278 insertions(+), 18 deletions(-)
+
+diff --git a/ehci/ehci.c b/ehci/ehci.c
+index addec00..4b548ae 100644
+--- a/ehci/ehci.c
++++ b/ehci/ehci.c
+@@ -40,6 +40,13 @@
+ 
+ static void bios_handoff(struct cdi_pci_device *pci_dev, struct ehci *hc);
+ static void irq_handler(struct cdi_device *dev);
++static void init_periodic_pseudo_qhs(struct ehci *hc);
++
++
++static inline bool is_power_of_two(unsigned value)
++{
++    return !(value &amp; (value - 1));
++}
+ 
+ 
+ struct cdi_device *ehci_init_device(struct cdi_bus_data *bus_data)
+@@ -111,6 +118,18 @@ struct cdi_device *ehci_init_device(struct cdi_bus_data *bus_data)
+     }
+     hc-&gt;regs-&gt;periodiclistbase = hc-&gt;periodic_list_mem-&gt;paddr.items[0].start;
+ 
++    hc-&gt;periodic_qhs = calloc(1024, sizeof(*hc-&gt;periodic_qhs));
++    // 10 = |0..10| = |ld(1)..ld(1024)|
++    hc-&gt;periodic_pseudo_qhs_mem =
++        cdi_mem_alloc(11 * sizeof(hc-&gt;periodic_pseudo_qhs[0]),
++                      6
++                      | CDI_MEM_PHYS_CONTIGUOUS
++                      | CDI_MEM_DMA_4G
++                      | CDI_MEM_NOINIT);
++    hc-&gt;periodic_pseudo_qhs = hc-&gt;periodic_pseudo_qhs_mem-&gt;vaddr;
++
++    init_periodic_pseudo_qhs(hc);
++
+     // Create anchor
+     struct cdi_mem_area *anchor_qh;
+     anchor_qh = cdi_mem_alloc(sizeof(ehci_fat_qh_t), 6
+@@ -157,8 +176,8 @@ struct cdi_device *ehci_init_device(struct cdi_bus_data *bus_data)
+ 
+     cdi_register_irq(pci_dev-&gt;irq, &amp;irq_handler, &amp;hc-&gt;hc.dev);
+ 
+-    // async advance doorbell
+-    hc-&gt;regs-&gt;usbintr = EHCI_INT_IAA;
++    // async advance doorbell, USB interrupt
++    hc-&gt;regs-&gt;usbintr = EHCI_INT_IAA | EHCI_INT_USBINT;
+ 
+     // Route everything to this HC
+     hc-&gt;regs-&gt;configflag |= EHCI_CF_CF;
+@@ -181,6 +200,10 @@ fail:
+     if (hc-&gt;periodic_list_mem) {
+         cdi_mem_free(hc-&gt;periodic_list_mem);
+     }
++    free(hc-&gt;periodic_qhs);
++    if (hc-&gt;periodic_pseudo_qhs_mem) {
++        cdi_mem_free(hc-&gt;periodic_pseudo_qhs_mem);
++    }
+     cdi_list_destroy(hc-&gt;retired_qhs);
+     free((void *)hc-&gt;hc.dev.name);
+     free(hc);
+@@ -223,6 +246,8 @@ static void bios_handoff(struct cdi_pci_device *pci_dev, struct ehci *hc)
+ }
+ 
+ 
++static void qtd_write_back(ehci_fat_qtd_t *qtd);
++
+ static void irq_handler(struct cdi_device *dev)
+ {
+     struct cdi_usb_hc *cdi_hc = CDI_UPCAST(dev, struct cdi_usb_hc, dev);
+@@ -231,14 +256,108 @@ static void irq_handler(struct cdi_device *dev)
+     uint32_t usbsts = hc-&gt;regs-&gt;usbsts;
+     hc-&gt;regs-&gt;usbsts = usbsts;
+ 
+-    // async advance doorbell
+-    if (!(usbsts &amp; EHCI_STS_IAA)) {
+-        return;
++    if (usbsts &amp; EHCI_STS_IAA) {
++        // async advance doorbell
++
++        ehci_fat_qh_t *rqh;
++        while ((rqh = cdi_list_pop(hc-&gt;retired_qhs))) {
++            cdi_mem_free(rqh-&gt;cdi_mem_area);
++        }
+     }
+ 
+-    ehci_fat_qh_t *rqh;
+-    while ((rqh = cdi_list_pop(hc-&gt;retired_qhs))) {
+-        cdi_mem_free(rqh-&gt;cdi_mem_area);
++    if (usbsts &amp; EHCI_STS_USBINT) {
++        // IOC qTD retired
++
++        for (ehci_fat_qh_t *qh = hc-&gt;periodic_functional_qhs; qh;
++             qh = qh-&gt;next_periodic)
++        {
++            if (qh-&gt;qh.overlay.status &amp; EHCI_QTDS_ACTIVE) {
++                continue;
++            }
++
++            bool error = false;
++
++            for (ehci_fat_qtd_t *qtd = qh-&gt;first_qtd; qtd; qtd = qtd-&gt;next) {
++                assert((qtd-&gt;qtd.status &amp; EHCI_QTDS_PID_MASK) ==
++                       EHCI_QTDS_PID_IN);
++
++                error = error || (qtd-&gt;qtd.status &amp; EHCI_QTDS_HALTED);
++                if (!error) {
++                    qtd_write_back(qtd);
++                }
++                qtd-&gt;qtd.buffers[0] &amp;= ~0xfffu;
++                qtd-&gt;qtd.status &amp;= ~0x7fu; // clear errors
++                qtd-&gt;qtd.status |= EHCI_QTDS_XFLEN(qtd-&gt;write_back_size)
++                                |  EHCI_QTDS_IOC
++                                |  EHCI_QTDS_CP(0)
++                                |  EHCI_QTDS_CERR(3)
++                                |  EHCI_QTDS_PID_IN
++                                |  EHCI_QTDS_ACTIVE;
++            }
++
++            if (!error) {
++                qh-&gt;cb(qh-&gt;cb_opaque);
++            }
++
++            // Reactivate the QH
++            qh-&gt;qh.overlay.next_qtd = qh-&gt;first_qtd-&gt;paddr;
++            qh-&gt;qh.overlay.alt_next_qtd = qh-&gt;first_qtd-&gt;paddr;
++            qh-&gt;qh.overlay.status &amp;= ~0x7fu; // clear errors
++        }
++    }
++}
++
++
++static void init_periodic_pseudo_qhs(struct ehci *hc)
++{
++    for (int e = 0; e &lt; 11; e++) {
++        ehci_fat_qh_t *qh = &amp;hc-&gt;periodic_pseudo_qhs[e];
++        int interval = 1 &lt;&lt; e;
++
++        memset(qh, 0, sizeof(*qh));
++
++        qh-&gt;is_pseudo_qh = true;
++
++        qh-&gt;paddr = hc-&gt;periodic_pseudo_qhs_mem-&gt;paddr.items[0].start
++                  + e * sizeof(*qh);
++
++        qh-&gt;qh.ep_state[0] = EHCI_QHES0_RL(0)
++                           | EHCI_QHES0_MPL(0)
++                           | EHCI_QHES0_DTC
++                           | EHCI_QHES0_EP(0)
++                           | EHCI_QHES0_DEV(0)
++                           | EHCI_QHES0_EPS_HS;
++        qh-&gt;qh.ep_state[1] = EHCI_QHES1_MULT(1)
++                           | EHCI_QHES1_PORT(0)
++                           | EHCI_QHES1_HUB(0)
++                           | EHCI_QHES1_SCM(0xff)
++                           | EHCI_QHES1_ISM(0x01);
++
++        qh-&gt;qh.overlay.next_qtd = EHCI_T;
++        qh-&gt;qh.overlay.alt_next_qtd = EHCI_T;
++        qh-&gt;qh.overlay.status = EHCI_QTDS_HALTED;
++
++
++        // EHCI specification, 4.6: &quot;Interrupt queue heads are linked into the
++        // frame list ordered by poll rate. Longer poll rates are linked first
++        // [...].&quot;
++        // Therefore, link from high exponents (intervals) to lower ones.
++
++        if (e &gt; 0) {
++            qh-&gt;qh.next_qh = hc-&gt;periodic_pseudo_qhs[e - 1].paddr | EHCI_QH;
++            qh-&gt;next = &amp;hc-&gt;periodic_pseudo_qhs[e - 1];
++        } else {
++            qh-&gt;qh.next_qh = EHCI_T;
++        }
++
++        if (e &lt; 10) {
++            qh-&gt;previous = &amp;hc-&gt;periodic_pseudo_qhs[e + 1];
++        }
++
++        for (int i = 0; i &lt; 1024; i += interval) {
++            hc-&gt;periodic_list[i] = qh-&gt;paddr | EHCI_QH;
++            hc-&gt;periodic_qhs[i]  = qh;
++        }
+     }
+ }
+ 
+@@ -323,7 +442,28 @@ static void enter_async_qh(struct ehci *hc, ehci_fat_qh_t *qh)
+ }
+ 
+ 
+-static void retire_qh(struct ehci *hc, ehci_fat_qh_t *qh)
++static void enter_interrupt_qh(struct ehci *hc, ehci_fat_qh_t *qh,
++                               int frame_interval_shift)
++{
++    qh-&gt;next = hc-&gt;periodic_functional_qhs;
++    hc-&gt;periodic_functional_qhs = qh;
++
++    ehci_fat_qh_t *pseudo_qh = &amp;hc-&gt;periodic_pseudo_qhs[frame_interval_shift];
++
++    qh-&gt;next = pseudo_qh-&gt;next;
++    qh-&gt;previous = pseudo_qh;
++
++    pseudo_qh-&gt;next = qh;
++    if (qh-&gt;next) {
++        qh-&gt;next-&gt;previous = qh;
++    }
++
++    qh-&gt;qh.next_qh = pseudo_qh-&gt;qh.next_qh;
++    pseudo_qh-&gt;qh.next_qh = qh-&gt;paddr | EHCI_QH;
++}
++
++
++static void retire_async_qh(struct ehci *hc, ehci_fat_qh_t *qh)
+ {
+     qh-&gt;previous-&gt;qh.next_qh = qh-&gt;qh.next_qh;
+ 
+@@ -336,11 +476,29 @@ static void retire_qh(struct ehci *hc, ehci_fat_qh_t *qh)
+ }
+ 
+ 
+-static void retire_first_qtd(ehci_fat_qh_t *qh)
++static void retire_periodic_qh(struct ehci *hc, ehci_fat_qh_t *qh)
+ {
+-    ehci_fat_qtd_t *qtd = qh-&gt;first_qtd;
++    qh-&gt;previous-&gt;qh.next_qh = qh-&gt;qh.next_qh;
+ 
+-    assert(qtd);
++    qh-&gt;previous-&gt;next = qh-&gt;next;
++    if (qh-&gt;next) {
++        qh-&gt;next-&gt;previous = qh-&gt;previous;
++    }
++
++    ehci_fat_qh_t **func_periodic_ptr = &amp;hc-&gt;periodic_functional_qhs;
++    while (*func_periodic_ptr &amp;&amp; *func_periodic_ptr != qh) {
++        func_periodic_ptr = &amp;(*func_periodic_ptr)-&gt;next_periodic;
++    }
++    assert(*func_periodic_ptr == qh);
++    *func_periodic_ptr = qh-&gt;next_periodic;
++
++    cdi_list_push(hc-&gt;retired_qhs, qh);
++}
++
++
++static void qtd_write_back(ehci_fat_qtd_t *qtd)
++{
++    ehci_fat_qh_t *qh = qtd-&gt;qh;
+ 
+     uint32_t err_mask = (qh-&gt;qh.ep_state[0] &amp; EHCI_QHES0_EPS_MASK)
+                          == EHCI_QHES0_EPS_HS
+@@ -371,6 +529,16 @@ static void retire_first_qtd(ehci_fat_qh_t *qh)
+         }
+         assert(!rem);
+     }
++}
++
++
++static void retire_first_qtd(ehci_fat_qh_t *qh)
++{
++    ehci_fat_qtd_t *qtd = qh-&gt;first_qtd;
++
++    assert(qtd);
++
++    qtd_write_back(qtd);
+ 
+     qh-&gt;first_qtd = qtd-&gt;next;
+     if (qh-&gt;last_qtd == qtd) {
+@@ -561,6 +729,73 @@ void ehci_start_transaction(struct cdi_usb_hc *cdi_hc,
+ }
+ 
+ 
++void ehci_start_interrupt_transaction(struct cdi_usb_hc *cdi_hc,
++                                      cdi_usb_hc_transaction_t ta,
++                                      int interval,
++                                      cdi_usb_hc_interrupt_cb_t cb,
++                                      void *cb_opaque)
++{
++    struct ehci *hc = CDI_UPCAST(cdi_hc, struct ehci, hc);
++    ehci_fat_qh_t *qh = ta;
++
++    // Set IOC for all qTDs
++    for (ehci_fat_qtd_t *qtd = qh-&gt;first_qtd; qtd; qtd = qtd-&gt;next) {
++        qtd-&gt;qtd.status |= EHCI_QTDS_IOC;
++    }
++
++    assert(interval &gt; 0 &amp;&amp; is_power_of_two(interval));
++
++    assert(cb);
++    qh-&gt;cb = cb;
++    qh-&gt;cb_opaque = cb_opaque;
++
++    if (interval &gt; 1024 * 8) {
++        interval = 1024 * 8;
++    }
++
++    // Moving the microframe index along looks like an easy way of balancing the
++    // periodic load a bit.
++    int start_microframe = hc-&gt;periodic_start_microframe;
++    hc-&gt;periodic_start_microframe = (hc-&gt;periodic_start_microframe + 1) % 8;
++
++    bool split =
++        (qh-&gt;qh.ep_state[0] &amp; EHCI_QHES0_EPS_MASK) != EHCI_QHES0_EPS_HS;
++
++    if (split) {
++        // If split transactions start in the latter four microframes of a
++        // frame, their management is more difficult. Therefore, just limit it
++        // to the first four microframes.
++        start_microframe %= 4;
++    }
++
++    int s_mask = 0;
++
++    for (int microframe = start_microframe; microframe &lt; start_microframe + 8;
++         microframe += interval)
++    {
++        s_mask |= 1 &lt;&lt; (microframe % 8);
++    }
++
++    assert(!(qh-&gt;qh.ep_state[1] &amp; EHCI_QHES1_ISM(0xff)));
++    qh-&gt;qh.ep_state[1] |= EHCI_QHES1_ISM(s_mask);
++
++    if (split) {
++        // Don't just issue complete split requests all over the place, but only
++        // when we actually should do so (3 requests starting 2 microframes
++        // after the start split request)
++        qh-&gt;qh.ep_state[1] &amp;= ~EHCI_QHES1_SCM(0xff);
++        qh-&gt;qh.ep_state[1] |=  EHCI_QHES1_SCM(7 &lt;&lt; (start_microframe + 2));
++    }
++
++    int frame_interval_shift = __builtin_ctz(interval) - 3;
++    if (frame_interval_shift &lt; 0) {
++        frame_interval_shift = 0;
++    }
++
++    enter_interrupt_qh(hc, qh, frame_interval_shift);
++}
++
++
+ void ehci_wait_transaction(struct cdi_usb_hc *cdi_hc,
+                            cdi_usb_hc_transaction_t ta)
+ {
+@@ -639,5 +874,9 @@ void ehci_destroy_transaction(struct cdi_usb_hc *cdi_hc,
+     while (qh-&gt;first_qtd) {
+         retire_first_qtd(qh);
+     }
+-    retire_qh(hc, qh);
++    if (qh-&gt;cb) {
++        retire_periodic_qh(hc, qh);
++    } else {
++        retire_async_qh(hc, qh);
++    }
+ }
+diff --git a/ehci/ehci.h b/ehci/ehci.h
+index fb8dd9e..4b55391 100644
+--- a/ehci/ehci.h
++++ b/ehci/ehci.h
+@@ -87,8 +87,14 @@ struct ehci_fat_qh {
+     struct cdi_mem_area *cdi_mem_area;
+     uintptr_t paddr;
+ 
++    cdi_usb_hc_interrupt_cb_t cb;
++    void *cb_opaque;
++
+     ehci_fat_qh_t *next, *previous;
++    ehci_fat_qh_t *next_periodic;
+     ehci_fat_qtd_t *first_qtd, *last_qtd;
++
++    bool is_pseudo_qh;
+ } __attribute__((aligned(64)));
+ 
+ static_assert(!(sizeof(struct ehci_fat_qh) % 64),
+@@ -122,9 +128,17 @@ struct ehci {
+ 
+     struct cdi_mem_area *periodic_list_mem;
+     volatile uint32_t *periodic_list;
++    ehci_fat_qh_t **periodic_qhs;
++
++    struct cdi_mem_area *periodic_pseudo_qhs_mem;
++    ehci_fat_qh_t *periodic_pseudo_qhs;
++    ehci_fat_qh_t *periodic_functional_qhs;
+ 
+     ehci_fat_qh_t *async_start;
+     cdi_list_t retired_qhs;
++
++    // For a bit of load balancing
++    int periodic_start_microframe;
+ };
+ 
+ #define PCI_CLASS_SERIAL_BUS_CONTROLLER     0x0c
+@@ -254,6 +268,7 @@ struct ehci {
+ #define EHCI_QTDS_PID_OUT   (0 &lt;&lt;  8)   // PID: OUT
+ #define EHCI_QTDS_PID_IN    (1 &lt;&lt;  8)   // PID: IN
+ #define EHCI_QTDS_PID_SETUP (2 &lt;&lt;  8)   // PID: SETUP
++#define EHCI_QTDS_PID_MASK  (3 &lt;&lt;  8)   // PID mask
+ #define EHCI_QTDS_ACTIVE    (1 &lt;&lt;  7)   // Status: Active
+ #define EHCI_QTDS_HALTED    (1 &lt;&lt;  6)   // Status: Halted
+ #define EHCI_QTDS_BUFERR    (1 &lt;&lt;  5)   // Status: Data Buffer Error
+@@ -287,6 +302,11 @@ void ehci_enqueue(struct cdi_usb_hc *hc,
+ void ehci_start_transaction(struct cdi_usb_hc *cdi_hc,
+                             cdi_usb_hc_transaction_t ta);
+ void ehci_wait_transaction(struct cdi_usb_hc *hc, cdi_usb_hc_transaction_t ta);
++void ehci_start_interrupt_transaction(struct cdi_usb_hc *hc,
++                                      cdi_usb_hc_transaction_t ta,
++                                      int interval,
++                                      cdi_usb_hc_interrupt_cb_t cb,
++                                      void *cb_opaque);
+ void ehci_destroy_transaction(struct cdi_usb_hc *hc,
+                               cdi_usb_hc_transaction_t ta);
+ 
+diff --git a/ehci/main.c b/ehci/main.c
+index 5623819..97974ac 100644
+--- a/ehci/main.c
++++ b/ehci/main.c
+@@ -59,11 +59,12 @@ static struct cdi_usb_hcd ehcd = {
+         .port_status        = ehci_rh_port_status,
+     },
+ 
+-    .create_transaction     = ehci_create_transaction,
+-    .enqueue                = ehci_enqueue,
+-    .start_transaction      = ehci_start_transaction,
+-    .wait_transaction       = ehci_wait_transaction,
+-    .destroy_transaction    = ehci_destroy_transaction,
++    .create_transaction             = ehci_create_transaction,
++    .enqueue                        = ehci_enqueue,
++    .start_transaction              = ehci_start_transaction,
++    .wait_transaction               = ehci_wait_transaction,
++    .start_interrupt_transaction    = ehci_start_interrupt_transaction,
++    .destroy_transaction            = ehci_destroy_transaction,
+ };
+ 
+ CDI_DRIVER(DRIVER_NAME, ehcd)
+-- 
+2.6.4
+
+</PRE>
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000358.html">[cdi-devel] [PATCH 1/5] usb: Extend interface for interrupt	transfers
+</A></li>
+	<LI>Next message: <A HREF="000360.html">[cdi-devel] [PATCH 3/5] usb: Implement interrupt transfers
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#359">[ date ]</a>
+              <a href="thread.html#359">[ thread ]</a>
+              <a href="subject.html#359">[ subject ]</a>
+              <a href="author.html#359">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

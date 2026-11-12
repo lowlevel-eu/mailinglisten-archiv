@@ -1,0 +1,174 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH v2 2/8] libc: lio_compat_tell() auslagern
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%202/8%5D%20libc%3A%20lio_compat_tell%28%29%20auslagern&In-Reply-To=%3C1437432317-27705-3-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002497.html">
+   <LINK REL="Next"  HREF="002498.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH v2 2/8] libc: lio_compat_tell() auslagern</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%202/8%5D%20libc%3A%20lio_compat_tell%28%29%20auslagern&In-Reply-To=%3C1437432317-27705-3-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH v2 2/8] libc: lio_compat_tell() auslagern">kevin at tyndur.org
+                  </A><BR>
+    <I>Di Jul 21 00:45:11 CEST 2015</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002497.html">[tyndur-devel] [PATCH v2 1/8] kernel2: lio_seek ohne Veränderung auch für non-seekable erlauben
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002498.html">[tyndur-devel] [PATCH v2 3/8] libc: LIOv2 in lio_compat_eof()	abfangen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2499">[ Datum ]</a>
+              <a href="thread.html#2499">[ Thema ]</a>
+              <a href="subject.html#2499">[ Betreff (Subject) ]</a>
+              <a href="author.html#2499">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* libc: Bisher hatte ftell() direkt die Funktionalität, um sowohl auf
+  LIOv1 als auch LIOv2 die Position zurückgeben zu können. Wenn man es
+  raussplittet, ist nicht nur der Code sauberer, sondern man kann es
+  auch ohne stdio.h benutzen.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/include/lostio.h         |  3 +++
+ src/modules/lib/lostio/client/seek.c | 33 ++++++++++++++++++++++++++++++++-
+ src/modules/lib/stdlibc/file.c       | 25 ++++---------------------
+ 3 files changed, 39 insertions(+), 22 deletions(-)
+
+diff --git a/src/modules/include/lostio.h b/src/modules/include/lostio.h
+index 5846be6..58fe314 100644
+--- a/src/modules/include/lostio.h
++++ b/src/modules/include/lostio.h
+@@ -239,6 +239,9 @@ int lio_compat_eof(io_resource_t* io_res);
+ /// Stream-Position setzen
+ bool lio_compat_seek(io_resource_t* io_res, uint64_t offset, int origin);
+ 
++/// Stream-Position abfragen
++int64_t lio_compat_tell(io_resource_t* io_res);
++
+ 
+ /******************************************************************************
+  * LIO2-Server                                                                *
+diff --git a/src/modules/lib/lostio/client/seek.c b/src/modules/lib/lostio/client/seek.c
+index 94d05cc..c7fdcf0 100644
+--- a/src/modules/lib/lostio/client/seek.c
++++ b/src/modules/lib/lostio/client/seek.c
+@@ -30,7 +30,8 @@
+ #include &lt;stdio.h&gt;
+ #include &lt;rpc.h&gt;
+ #include &lt;stdint.h&gt;
+-#include &lt;stdio.h&gt;
++#include &lt;stdlib.h&gt;
++#include &lt;string.h&gt;
+ 
+ static bool newlio_flseek(io_resource_t* io_res, uint64_t offset, int origin)
+ {
+@@ -75,3 +76,33 @@ bool lio_compat_seek(io_resource_t* io_res, uint64_t offset, int origin)
+         (char*) &amp;seek_request) == 0);
+ }
+ 
++/**
++ * Aktuelle Cursorposition im Dateihandle abfragen
++ *
++ * @param io_res Dateihandle
++ * @return Aktuelle Position in Bytes vom Dateianfang oder -1 bei Fehler
++ */
++int64_t lio_compat_tell(io_resource_t* io_res)
++{
++    io_tell_request_t tell_request;
++    long result;
++
++    if (IS_LIO2(io_res)) {
++        int64_t pos = lio_seek(io_res-&gt;lio2_stream, 0, LIO_SEEK_CUR);
++        return (pos &lt; 0 ? -1 : pos);
++    }
++
++    tell_request.id = io_res-&gt;id;
++
++    //Da fuer qwords keine Funktion existiert um sie direkt uber RPC zu
++    // empfangen, muss hier ein kleiner Umweg gemacht werden.
++    response_t* resp = rpc_get_response(io_res-&gt;pid, &quot;IO_TELL &quot;,
++        sizeof(io_tell_request_t), (char*) &amp;(tell_request));
++    memcpy(&amp;result, resp-&gt;data, sizeof(long));
++
++    //Antwort und Daten wieder freigeben
++    free(resp-&gt;data);
++    free(resp);
++
++    return result;
++}
+diff --git a/src/modules/lib/stdlibc/file.c b/src/modules/lib/stdlibc/file.c
+index fc99e17..7482c41 100644
+--- a/src/modules/lib/stdlibc/file.c
++++ b/src/modules/lib/stdlibc/file.c
+@@ -666,29 +666,12 @@ long ftell(FILE* io_res)
+         return EOF;
+     }
+ 
+-    if (IS_LIO2_FILE(io_res)) {
+-        int64_t pos = lio_seek(io_res-&gt;res-&gt;lio2_stream, 0, LIO_SEEK_CUR);
+-        result = (pos &lt; 0 ? -1 : pos);
+-        goto out;
++    if (!IS_LIO2_FILE(io_res)) {
++        //Sonst könnte die Angabe falsch sein
++        fflush(io_res);
+     }
+ 
+-    io_tell_request_t tell_request;
+-    tell_request.id = io_res-&gt;res-&gt;id;
+-    
+-    //Sonst könnte die Angabe falsch sein
+-    fflush(io_res);
+-
+-    //Da fuer qwords keine Funktion existiert um sie direkt uber RPC zu
+-    // empfangen, muss hier ein kleiner Umweg gemacht werden.
+-    response_t* resp = rpc_get_response(io_res-&gt;res-&gt;pid, &quot;IO_TELL &quot;,
+-        sizeof(io_tell_request_t), (char*) &amp;(tell_request));
+-    memcpy(&amp;result, resp-&gt;data, sizeof(long));
+-
+-    //Antwort und Daten wieder freigeben
+-    free(resp-&gt;data);
+-    free(resp);
+-
+-out:
++    result = lio_compat_tell(io_res-&gt;res);
+     if (result &gt;= 0) {
+         result += io_res-&gt;buffer_pos - io_res-&gt;ungetc_count;
+         if (result &lt; 0) {
+-- 
+2.1.4
+
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002497.html">[tyndur-devel] [PATCH v2 1/8] kernel2: lio_seek ohne Veränderung auch für non-seekable erlauben
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002498.html">[tyndur-devel] [PATCH v2 3/8] libc: LIOv2 in lio_compat_eof()	abfangen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2499">[ Datum ]</a>
+              <a href="thread.html#2499">[ Thema ]</a>
+              <a href="subject.html#2499">[ Betreff (Subject)]</a>
+              <a href="author.html#2499">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

@@ -1,0 +1,952 @@
+From kevin at tyndur.org  Sat Jun 25 11:18:12 2011
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 25 Jun 2011 11:18:12 +0200
+Subject: [tyndur-devel] [PATCH] kernel2: IRQs nach pm_scheduler_yield
+	abarbeiten
+Message-ID: <1308993492-12958-1-git-send-email-kevin@tyndur.org>
+
+! kernel2: Zwei Tasks, die im Kernel hin- und heryielden, können IRQs
+  blockieren, die nötig sind, damit die Tasks weiterlaufen. Kurzzeitig
+  IRQs erlauben löst den Deadlock.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/src/tasks/scheduler.c |    5 +++++
+ 1 files changed, 5 insertions(+), 0 deletions(-)
+
+diff --git a/src/kernel2/src/tasks/scheduler.c b/src/kernel2/src/tasks/scheduler.c
+index 43c8180..de95d83 100644
+--- a/src/kernel2/src/tasks/scheduler.c
++++ b/src/kernel2/src/tasks/scheduler.c
+@@ -231,6 +231,11 @@ void pm_scheduler_push(pm_thread_t* thread)
+ void pm_scheduler_yield(void)
+ {
+     asm volatile("int $0x30;" : : "a" (SYSCALL_PM_SLEEP));
++
++    // Es kann passieren, dass zwei Tasks im Kernel hin- und heryielden und
++    // auf irgendetwas warten, was von einem IRQ abhängt. Deshalb müssen wir
++    // dem IRQ eine Chance geben, anzukommen.
++    asm volatile("sti; nop; cli");
+ }
+ 
+ /**
+-- 
+1.6.0.2
+
+
+From hartmut at tyndur.org  Mon Jun 27 15:30:46 2011
+From: hartmut at tyndur.org (Alexander Kluth)
+Date: Mon, 27 Jun 2011 15:30:46 +0200
+Subject: [tyndur-devel] [PATCH] kernel2: IRQs nach pm_scheduler_yield
+ abarbeiten
+In-Reply-To: <1308993492-12958-1-git-send-email-kevin@tyndur.org>
+References: <1308993492-12958-1-git-send-email-kevin@tyndur.org>
+Message-ID: <20110627153046.7c5f9d51.hartmut@tyndur.org>
+
+On Sat, 25 Jun 2011 11:18:12 +0200
+Kevin Wolf <kevin at tyndur.org> wrote:
+
+> ! kernel2: Zwei Tasks, die im Kernel hin- und heryielden, können IRQs
+>   blockieren, die nötig sind, damit die Tasks weiterlaufen. Kurzzeitig
+>   IRQs erlauben löst den Deadlock.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Alexander Kluth <hartmut at tyndur.org>
+
+-- 
+Alexander Kluth <hartmut at tyndur.org>
+
+From max at tyndur.org  Mon Jun 27 16:14:52 2011
+From: max at tyndur.org (Max Reitz)
+Date: Mon, 27 Jun 2011 16:14:52 +0200
+Subject: [tyndur-devel] [PATCH] lbuilds: FASM 1.69.31
+Message-ID: <1309184092-3085-1-git-send-email-max@tyndur.org>
+
++ FASM 1.69.31 für scripts/build_crosstools und als lbuild (scheint
+  einen Exitcode ungleich 0 auch bei Erfolg zurückzugeben).
+
+Signed-off-by: Max Reitz <max at tyndur.org>
+---
+ lbuilds/fasm/1.69.31/fasm-1.69.31.lbuild |   33 ++++++++++++++++++++++++++++++
+ lbuilds/fasm/1.69.31/files/formats.patch |    4 +++
+ patches/fasm/1.69.09/formats.patch       |    4 ---
+ patches/fasm/1.69.31/formats.patch       |   13 +++++++++++
+ scripts/build_crosstools                 |    4 +-
+ 5 files changed, 52 insertions(+), 6 deletions(-)
+ create mode 100644 lbuilds/fasm/1.69.31/fasm-1.69.31.lbuild
+ create mode 100644 lbuilds/fasm/1.69.31/files/formats.patch
+ delete mode 100644 patches/fasm/1.69.09/formats.patch
+ create mode 100644 patches/fasm/1.69.31/formats.patch
+
+diff --git a/lbuilds/fasm/1.69.31/fasm-1.69.31.lbuild b/lbuilds/fasm/1.69.31/fasm-1.69.31.lbuild
+new file mode 100644
+index 0000000..75bdb98
+--- /dev/null
++++ b/lbuilds/fasm/1.69.31/fasm-1.69.31.lbuild
+@@ -0,0 +1,33 @@
++include toolchain
++include lutils
++
++DESCRIPTION="Der Flatassembler (Intelsyntax)"
++HOMEPAGE="http://flatassembler.net/"
++SRC_URI="http://flatassembler.net/${P}.tar.gz"
++
++LICENSE="Proprietary"
++
++BUILD_DEPEND=""
++RUN_DEPEND=""
++
++MY_S="${S}/${P}"
++
++src_unpack() {
++lunpack ${P}.tar.gz
++cd fasm
++
++    patch source/formats.inc ${F}/formats.patch || die "could not patch formats.inc"
++}
++
++src_compile() {
++	cd fasm
++	fasm source/libc/fasm.asm fasm.o
++	i386-pc-tyndur-gcc fasm.o -o fasm || die "linking failed"
++	cd ..
++}
++
++src_install() {
++	cd fasm
++	install -d ${D}${R}/bin
++	cp fasm ${D}${R}/bin || die "could not install fasm"
++}
+diff --git a/lbuilds/fasm/1.69.31/files/formats.patch b/lbuilds/fasm/1.69.31/files/formats.patch
+new file mode 100644
+index 0000000..8b8498b
+--- /dev/null
++++ b/lbuilds/fasm/1.69.31/files/formats.patch
+@@ -0,0 +1,4 @@
++3628c3628
++< 	mov	[image_base],8048000h
++---
++> 	mov	[image_base],40000000h
+diff --git a/patches/fasm/1.69.09/formats.patch b/patches/fasm/1.69.09/formats.patch
+deleted file mode 100644
+index 7e4ec4b..0000000
+--- a/patches/fasm/1.69.09/formats.patch
++++ /dev/null
+@@ -1,4 +0,0 @@
+-3606c3606
+-< 	mov	[image_base],8048000h
+----
+-> 	mov	[image_base],40000000h
+diff --git a/patches/fasm/1.69.31/formats.patch b/patches/fasm/1.69.31/formats.patch
+new file mode 100644
+index 0000000..29f01db
+--- /dev/null
++++ b/patches/fasm/1.69.31/formats.patch
+@@ -0,0 +1,13 @@
++Index: cross-fasm/fasm/source/formats.inc
++===================================================================
++--- cross-fasm.orig/fasm/source/formats.inc	2011-02-07 11:39:42.000000000 +0100
+++++ cross-fasm/fasm/source/formats.inc	2011-05-07 00:17:39.000000000 +0200
++@@ -3625,7 +3625,7 @@
++ 	pop	edx
++ 	mov	[edx+7],al
++       elf_exe_brand_ok:
++-	mov	[image_base],8048000h
+++	mov	[image_base],40000000h
++ 	cmp	byte [esi],80h
++ 	jne	elf_exe_base_ok
++ 	lods	word [esi]
+diff --git a/scripts/build_crosstools b/scripts/build_crosstools
+index 827e883..b3589fd 100755
+--- a/scripts/build_crosstools
++++ b/scripts/build_crosstools
+@@ -16,7 +16,7 @@ GMP_VERSION=5.0.1
+ MPFR_VERSION=3.0.1
+ MPC_VERSION=0.8.2
+ FPC_VERSION=2.4.0
+-FASM_VERSION=1.69.09
++FASM_VERSION=1.69.31
+ 
+ PREFIX=`pwd`/env
+ TARGET=i386-pc-tyndur
+@@ -273,7 +273,7 @@ gcc -m32 fasm.o -o fasm || die "Fehler beim Linken des Linux-FASM."
+ echo "[fasm] Patch anwenden..."
+ patch source/formats.inc ${PATCHES}/fasm/${FASM_VERSION}/formats.patch || die "Fehler beim Anwenden des Patches."
+ echo "[fasm] Assemblieren..."
+-./fasm source/libc/fasm.asm fasm.o || die "Fehler beim Assemblieren."
++./fasm source/libc/fasm.asm fasm.o
+ echo "[fasm] Týndur-FASM linken..."
+ gcc -m32 fasm.o -o fasm || die "Fehler beim Linken des týndur-FASM."
+ echo "[fasm] Installieren..."
+-- 
+1.7.5.2
+
+
+From DoBi-tyndur at gmx.net  Wed Jun 29 21:01:55 2011
+From: DoBi-tyndur at gmx.net (Dominik)
+Date: Wed, 29 Jun 2011 21:01:55 +0200
+Subject: [tyndur-devel] [PATCH]
+	=?UTF-8?q?Diffutils=20auf=20Version=203.0=20geupdatet.=20Ben=C3=B6tigt=20evt.=20noch=20=C3=9Cberarbeitung.
+Message-ID: <1309374115-11407-1-git-send-email-DoBi-tyndur@gmx.net>
+
+---
+ lbuilds/diffutils/3.0/diffutils-3.0.lbuild         |   35 ++++++++++++
+ .../diffutils/3.0/patches/diffutils-config.patch   |   11 ++++
+ .../diffutils/3.0/patches/diffutils-inttypes.patch |   13 +++++
+ lbuilds/diffutils/3.0/patches/diffutils-src.patch  |   55 ++++++++++++++++++++
+ .../diffutils/3.0/patches/diffutils-strftime.patch |   11 ++++
+ lbuilds/diffutils/3.0/patches/series               |    4 ++
+ 6 files changed, 129 insertions(+), 0 deletions(-)
+ create mode 100644 lbuilds/diffutils/3.0/diffutils-3.0.lbuild
+ create mode 100644 lbuilds/diffutils/3.0/patches/diffutils-config.patch
+ create mode 100644 lbuilds/diffutils/3.0/patches/diffutils-inttypes.patch
+ create mode 100644 lbuilds/diffutils/3.0/patches/diffutils-src.patch
+ create mode 100644 lbuilds/diffutils/3.0/patches/diffutils-strftime.patch
+ create mode 100644 lbuilds/diffutils/3.0/patches/series
+
+diff --git a/lbuilds/diffutils/3.0/diffutils-3.0.lbuild b/lbuilds/diffutils/3.0/diffutils-3.0.lbuild
+new file mode 100644
+index 0000000..ea0eb30
+--- /dev/null
++++ b/lbuilds/diffutils/3.0/diffutils-3.0.lbuild
+@@ -0,0 +1,35 @@
++include lutils
++include toolchain
++
++DESCRIPTION="Tools necessary to build programs"
++HOMEPAGE="http://lowlevel.brainsware.org/wiki/index.php/LOST/Pakete/diffutils"
++SRC_URI="http://ftp.gnu.org/gnu/diffutils/${P}.tar.gz"
++
++LICENSE="GPL-2"
++
++BUILD_DEPEND=""
++RUN_DEPEND=""
++
++MY_S="${S}/${P}"
++
++src_compile() {
++	cd ${MY_S}
++	./configure \
++		--build=`tc-build` \
++		--host=`tc-host` \
++		--prefix=${R} \
++		|| die "configure failed"
++
++	lmake || die "make failed"
++	cd ..
++}
++
++src_install() {
++	cd ${MY_S}
++	lmake DESTDIR="${D}" install || die "make install failed"
++
++	cd "${D}/${R}"
++
++	# Sonst merkt noch jemand, dass die nicht funktionieren
++	rm bin/diff3 bin/sdiff
++}
+diff --git a/lbuilds/diffutils/3.0/patches/diffutils-config.patch b/lbuilds/diffutils/3.0/patches/diffutils-config.patch
+new file mode 100644
+index 0000000..ef12367
+--- /dev/null
++++ b/lbuilds/diffutils/3.0/patches/diffutils-config.patch
+@@ -0,0 +1,11 @@
++--- src.orig/diffutils-3.0/build-aux/config.sub	2010-04-15 15:40:36.000000000 +0200
+++++ src/diffutils-3.0/build-aux/config.sub	2011-06-29 19:38:10.147375879 +0200
++@@ -1315,7 +1315,7 @@
++ 	      | -os2* | -vos* | -palmos* | -uclinux* | -nucleus* \
++ 	      | -morphos* | -superux* | -rtmk* | -rtmk-nova* | -windiss* \
++ 	      | -powermax* | -dnix* | -nx6 | -nx7 | -sei* | -dragonfly* \
++-	      | -skyos* | -haiku* | -rdos* | -toppers* | -drops* | -es*)
+++	      | -skyos* | -haiku* | -rdos* | -toppers* | -drops* | -es* | -tyndur*)
++ 	# Remember, each alternative MUST END IN *, to match a version number.
++ 		;;
++ 	-qnx*)
+diff --git a/lbuilds/diffutils/3.0/patches/diffutils-inttypes.patch b/lbuilds/diffutils/3.0/patches/diffutils-inttypes.patch
+new file mode 100644
+index 0000000..2fdaf31
+--- /dev/null
++++ b/lbuilds/diffutils/3.0/patches/diffutils-inttypes.patch
+@@ -0,0 +1,13 @@
++--- src.orig/diffutils-3.0/lib/inttypes.in.h	2010-04-15 15:40:37.000000000 +0200
+++++ src/diffutils-3.0/lib/inttypes.in.h	2011-06-29 20:06:00.357375107 +0200
++@@ -45,10 +45,6 @@
++ /* Get CHAR_BIT.  */
++ #include <limits.h>
++ 
++-#if !(INT_MIN == INT32_MIN && INT_MAX == INT32_MAX)
++-# error "This file assumes that 'int' has exactly 32 bits. Please report your platform and compiler to <bug-gnulib at gnu.org>."
++-#endif
++-
++ /* The definition of _GL_ARG_NONNULL is copied here.  */
++ 
++ /* The definition of _GL_WARN_ON_USE is copied here.  */
+diff --git a/lbuilds/diffutils/3.0/patches/diffutils-src.patch b/lbuilds/diffutils/3.0/patches/diffutils-src.patch
+new file mode 100644
+index 0000000..abbf8ce
+--- /dev/null
++++ b/lbuilds/diffutils/3.0/patches/diffutils-src.patch
+@@ -0,0 +1,55 @@
++--- src.orig/diffutils-3.0/src/diff.c	2010-04-15 21:53:08.000000000 +0200
+++++ src/diffutils-3.0/src/diff.c	2011-06-29 20:00:15.507375267 +0200
++@@ -633,7 +633,7 @@
++ 	specify_style (OUTPUT_NORMAL);
++     }
++ 
++-  if (output_style != OUTPUT_CONTEXT || hard_locale (LC_TIME))
+++  /*if (output_style != OUTPUT_CONTEXT || hard_locale (LC_TIME))
++     {
++ #if (defined STAT_TIMESPEC || defined STAT_TIMESPEC_NS \
++      || defined HAVE_STRUCT_STAT_ST_SPARE1)
++@@ -642,7 +642,7 @@
++       time_format = "%Y-%m-%d %H:%M:%S %z";
++ #endif
++     }
++-  else
+++  else*/
++     {
++       /* See POSIX 1003.1-2001 for this format.  */
++       time_format = "%a %b %e %T %Y";
++--- src.orig/diffutils-3.0/src/sdiff.c	2010-04-15 14:58:08.000000000 +0200
+++++ src/diffutils-3.0/src/sdiff.c	2011-06-29 20:02:01.767375217 +0200
++@@ -1225,12 +1225,12 @@
++   sprintf (buf, "%s/sdiffXXXXXX", dir);
++   sigemptyset (&blocked);
++   sigaddset (&blocked, SIGINT);
++-  sigprocmask (SIG_BLOCK, &blocked, &procmask);
+++  // sigprocmask (SIG_BLOCK, &blocked, &procmask);
++   fd = mkstemp (buf);
++   e = errno;
++   if (0 <= fd)
++     tmpname = buf;
++-  sigprocmask (SIG_SETMASK, &procmask, 0);
+++  // sigprocmask (SIG_SETMASK, &procmask, 0);
++   errno = e;
++   return fd;
++ }
++--- src.orig/diffutils-3.0/src/util.c	2010-04-15 21:53:08.000000000 +0200
+++++ src/diffutils-3.0/src/util.c	2011-06-29 20:02:53.287375194 +0200
++@@ -192,6 +192,7 @@
++ 
++       /* Make OUTFILE a pipe to a subsidiary `pr'.  */
++       {
+++#if 0
++ #if HAVE_WORKING_FORK || HAVE_WORKING_VFORK
++ 	int pipes[2];
++ 
++@@ -236,6 +237,7 @@
++ 	  pfatal_with_name (command);
++ 	free (command);
++ #endif
+++#endif
++       }
++     }
++   else
+diff --git a/lbuilds/diffutils/3.0/patches/diffutils-strftime.patch b/lbuilds/diffutils/3.0/patches/diffutils-strftime.patch
+new file mode 100644
+index 0000000..4901af4
+--- /dev/null
++++ b/lbuilds/diffutils/3.0/patches/diffutils-strftime.patch
+@@ -0,0 +1,11 @@
++--- src.orig/diffutils-3.0/lib/strftime.c	2010-04-15 15:40:37.000000000 +0200
+++++ src/diffutils-3.0/lib/strftime.c	2011-06-29 19:44:58.807375690 +0200
++@@ -1122,7 +1122,7 @@
++             time_t t;
++ 
++             ltm = *tp;
++-            t = mktime (&ltm);
+++            t = 0; // mktime (&ltm);
++ 
++             /* Generate string value for T using time_t arithmetic;
++                this works even if sizeof (long) < sizeof (time_t).  */
+diff --git a/lbuilds/diffutils/3.0/patches/series b/lbuilds/diffutils/3.0/patches/series
+new file mode 100644
+index 0000000..511d5de
+--- /dev/null
++++ b/lbuilds/diffutils/3.0/patches/series
+@@ -0,0 +1,4 @@
++diffutils-config.patch
++diffutils-strftime.patch
++diffutils-src.patch
++diffutils-inttypes.patch
+-- 
+1.7.4.1
+
+
+From DoBi-tyndur at gmx.net  Wed Jun 29 21:03:35 2011
+From: DoBi-tyndur at gmx.net (Dominik)
+Date: Wed, 29 Jun 2011 21:03:35 +0200
+Subject: [tyndur-devel] [PATCH]
+	=?UTF-8?q?Diffutils=20auf=20Version=203.0=20geupdatet.=20Ben=C3=B6tigt=20evt.=20noch=20=C3=9Cberarbeitung.
+Message-ID: <1309374215-11459-1-git-send-email-DoBi-tyndur@gmx.net>
+
+---
+ lbuilds/diffutils/3.0/diffutils-3.0.lbuild         |   35 ++++++++++++
+ .../diffutils/3.0/patches/diffutils-config.patch   |   11 ++++
+ .../diffutils/3.0/patches/diffutils-inttypes.patch |   13 +++++
+ lbuilds/diffutils/3.0/patches/diffutils-src.patch  |   55 ++++++++++++++++++++
+ .../diffutils/3.0/patches/diffutils-strftime.patch |   11 ++++
+ lbuilds/diffutils/3.0/patches/series               |    4 ++
+ 6 files changed, 129 insertions(+), 0 deletions(-)
+ create mode 100644 lbuilds/diffutils/3.0/diffutils-3.0.lbuild
+ create mode 100644 lbuilds/diffutils/3.0/patches/diffutils-config.patch
+ create mode 100644 lbuilds/diffutils/3.0/patches/diffutils-inttypes.patch
+ create mode 100644 lbuilds/diffutils/3.0/patches/diffutils-src.patch
+ create mode 100644 lbuilds/diffutils/3.0/patches/diffutils-strftime.patch
+ create mode 100644 lbuilds/diffutils/3.0/patches/series
+
+diff --git a/lbuilds/diffutils/3.0/diffutils-3.0.lbuild b/lbuilds/diffutils/3.0/diffutils-3.0.lbuild
+new file mode 100644
+index 0000000..ea0eb30
+--- /dev/null
++++ b/lbuilds/diffutils/3.0/diffutils-3.0.lbuild
+@@ -0,0 +1,35 @@
++include lutils
++include toolchain
++
++DESCRIPTION="Tools necessary to build programs"
++HOMEPAGE="http://lowlevel.brainsware.org/wiki/index.php/LOST/Pakete/diffutils"
++SRC_URI="http://ftp.gnu.org/gnu/diffutils/${P}.tar.gz"
++
++LICENSE="GPL-2"
++
++BUILD_DEPEND=""
++RUN_DEPEND=""
++
++MY_S="${S}/${P}"
++
++src_compile() {
++	cd ${MY_S}
++	./configure \
++		--build=`tc-build` \
++		--host=`tc-host` \
++		--prefix=${R} \
++		|| die "configure failed"
++
++	lmake || die "make failed"
++	cd ..
++}
++
++src_install() {
++	cd ${MY_S}
++	lmake DESTDIR="${D}" install || die "make install failed"
++
++	cd "${D}/${R}"
++
++	# Sonst merkt noch jemand, dass die nicht funktionieren
++	rm bin/diff3 bin/sdiff
++}
+diff --git a/lbuilds/diffutils/3.0/patches/diffutils-config.patch b/lbuilds/diffutils/3.0/patches/diffutils-config.patch
+new file mode 100644
+index 0000000..ef12367
+--- /dev/null
++++ b/lbuilds/diffutils/3.0/patches/diffutils-config.patch
+@@ -0,0 +1,11 @@
++--- src.orig/diffutils-3.0/build-aux/config.sub	2010-04-15 15:40:36.000000000 +0200
+++++ src/diffutils-3.0/build-aux/config.sub	2011-06-29 19:38:10.147375879 +0200
++@@ -1315,7 +1315,7 @@
++ 	      | -os2* | -vos* | -palmos* | -uclinux* | -nucleus* \
++ 	      | -morphos* | -superux* | -rtmk* | -rtmk-nova* | -windiss* \
++ 	      | -powermax* | -dnix* | -nx6 | -nx7 | -sei* | -dragonfly* \
++-	      | -skyos* | -haiku* | -rdos* | -toppers* | -drops* | -es*)
+++	      | -skyos* | -haiku* | -rdos* | -toppers* | -drops* | -es* | -tyndur*)
++ 	# Remember, each alternative MUST END IN *, to match a version number.
++ 		;;
++ 	-qnx*)
+diff --git a/lbuilds/diffutils/3.0/patches/diffutils-inttypes.patch b/lbuilds/diffutils/3.0/patches/diffutils-inttypes.patch
+new file mode 100644
+index 0000000..2fdaf31
+--- /dev/null
++++ b/lbuilds/diffutils/3.0/patches/diffutils-inttypes.patch
+@@ -0,0 +1,13 @@
++--- src.orig/diffutils-3.0/lib/inttypes.in.h	2010-04-15 15:40:37.000000000 +0200
+++++ src/diffutils-3.0/lib/inttypes.in.h	2011-06-29 20:06:00.357375107 +0200
++@@ -45,10 +45,6 @@
++ /* Get CHAR_BIT.  */
++ #include <limits.h>
++ 
++-#if !(INT_MIN == INT32_MIN && INT_MAX == INT32_MAX)
++-# error "This file assumes that 'int' has exactly 32 bits. Please report your platform and compiler to <bug-gnulib at gnu.org>."
++-#endif
++-
++ /* The definition of _GL_ARG_NONNULL is copied here.  */
++ 
++ /* The definition of _GL_WARN_ON_USE is copied here.  */
+diff --git a/lbuilds/diffutils/3.0/patches/diffutils-src.patch b/lbuilds/diffutils/3.0/patches/diffutils-src.patch
+new file mode 100644
+index 0000000..abbf8ce
+--- /dev/null
++++ b/lbuilds/diffutils/3.0/patches/diffutils-src.patch
+@@ -0,0 +1,55 @@
++--- src.orig/diffutils-3.0/src/diff.c	2010-04-15 21:53:08.000000000 +0200
+++++ src/diffutils-3.0/src/diff.c	2011-06-29 20:00:15.507375267 +0200
++@@ -633,7 +633,7 @@
++ 	specify_style (OUTPUT_NORMAL);
++     }
++ 
++-  if (output_style != OUTPUT_CONTEXT || hard_locale (LC_TIME))
+++  /*if (output_style != OUTPUT_CONTEXT || hard_locale (LC_TIME))
++     {
++ #if (defined STAT_TIMESPEC || defined STAT_TIMESPEC_NS \
++      || defined HAVE_STRUCT_STAT_ST_SPARE1)
++@@ -642,7 +642,7 @@
++       time_format = "%Y-%m-%d %H:%M:%S %z";
++ #endif
++     }
++-  else
+++  else*/
++     {
++       /* See POSIX 1003.1-2001 for this format.  */
++       time_format = "%a %b %e %T %Y";
++--- src.orig/diffutils-3.0/src/sdiff.c	2010-04-15 14:58:08.000000000 +0200
+++++ src/diffutils-3.0/src/sdiff.c	2011-06-29 20:02:01.767375217 +0200
++@@ -1225,12 +1225,12 @@
++   sprintf (buf, "%s/sdiffXXXXXX", dir);
++   sigemptyset (&blocked);
++   sigaddset (&blocked, SIGINT);
++-  sigprocmask (SIG_BLOCK, &blocked, &procmask);
+++  // sigprocmask (SIG_BLOCK, &blocked, &procmask);
++   fd = mkstemp (buf);
++   e = errno;
++   if (0 <= fd)
++     tmpname = buf;
++-  sigprocmask (SIG_SETMASK, &procmask, 0);
+++  // sigprocmask (SIG_SETMASK, &procmask, 0);
++   errno = e;
++   return fd;
++ }
++--- src.orig/diffutils-3.0/src/util.c	2010-04-15 21:53:08.000000000 +0200
+++++ src/diffutils-3.0/src/util.c	2011-06-29 20:02:53.287375194 +0200
++@@ -192,6 +192,7 @@
++ 
++       /* Make OUTFILE a pipe to a subsidiary `pr'.  */
++       {
+++#if 0
++ #if HAVE_WORKING_FORK || HAVE_WORKING_VFORK
++ 	int pipes[2];
++ 
++@@ -236,6 +237,7 @@
++ 	  pfatal_with_name (command);
++ 	free (command);
++ #endif
+++#endif
++       }
++     }
++   else
+diff --git a/lbuilds/diffutils/3.0/patches/diffutils-strftime.patch b/lbuilds/diffutils/3.0/patches/diffutils-strftime.patch
+new file mode 100644
+index 0000000..4901af4
+--- /dev/null
++++ b/lbuilds/diffutils/3.0/patches/diffutils-strftime.patch
+@@ -0,0 +1,11 @@
++--- src.orig/diffutils-3.0/lib/strftime.c	2010-04-15 15:40:37.000000000 +0200
+++++ src/diffutils-3.0/lib/strftime.c	2011-06-29 19:44:58.807375690 +0200
++@@ -1122,7 +1122,7 @@
++             time_t t;
++ 
++             ltm = *tp;
++-            t = mktime (&ltm);
+++            t = 0; // mktime (&ltm);
++ 
++             /* Generate string value for T using time_t arithmetic;
++                this works even if sizeof (long) < sizeof (time_t).  */
+diff --git a/lbuilds/diffutils/3.0/patches/series b/lbuilds/diffutils/3.0/patches/series
+new file mode 100644
+index 0000000..511d5de
+--- /dev/null
++++ b/lbuilds/diffutils/3.0/patches/series
+@@ -0,0 +1,4 @@
++diffutils-config.patch
++diffutils-strftime.patch
++diffutils-src.patch
++diffutils-inttypes.patch
+-- 
+1.7.4.1
+
+
+From DoBi-tyndur at gmx.net  Wed Jun 29 21:05:53 2011
+From: DoBi-tyndur at gmx.net (Dominik)
+Date: Wed, 29 Jun 2011 21:05:53 +0200
+Subject: [tyndur-devel] [PATCH]
+	=?UTF-8?q?Diffutils=20auf=20Version=203.0=20geupdatet.=20Ben=C3=B6tigt=20evt.=20noch=20=C3=9Cberarbeitung.
+In-Reply-To: <[lbuilds] Diffutils auf Version 3.0 geupdatet.>
+References: <[lbuilds] Diffutils auf Version 3.0 geupdatet.>
+Message-ID: <1309374353-11534-1-git-send-email-DoBi-tyndur@gmx.net>
+
+---
+ lbuilds/diffutils/3.0/diffutils-3.0.lbuild         |   35 ++++++++++++
+ .../diffutils/3.0/patches/diffutils-config.patch   |   11 ++++
+ .../diffutils/3.0/patches/diffutils-inttypes.patch |   13 +++++
+ lbuilds/diffutils/3.0/patches/diffutils-src.patch  |   55 ++++++++++++++++++++
+ .../diffutils/3.0/patches/diffutils-strftime.patch |   11 ++++
+ lbuilds/diffutils/3.0/patches/series               |    4 ++
+ 6 files changed, 129 insertions(+), 0 deletions(-)
+ create mode 100644 lbuilds/diffutils/3.0/diffutils-3.0.lbuild
+ create mode 100644 lbuilds/diffutils/3.0/patches/diffutils-config.patch
+ create mode 100644 lbuilds/diffutils/3.0/patches/diffutils-inttypes.patch
+ create mode 100644 lbuilds/diffutils/3.0/patches/diffutils-src.patch
+ create mode 100644 lbuilds/diffutils/3.0/patches/diffutils-strftime.patch
+ create mode 100644 lbuilds/diffutils/3.0/patches/series
+
+diff --git a/lbuilds/diffutils/3.0/diffutils-3.0.lbuild b/lbuilds/diffutils/3.0/diffutils-3.0.lbuild
+new file mode 100644
+index 0000000..ea0eb30
+--- /dev/null
++++ b/lbuilds/diffutils/3.0/diffutils-3.0.lbuild
+@@ -0,0 +1,35 @@
++include lutils
++include toolchain
++
++DESCRIPTION="Tools necessary to build programs"
++HOMEPAGE="http://lowlevel.brainsware.org/wiki/index.php/LOST/Pakete/diffutils"
++SRC_URI="http://ftp.gnu.org/gnu/diffutils/${P}.tar.gz"
++
++LICENSE="GPL-2"
++
++BUILD_DEPEND=""
++RUN_DEPEND=""
++
++MY_S="${S}/${P}"
++
++src_compile() {
++	cd ${MY_S}
++	./configure \
++		--build=`tc-build` \
++		--host=`tc-host` \
++		--prefix=${R} \
++		|| die "configure failed"
++
++	lmake || die "make failed"
++	cd ..
++}
++
++src_install() {
++	cd ${MY_S}
++	lmake DESTDIR="${D}" install || die "make install failed"
++
++	cd "${D}/${R}"
++
++	# Sonst merkt noch jemand, dass die nicht funktionieren
++	rm bin/diff3 bin/sdiff
++}
+diff --git a/lbuilds/diffutils/3.0/patches/diffutils-config.patch b/lbuilds/diffutils/3.0/patches/diffutils-config.patch
+new file mode 100644
+index 0000000..ef12367
+--- /dev/null
++++ b/lbuilds/diffutils/3.0/patches/diffutils-config.patch
+@@ -0,0 +1,11 @@
++--- src.orig/diffutils-3.0/build-aux/config.sub	2010-04-15 15:40:36.000000000 +0200
+++++ src/diffutils-3.0/build-aux/config.sub	2011-06-29 19:38:10.147375879 +0200
++@@ -1315,7 +1315,7 @@
++ 	      | -os2* | -vos* | -palmos* | -uclinux* | -nucleus* \
++ 	      | -morphos* | -superux* | -rtmk* | -rtmk-nova* | -windiss* \
++ 	      | -powermax* | -dnix* | -nx6 | -nx7 | -sei* | -dragonfly* \
++-	      | -skyos* | -haiku* | -rdos* | -toppers* | -drops* | -es*)
+++	      | -skyos* | -haiku* | -rdos* | -toppers* | -drops* | -es* | -tyndur*)
++ 	# Remember, each alternative MUST END IN *, to match a version number.
++ 		;;
++ 	-qnx*)
+diff --git a/lbuilds/diffutils/3.0/patches/diffutils-inttypes.patch b/lbuilds/diffutils/3.0/patches/diffutils-inttypes.patch
+new file mode 100644
+index 0000000..2fdaf31
+--- /dev/null
++++ b/lbuilds/diffutils/3.0/patches/diffutils-inttypes.patch
+@@ -0,0 +1,13 @@
++--- src.orig/diffutils-3.0/lib/inttypes.in.h	2010-04-15 15:40:37.000000000 +0200
+++++ src/diffutils-3.0/lib/inttypes.in.h	2011-06-29 20:06:00.357375107 +0200
++@@ -45,10 +45,6 @@
++ /* Get CHAR_BIT.  */
++ #include <limits.h>
++ 
++-#if !(INT_MIN == INT32_MIN && INT_MAX == INT32_MAX)
++-# error "This file assumes that 'int' has exactly 32 bits. Please report your platform and compiler to <bug-gnulib at gnu.org>."
++-#endif
++-
++ /* The definition of _GL_ARG_NONNULL is copied here.  */
++ 
++ /* The definition of _GL_WARN_ON_USE is copied here.  */
+diff --git a/lbuilds/diffutils/3.0/patches/diffutils-src.patch b/lbuilds/diffutils/3.0/patches/diffutils-src.patch
+new file mode 100644
+index 0000000..abbf8ce
+--- /dev/null
++++ b/lbuilds/diffutils/3.0/patches/diffutils-src.patch
+@@ -0,0 +1,55 @@
++--- src.orig/diffutils-3.0/src/diff.c	2010-04-15 21:53:08.000000000 +0200
+++++ src/diffutils-3.0/src/diff.c	2011-06-29 20:00:15.507375267 +0200
++@@ -633,7 +633,7 @@
++ 	specify_style (OUTPUT_NORMAL);
++     }
++ 
++-  if (output_style != OUTPUT_CONTEXT || hard_locale (LC_TIME))
+++  /*if (output_style != OUTPUT_CONTEXT || hard_locale (LC_TIME))
++     {
++ #if (defined STAT_TIMESPEC || defined STAT_TIMESPEC_NS \
++      || defined HAVE_STRUCT_STAT_ST_SPARE1)
++@@ -642,7 +642,7 @@
++       time_format = "%Y-%m-%d %H:%M:%S %z";
++ #endif
++     }
++-  else
+++  else*/
++     {
++       /* See POSIX 1003.1-2001 for this format.  */
++       time_format = "%a %b %e %T %Y";
++--- src.orig/diffutils-3.0/src/sdiff.c	2010-04-15 14:58:08.000000000 +0200
+++++ src/diffutils-3.0/src/sdiff.c	2011-06-29 20:02:01.767375217 +0200
++@@ -1225,12 +1225,12 @@
++   sprintf (buf, "%s/sdiffXXXXXX", dir);
++   sigemptyset (&blocked);
++   sigaddset (&blocked, SIGINT);
++-  sigprocmask (SIG_BLOCK, &blocked, &procmask);
+++  // sigprocmask (SIG_BLOCK, &blocked, &procmask);
++   fd = mkstemp (buf);
++   e = errno;
++   if (0 <= fd)
++     tmpname = buf;
++-  sigprocmask (SIG_SETMASK, &procmask, 0);
+++  // sigprocmask (SIG_SETMASK, &procmask, 0);
++   errno = e;
++   return fd;
++ }
++--- src.orig/diffutils-3.0/src/util.c	2010-04-15 21:53:08.000000000 +0200
+++++ src/diffutils-3.0/src/util.c	2011-06-29 20:02:53.287375194 +0200
++@@ -192,6 +192,7 @@
++ 
++       /* Make OUTFILE a pipe to a subsidiary `pr'.  */
++       {
+++#if 0
++ #if HAVE_WORKING_FORK || HAVE_WORKING_VFORK
++ 	int pipes[2];
++ 
++@@ -236,6 +237,7 @@
++ 	  pfatal_with_name (command);
++ 	free (command);
++ #endif
+++#endif
++       }
++     }
++   else
+diff --git a/lbuilds/diffutils/3.0/patches/diffutils-strftime.patch b/lbuilds/diffutils/3.0/patches/diffutils-strftime.patch
+new file mode 100644
+index 0000000..4901af4
+--- /dev/null
++++ b/lbuilds/diffutils/3.0/patches/diffutils-strftime.patch
+@@ -0,0 +1,11 @@
++--- src.orig/diffutils-3.0/lib/strftime.c	2010-04-15 15:40:37.000000000 +0200
+++++ src/diffutils-3.0/lib/strftime.c	2011-06-29 19:44:58.807375690 +0200
++@@ -1122,7 +1122,7 @@
++             time_t t;
++ 
++             ltm = *tp;
++-            t = mktime (&ltm);
+++            t = 0; // mktime (&ltm);
++ 
++             /* Generate string value for T using time_t arithmetic;
++                this works even if sizeof (long) < sizeof (time_t).  */
+diff --git a/lbuilds/diffutils/3.0/patches/series b/lbuilds/diffutils/3.0/patches/series
+new file mode 100644
+index 0000000..511d5de
+--- /dev/null
++++ b/lbuilds/diffutils/3.0/patches/series
+@@ -0,0 +1,4 @@
++diffutils-config.patch
++diffutils-strftime.patch
++diffutils-src.patch
++diffutils-inttypes.patch
+-- 
+1.7.4.1
+
+
+From DoBi-tyndur at gmx.net  Thu Jun 30 22:06:50 2011
+From: DoBi-tyndur at gmx.net (Dominik Bittner)
+Date: Thu, 30 Jun 2011 22:06:50 +0200
+Subject: [tyndur-devel] [PATCH] [lbuilds] Diffutils geupdatet
+Message-ID: <1309464410-13444-1-git-send-email-DoBi-tyndur@gmx.net>
+
++ Neue Version von Diffutils hinzugefügt (3.0). Diese muss aber evt. noch einmal überarbeitet werden.
+Signed-off-by: Dominik Bittner <DoBi-tyndur at gmx.net>
+---
+ lbuilds/diffutils/3.0/diffutils-3.0.lbuild         |   35 ++++++++++++
+ .../diffutils/3.0/patches/diffutils-config.patch   |   11 ++++
+ .../diffutils/3.0/patches/diffutils-inttypes.patch |   13 +++++
+ lbuilds/diffutils/3.0/patches/diffutils-src.patch  |   55 ++++++++++++++++++++
+ .../diffutils/3.0/patches/diffutils-strftime.patch |   11 ++++
+ lbuilds/diffutils/3.0/patches/series               |    4 ++
+ 6 files changed, 129 insertions(+), 0 deletions(-)
+ create mode 100644 lbuilds/diffutils/3.0/diffutils-3.0.lbuild
+ create mode 100644 lbuilds/diffutils/3.0/patches/diffutils-config.patch
+ create mode 100644 lbuilds/diffutils/3.0/patches/diffutils-inttypes.patch
+ create mode 100644 lbuilds/diffutils/3.0/patches/diffutils-src.patch
+ create mode 100644 lbuilds/diffutils/3.0/patches/diffutils-strftime.patch
+ create mode 100644 lbuilds/diffutils/3.0/patches/series
+
+diff --git a/lbuilds/diffutils/3.0/diffutils-3.0.lbuild b/lbuilds/diffutils/3.0/diffutils-3.0.lbuild
+new file mode 100644
+index 0000000..ea0eb30
+--- /dev/null
++++ b/lbuilds/diffutils/3.0/diffutils-3.0.lbuild
+@@ -0,0 +1,35 @@
++include lutils
++include toolchain
++
++DESCRIPTION="Tools necessary to build programs"
++HOMEPAGE="http://lowlevel.brainsware.org/wiki/index.php/LOST/Pakete/diffutils"
++SRC_URI="http://ftp.gnu.org/gnu/diffutils/${P}.tar.gz"
++
++LICENSE="GPL-2"
++
++BUILD_DEPEND=""
++RUN_DEPEND=""
++
++MY_S="${S}/${P}"
++
++src_compile() {
++	cd ${MY_S}
++	./configure \
++		--build=`tc-build` \
++		--host=`tc-host` \
++		--prefix=${R} \
++		|| die "configure failed"
++
++	lmake || die "make failed"
++	cd ..
++}
++
++src_install() {
++	cd ${MY_S}
++	lmake DESTDIR="${D}" install || die "make install failed"
++
++	cd "${D}/${R}"
++
++	# Sonst merkt noch jemand, dass die nicht funktionieren
++	rm bin/diff3 bin/sdiff
++}
+diff --git a/lbuilds/diffutils/3.0/patches/diffutils-config.patch b/lbuilds/diffutils/3.0/patches/diffutils-config.patch
+new file mode 100644
+index 0000000..ef12367
+--- /dev/null
++++ b/lbuilds/diffutils/3.0/patches/diffutils-config.patch
+@@ -0,0 +1,11 @@
++--- src.orig/diffutils-3.0/build-aux/config.sub	2010-04-15 15:40:36.000000000 +0200
+++++ src/diffutils-3.0/build-aux/config.sub	2011-06-29 19:38:10.147375879 +0200
++@@ -1315,7 +1315,7 @@
++ 	      | -os2* | -vos* | -palmos* | -uclinux* | -nucleus* \
++ 	      | -morphos* | -superux* | -rtmk* | -rtmk-nova* | -windiss* \
++ 	      | -powermax* | -dnix* | -nx6 | -nx7 | -sei* | -dragonfly* \
++-	      | -skyos* | -haiku* | -rdos* | -toppers* | -drops* | -es*)
+++	      | -skyos* | -haiku* | -rdos* | -toppers* | -drops* | -es* | -tyndur*)
++ 	# Remember, each alternative MUST END IN *, to match a version number.
++ 		;;
++ 	-qnx*)
+diff --git a/lbuilds/diffutils/3.0/patches/diffutils-inttypes.patch b/lbuilds/diffutils/3.0/patches/diffutils-inttypes.patch
+new file mode 100644
+index 0000000..2fdaf31
+--- /dev/null
++++ b/lbuilds/diffutils/3.0/patches/diffutils-inttypes.patch
+@@ -0,0 +1,13 @@
++--- src.orig/diffutils-3.0/lib/inttypes.in.h	2010-04-15 15:40:37.000000000 +0200
+++++ src/diffutils-3.0/lib/inttypes.in.h	2011-06-29 20:06:00.357375107 +0200
++@@ -45,10 +45,6 @@
++ /* Get CHAR_BIT.  */
++ #include <limits.h>
++ 
++-#if !(INT_MIN == INT32_MIN && INT_MAX == INT32_MAX)
++-# error "This file assumes that 'int' has exactly 32 bits. Please report your platform and compiler to <bug-gnulib at gnu.org>."
++-#endif
++-
++ /* The definition of _GL_ARG_NONNULL is copied here.  */
++ 
++ /* The definition of _GL_WARN_ON_USE is copied here.  */
+diff --git a/lbuilds/diffutils/3.0/patches/diffutils-src.patch b/lbuilds/diffutils/3.0/patches/diffutils-src.patch
+new file mode 100644
+index 0000000..abbf8ce
+--- /dev/null
++++ b/lbuilds/diffutils/3.0/patches/diffutils-src.patch
+@@ -0,0 +1,55 @@
++--- src.orig/diffutils-3.0/src/diff.c	2010-04-15 21:53:08.000000000 +0200
+++++ src/diffutils-3.0/src/diff.c	2011-06-29 20:00:15.507375267 +0200
++@@ -633,7 +633,7 @@
++ 	specify_style (OUTPUT_NORMAL);
++     }
++ 
++-  if (output_style != OUTPUT_CONTEXT || hard_locale (LC_TIME))
+++  /*if (output_style != OUTPUT_CONTEXT || hard_locale (LC_TIME))
++     {
++ #if (defined STAT_TIMESPEC || defined STAT_TIMESPEC_NS \
++      || defined HAVE_STRUCT_STAT_ST_SPARE1)
++@@ -642,7 +642,7 @@
++       time_format = "%Y-%m-%d %H:%M:%S %z";
++ #endif
++     }
++-  else
+++  else*/
++     {
++       /* See POSIX 1003.1-2001 for this format.  */
++       time_format = "%a %b %e %T %Y";
++--- src.orig/diffutils-3.0/src/sdiff.c	2010-04-15 14:58:08.000000000 +0200
+++++ src/diffutils-3.0/src/sdiff.c	2011-06-29 20:02:01.767375217 +0200
++@@ -1225,12 +1225,12 @@
++   sprintf (buf, "%s/sdiffXXXXXX", dir);
++   sigemptyset (&blocked);
++   sigaddset (&blocked, SIGINT);
++-  sigprocmask (SIG_BLOCK, &blocked, &procmask);
+++  // sigprocmask (SIG_BLOCK, &blocked, &procmask);
++   fd = mkstemp (buf);
++   e = errno;
++   if (0 <= fd)
++     tmpname = buf;
++-  sigprocmask (SIG_SETMASK, &procmask, 0);
+++  // sigprocmask (SIG_SETMASK, &procmask, 0);
++   errno = e;
++   return fd;
++ }
++--- src.orig/diffutils-3.0/src/util.c	2010-04-15 21:53:08.000000000 +0200
+++++ src/diffutils-3.0/src/util.c	2011-06-29 20:02:53.287375194 +0200
++@@ -192,6 +192,7 @@
++ 
++       /* Make OUTFILE a pipe to a subsidiary `pr'.  */
++       {
+++#if 0
++ #if HAVE_WORKING_FORK || HAVE_WORKING_VFORK
++ 	int pipes[2];
++ 
++@@ -236,6 +237,7 @@
++ 	  pfatal_with_name (command);
++ 	free (command);
++ #endif
+++#endif
++       }
++     }
++   else
+diff --git a/lbuilds/diffutils/3.0/patches/diffutils-strftime.patch b/lbuilds/diffutils/3.0/patches/diffutils-strftime.patch
+new file mode 100644
+index 0000000..4901af4
+--- /dev/null
++++ b/lbuilds/diffutils/3.0/patches/diffutils-strftime.patch
+@@ -0,0 +1,11 @@
++--- src.orig/diffutils-3.0/lib/strftime.c	2010-04-15 15:40:37.000000000 +0200
+++++ src/diffutils-3.0/lib/strftime.c	2011-06-29 19:44:58.807375690 +0200
++@@ -1122,7 +1122,7 @@
++             time_t t;
++ 
++             ltm = *tp;
++-            t = mktime (&ltm);
+++            t = 0; // mktime (&ltm);
++ 
++             /* Generate string value for T using time_t arithmetic;
++                this works even if sizeof (long) < sizeof (time_t).  */
+diff --git a/lbuilds/diffutils/3.0/patches/series b/lbuilds/diffutils/3.0/patches/series
+new file mode 100644
+index 0000000..511d5de
+--- /dev/null
++++ b/lbuilds/diffutils/3.0/patches/series
+@@ -0,0 +1,4 @@
++diffutils-config.patch
++diffutils-strftime.patch
++diffutils-src.patch
++diffutils-inttypes.patch
+-- 
+1.7.4.1
+
+

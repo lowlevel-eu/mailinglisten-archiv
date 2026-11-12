@@ -1,0 +1,313 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH v2 8/8] kernel2: Blockierendes Lesen
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%208/8%5D%20kernel2%3A%20Blockierendes%20Lesen&In-Reply-To=%3C1437432317-27705-9-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002505.html">
+   <LINK REL="Next"  HREF="002506.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH v2 8/8] kernel2: Blockierendes Lesen</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%208/8%5D%20kernel2%3A%20Blockierendes%20Lesen&In-Reply-To=%3C1437432317-27705-9-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH v2 8/8] kernel2: Blockierendes Lesen">kevin at tyndur.org
+                  </A><BR>
+    <I>Di Jul 21 00:45:17 CEST 2015</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002505.html">[tyndur-devel] [PATCH v3 7/8] libc: POSIX-Dateifunktionen nicht über stdio.h emulieren
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002506.html">[tyndur-devel] [PATCH] libc/kernel2: Kein Busywait in waitpid()
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2504">[ Datum ]</a>
+              <a href="thread.html#2504">[ Thema ]</a>
+              <a href="subject.html#2504">[ Betreff (Subject) ]</a>
+              <a href="author.html#2504">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ kernel2: lio_(p)read() blockiert jetzt, wenn es gar nichts lesen kann,
+  aber moredata noch gesetzt ist (d.h. es sonst -EAGAIN zurückgeben
+  würde).
+
+  Solange man sich nicht einloggt, verbraten die getterms jetzt nicht
+  mehr 100% CPU um die Tastatur zu pollen, sondern der Idle-Thread kommt
+  zum Zug.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/kernel2/include/lostio/client.h         |  4 +--
+ src/kernel2/include/tasks.h                 |  1 +
+ src/kernel2/src/lostio/client.c             | 48 ++++++++++++++++++++++++-----
+ src/kernel2/src/lostio/include/lostio_int.h | 11 +++++++
+ src/kernel2/src/lostio/tree.c               |  6 ++++
+ src/kernel2/src/syscalls/lio_server.c       |  5 ++-
+ src/kernel2/src/syscalls/lostio.c           |  4 +--
+ 7 files changed, 66 insertions(+), 13 deletions(-)
+
+diff --git a/src/kernel2/include/lostio/client.h b/src/kernel2/include/lostio/client.h
+index d3490f0..c7b3795 100644
+--- a/src/kernel2/include/lostio/client.h
++++ b/src/kernel2/include/lostio/client.h
+@@ -68,7 +68,7 @@ struct lio_stream* lio_open(struct lio_resource* res, int flags);
+  *
+  * @return Anzahl der gelesenen Bytes oder negativ im Fehlerfall
+  */
+-ssize_t lio_read(struct lio_stream* s, size_t bytes, void* buf);
++ssize_t lio_read(struct lio_stream* s, size_t bytes, void* buf, int flags);
+ 
+ /**
+  * Liest aus einem Stream aus, ohne die Position des streams zu benutzen oder
+@@ -77,7 +77,7 @@ ssize_t lio_read(struct lio_stream* s, size_t bytes, void* buf);
+  * @return Anzahl der gelesenen Bytes oder negativ im Fehlerfall
+  */
+ ssize_t lio_pread(struct lio_stream* s, uint64_t offset, size_t bytes,
+-    void* buf);
++    void* buf, int flags);
+ 
+ /**
+  * Schreibt in einen Stream
+diff --git a/src/kernel2/include/tasks.h b/src/kernel2/include/tasks.h
+index e17d22b..8fac5ad 100644
+--- a/src/kernel2/include/tasks.h
++++ b/src/kernel2/include/tasks.h
+@@ -52,6 +52,7 @@
+ #define PM_STATUS_WAIT_FOR_RPC 3
+ #define PM_STATUS_WAIT_FOR_LIO 4
+ #define PM_STATUS_WAIT_FOR_IO_REQUEST 5
++#define PM_STATUS_WAIT_FOR_DATA 6
+ 
+ typedef struct pm_process {
+     /// Die eindeutige Prozessnummer
+diff --git a/src/kernel2/src/lostio/client.c b/src/kernel2/src/lostio/client.c
+index 4673a27..8f3bcd1 100644
+--- a/src/kernel2/src/lostio/client.c
++++ b/src/kernel2/src/lostio/client.c
+@@ -92,7 +92,7 @@ static struct lio_resource* resolve_symlink(struct lio_resource* link,
+         return NULL;
+     }
+ 
+-    len = lio_read(stream, link-&gt;size, buf);
++    len = lio_read(stream, link-&gt;size, buf, 0);
+     lio_close(stream);
+ 
+     if (len &lt; 0) {
+@@ -288,11 +288,11 @@ fail:
+  *
+  * @return Anzahl der gelesenen Bytes oder negativ im Fehlerfall
+  */
+-ssize_t lio_read(struct lio_stream* s, size_t bytes, void* buf)
++ssize_t lio_read(struct lio_stream* s, size_t bytes, void* buf, int flags)
+ {
+     ssize_t result;
+ 
+-    result = lio_pread(s, s-&gt;pos_read, bytes, buf);
++    result = lio_pread(s, s-&gt;pos_read, bytes, buf, flags);
+     if (result &gt; 0) {
+         s-&gt;pos_read += result;
+     }
+@@ -302,11 +302,12 @@ ssize_t lio_read(struct lio_stream* s, size_t bytes, void* buf)
+ 
+ /**
+  * Liest aus einem Stream aus, ohne die Position des streams zu benutzen oder
+- * zu veraendern.
++ * zu veraendern. Diese Funktion blockiert nie, sondern gibt -EAGAIN zurück,
++ * wenn es nichts zu lesen gibt.
+  *
+  * @return Anzahl der gelesenen Bytes oder negativ im Fehlerfall
+  */
+-ssize_t lio_pread(struct lio_stream* s, uint64_t offset, size_t bytes,
++ssize_t lio_pread_nonblock(struct lio_stream* s, uint64_t offset, size_t bytes,
+     void* buf)
+ {
+     ssize_t ret = 0;
+@@ -361,6 +362,37 @@ ssize_t lio_pread(struct lio_stream* s, uint64_t offset, size_t bytes,
+     return ret;
+ }
+ 
++static void lio_pread_unblock_cb(void* opaque)
++{
++    pm_thread_t* t = opaque;
++
++    BUG_ON(t-&gt;status != PM_STATUS_WAIT_FOR_DATA);
++    t-&gt;status = PM_STATUS_READY;
++}
++
++/**
++ * Liest aus einem Stream aus, ohne die Position des streams zu benutzen oder
++ * zu veraendern. Diese Funktion blockiert, bis etwas gelesen werden kann.
++ *
++ * @return Anzahl der gelesenen Bytes oder negativ im Fehlerfall
++ */
++ssize_t lio_pread(struct lio_stream* s, uint64_t offset, size_t bytes,
++    void* buf, int flags)
++{
++    bool blocking = (flags &amp; LIO_REQ_BLOCKING);
++    ssize_t ret;
++
++    ret = lio_pread_nonblock(s, offset, bytes, buf);
++    while (ret == -EAGAIN &amp;&amp; blocking) {
++        notifier_add(&amp;s-&gt;res_read-&gt;on_resize,
++                     lio_pread_unblock_cb, current_thread, true);
++        pm_scheduler_kern_yield(0, PM_STATUS_WAIT_FOR_DATA);
++        ret = lio_pread_nonblock(s, offset, bytes, buf);
++    }
++
++    return ret;
++}
++
+ /**
+  * Schreibt in einen Stream
+  *
+@@ -430,7 +462,7 @@ ssize_t lio_pwrite(struct lio_stream* s, uint64_t offset, size_t bytes,
+         old_flags = s-&gt;flags;
+         // FIXME Wenn das mal nicht racy ist...
+         s-&gt;flags |= LIO_READ;
+-        ret = lio_pread(s, offset_aligned, bytes_aligned, bounce);
++        ret = lio_pread(s, offset_aligned, bytes_aligned, bounce, 0);
+         s-&gt;flags = old_flags;
+     }
+ 
+@@ -447,7 +479,7 @@ ssize_t lio_pwrite(struct lio_stream* s, uint64_t offset, size_t bytes,
+     // Offset zeigt jetzt auf das erste Byte nach dem letzten geschriebenen
+     if (ret &gt; 0){
+         if (res-&gt;size &lt; offset) {
+-            res-&gt;size = offset;
++            lio_resource_update_size(res, offset);
+         }
+     }
+ 
+@@ -589,7 +621,7 @@ int lio_truncate(struct lio_stream* s, uint64_t size)
+ 
+     /* Anschliessend die Ressourcengroesse anpassen (drv-&gt;truncate kann das
+      * u.U. auch schon gemacht haben) */
+-    res-&gt;size = size;
++    lio_resource_update_size(res, size);
+ 
+     return 0;
+ }
+diff --git a/src/kernel2/src/lostio/include/lostio_int.h b/src/kernel2/src/lostio/include/lostio_int.h
+index a0f2947..33c055c 100644
+--- a/src/kernel2/src/lostio/include/lostio_int.h
++++ b/src/kernel2/src/lostio/include/lostio_int.h
+@@ -40,6 +40,7 @@
+ #include &lt;syscall_structs.h&gt;
+ 
+ #include &quot;lostio/core.h&quot;
++#include &quot;notifier.h&quot;
+ #include &quot;tasks.h&quot;
+ 
+ #define ROUND_TO_NEXT_BLOCK(bytes, blocksize) \
+@@ -180,6 +181,13 @@ struct lio_resource {
+     bool                        resolvable;
+     bool                        retargetable;
+ 
++    /**
++     * Wird aufgerufen, wenn sich die Größe einer Ressource ändert (dies
++     * schließt Fälle ein, in denen moredata von true zu false wechselt, wenn
++     * dann statt -EGAIN das Dateiende gemeldet wird.
++     */
++    struct notifier*            on_resize;
++
+     /** Id der Ressource fuer Userspace-Programme */
+     lio_usp_resource_t          usp_id;
+ 
+@@ -286,6 +294,9 @@ void lio_resource_remove_child(struct lio_resource* parent,
+ struct lio_node* lio_create_node(struct lio_resource* parent,
+     struct lio_resource* res, const char* name);
+ 
++/** Größe aktualisieren und on_size-Notifier ausführen */
++void lio_resource_update_size(struct lio_resource* res, uint64_t size);
++
+ 
+ /** Weist einer Ressource eine Userspace-ID zu */
+ void lio_usp_add_resource(struct lio_resource* res);
+diff --git a/src/kernel2/src/lostio/tree.c b/src/kernel2/src/lostio/tree.c
+index ee0e481..3fcd2c7 100644
+--- a/src/kernel2/src/lostio/tree.c
++++ b/src/kernel2/src/lostio/tree.c
+@@ -371,3 +371,9 @@ struct lio_node* lio_create_node(struct lio_resource* parent,
+     return n;
+ }
+ 
++/** Größe aktualisieren und on_size-Notifier ausführen */
++void lio_resource_update_size(struct lio_resource* res, uint64_t size)
++{
++    res-&gt;size = size;
++    notify(res-&gt;on_resize);
++}
+diff --git a/src/kernel2/src/syscalls/lio_server.c b/src/kernel2/src/syscalls/lio_server.c
+index 0ead479..5127d7a 100644
+--- a/src/kernel2/src/syscalls/lio_server.c
++++ b/src/kernel2/src/syscalls/lio_server.c
+@@ -262,7 +262,6 @@ int syscall_lio_srv_res_upload(struct lio_server_resource* resource)
+     }
+ 
+     res-&gt;tree = lio_usp_get_tree(resource-&gt;tree);
+-    res-&gt;size = resource-&gt;size;
+     res-&gt;blocksize = resource-&gt;blocksize;
+     res-&gt;readable = ((resource-&gt;flags &amp; LIO_SRV_READABLE) ? 1 : 0);
+     res-&gt;writable = ((resource-&gt;flags &amp; LIO_SRV_WRITABLE) ? 1 : 0);
+@@ -278,6 +277,10 @@ int syscall_lio_srv_res_upload(struct lio_server_resource* resource)
+     }
+     res-&gt;opaque = resource-&gt;opaque;
+ 
++    /* Auch aufrufen falls sich die Größe nicht geändert hat: moredata könnte
++     * von true auf false gewechselt sein. */
++    lio_resource_update_size(res, resource-&gt;size);
++
+     return 0;
+ }
+ 
+diff --git a/src/kernel2/src/syscalls/lostio.c b/src/kernel2/src/syscalls/lostio.c
+index b060626..32efd4b 100644
+--- a/src/kernel2/src/syscalls/lostio.c
++++ b/src/kernel2/src/syscalls/lostio.c
+@@ -163,9 +163,9 @@ void syscall_lio_read(lio_usp_stream_t* stream_id, uint64_t* offset,
+     }
+ 
+     if (flags &amp; LIO_REQ_FILEPOS) {
+-        *result = lio_read(fd-&gt;stream, bytes, buffer);
++        *result = lio_read(fd-&gt;stream, bytes, buffer, flags);
+     } else {
+-        *result = lio_pread(fd-&gt;stream, *offset, bytes, buffer);
++        *result = lio_pread(fd-&gt;stream, *offset, bytes, buffer, flags);
+     }
+ }
+ 
+-- 
+2.1.4
+
+</PRE>
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002505.html">[tyndur-devel] [PATCH v3 7/8] libc: POSIX-Dateifunktionen nicht über stdio.h emulieren
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002506.html">[tyndur-devel] [PATCH] libc/kernel2: Kein Busywait in waitpid()
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2504">[ Datum ]</a>
+              <a href="thread.html#2504">[ Thema ]</a>
+              <a href="subject.html#2504">[ Betreff (Subject)]</a>
+              <a href="author.html#2504">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

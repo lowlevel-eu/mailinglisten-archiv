@@ -1,0 +1,264 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] neuer shell-Befehl: killall
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20neuer%20shell-Befehl%3A%20killall&In-Reply-To=%3C1364420817-15812-1-git-send-email-particleflux%40gmail.com%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002415.html">
+   <LINK REL="Next"  HREF="002417.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] neuer shell-Befehl: killall</H1>
+    <B>Stefan Linke</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20neuer%20shell-Befehl%3A%20killall&In-Reply-To=%3C1364420817-15812-1-git-send-email-particleflux%40gmail.com%3E"
+           TITLE="[tyndur-devel] [PATCH] neuer shell-Befehl: killall">particleflux at gmail.com
+                  </A><BR>
+    <I>Mi Mär 27 22:46:57 CET 2013</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002415.html">[tyndur-devel] [PATCH] kbc: für langsame Tastaturen angepasst
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002417.html">[tyndur-devel] [PATCH] neuer shell-Befehl: killall
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2416">[ Datum ]</a>
+              <a href="thread.html#2416">[ Thema ]</a>
+              <a href="subject.html#2416">[ Betreff (Subject) ]</a>
+              <a href="author.html#2416">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ Neuen Shell-Befehl killall implementiert, der alle Prozesse mit gegebenem Namen killt.
+
+Signed-off-by: Stefan Linke &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">particleflux at gmail.com</A>&gt;
+---
+ src/modules/c/shell/cmds/killall.c | 118 +++++++++++++++++++++++++++++++++++++
+ src/modules/c/shell/lang/lang_en.c |  14 +++++
+ src/modules/c/shell/lang/resstr.h  |   5 ++
+ src/modules/c/shell/shell.c        |   1 +
+ src/modules/c/shell/shell.h        |   1 +
+ 5 files changed, 139 insertions(+)
+ create mode 100644 src/modules/c/shell/cmds/killall.c
+
+diff --git a/src/modules/c/shell/cmds/killall.c b/src/modules/c/shell/cmds/killall.c
+new file mode 100644
+index 0000000..48eec14
+--- /dev/null
++++ b/src/modules/c/shell/cmds/killall.c
+@@ -0,0 +1,118 @@
++/*
++ * Copyright (c) 2009 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the tyndur Project
++ *     and its contributors.
++ * 4. Neither the name of the tyndur Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include &lt;stdlib.h&gt;
++#include &lt;stdio.h&gt;
++#include &lt;string.h&gt;
++#include &lt;syscall.h&gt;
++#include &lt;lost/config.h&gt;
++
++#include &lt;errno.h&gt;
++#include &lt;signal.h&gt;
++#include &lt;tms.h&gt;
++
++static void killall_display_usage(void);
++
++#ifdef CONFIG_SHELL_BUILTIN_ONLY
++    int shell_command_killall(int argc, char* argv[], const char* args)
++#else
++    int main(int argc, char* argv[])
++#endif
++{
++    int ret=0,i=0,fail=0,matches=0;
++    task_info_t *task_info = NULL;
++    char *process;
++    char copied_cmdline[255];
++
++    if (argc &lt; 2) {
++        killall_display_usage();
++        return -1;
++    }
++
++    task_info = enumerate_tasks();
++
++    if (task_info == NULL) {
++        return EXIT_FAILURE;
++    }
++
++
++    for (i = 0; i &lt; task_info-&gt;task_count; ++i) {
++        strncpy(copied_cmdline, task_info-&gt;tasks[i].cmdline, 255);
++
++        process = strtok((char *) task_info-&gt;tasks[i].cmdline, &quot; &quot;);
++        process = process == NULL
++                ? strrchr(task_info-&gt;tasks[i].cmdline, '/')
++                : strrchr(process, '/');
++        ++process;
++
++        if (strcmp(argv[1], process) == 0) {
++            ++matches;
++            ret = kill(task_info-&gt;tasks[i].pid, SIGTERM);
++
++            if (ret &lt; 0) {
++                printf(TMS(killall_cant_kill, 
++                        &quot;Konnte pid %d - %s nicht beenden: %s (%s)\n&quot;),
++                        task_info-&gt;tasks[i].pid, errno, strerror(errno));
++
++                if (!fail) {
++                    fail = 1;
++                }
++            } else {
++                printf(TMS(killall_killed, &quot;pid %d beendet\n&quot;), 
++                       task_info-&gt;tasks[i].pid);
++            }
++        }
++
++        process = NULL;
++    }
++
++    mem_free(task_info, task_info-&gt;info_size);
++
++    if (matches == 0) {
++        printf(TMS(killall_not_found, &quot;Kein passender Prozess gefunden\n&quot;));
++    }
++
++    if (fail) {
++        return EXIT_FAILURE;
++    }
++
++    return EXIT_SUCCESS;
++}
++
++static void killall_display_usage()
++{
++    printf(TMS(killall_usage, &quot;Aufruf: killall &lt;name&gt;\n&quot;));
++}
++
+diff --git a/src/modules/c/shell/lang/lang_en.c b/src/modules/c/shell/lang/lang_en.c
+index 3366190..c16abcf 100644
+--- a/src/modules/c/shell/lang/lang_en.c
++++ b/src/modules/c/shell/lang/lang_en.c
+@@ -250,6 +250,20 @@ static const struct tms_strings dict[] = {
+ 
+ 
+ 
++    &amp;__tms_killall_usage,
++    &quot;usage: killall &lt;name&gt;\n&quot;,
++
++    &amp;__tms_killall_not_found,
++    &quot;no matching process found\n&quot;,
++
++    &amp;__tms_killall_killed,
++    &quot;pid %d killed\n&quot;,
++
++    &amp;__tms_killall_cant_kill,
++    &quot;couldn't kill pid %d - %s: %s (%s)\n&quot;,
++
++
++
+     &amp;__tms_ln_usage,
+     &quot;\nUsage: ln &lt;target&gt; &lt;link-path&gt;\n\n&quot;
+     &quot;Create hardlink to file/directory &lt;target&gt; at &lt;link-path&gt;.\n&quot;,
+diff --git a/src/modules/c/shell/lang/resstr.h b/src/modules/c/shell/lang/resstr.h
+index 5a11d64..fdff7b9 100644
+--- a/src/modules/c/shell/lang/resstr.h
++++ b/src/modules/c/shell/lang/resstr.h
+@@ -85,6 +85,11 @@ extern void* __tms_kill_usage;
+ extern void* __tms_kill_not_found;
+ extern void* __tms_kill_error;
+ 
++extern void* __tms_killall_usage;
++extern void* __tms_killall_not_found;
++extern void* __tms_killall_cant_kill;
++extern void* __tms_killall_killed;
++
+ extern void* __tms_ln_usage;
+ extern void* __tms_ln_error;
+ 
+diff --git a/src/modules/c/shell/shell.c b/src/modules/c/shell/shell.c
+index 55a3f3b..cdca2f1 100644
+--- a/src/modules/c/shell/shell.c
++++ b/src/modules/c/shell/shell.c
+@@ -87,6 +87,7 @@ shell_command_t shell_commands[] = {
+     {&quot;echo&quot;,        &amp;shell_command_echo},
+     {&quot;free&quot;,        &amp;shell_command_free},
+     {&quot;kill&quot;,        &amp;shell_command_kill},
++    {&quot;killall&quot;,     &amp;shell_command_killall},
+     {&quot;ls&quot;,          &amp;shell_command_ls},
+     {&quot;mkdir&quot;,       &amp;shell_command_mkdir},
+     {&quot;pipe&quot;,        &amp;shell_command_pipe},
+diff --git a/src/modules/c/shell/shell.h b/src/modules/c/shell/shell.h
+index 40f91c9..8e94409 100644
+--- a/src/modules/c/shell/shell.h
++++ b/src/modules/c/shell/shell.h
+@@ -68,6 +68,7 @@ int shell_command_clear(int argc, char* argv[], const char* args);
+     int shell_command_echo(int argc, char* argv[], const char* args);
+     int shell_command_free(int argc, char* argv[], const char* args);
+     int shell_command_kill(int argc, char* argv[], const char* args);
++    int shell_command_killall(int argc, char* argv[], const char* args);
+     int shell_command_ls(int argc, char* argv[], const char* args);
+     int shell_command_mkdir(int argc, char* argv[], const char* args);
+     int shell_command_pipe(int argc, char* argv[], const char* args);
+-- 
+1.8.1.5
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002415.html">[tyndur-devel] [PATCH] kbc: für langsame Tastaturen angepasst
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002417.html">[tyndur-devel] [PATCH] neuer shell-Befehl: killall
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2416">[ Datum ]</a>
+              <a href="thread.html#2416">[ Thema ]</a>
+              <a href="subject.html#2416">[ Betreff (Subject)]</a>
+              <a href="author.html#2416">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

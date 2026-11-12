@@ -1,0 +1,71 @@
+Index: trunk/src/modules/servmgr/config.c
+===================================================================
+--- trunk.orig/src/modules/servmgr/config.c
++++ trunk/src/modules/servmgr/config.c
+@@ -126,7 +126,7 @@ static void config_parse_conf(const char
+     FILE* f;
+     char buffer[33];
+ 
+-    conf_serv->conf.no_wait = FALSE;
++    conf_serv->conf.wait = SERVSTART;
+ 
+     f = fopen(path, "r");
+     if (!f) {
+@@ -136,7 +136,9 @@ static void config_parse_conf(const char
+     // FIXME: Das koennte man noch etwas eleganter loesen ;-)
+     while (fgets(buffer, sizeof(buffer), f)) {
+         if (!strcmp(buffer, "nowait")) {
+-            conf_serv->conf.no_wait = TRUE;
++            conf_serv->conf.wait = NOWAIT;
++        } else if (!strcmp(buffer, "waitterminate")) {
++            conf_serv->conf.wait = TERMINATE;
+         }
+     }
+ }
+Index: trunk/src/modules/servmgr/service.c
+===================================================================
+--- trunk.orig/src/modules/servmgr/service.c
++++ trunk/src/modules/servmgr/service.c
+@@ -37,6 +37,7 @@
+ #include <syscall.h>
+ #include <init.h>
+ #include <collections.h>
++#include <sys/wait.h>
+ 
+ #include "servmgr.h"
+ 
+@@ -119,11 +120,15 @@ bool service_start(const char* name)
+     }
+ 
+     if (conf_serv->start_cmd) {
+-        init_execute(conf_serv->start_cmd);
+-        if (!conf_serv->conf.no_wait && !service_wait(name, 10000)) {
++        pid_t pid = init_execute(conf_serv->start_cmd);
++        if ((conf_serv->conf.wait == SERVSTART) && !service_wait(name, 10000)) {
+             printf("servmgr: Timeout beim Warten auf den Service %s\n", name);
+             return FALSE;
++        } else if (conf_serv->conf.wait == TERMINATE) {
++            int status;
++            waitpid(pid, &status, 0);
+         }
+     }
++
+     return TRUE;
+ }
+Index: trunk/src/modules/servmgr/servmgr.h
+===================================================================
+--- trunk.orig/src/modules/servmgr/servmgr.h
++++ trunk/src/modules/servmgr/servmgr.h
+@@ -45,7 +45,11 @@ struct config_service {
+     list_t* deps;
+ 
+     struct {
+-        bool no_wait;
++        enum {
++            SERVSTART,
++            TERMINATE,
++            NOWAIT
++        } wait;
+     } conf;
+ };
+ 

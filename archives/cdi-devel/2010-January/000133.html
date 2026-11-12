@@ -1,0 +1,898 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH 3/5] UHCI
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%203/5%5D%20UHCI&In-Reply-To=%3C1262634935-24109-4-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000132.html">
+   <LINK REL="Next"  HREF="000134.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH 3/5] UHCI</H1>
+    <B>Kevin Wolf</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%203/5%5D%20UHCI&In-Reply-To=%3C1262634935-24109-4-git-send-email-kevin%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH 3/5] UHCI">kevin at tyndur.org
+       </A><BR>
+    <I>Mon Jan  4 20:55:33 CET 2010</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000132.html">[cdi-devel] [PATCH 2/5] OHCI
+</A></li>
+        <LI>Next message: <A HREF="000134.html">[cdi-devel] [PATCH 4/5] USB 1.1
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#133">[ date ]</a>
+              <a href="thread.html#133">[ thread ]</a>
+              <a href="subject.html#133">[ subject ]</a>
+              <a href="author.html#133">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>From: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+
++ Added USB universal host controller driver
+
+Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">kevin at tyndur.org</A>&gt;
+---
+ uhci/hcd.c                   |  207 ++++++++++++++++++++++++++++++++++++
+ uhci/include/uhci-hcd.h      |   35 ++++++
+ uhci/include/uhci-init.h     |   31 ++++++
+ uhci/include/uhci-transfer.h |   30 +++++
+ uhci/include/uhci.h          |  138 ++++++++++++++++++++++++
+ uhci/init.c                  |  242 ++++++++++++++++++++++++++++++++++++++++++
+ uhci/transfer.c              |   91 ++++++++++++++++
+ 7 files changed, 774 insertions(+), 0 deletions(-)
+ create mode 100644 uhci/hcd.c
+ create mode 100644 uhci/include/uhci-hcd.h
+ create mode 100644 uhci/include/uhci-init.h
+ create mode 100644 uhci/include/uhci-transfer.h
+ create mode 100644 uhci/include/uhci.h
+ create mode 100644 uhci/init.c
+ create mode 100644 uhci/transfer.c
+
+diff --git a/uhci/hcd.c b/uhci/hcd.c
+new file mode 100644
+index 0000000..bf4d738
+--- /dev/null
++++ b/uhci/hcd.c
+@@ -0,0 +1,207 @@
++/*****************************************************************************
++* Copyright (c) 2009 Max Reitz                                               *
++*                                                                            *
++* Permission is hereby granted,  free of charge,  to any  person obtaining a *
++* copy of this software and associated documentation files (the &quot;Software&quot;), *
++* to deal in the Software without restriction,  including without limitation *
++* the rights to use,  copy, modify, merge, publish,  distribute, sublicense, *
++* and/or sell copies  of the  Software,  and to permit  persons to whom  the *
++* Software is furnished to do so, subject to the following conditions:       *
++*                                                                            *
++* The above copyright notice and this permission notice shall be included in *
++* all copies or substantial portions of the Software.                        *
++*                                                                            *
++* THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++* IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF MERCHANTABILITY, *
++* FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT SHALL *
++* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++* LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++* FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++* DEALINGS IN THE SOFTWARE.                                                  *
++*****************************************************************************/
++
++#include &lt;stdlib.h&gt;
++#include &lt;string.h&gt;
++
++#include &lt;cdi/io.h&gt;
++#include &lt;cdi/lists.h&gt;
++#include &lt;cdi/mempool.h&gt;
++#include &lt;cdi/usb.h&gt;
++#include &lt;cdi/usb-hcd.h&gt;
++
++#include &quot;uhci.h&quot;
++#include &quot;uhci-hcd.h&quot;
++
++extern cdi_list_t uhci_active_transfers;
++
++static void reset_device(struct cdi_usb_device *device);
++
++void uhci_find_devices(struct cdi_usb_hc *device)
++{
++    struct uhci *uhci = (struct uhci *)device;
++    struct cdi_usb_device *dev;
++    int i;
++
++    d0printf(&quot;Scanning root ports\n&quot;);
++    cdi_outw(uhci-&gt;pbase + UHCI_USBCMD, USB_RUN);
++    for (i = 0; i &lt; uhci-&gt;root_ports; i++) {
++        if (!(cdi_inw(uhci-&gt;pbase + UHCI_RPORTS + 2 * i) &amp; RPORT_DEVICE)) {
++            continue;
++        }
++        dev = malloc(sizeof(struct cdi_usb_device));
++        dev-&gt;hc = device;
++        dev-&gt;id = 0;
++        dev-&gt;port = i;
++        dev-&gt;speed = (cdi_inw(uhci-&gt;pbase + UHCI_RPORTS + 2 * i) &amp;
++                RPORT_LOSPD) ? CDI_USB_LOW_SPEED : CDI_USB_FULL_SPEED;
++        dev-&gt;hub = NULL;
++        dev-&gt;reset = &amp;reset_device;
++        cdi_usb_device_init(dev);
++    }
++}
++
++void uhci_activate_device(struct cdi_usb_device *device)
++{
++    struct uhci *uhci = (struct uhci *)device-&gt;hc;
++
++    if (device-&gt;hub != NULL) {
++        return;
++    }
++
++    d1printf(&quot;Activating device on port %i.\n&quot;, device-&gt;port);
++    cdi_outw(uhci-&gt;pbase + UHCI_RPORTS + 2 * device-&gt;port,
++             RPORT_ENABLE | RPORT_CSC);
++    cdi_sleep_ms(20);
++}
++
++static void reset_device(struct cdi_usb_device *device)
++{
++    struct uhci *uhci = (struct uhci *)device-&gt;hc;
++
++    if (device-&gt;hub != NULL) {
++        return;
++    }
++
++    d1printf(&quot;Resetting device on port %i.\n&quot;, device-&gt;port);
++    cdi_outw(uhci-&gt;pbase + UHCI_RPORTS + 2 * device-&gt;port,
++             RPORT_ENABLE | RPORT_RESET | RPORT_CSC);
++    cdi_sleep_ms(20);
++}
++
++void uhci_add_pipe(struct cdi_usb_pipe *pipe)
++{
++    //Macht nix, weil das bei UHCI nicht n&#195;&#182;tig ist
++    pipe = NULL; //Aber GCC k&#195;&#182;nnen wir trotzdem gl&#195;&#188;cklich machen
++}
++
++static inline int _tsl(volatile int *variable)
++{
++    int rval;
++    rval = *variable;
++    *variable = 1;
++    return rval;
++}
++
++static volatile int locked = 0;
++
++static cdi_usb_status_t do_packet(struct cdi_usb_packet *packet)
++{
++    struct cdi_usb_device *usbdev = packet-&gt;pipe-&gt;device;
++    struct uhci *uhci = (struct uhci *)usbdev-&gt;hc;
++    struct uhci_td td;
++    struct transfer addr;
++    int timeout, frame;
++
++    void *buf;
++    uintptr_t pbuf;
++
++    memset(&amp;td, 0, sizeof(td));
++    td.next = 1; //Invalid
++    td.active = 1;
++    td.ioc = 1;
++    if (packet-&gt;use_toggle == TOGGLE_0) {
++        packet-&gt;pipe-&gt;data_toggle = 0;
++    } else if (packet-&gt;use_toggle == TOGGLE_1) {
++        packet-&gt;pipe-&gt;data_toggle = 1;
++    }
++    td.data_toggle = packet-&gt;pipe-&gt;data_toggle;
++    packet-&gt;pipe-&gt;data_toggle ^= 1;
++    td.low_speed = !!(usbdev-&gt;speed == CDI_USB_LOW_SPEED);
++    td.errors = 1;
++    td.pid = packet-&gt;type;
++    td.device = usbdev-&gt;id;
++    td.endpoint = packet-&gt;pipe-&gt;endpoint-&gt;endpoint_address &amp; 0x07;
++    td.maxlen = packet-&gt;length ? packet-&gt;length - 1 : 0x7FF;
++    while (_tsl(&amp;locked));
++    frame = (cdi_inw(uhci-&gt;pbase + UHCI_FRNUM) + 5) &amp; 0x3FF;
++    while (!(uhci-&gt;queue_heads[frame].transfer &amp; 1)) {
++        frame++;
++        frame &amp;= 0x3FF;
++    }
++
++    if (cdi_mempool_get(uhci-&gt;buffers, &amp;buf, &amp;pbuf) &lt; 0) {
++        return CDI_USB_TRIVIAL_ERROR;
++    }
++
++    addr.virt = buf;
++    addr.phys = pbuf;
++    addr.error = 0xFFFF;
++
++    buf = (void *)((uintptr_t)buf + sizeof(td));
++    pbuf += sizeof(td);
++
++    if (!packet-&gt;length) {
++        td.buffer = 0;
++    } else {
++        td.buffer = pbuf;
++        if (packet-&gt;type != CDI_USB_PACKET_IN) {
++            memcpy(buf, packet-&gt;data, packet-&gt;length);
++        }
++    }
++
++    memcpy(addr.virt, &amp;td, sizeof(td));
++
++
++    if (uhci_active_transfers == NULL) {
++        uhci_active_transfers = cdi_list_create();
++    }
++    uhci-&gt;queue_heads[frame].transfer = addr.phys;
++    cdi_list_push(uhci_active_transfers, &amp;addr);
++
++    locked = 0;
++    for (timeout = 0; !(uhci-&gt;queue_heads[frame].transfer &amp; 1) &amp;&amp;
++         (timeout &lt; 1000); timeout++)
++    {
++        cdi_sleep_ms(1);
++    }
++    while ((timeout &lt; 1000) &amp;&amp; (addr.error == 0xFFFF)) {
++#ifndef CDI_STANDALONE
++        __asm__ __volatile__ (&quot;hlt&quot;);
++#endif
++    }
++    if (packet-&gt;type == CDI_USB_PACKET_IN) {
++        memcpy(packet-&gt;data, buf, packet-&gt;length);
++    }
++    if (addr.error == 0xFFFF) {
++        addr.error = CDI_USB_TIMEOUT;
++    }
++
++    cdi_mempool_put(uhci-&gt;buffers, addr.virt);
++
++    return addr.error;
++}
++
++cdi_usb_status_t uhci_do_packets(struct cdi_usb_packet *packets,
++    size_t num_packets)
++{
++    size_t i;
++    cdi_usb_status_t cond = CDI_USB_NO_ERROR;
++
++    //TODO
++    for (i = 0; (i &lt; num_packets) &amp;&amp; !cond; i++) {
++        packets[i].condition = do_packet(&amp;packets[i]);
++        cond |= packets[i].condition;
++    }
++
++    return cond;
++}
+diff --git a/uhci/include/uhci-hcd.h b/uhci/include/uhci-hcd.h
+new file mode 100644
+index 0000000..423f23a
+--- /dev/null
++++ b/uhci/include/uhci-hcd.h
+@@ -0,0 +1,35 @@
++/*****************************************************************************
++* Copyright (c) 2009 Max Reitz                                               *
++*                                                                            *
++* Permission is hereby granted,  free of charge,  to any  person obtaining a *
++* copy of this software and associated documentation files (the &quot;Software&quot;), *
++* to deal in the Software without restriction,  including without limitation *
++* the rights to use,  copy, modify, merge, publish,  distribute, sublicense, *
++* and/or sell copies  of the  Software,  and to permit  persons to whom  the *
++* Software is furnished to do so, subject to the following conditions:       *
++*                                                                            *
++* The above copyright notice and this permission notice shall be included in *
++* all copies or substantial portions of the Software.                        *
++*                                                                            *
++* THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++* IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF MERCHANTABILITY, *
++* FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT SHALL *
++* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++* LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++* FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++* DEALINGS IN THE SOFTWARE.                                                  *
++*****************************************************************************/
++
++#ifndef UHCI_HCD_H
++#define UHCI_HCD_H
++
++#include &lt;cdi/usb.h&gt;
++#include &lt;cdi/usb-hcd.h&gt;
++
++void uhci_find_devices(struct cdi_usb_hc *device);
++void uhci_activate_device(struct cdi_usb_device *device);
++cdi_usb_status_t uhci_do_packets(struct cdi_usb_packet *packets,
++        size_t num_packets);
++void uhci_add_pipe(struct cdi_usb_pipe *pipe);
++
++#endif
+diff --git a/uhci/include/uhci-init.h b/uhci/include/uhci-init.h
+new file mode 100644
+index 0000000..7b357bc
+--- /dev/null
++++ b/uhci/include/uhci-init.h
+@@ -0,0 +1,31 @@
++/*****************************************************************************
++* Copyright (c) 2009 Max Reitz                                               *
++*                                                                            *
++* Permission is hereby granted,  free of charge,  to any  person obtaining a *
++* copy of this software and associated documentation files (the &quot;Software&quot;), *
++* to deal in the Software without restriction,  including without limitation *
++* the rights to use,  copy, modify, merge, publish,  distribute, sublicense, *
++* and/or sell copies  of the  Software,  and to permit  persons to whom  the *
++* Software is furnished to do so, subject to the following conditions:       *
++*                                                                            *
++* The above copyright notice and this permission notice shall be included in *
++* all copies or substantial portions of the Software.                        *
++*                                                                            *
++* THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++* IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF MERCHANTABILITY, *
++* FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT SHALL *
++* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++* LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++* FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++* DEALINGS IN THE SOFTWARE.                                                  *
++*****************************************************************************/
++
++#ifndef UHCI_INIT_H
++#define UHCI_INIT_H
++
++#include &quot;uhci.h&quot;
++
++void find_and_init_uhcis(void);
++void uhci_init(struct cdi_device *dev);
++
++#endif
+diff --git a/uhci/include/uhci-transfer.h b/uhci/include/uhci-transfer.h
+new file mode 100644
+index 0000000..53b46b0
+--- /dev/null
++++ b/uhci/include/uhci-transfer.h
+@@ -0,0 +1,30 @@
++/*****************************************************************************
++* Copyright (c) 2009 Max Reitz                                               *
++*                                                                            *
++* Permission is hereby granted,  free of charge,  to any  person obtaining a *
++* copy of this software and associated documentation files (the &quot;Software&quot;), *
++* to deal in the Software without restriction,  including without limitation *
++* the rights to use,  copy, modify, merge, publish,  distribute, sublicense, *
++* and/or sell copies  of the  Software,  and to permit  persons to whom  the *
++* Software is furnished to do so, subject to the following conditions:       *
++*                                                                            *
++* The above copyright notice and this permission notice shall be included in *
++* all copies or substantial portions of the Software.                        *
++*                                                                            *
++* THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++* IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF MERCHANTABILITY, *
++* FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT SHALL *
++* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++* LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++* FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++* DEALINGS IN THE SOFTWARE.                                                  *
++*****************************************************************************/
++
++#ifndef UHCI_TRANSFER_H
++#define UHCI_TRANSFER_H
++
++#include &lt;cdi/misc.h&gt;
++
++void uhci_handler(struct cdi_device *cdi_hci);
++
++#endif
+diff --git a/uhci/include/uhci.h b/uhci/include/uhci.h
+new file mode 100644
+index 0000000..c9b3b05
+--- /dev/null
++++ b/uhci/include/uhci.h
+@@ -0,0 +1,138 @@
++/*****************************************************************************
++* Copyright (c) 2009 Max Reitz                                               *
++*                                                                            *
++* Permission is hereby granted,  free of charge,  to any  person obtaining a *
++* copy of this software and associated documentation files (the &quot;Software&quot;), *
++* to deal in the Software without restriction,  including without limitation *
++* the rights to use,  copy, modify, merge, publish,  distribute, sublicense, *
++* and/or sell copies  of the  Software,  and to permit  persons to whom  the *
++* Software is furnished to do so, subject to the following conditions:       *
++*                                                                            *
++* The above copyright notice and this permission notice shall be included in *
++* all copies or substantial portions of the Software.                        *
++*                                                                            *
++* THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++* IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF MERCHANTABILITY, *
++* FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT SHALL *
++* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++* LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++* FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++* DEALINGS IN THE SOFTWARE.                                                  *
++*****************************************************************************/
++
++#ifndef UHCI_H
++#define UHCI_H
++
++#include &lt;stdint.h&gt;
++#include &lt;stdio.h&gt;
++
++#include &lt;cdi/mempool.h&gt;
++#include &lt;cdi/misc.h&gt;
++#include &lt;cdi/pci.h&gt;
++#include &lt;cdi/usb-hcd.h&gt;
++
++
++//#define DEBUG
++
++#ifdef DEBUG
++#define d1printf(...) printf(&quot;[uhci] &quot; __VA_ARGS__)
++#define _d1printf(...) printf(__VA_ARGS__)
++#else
++#define d1printf(...)
++#define _d1printf(...)
++#endif
++
++#define d0printf(...) printf(&quot;[uhci] &quot; __VA_ARGS__)
++#define _d0printf(...) printf(__VA_ARGS__)
++
++
++#define UHCI_USBCMD    0x00 //w
++#define UHCI_USBSTS    0x02 //w
++#define UHCI_USBINTR   0x04 //w
++#define UHCI_FRNUM     0x06 //w
++#define UHCI_FRBASEADD 0x08 //l
++#define UHCI_SOFMOD    0x0C //b
++#define UHCI_RPORTS    0x10
++#define UHCI_PORTSC1   0x10 //w
++#define UHCI_PORTSC2   0x12 //w
++
++#define MAXP           0x0080
++#define CONFIGURE      0x0040
++#define GLOB_SUSP_MODE 0x0008
++#define GRESET         0x0004
++#define HCRESET        0x0002
++#define USB_RUN        0x0001
++
++#define RPORT_RESET    0x0200
++#define RPORT_LOSPD    0x0100 //Low speed device attached
++#define RPORT_ENABLE   0x0004
++#define RPORT_CSC      0x0002 //Connect status change
++#define RPORT_DEVICE   0x0001
++
++//Legacy support
++#define UHCI_PCI_LEGSUP 0xC0 //w
++
++#define UHCI_LEGSUP_STATUS 0x8F00 //Statusbits, die mittels schreiben einer 1
++                                  //gel&#195;&#182;scht werden
++#define UHCI_LEGSUP_NO_CHG 0x5040 //Bits, die nicht ver&#195;&#164;ndert werden k&#195;&#182;nnen
++                                  //(RO bzw. reserviert)
++#define UHCI_LEGSUP_PIRQ   0x2000 //Interrupt wird als PCI-IRQ ausgef&#195;&#188;hrt
++
++
++struct uhci_qh {
++    volatile uint32_t next;
++    volatile uint32_t transfer;
++    uint32_t align[2]; //F&#195;&#188;rs korrekte Alignment (an 16 Bytes)
++} __attribute__((packed));
++
++struct uhci_td {
++    volatile uint32_t next;
++
++    unsigned trans_len : 11;
++    unsigned rsvd0 : 6;
++    unsigned bitstuff_err : 1;
++    unsigned crc_time_err : 1;
++    unsigned nak : 1;
++    unsigned babble : 1;
++    unsigned buf_err : 1;
++    unsigned stalled_err : 1;
++    unsigned active : 1;
++    unsigned ioc : 1;
++    unsigned isochronous : 1;
++    unsigned low_speed : 1;
++    unsigned errors : 2;
++    unsigned spd : 1;
++    unsigned rsvd1 : 2;
++
++    unsigned pid : 8;
++    unsigned device : 7;
++    unsigned endpoint : 4;
++    unsigned data_toggle : 1;
++    unsigned rsvd2 : 1;
++    unsigned maxlen : 11;
++
++    uint32_t buffer;
++
++    uint32_t user[4];
++} __attribute__((packed));
++
++struct transfer {
++    void *virt;
++    uintptr_t phys;
++    volatile int error;
++};
++
++struct uhci {
++    struct cdi_usb_hc cdidev;
++    struct cdi_pci_device *pcidev;
++    int pbase;
++    uintptr_t phys_frame_list;
++    uint32_t *frame_list;
++    int root_ports;
++    struct uhci_qh *queue_heads;
++    struct uhci_qh *phys_queue_heads;
++
++    struct cdi_mempool *buffers;
++};
++
++#endif
+diff --git a/uhci/init.c b/uhci/init.c
+new file mode 100644
+index 0000000..2ddeb36
+--- /dev/null
++++ b/uhci/init.c
+@@ -0,0 +1,242 @@
++/*****************************************************************************
++* Copyright (c) 2009 Max Reitz                                               *
++*                                                                            *
++* Permission is hereby granted,  free of charge,  to any  person obtaining a *
++* copy of this software and associated documentation files (the &quot;Software&quot;), *
++* to deal in the Software without restriction,  including without limitation *
++* the rights to use,  copy, modify, merge, publish,  distribute, sublicense, *
++* and/or sell copies  of the  Software,  and to permit  persons to whom  the *
++* Software is furnished to do so, subject to the following conditions:       *
++*                                                                            *
++* The above copyright notice and this permission notice shall be included in *
++* all copies or substantial portions of the Software.                        *
++*                                                                            *
++* THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++* IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF MERCHANTABILITY, *
++* FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT SHALL *
++* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++* LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++* FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++* DEALINGS IN THE SOFTWARE.                                                  *
++*****************************************************************************/
++
++#include &lt;stdio.h&gt;
++#include &lt;stdlib.h&gt;
++
++#include &lt;cdi/io.h&gt;
++#include &lt;cdi/lists.h&gt;
++#include &lt;cdi/mempool.h&gt;
++#include &lt;cdi/misc.h&gt;
++#include &lt;cdi/pci.h&gt;
++#include &lt;cdi/usb-hcd.h&gt;
++
++#include &quot;uhci.h&quot;
++#include &quot;uhci-hcd.h&quot;
++#include &quot;uhci-init.h&quot;
++#include &quot;uhci-transfer.h&quot;
++
++#define DRIVER_NAME &quot;uhcd&quot;
++
++static struct cdi_usb_hcd driver;
++static int uhci_counter = 0;
++
++int uhci_init_driver(void)
++{
++    cdi_usb_hcd_init(&amp;driver);
++    return 0;
++}
++
++struct cdi_device* uhci_init_device(struct cdi_bus_data* bus_data)
++{
++    struct uhci *uhci;
++    struct cdi_pci_device* dev = (struct cdi_pci_device*) dev;
++    struct cdi_pci_resource *res;
++    int size = 0, request_size, cmd, intr, i;
++#ifdef CDI_PCI_DIRECT_ACCESS
++    int legsup;
++#endif
++    char *name;
++
++    if ((dev-&gt;class_id != 0x0C) || (dev-&gt;subclass_id != 0x03)
++        || (dev-&gt;interface_id != 0x00))
++    {
++        return NULL;
++    }
++
++    uhci = malloc(sizeof(struct uhci));
++    name = malloc(7);
++    sprintf(name, &quot;uhci%i&quot;, uhci_counter++);
++    uhci-&gt;cdidev.dev.name = (const char *)name;
++    uhci-&gt;cdidev.speed = CDI_USB_LOW_SPEED | CDI_USB_FULL_SPEED;
++    uhci-&gt;pcidev = dev;
++
++    d0printf(&quot;Trying to init %s at %02x:%02x.%02x...\n&quot;, uhci-&gt;cdidev.dev.name,
++        uhci-&gt;pcidev-&gt;bus, uhci-&gt;pcidev-&gt;dev, uhci-&gt;pcidev-&gt;function);
++
++    uhci-&gt;pbase = 0;
++    for (i = 0; (res = cdi_list_get(uhci-&gt;pcidev-&gt;resources, i)) != NULL; i++)
++    {
++        if (res-&gt;type == CDI_PCI_IOPORTS) {
++            size = res-&gt;length ? res-&gt;length : 0x14;
++            if (cdi_ioports_alloc(res-&gt;start, size) == -1) {
++                d0printf(&quot;Cannot allocate I/O ports.\n&quot;);
++                return NULL;
++            }
++            uhci-&gt;pbase = res-&gt;start;
++            break;
++        }
++    }
++    if (!uhci-&gt;pbase) {
++        d0printf(&quot;No I/O space found.\n&quot;);
++        return NULL;
++    }
++    request_size =
++            // Maximale Paketl&#195;&#164;nge (Full Speed) ist 1023, Alignment au&#195;&#159;erdem
++            1024 +
++            // Transferdeskriptor
++            sizeof(struct uhci_td);
++
++    uhci-&gt;buffers = cdi_mempool_create(8192, request_size);
++    if (uhci-&gt;buffers == NULL) {
++        d0printf(&quot;Cannot create mempool.\n&quot;);
++        return NULL;
++    }
++
++    if (cdi_alloc_phys_mem(sizeof(*uhci-&gt;queue_heads) * 1024,
++        (void **)&amp;uhci-&gt;queue_heads, (void **)&amp;uhci-&gt;phys_queue_heads) == -1)
++    {
++        d0printf(&quot;Cannot allocate QH memory.\n&quot;);
++        return NULL;
++    }
++
++    if (cdi_alloc_phys_mem(4096, (void **)&amp;uhci-&gt;frame_list,
++        (void **)&amp;uhci-&gt;phys_frame_list) == -1)
++    {
++        d0printf(&quot;Cannot allocate frame list.\n&quot;);
++        return NULL;
++    }
++
++#ifdef CDI_PCI_DIRECT_ACCESS
++    cdi_pci_config_writew(uhci-&gt;pcidev, 4, 0x05);
++#endif
++
++    cdi_register_irq(uhci-&gt;pcidev-&gt;irq, &amp;uhci_handler, &amp;uhci-&gt;cdidev.dev);
++    uhci-&gt;root_ports = (size - 0x10) &gt;&gt; 1;
++    //Erstmal testen, wie viele wir genau haben...
++    for (i = 2; i &lt; uhci-&gt;root_ports; i++) {
++        if (!(cdi_inw(uhci-&gt;pbase + UHCI_RPORTS + i * 2) &amp; 0x0080) ||
++              (cdi_inw(uhci-&gt;pbase + UHCI_RPORTS + i * 2) == 0xFFFF))
++        {
++            uhci-&gt;root_ports = i;
++            break;
++        }
++    }
++    //Mehr als sieben Rootports, klingt lustig
++    if (uhci-&gt;root_ports &gt; 7) {
++        uhci-&gt;root_ports = 2;
++    }
++
++    d1printf(&quot;I/O 0x%04X (%i ports), IRQ %i\n&quot;, uhci-&gt;pbase, uhci-&gt;root_ports,
++        uhci-&gt;pcidev-&gt;irq);
++
++#ifdef CDI_PCI_DIRECT_ACCESS
++    legsup = cdi_pci_config_readw(uhci-&gt;pcidev, UHCI_PCI_LEGSUP);
++#endif
++    cmd = cdi_inw(uhci-&gt;pbase + UHCI_USBCMD);
++    intr = cdi_inw(uhci-&gt;pbase + UHCI_USBINTR);
++
++#ifdef CDI_PCI_DIRECT_ACCESS
++    //Wenn der HC l&#195;&#164;uft, das Configurebit gesetzt ist, der nicht runtergefahren
++    //ist oder dieses Interrupt-enable-Bit gesetzt ist, dann war wohl schon
++    //jemand dran.
++    //(oder wenn der Legacy Support aktiviert ist, das hei&#195;&#159;t, wenn in LEGSUP
++    //irgendein Bit gesetzt ist, dass nicht RO/reserviert oder ein Statusbit
++    //ist)
++    if ((legsup &amp; ~(UHCI_LEGSUP_STATUS | UHCI_LEGSUP_NO_CHG)) ||
++         (cmd &amp; USB_RUN) || !(cmd &amp; CONFIGURE) || !(cmd &amp; GLOB_SUSP_MODE) ||
++         (intr &amp; 0x0002))
++    {
++        //Na, wer hat denn da am HC rumgefummelt. B&#195;&#182;&#195;&#182;&#195;&#182;&#195;&#182;ses BIOS. Oder SMM. Oder
++        //wer auch immer.
++        //Alle LEGSUP-Statusbits l&#195;&#182;schen
++        cdi_pci_config_writew(uhci-&gt;pcidev, UHCI_PCI_LEGSUP,
++                            UHCI_LEGSUP_STATUS);
++#endif
++        //Resetten
++        cdi_outw(uhci-&gt;pbase + UHCI_USBCMD, HCRESET);
++        //Warten, bis der Reset beendet ist
++        for (i = 0; (cdi_inw(uhci-&gt;pbase + UHCI_USBCMD) &amp; HCRESET) &amp;&amp;
++             (i &lt; 50); i++)
++        {
++            cdi_sleep_ms(10);
++        }
++        if (i == 50) {
++            d1printf(&quot;Reset not finished...\n&quot;);
++        }
++
++        //Interrupts erstmal deaktivieren
++        cdi_outw(uhci-&gt;pbase + UHCI_USBINTR, 0);
++        //Den gesamten HC ebenso
++        cdi_outw(uhci-&gt;pbase + UHCI_USBCMD, 0);
++
++        //Alle Ports &quot;runterfahren&quot;
++        for (int port = 0; port &lt; uhci-&gt;root_ports; port++) {
++            cdi_outw(uhci-&gt;pbase + UHCI_RPORTS + (port * 2), 0);
++        }
++#ifdef CDI_PCI_DIRECT_ACCESS
++    }
++#endif
++
++    for (i = 0; i &lt; 1024; i++) {
++        uhci-&gt;queue_heads[i].next = 1; //Invalid
++        uhci-&gt;queue_heads[i].transfer = 1; //Invalid
++    }
++    for (i = 0; i &lt; 1024; i++) {
++        uhci-&gt;frame_list[i] = (uintptr_t)&amp;uhci-&gt;phys_queue_heads[i] | 2;
++    }
++
++    //Standardwert, jede Millisekunde ein Frame
++    cdi_outb(uhci-&gt;pbase + UHCI_SOFMOD, 0x40);
++    //Unsere Frameliste eintragen
++    cdi_outl(uhci-&gt;pbase + UHCI_FRBASEADD, uhci-&gt;phys_frame_list);
++    //Frame zur&#195;&#188;cksetzen
++    cdi_outw(uhci-&gt;pbase + UHCI_FRNUM, 0);
++#ifdef CDI_PCI_DIRECT_ACCESS
++    //Hier setzen wir das PIRQ-Bit und deaktivieren s&#195;&#164;mtlichen Legacy Support.
++    cdi_pci_config_writew(uhci-&gt;pcidev, UHCI_PCI_LEGSUP, UHCI_LEGSUP_PIRQ);
++#else
++    d0printf(&quot;Failed to deactivate USB legacy support.\n&quot;);
++#endif
++
++    //HC starten
++    cdi_outw(uhci-&gt;pbase + UHCI_USBCMD, USB_RUN | CONFIGURE | MAXP);
++    //Alle Interrupts aktivieren
++    cdi_outw(uhci-&gt;pbase + UHCI_USBINTR, 0xF);
++
++    //Connect status change l&#195;&#182;schen
++    for (i = 0; i &lt; uhci-&gt;root_ports; i++) {
++        cdi_outw(uhci-&gt;pbase + UHCI_RPORTS + i * 2, RPORT_CSC);
++    }
++
++    return &amp;uhci-&gt;cdidev.dev;
++}
++
++
++static struct cdi_usb_hcd driver = {
++    .drv = {
++        .type           = CDI_USB_HCD,
++        .name           = DRIVER_NAME,
++        .devices        = NULL,
++        .init_device    = &amp;uhci_init_device,
++        .remove_device  = NULL,
++        .init           = &amp;uhci_init_driver,
++        .destroy        = NULL,
++    },
++
++    .find_devices       = uhci_find_devices,
++    .activate_device    = uhci_activate_device,
++    .send_packets       = uhci_do_packets,
++    .add_pipe           = uhci_add_pipe,
++};
++
++CDI_DRIVER(DRIVER_NAME, driver)
+diff --git a/uhci/transfer.c b/uhci/transfer.c
+new file mode 100644
+index 0000000..33c60bf
+--- /dev/null
++++ b/uhci/transfer.c
+@@ -0,0 +1,91 @@
++/*****************************************************************************
++* Copyright (c) 2009 Max Reitz                                               *
++*                                                                            *
++* Permission is hereby granted,  free of charge,  to any  person obtaining a *
++* copy of this software and associated documentation files (the &quot;Software&quot;), *
++* to deal in the Software without restriction,  including without limitation *
++* the rights to use,  copy, modify, merge, publish,  distribute, sublicense, *
++* and/or sell copies  of the  Software,  and to permit  persons to whom  the *
++* Software is furnished to do so, subject to the following conditions:       *
++*                                                                            *
++* The above copyright notice and this permission notice shall be included in *
++* all copies or substantial portions of the Software.                        *
++*                                                                            *
++* THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++* IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF MERCHANTABILITY, *
++* FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT SHALL *
++* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++* LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++* FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++* DEALINGS IN THE SOFTWARE.                                                  *
++*****************************************************************************/
++
++#include &lt;stdio.h&gt;
++
++#include &lt;cdi/io.h&gt;
++#include &lt;cdi/lists.h&gt;
++#include &lt;cdi/misc.h&gt;
++
++#include &quot;uhci.h&quot;
++
++cdi_list_t uhci_active_transfers = NULL;
++
++void uhci_handler(struct cdi_device *cdi_hci)
++{
++    struct uhci *uhci = (struct uhci *)cdi_hci;
++    int status = cdi_inw(uhci-&gt;pbase + UHCI_USBSTS), i;
++    struct transfer *addr;
++    struct uhci_td *td;
++
++    if (!status) {
++        //Also, von hier kommt der IRQ nicht.
++        return;
++    }
++    //Ist Bit 0 gesetzt, dann ist das ein normaler IOC (Interrupt on
++    //completion), bei Bit 1 ist ein Fehler aufgetreten, aber das werden wir ja
++    //unten sehen.
++    if (status &amp; ~0x0003) {
++        d1printf(&quot;Unerwarteter IRQ 0x%04X von %s\n&quot;, status, cdi_hci-&gt;name);
++    }
++    if (status &amp; 0x10) {
++        d0printf(&quot;SCHWERWIEGENDER FEHLER - HC WIRD ANGEHALTEN\n&quot;);
++        cdi_outw(uhci-&gt;pbase + UHCI_USBCMD, MAXP | HCRESET); //FU!
++    } else {
++        for (i = 0; (addr = cdi_list_get(uhci_active_transfers, i)) != NULL;
++            i++)
++        {
++            td = addr-&gt;virt;
++            if (td-&gt;active) {
++                continue;
++            }
++            addr-&gt;error = CDI_USB_NO_ERROR;
++            cdi_list_remove(uhci_active_transfers, i--);
++            if (td-&gt;stalled_err) {
++                d0printf(&quot;ENDPOINT STALLED\n&quot;);
++                addr-&gt;error |= CDI_USB_STALLED;
++            }
++            if (td-&gt;buf_err) {
++                d1printf(&quot;Puffer&#195;&#188;berlauf oder Underrun\n&quot;);
++                addr-&gt;error |= CDI_USB_BUFFER_ERROR;
++            }
++            if (td-&gt;babble) {
++                d1printf(&quot;Da war ein Ger&#195;&#164;t wohl sehr gespr&#195;&#164;chig: Babble.\n&quot;);
++                addr-&gt;error |= CDI_USB_BABBLE;
++            }
++            if (td-&gt;nak) {
++                d1printf(&quot;NAK empfangen\n&quot;);
++                addr-&gt;error |= CDI_USB_NAK;
++            }
++            if (td-&gt;crc_time_err) {
++                d1printf(&quot;CRC-Fehler oder Timeout\n&quot;);
++                addr-&gt;error |= CDI_USB_CRC | CDI_USB_TIMEOUT;
++            }
++            if (td-&gt;bitstuff_err) {
++                d1printf(&quot;Bitstufffehler\n&quot;);
++                addr-&gt;error |= CDI_USB_BITSTUFF;
++            }
++            //TODO: free(td) - dazu w&#195;&#164;re eine CDI-Funktion n&#195;&#188;tzlich
++        }
++    }
++    cdi_outw(uhci-&gt;pbase + UHCI_USBSTS, status);
++}
+-- 
+1.6.0.2
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000132.html">[cdi-devel] [PATCH 2/5] OHCI
+</A></li>
+	<LI>Next message: <A HREF="000134.html">[cdi-devel] [PATCH 4/5] USB 1.1
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#133">[ date ]</a>
+              <a href="thread.html#133">[ thread ]</a>
+              <a href="subject.html#133">[ subject ]</a>
+              <a href="author.html#133">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

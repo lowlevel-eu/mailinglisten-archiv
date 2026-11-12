@@ -1,0 +1,372 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 1/6] kernel2: handle_exception nach arch	verschoben
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%201/6%5D%20kernel2%3A%20handle_exception%20nach%20arch%0A%09verschoben&In-Reply-To=%3C1303126945-5762-2-git-send-email-m.nemo%40gmx.net%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002165.html">
+   <LINK REL="Next"  HREF="002167.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 1/6] kernel2: handle_exception nach arch	verschoben</H1>
+    <B>Andreas Freimuth</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%201/6%5D%20kernel2%3A%20handle_exception%20nach%20arch%0A%09verschoben&In-Reply-To=%3C1303126945-5762-2-git-send-email-m.nemo%40gmx.net%3E"
+           TITLE="[tyndur-devel] [PATCH 1/6] kernel2: handle_exception nach arch	verschoben">m.nemo at gmx.net
+                  </A><BR>
+    <I>Mo Apr 18 13:42:20 CEST 2011</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002165.html">[tyndur-devel] AMD64-Port orphaned
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002167.html">[tyndur-devel] [PATCH 2/6] kernel2: Pointer auf mmc_context_t benutzen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2166">[ Datum ]</a>
+              <a href="thread.html#2166">[ Thema ]</a>
+              <a href="subject.html#2166">[ Betreff (Subject) ]</a>
+              <a href="author.html#2166">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* handle_exception ist architektur abhängig und gehört daher in
+  den arch/* abschnitt
+
+Signed-off-by: Andreas Freimuth &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">m.nemo at gmx.net</A>&gt;
+---
+ src/kernel2/include/arch/amd64/cpu.h      |    5 ++
+ src/kernel2/src/arch/amd64/im/im.c        |   72 ++++++++++++++++++++++++-
+ src/kernel2/src/arch/i386/interrupts/im.c |   84 +++++++++++++++++++++++++++++
+ src/kernel2/src/interrupts/im.c           |   84 +----------------------------
+ 4 files changed, 161 insertions(+), 84 deletions(-)
+
+diff --git a/src/kernel2/include/arch/amd64/cpu.h b/src/kernel2/include/arch/amd64/cpu.h
+index 0826c32..b5214c4 100644
+--- a/src/kernel2/include/arch/amd64/cpu.h
++++ b/src/kernel2/include/arch/amd64/cpu.h
+@@ -107,5 +107,10 @@ uint64_t cpu_read_msr(uint32_t reg);
+ mmc_context_t cpu_get_context();
+ void cpu_set_context(mmc_context_t context);
+ 
++/*
++ * Aktiviert die I/O-Bitmap fuer den Prozess
++ */
++void io_activate_bitmap(pm_process_t* task);
++
+ #endif //ifndef _CPU_H_
+ 
+diff --git a/src/kernel2/src/arch/amd64/im/im.c b/src/kernel2/src/arch/amd64/im/im.c
+index 59008f9..0a58beb 100644
+--- a/src/kernel2/src/arch/amd64/im/im.c
++++ b/src/kernel2/src/arch/amd64/im/im.c
+@@ -40,6 +40,8 @@
+ #include &quot;im.h&quot;
+ #include &quot;apic.h&quot;
+ #include &quot;pic.h&quot;
++#include &quot;debug.h&quot;
++#include &quot;syscall.h&quot;
+ 
+ #define IDT_GATE_COUNT 256
+ #define IDT_GATE_TYPE_INT 0xE
+@@ -77,6 +79,7 @@ typedef struct {
+ idt_gate_t idt[IDT_GATE_COUNT];
+ bool use_apic;
+ 
++extern void increase_user_stack_size(pm_thread_t* task_ptr, int pages);
+ static void idt_set_gate(size_t interrupt, vaddr_t handler, uint8_t privilege_level);
+ 
+ // Die ASM-Stubs
+@@ -659,4 +662,71 @@ void im_end_of_interrupt(uint8_t interrupt)
+     }
+ }
+ 
+-
++
++/**
++ * Verarbeitet eine CPU-Exception
++ */
++void handle_exception(interrupt_stack_frame_t* isf, uint8_t int_num)
++{
++    uintptr_t cr2;
++    asm(&quot;mov %%cr2, %0&quot; : &quot;=r&quot; (cr2));
++
++//    kprintf(&quot;user_stack_bottom = %x\n&quot;,
++//        current_thread-&gt;user_stack_bottom);
++
++    if (int_num == 0x0d) {
++        // Prüfen, ob der #GP möglicherweise durch eine nicht geladene
++        // I/O-Bitmap verurscht worden ist
++        if (cpu_get_current()-&gt;tss.io_bit_map_offset ==
++                TSS_IO_BITMAP_NOT_LOADED)
++        {
++            io_activate_bitmap(current_process);
++            return;
++        }
++    }
++
++    if (int_num == 0x0e) {
++        // Überprüfen ob der Pagefault durch einen Stackoverflow
++        // hervorgerufen wurde. Falls ja: Stack vergrößern und weitermachen
++        if ((cr2 &lt;= isf-&gt;rsp + 0x800) &amp;&amp; (cr2 &gt;= isf-&gt;rsp - 0x20)
++            &amp;&amp; (current_thread != NULL)
++            &amp;&amp; ((void*) cr2 &gt;= current_thread-&gt;user_stack_bottom - 0x1000000)
++            &amp;&amp; ((void*) cr2 &lt;  current_thread-&gt;user_stack_bottom))
++        {
++            increase_user_stack_size(current_thread, 1);
++            return;
++        }
++    }
++
++    // Exception
++    kprintf(&quot;\033[1;41m&quot;);
++    kprintf(&quot;[CPU%d] Exception %d; Error Code = 0x%lx\n&quot;,
++        cpu_get_current()-&gt;id, int_num, isf-&gt;error_code);
++
++    kprintf(&quot;PID %d: %s\n&quot;,
++        current_process-&gt;pid, current_process-&gt;cmdline);
++    cpu_dump(isf);
++    kprintf(&quot;\033[0;40m&quot;);
++
++    // Ein Stacktrace dürfen wir nur ausgeben, wenn kein Pagefault wegen
++    // dem Stack aufgetreten ist!
++    if (!((cr2 &lt; isf-&gt;rsp + 800) &amp;&amp; (cr2 &gt;= isf-&gt;rsp -0x20))) {
++        stack_backtrace(isf-&gt;rbp, isf-&gt;rip);
++    }
++
++    // Wenn die Exception im Kernel passiert ist, geben wir auf
++    if ((isf-&gt;cs &amp; 0x03) == 0) {
++        // Hier werden alle Prozessoren zum halten gebracht
++        if (cpu_count &gt; 1) {
++            apic_ipi_broadcast(0xF0, true);
++        }
++
++        // Aber da das ohne APIC nicht so funktioniert, wird das noch
++        // abgefangen.
++        asm(&quot;cli; hlt&quot;);
++    }
++
++    // Ansonsten wird nur der aktuelle Task beendet
++    syscall_pm_exit_process();
++}
++
+diff --git a/src/kernel2/src/arch/i386/interrupts/im.c b/src/kernel2/src/arch/i386/interrupts/im.c
+index 08642fa..413ef15 100644
+--- a/src/kernel2/src/arch/i386/interrupts/im.c
++++ b/src/kernel2/src/arch/i386/interrupts/im.c
+@@ -41,6 +41,8 @@
+ #include &quot;im.h&quot;
+ #include &quot;apic.h&quot;
+ #include &quot;pic.h&quot;
++#include &quot;debug.h&quot;
++#include &quot;syscall.h&quot;
+ 
+ #define IDT_GATE_COUNT 256
+ #define IDT_GATE_TYPE_TASK 0x5
+@@ -727,3 +729,85 @@ void im_end_of_interrupt(uint8_t interrupt)
+     }
+ }
+ 
++extern void increase_user_stack_size(pm_thread_t* task_ptr, int pages);
++extern int vm86_exception(interrupt_stack_frame_t* isf);
++
++/**
++ * Verarbeitet eine CPU-Exception
++ */
++void handle_exception(interrupt_stack_frame_t* isf, uint8_t int_num)
++{
++    uintptr_t cr2;
++    asm(&quot;mov %%cr2, %0&quot; : &quot;=r&quot; (cr2));
++
++//    kprintf(&quot;user_stack_bottom = %x\n&quot;,
++//        current_thread-&gt;user_stack_bottom);
++
++    // Prüfen, ob ein VM86-Task die Exception ausgelöst hat
++    // Falls ja lassen wir sie vom VM86-Code behandeln, wenn er kann
++    if (current_thread-&gt;vm86) {
++        if (vm86_exception(isf)) {
++            return;
++        }
++    }
++
++    if (int_num == 0x0d) {
++        // Prüfen, ob der #GP möglicherweise durch eine nicht geladene
++        // I/O-Bitmap verurscht worden ist
++        if (cpu_get_current()-&gt;tss.io_bit_map_offset ==
++                TSS_IO_BITMAP_NOT_LOADED)
++        {
++            io_activate_bitmap(current_process);
++            return;
++        }
++    }
++
++    if (int_num == 0x0e) {
++        // Überprüfen ob der Pagefault durch einen Stackoverflow
++        // hervorgerufen wurde. Falls ja: Stack vergrößern und weitermachen
++        if ((cr2 &lt;= isf-&gt;esp + 0x800) &amp;&amp; (cr2 &gt;= isf-&gt;esp - 0x20)
++            &amp;&amp; (current_thread != NULL)
++            &amp;&amp; ((void*) cr2 &gt;= current_thread-&gt;user_stack_bottom - 0x1000000)
++            &amp;&amp; ((void*) cr2 &lt;  current_thread-&gt;user_stack_bottom))
++        {
++            increase_user_stack_size(current_thread, 1);
++            return;
++        }
++    }
++
++    // Exception
++    kprintf(&quot;\033[1;41m&quot;);
++    kprintf(&quot;[CPU%d] Exception %d; Error Code = 0x%x\n&quot;,
++        cpu_get_current()-&gt;id, int_num, isf-&gt;error_code);
++
++    kprintf(&quot;PID %d: %s\n&quot;,
++        current_process-&gt;pid, current_process-&gt;cmdline);
++    cpu_dump(isf);
++    kprintf(&quot;\033[0;40m&quot;);
++
++    // Ein Stacktrace dürfen wir nur ausgeben, wenn kein Pagefault wegen
++    // dem Stack aufgetreten ist!
++    if (!((cr2 &lt; isf-&gt;esp + 800) &amp;&amp; (cr2 &gt;= isf-&gt;esp -0x20))) {
++        // Und für VM86 müssten wir wenigstens noch das Segment
++        // berücksichtigen, aber eigentlich brauchen wir ihn da gar nicht
++        if ((isf-&gt;eflags &amp; 0x20000) == 0) {
++            stack_backtrace(isf-&gt;ebp, isf-&gt;eip);
++        }
++    }
++
++    // Wenn die Exception im Kernel passiert ist, geben wir auf
++    if ((isf-&gt;cs &amp; 0x03) == 0) {
++        // Hier werden alle Prozessoren zum halten gebracht
++        if (cpu_count &gt; 1) {
++            apic_ipi_broadcast(0xF0, true);
++        }
++
++        // Aber da das ohne APIC nicht so funktioniert, wird das noch
++        // abgefangen.
++        asm(&quot;cli; hlt&quot;);
++    }
++
++    // Ansonsten wird nur der aktuelle Task beendet
++    syscall_pm_exit_process();
++}
++
+diff --git a/src/kernel2/src/interrupts/im.c b/src/kernel2/src/interrupts/im.c
+index 97862ac..9879f98 100644
+--- a/src/kernel2/src/interrupts/im.c
++++ b/src/kernel2/src/interrupts/im.c
+@@ -71,89 +71,7 @@ void im_send_interrupts(void);
+ bool fastrpc_irq(pm_process_t* callee, size_t metadata_size, void* metadata,
+     size_t data_size, void* data, uint8_t irq);
+ 
+-extern void increase_user_stack_size(pm_thread_t* task_ptr, int pages);
+-extern int vm86_exception(interrupt_stack_frame_t* isf);
+-
+-/**
+- * Verarbeitet eine CPU-Exception
+- */
+-static void handle_exception(interrupt_stack_frame_t* isf, uint8_t int_num)
+-{
+-    uintptr_t cr2;
+-    asm(&quot;mov %%cr2, %0&quot; : &quot;=r&quot; (cr2));
+-
+-//    kprintf(&quot;user_stack_bottom = %x\n&quot;,
+-//        current_thread-&gt;user_stack_bottom);
+-
+-#if CONFIG_ARCH == ARCH_I386
+-    // Pruefen, ob ein VM86-Task die Exception ausgeloest hat
+-    // Falls ja lassen wir sie vom VM86-Code behandeln, wenn er kann
+-    if (current_thread-&gt;vm86) {
+-        if (vm86_exception(isf)) {
+-            return;
+-        }
+-    }
+-#endif
+-
+-    if (int_num == 0x0d) {
+-        // Pruefen, ob der #GP moeglicherweise durch eine nicht geladene
+-        // I/O-Bitmap verurscht worden ist
+-        if (cpu_get_current()-&gt;tss.io_bit_map_offset ==
+-                TSS_IO_BITMAP_NOT_LOADED)
+-        {
+-            io_activate_bitmap(current_process);
+-            return;
+-        }
+-    }
+-
+-    if (int_num == 0x0e) {
+-        // Ueberprüfen ob der Pagefault durch einen Stackoverflow
+-        // hervorgerufen wurde. Falls ja: Stack vergroessern und weitermachen
+-        if ((cr2 &lt;= isf-&gt;esp + 0x800) &amp;&amp; (cr2 &gt;= isf-&gt;esp - 0x20)
+-            &amp;&amp; (current_thread != NULL)
+-            &amp;&amp; ((void*) cr2 &gt;= current_thread-&gt;user_stack_bottom - 0x1000000)
+-            &amp;&amp; ((void*) cr2 &lt;  current_thread-&gt;user_stack_bottom))
+-        {
+-            increase_user_stack_size(current_thread, 1);
+-            return;
+-        }
+-    }
+-
+-    // Exception
+-    kprintf(&quot;\033[1;41m&quot;);
+-    kprintf(&quot;[CPU%d] Exception %d; Error Code = 0x%x\n&quot;,
+-        cpu_get_current()-&gt;id, int_num, isf-&gt;error_code);
+-
+-    kprintf(&quot;PID %d: %s\n&quot;,
+-        current_process-&gt;pid, current_process-&gt;cmdline);
+-    cpu_dump(isf);
+-    kprintf(&quot;\033[0;40m&quot;);
+-
+-    // Ein Stacktrace duerfen wir nur ausgeben, wenn kein Pagefault wegen
+-    // dem Stack aufgetreten ist!
+-    if (!((cr2 &lt; isf-&gt;esp + 800) &amp;&amp; (cr2 &gt;= isf-&gt;esp -0x20))) {
+-        // Und fuer VM86 muessten wir wenigstens noch das Segment
+-        // beruecksichtigen, aber eigentlich brauchen wir ihn da gar nicht
+-        if ((isf-&gt;eflags &amp; 0x20000) == 0) {
+-            stack_backtrace(isf-&gt;ebp, isf-&gt;eip);
+-        }
+-    }
+-
+-    // Wenn die Exception im Kernel passiert ist, geben wir auf
+-    if ((isf-&gt;cs &amp; 0x03) == 0) {
+-        // Hier werden alle Prozessoren zum halten gebracht
+-        if (cpu_count &gt; 1) {
+-            apic_ipi_broadcast(0xF0, true);
+-        }
+-
+-        // Aber da das ohne APIC nicht so funktioniert, wird das noch
+-        // abgefangen.
+-        asm(&quot;cli; hlt&quot;);
+-    }
+-
+-    // Ansonsten wird nur der aktuelle Task beendet
+-    syscall_pm_exit_process();
+-}
++void handle_exception(interrupt_stack_frame_t* isf, uint8_t int_num);
+ 
+ /**
+  * Behandelt alle Interrupts. Wird aus den Interrupt-Stubs aufgerufen.
+-- 
+1.7.4.4
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002165.html">[tyndur-devel] AMD64-Port orphaned
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002167.html">[tyndur-devel] [PATCH 2/6] kernel2: Pointer auf mmc_context_t benutzen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2166">[ Datum ]</a>
+              <a href="thread.html#2166">[ Thema ]</a>
+              <a href="subject.html#2166">[ Betreff (Subject)]</a>
+              <a href="author.html#2166">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

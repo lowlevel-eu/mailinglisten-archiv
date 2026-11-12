@@ -1,0 +1,255 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] libc: POSIX: Mehr arpa/inet.h
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20libc%3A%20POSIX%3A%20Mehr%20arpa/inet.h&In-Reply-To=%3C1250275414-25054-1-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001283.html">
+   <LINK REL="Next"  HREF="001294.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] libc: POSIX: Mehr arpa/inet.h</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20libc%3A%20POSIX%3A%20Mehr%20arpa/inet.h&In-Reply-To=%3C1250275414-25054-1-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH] libc: POSIX: Mehr arpa/inet.h">kevin at tyndur.org
+                  </A><BR>
+    <I>Fr Aug 14 20:43:34 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001283.html">[tyndur-devel] [PATCH] strftime()
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001294.html">[tyndur-devel] [PATCH] libc: POSIX: Mehr arpa/inet.h
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1281">[ Datum ]</a>
+              <a href="thread.html#1281">[ Thema ]</a>
+              <a href="subject.html#1281">[ Betreff (Subject) ]</a>
+              <a href="author.html#1281">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ libc: POSIX: inet_ntop() und inet_pton()
+! libc: POSIX: inet_ntoa() und inet_aton() gehoeren nach arpa/inet.h und
+  nicht nach netinet/in.h. Da letzteres ersteres includet, besteht auch
+  keine Gefahr, dass das Verschieben lbuilds ungluecklich macht.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/include/arpa/inet.h  |   44 +++++++++++++++++++++++++++
+ src/modules/include/netinet/in.h |   21 ++++---------
+ src/modules/lib/posix/net.c      |   60 ++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 111 insertions(+), 14 deletions(-)
+
+diff --git a/src/modules/include/arpa/inet.h b/src/modules/include/arpa/inet.h
+index 23610a9..8224bf0 100644
+--- a/src/modules/include/arpa/inet.h
++++ b/src/modules/include/arpa/inet.h
+@@ -29,10 +29,54 @@
+ #ifndef _ARPA_INET_H_
+ #define _ARPA_INET_H_
+ 
++#include &lt;netinet/in.h&gt;
++
+ unsigned long int htonl(unsigned long int hostlong);
+ unsigned short int htons(unsigned short int hostshort);
+ unsigned long int ntohl(unsigned long int netlong);
+ unsigned short int ntohs(unsigned short int netshort);
+ 
++/**
++ * Wandelt einen String, der eine IP-Adresse der Form a.b.c.d enthaelt in einen
++ * 32-Bit-Wert um.
++ *
++ * @return 0 im Fehlerfall; ungleich 0 bei Erfolg
++ */
++int inet_aton(const char* ip_string, struct in_addr* ip);
++
++/**
++ * Wandelt eine 32-Bit-Adresse in einen String um. Der String ist in einem
++ * statischen Puffer und wird beim naechsten Aufruf ueberschrieben.
++ */
++char* inet_ntoa(struct in_addr ip);
++
++/**
++ * Wandelt einen String, der eine Adresse (IPv4 or IPv6) enthaelt in ihre
++ * binaere Darstellung um.
++ *
++ * @param family Adressfamilie, fuer die umgewandelt werden soll (z.B. AF_INET)
++ * @param src Adresse als String
++ * @param dst Ziel fuer die binaere Darstellung (z.B. struct in_addr*)
++ *
++ * @return 1 bei Erfolg, 0 wenn die Adresse ungueltig ist. Bei sonstigen
++ * Fehlern -1 und errno wird gesetzt.
++ */
++int inet_pton(int family, const char* src, void* dst);
++
++/**
++ * Wandelt eine Adresse (IPv4 oder IPv6) in einen String um. Der Ausgabepuffer
++ * wird vom Aufrufer uebergeben.
++ *
++ * @param family Adressfamilie, zu der src gehoert (z.B. AF_INET)
++ * @param src Adressstruktur, die umgewandelt werden soll (z.B. struct
++ * in_addr*)
++ * @param dst Ausgabepuffer
++ * @param size Laenge des Ausgabepuffers
++ *
++ * @return Pointer auf den Ausgabepuffer; im Fehlerfall NULL und errno wird
++ * gesetzt
++ */
++const char *inet_ntop(int family, const void* src, char* dst, socklen_t size);
++
+ #endif
+ 
+diff --git a/src/modules/include/netinet/in.h b/src/modules/include/netinet/in.h
+index a620b88..8e95fce 100644
+--- a/src/modules/include/netinet/in.h
++++ b/src/modules/include/netinet/in.h
+@@ -31,7 +31,9 @@
+ 
+ #include &lt;sys/socket.h&gt;
+ #include &lt;stdint.h&gt;
+-#include &lt;arpa/inet.h&gt;
++
++/// Laenge einer IP-Adresse als String
++#define INET_ADDRSTRLEN 16
+ 
+ typedef uint32_t in_addr_t;
+ struct in_addr {
+@@ -45,19 +47,10 @@ struct sockaddr_in {
+     uint32_t        sin_port;
+ };
+ 
+-/**
+- * Wandelt einen String, der eine IP-Adresse der Form a.b.c.d enthaelt in einen
+- * 32-Bit-Wert um.
+- *
+- * @return 0 im Fehlerfall; ungleich 0 bei Erfolg
+- */
+-int inet_aton(const char* ip_string, struct in_addr* ip);
+-
+-/**
+- * Wandelt eine 32-Bit-Adresse in einen String um. Der String ist in einem
+- * statischen Puffer und wird beim naechsten Aufruf ueberschrieben.
+- */
+-char* inet_ntoa(struct in_addr ip);
++// arpa/inet.h braucht die Definitionen von oben. Eigentlich muesste das hier
++// gar nicht eingebunden werden, aber manche Programme erwarten Definitionen
++// von dort hier.
++#include &lt;arpa/inet.h&gt;
+ 
+ #endif
+ 
+diff --git a/src/modules/lib/posix/net.c b/src/modules/lib/posix/net.c
+index f747da6..3a89ef4 100644
+--- a/src/modules/lib/posix/net.c
++++ b/src/modules/lib/posix/net.c
+@@ -33,6 +33,7 @@
+ #include &lt;stdio.h&gt;
+ #include &lt;stdlib.h&gt;
+ #include &lt;string.h&gt;
++#include &lt;errno.h&gt;
+ 
+ int h_errno;
+ 
+@@ -118,6 +119,65 @@ char* inet_ntoa(struct in_addr ip)
+ 
+     return buf;
+ }
++/**
++ * Wandelt einen String, der eine Adresse (IPv4 or IPv6) enthaelt in ihre
++ * binaere Darstellung um.
++ *
++ * @param family Adressfamilie, fuer die umgewandelt werden soll (z.B. AF_INET)
++ * @param src Adresse als String
++ * @param dst Ziel fuer die binaere Darstellung (z.B. struct in_addr*)
++ *
++ * @return 1 bei Erfolg, 0 wenn die Adresse ungueltig ist. Bei sonstigen
++ * Fehlern -1 und errno wird gesetzt.
++ */
++int inet_pton(int family, const char* src, void* dst)
++{
++    struct in_addr* addr = dst;
++
++    if (family != AF_INET) {
++        errno = EAFNOSUPPORT;
++        return -1;
++    }
++
++    addr-&gt;s_addr = string_to_ip((char*) src);
++    return (addr-&gt;s_addr != 0);
++}
++
++/**
++ * Wandelt eine Adresse (IPv4 oder IPv6) in einen String um. Der Ausgabepuffer
++ * wird vom Aufrufer uebergeben.
++ *
++ * @param family Adressfamilie, zu der src gehoert (z.B. AF_INET)
++ * @param src Adressstruktur, die umgewandelt werden soll (z.B. struct
++ * in_addr*)
++ * @param dst Ausgabepuffer
++ * @param size Laenge des Ausgabepuffers
++ *
++ * @return Pointer auf den Ausgabepuffer; im Fehlerfall NULL und errno wird
++ * gesetzt
++ */
++const char *inet_ntop(int family, const void* src, char* dst, socklen_t size)
++{
++    const struct in_addr* addr = src;
++    char* res;
++
++    if (family != AF_INET) {
++        errno = EAFNOSUPPORT;
++        return NULL;
++    }
++
++    res = ip_to_string(addr-&gt;s_addr);
++    if (size &lt; strlen(res) + 1) {
++        free(res);
++        errno = ENOSPC;
++        return NULL;
++    }
++
++    strncpy(dst, res, size);
++    free(res);
++
++    return dst;
++}
+ 
+ struct hostent* gethostbyname(const char* name)
+ {
+-- 
+1.6.0.2
+
+</PRE>
+
+
+
+
+
+
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001283.html">[tyndur-devel] [PATCH] strftime()
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001294.html">[tyndur-devel] [PATCH] libc: POSIX: Mehr arpa/inet.h
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1281">[ Datum ]</a>
+              <a href="thread.html#1281">[ Thema ]</a>
+              <a href="subject.html#1281">[ Betreff (Subject)]</a>
+              <a href="author.html#1281">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

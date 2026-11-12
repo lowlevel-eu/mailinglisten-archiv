@@ -1,0 +1,301 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH v2] IRQ-Sharing
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%5D%20IRQ-Sharing&In-Reply-To=%3C1257357551-23399-1-git-send-email-max%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001463.html">
+   <LINK REL="Next"  HREF="001467.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH v2] IRQ-Sharing</H1>
+    <B>max at tyndur.org</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%5D%20IRQ-Sharing&In-Reply-To=%3C1257357551-23399-1-git-send-email-max%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH v2] IRQ-Sharing">max at tyndur.org
+                  </A><BR>
+    <I>Mi Nov  4 18:59:11 CET 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001463.html">[tyndur-devel] [PATCH v2] USB-Image
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001467.html">[tyndur-devel] [PATCH v2] IRQ-Sharing
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1464">[ Datum ]</a>
+              <a href="thread.html#1464">[ Thema ]</a>
+              <a href="subject.html#1464">[ Betreff (Subject) ]</a>
+              <a href="author.html#1464">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>From: Max Reitz &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">max at tyndur.org</A>&gt;
+
+* Mit dem Makro MAX_INTERRUPTS in intr.c kann man jetzt die
+  maximale Anzahl von Handlern pro IRQ definieren
+
+Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">max at tyndur.org</A>&gt;
+---
+ src/kernel/src/intr.c |   99 ++++++++++++++++++++++++++++++++-----------------
+ 1 files changed, 65 insertions(+), 34 deletions(-)
+
+diff --git a/src/kernel/src/intr.c b/src/kernel/src/intr.c
+index 9fa3ff3..2a56e64 100644
+--- a/src/kernel/src/intr.c
++++ b/src/kernel/src/intr.c
+@@ -55,6 +55,8 @@
+ #include &quot;vm86.h&quot;
+ #include &quot;tss.h&quot;
+ 
++#define MAX_INTERRUPTS 4
++
+ typedef struct {
+   word lsb_handler;
+   word selector;
+@@ -65,8 +67,8 @@ typedef struct {
+ 
+ gate_descriptor idt[IDT_SIZE];
+ 
+-pfIrqHandler irq_handlers[16] = { 0 }; // für jeden IRQ genau ein Handler. Wenn es keinen Handler gibt, ist der entsprechende Wert 0.
+-struct task * intr_handling_task[256] = { NULL };
++pfIrqHandler irq_handlers[16] = { 0 }; // fï¿½r jeden IRQ genau ein Handler. Wenn es keinen Handler gibt, ist der entsprechende Wert 0.
++static struct task * intr_handling_task[256][MAX_INTERRUPTS] = { { NULL } };
+ 
+ void handle_irq(int irq, dword* esp);
+ 
+@@ -116,17 +118,17 @@ extern void stack_backtrace_ebp(dword start_ebp, dword start_eip);
+ void handle_exception(dword* esp);
+ 
+ void send_irqs(dword* esp);
+-dword irqs_to_send[16];
++static dword irqs_to_send[16][MAX_INTERRUPTS];
+ extern dword kernel_pd_id;
+ 
+ /*
+- * gibt einen neuen Wert für esp zurck
++ * gibt einen neuen Wert fï¿½r esp zurck
+  */
+ dword handle_int(dword esp)
+ {
+     struct int_stack_frame * isf = (struct int_stack_frame *)esp;
+     struct task* old_task = current_task;
+-    
++
+ //	kprintf(&quot;\nTask switch!  esp alter Task:0x%08x&quot;, isf-&gt;esp);
+ 	
+ 	if(isf-&gt;interrupt_number &lt;= 31)
+@@ -146,7 +148,7 @@ dword handle_int(dword esp)
+     }
+     else
+     {
+-        // TODO: Abstürzen, denn diese Interrupts dürften nicht aufgerufen werden
++        // TODO: Abstï¿½rzen, denn diese Interrupts dï¿½rften nicht aufgerufen werden
+     }
+ 
+     send_irqs(&amp;esp);
+@@ -158,7 +160,7 @@ dword handle_int(dword esp)
+         //tss.esp = current_task-&gt;kernel_stack;
+         isf = (struct int_stack_frame *)esp;
+         //kprintf(&quot;  esp neuer Task:0x%08x&quot;, isf-&gt;esp);
+-        
++
+         tss.esp0 = current_task-&gt;kernel_stack;
+         // sicherstellen, dass der Kernel Adressraum im Page Directory des Tasks korrekt gemappt ist
+         //kprintf(&quot;PID=%d  cr3=0x%08x  kernel_pd=0x%08x eip=0x%08x\n&quot;, 
+@@ -186,8 +188,8 @@ dword handle_int(dword esp)
+ 
+ /**
+  * Legt eine IDT an und installiert die Exception Handler. Nicht genutzte
+- * Einträge werden mit Verweisen auf den Null-Handler initalisiert.
+- * Anschließend wird die IDT geladen.
++ * Eintrï¿½ge werden mit Verweisen auf den Null-Handler initalisiert.
++ * Anschlieï¿½end wird die IDT geladen.
+  */
+ void init_idt() {
+   int i;
+@@ -265,9 +267,9 @@ void init_idt() {
+   outb_wait(PIC1_DATA, 0x00);
+   outb_wait(PIC2_DATA, 0x00);
+ 
+-  // Handler für den System Call installieren
++  // Handler fï¿½r den System Call installieren
+   // TODO: SOllte eigentlich ein IDT_TRAP_GATE sein, aber irgendwo ist da 
+-  // noch ein Problem, das dann für einen Page Fault sorgt, wenn ich zu
++  // noch ein Problem, das dann fï¿½r einen Page Fault sorgt, wenn ich zu
+   // schnell tippe...
+   set_intr(SYSCALL_INTERRUPT, 0x08, syscall_stub, 3, IDT_INTERRUPT_GATE);
+   //set_intr(SYSCALL_INTERRUPT, 0x08, syscall_stub, 3, IDT_TRAP_GATE);
+@@ -348,10 +350,12 @@ int release_irq(int irq)
+ 
+ void handle_irq(int irq, dword* esp)
+ {
++    int i;
++
+     //if (irq &gt; 0) {
+     //    kprintf(&quot;Interrupt 0x%x\n&quot;, irq + IRQ_BASE);
+     //}
+-        
++
+     /*if (irq &gt; 0)
+     {
+         byte pic = (irq &lt; 8 ? PIC1 : PIC2);
+@@ -360,8 +364,8 @@ void handle_irq(int irq, dword* esp)
+             kprintf(&quot;Spurious IRQ %d\n&quot;, irq);
+         }
+     }*/
+-        
+-    // IRQs 7 und 15 können unabsichtlich aufgerufen werden
++
++    // IRQs 7 und 15 kï¿½nnen unabsichtlich aufgerufen werden
+     // In diesem Fall beim PIC nachschauen, ob wirklich was zu verarbeiten 
+     // ist, ansonsten gleich wieder abbrechen.
+     if ((irq == 7) || (irq == 15))
+@@ -377,12 +381,22 @@ void handle_irq(int irq, dword* esp)
+             goto send_eoi;
+         }
+     }
+-            
+-    if (intr_handling_task[irq + IRQ_BASE] != NULL)  
++
++    for (i = 0; i &lt; MAX_INTERRUPTS; i++) {
++        if (intr_handling_task[irq + IRQ_BASE][i] != NULL) {
++            i = -1;
++            break;
++        }
++    }
++    if (i == -1)
+     {
+         //kprintf(&quot;IRQ-Verarbeitung durch ein Modul\n&quot;);
+-        irqs_to_send[irq]++;
+-    
++        for (i = 0; i &lt; MAX_INTERRUPTS; i++) {
++            if (intr_handling_task[irq + IRQ_BASE][i] != NULL) {
++                irqs_to_send[irq][i]++;
++            }
++        }
++
+         //printf(&quot;disable IRQ %d\n&quot;, irq);
+         disable_irq(irq);
+     } 
+@@ -401,10 +415,20 @@ send_eoi:
+ 
+ void set_intr_handling_task(byte intr, struct task * task)
+ {
++    int i;
++
+     //kprintf(&quot;Interrupt %d wird jetzt von Task %d behandelt\n&quot;, intr, task-&gt;pid);
+-    intr_handling_task[intr] = task;
++    for (i = 0; i &lt; MAX_INTERRUPTS; i++) {
++        if ((intr_handling_task[intr][i] == NULL) ||
++            (i == MAX_INTERRUPTS - 1))
++        {
++            intr_handling_task[intr][i] = task;
++            irqs_to_send[intr - IRQ_BASE][i] = 0;
++            break;
++        }
++    }
+ }
+-		
++
+ void handle_exception(dword* esp)
+ {
+     struct int_stack_frame * isf = *((struct int_stack_frame **)esp);
+@@ -426,7 +450,7 @@ void handle_exception(dword* esp)
+         case 14:
+             cr2 = read_cr2();
+             diff = (cr2 &gt;&gt; PAGE_SHIFT) - (isf-&gt;esp &gt;&gt; PAGE_SHIFT);
+-            // Ueberprüfen ob der Pagefault durch einen Stackoverflow
++            // Ueberprï¿½fen ob der Pagefault durch einen Stackoverflow
+             // hervorgerufen wurde
+             if ((diff &gt;= -2) &amp;&amp; (diff &lt;= 2)
+                 &amp;&amp; (current_task != NULL)
+@@ -439,8 +463,8 @@ void handle_exception(dword* esp)
+             kprintf(&quot;\033[1;37m\033[41mPage Fault: 0x%x\033[0;37m\033[40m&quot;, cr2);
+             break;
+     }
+-    
+-    // Prüfen, ob ein VM86-Task die Exception ausgelöst hat, und evtl reagieren
++
++    // Prï¿½fen, ob ein VM86-Task die Exception ausgelï¿½st hat, und evtl reagieren
+     if (isf-&gt;eflags &amp; 0x20000) {
+         if (vm86_exception(esp)) {
+             return;
+@@ -472,7 +496,7 @@ void handle_exception(dword* esp)
+             kprintf(&quot;\n&quot;);
+         }
+         #endif 
+-        
++
+         if(debug_test_flag(DEBUG_FLAG_STACK_BACKTRACE))
+         {
+             stack_backtrace_ebp(isf-&gt;ebp, isf-&gt;eip);
+@@ -508,24 +532,31 @@ void handle_exception(dword* esp)
+ 
+         abort_task(&quot;Unbehandelte Ausnahme.&quot;);
+     }
+-}        
++}
+ 
+ void send_irqs(dword* esp) 
+ {
+     dword irq;
++    int task;
++
+     for (irq = 0; irq &lt; 16; irq++)
+     {
+         dword rpc_data = irq + IRQ_BASE;
+-        while (irqs_to_send[irq] &gt; 0) {
+-            schedule_to_task(intr_handling_task[irq + IRQ_BASE], esp);
+-            if (!fastrpc_irq(intr_handling_task[irq + IRQ_BASE], 0, 0, 4, 
+-                (char*) &amp;rpc_data, irq)) 
+-            {
+-                //kprintf(&quot;SYSCALL_RPC = FALSE&quot;);
+-                break;
++        for (task = 0; task &lt; MAX_INTERRUPTS; task++) {
++            if (intr_handling_task[irq + IRQ_BASE][task] == NULL) {
++                continue;
++            }
++            while (irqs_to_send[irq][task] &gt; 0) {
++                schedule_to_task(intr_handling_task[irq + IRQ_BASE][task], esp);
++                if (!fastrpc_irq(intr_handling_task[irq + IRQ_BASE][task], 0, 0, 4, 
++                    (char*) &amp;rpc_data, irq)) 
++                {
++                    //kprintf(&quot;SYSCALL_RPC = FALSE&quot;);
++                    break;
++                }
++                //kprintf(&quot;IRQ-Handler aufgerufen&quot;);
++                irqs_to_send[irq][task]--;
+             }
+-            //kprintf(&quot;IRQ-Handler aufgerufen&quot;);
+-            irqs_to_send[irq]--;
+         }
+     }
+ }
+-- 
+1.6.5
+
+</PRE>
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001463.html">[tyndur-devel] [PATCH v2] USB-Image
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001467.html">[tyndur-devel] [PATCH v2] IRQ-Sharing
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1464">[ Datum ]</a>
+              <a href="thread.html#1464">[ Thema ]</a>
+              <a href="subject.html#1464">[ Betreff (Subject)]</a>
+              <a href="author.html#1464">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

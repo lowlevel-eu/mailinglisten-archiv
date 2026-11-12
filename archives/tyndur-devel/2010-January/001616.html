@@ -1,0 +1,235 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH v2 1/7] kernel2: SHM-Funktionen bekommen	Prozess als Parameter
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%201/7%5D%20kernel2%3A%20SHM-Funktionen%20bekommen%0A%09Prozess%20als%20Parameter&In-Reply-To=%3C1262534601-14194-2-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001615.html">
+   <LINK REL="Next"  HREF="001624.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH v2 1/7] kernel2: SHM-Funktionen bekommen	Prozess als Parameter</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%201/7%5D%20kernel2%3A%20SHM-Funktionen%20bekommen%0A%09Prozess%20als%20Parameter&In-Reply-To=%3C1262534601-14194-2-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH v2 1/7] kernel2: SHM-Funktionen bekommen	Prozess als Parameter">kevin at tyndur.org
+                  </A><BR>
+    <I>So Jan  3 17:03:15 CET 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001615.html">[tyndur-devel] [PATCH v2 0/7] kernel2: Speicher beim Prozessende	freigeben (und andere Fixes)
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001624.html">[tyndur-devel] [PATCH v2 1/7] kernel2: SHM-Funktionen bekommen Prozess als Parameter
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1616">[ Datum ]</a>
+              <a href="thread.html#1616">[ Thema ]</a>
+              <a href="subject.html#1616">[ Betreff (Subject) ]</a>
+              <a href="author.html#1616">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* kernel2: Bis jetzt haben die SHM-Funktionen immer angenommen, dass
+  fuer den aktuellen Prozess geoeffnet/geschlossen wird. Den Prozess
+  wird jetzt als Parameter uebergeben.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/kernel2/include/mm.h        |    4 ++--
+ src/kernel2/include/tasks.h     |    2 +-
+ src/kernel2/src/arch/i386/gdt.c |    1 +
+ src/kernel2/src/mm/shm.c        |   13 +++++++------
+ src/kernel2/src/syscalls/pm.c   |    1 +
+ src/kernel2/src/syscalls/rpc.c  |    1 +
+ src/kernel2/src/syscalls/shm.c  |    4 ++--
+ src/kernel2/src/tasks/pm.c      |    1 +
+ 8 files changed, 16 insertions(+), 11 deletions(-)
+
+diff --git a/src/kernel2/include/mm.h b/src/kernel2/include/mm.h
+index 0144aca..617713c 100644
+--- a/src/kernel2/include/mm.h
++++ b/src/kernel2/include/mm.h
+@@ -140,10 +140,10 @@ void shm_init(void);
+ uint32_t shm_create(size_t size);
+ 
+ /// Bestehenden Shared Memory oeffnen.
+-void* shm_attach(uint32_t id);
++void* shm_attach(pm_process_t* process, uint32_t id);
+ 
+ /// Shared Memory schliessen.
+-void shm_detach(uint32_t id);
++void shm_detach(pm_process_t* process, uint32_t id);
+ 
+ #endif
+ 
+diff --git a/src/kernel2/include/tasks.h b/src/kernel2/include/tasks.h
+index 1aedbec..c8370f4 100644
+--- a/src/kernel2/include/tasks.h
++++ b/src/kernel2/include/tasks.h
+@@ -39,7 +39,7 @@
+ #include &lt;types.h&gt;
+ #include &lt;collections.h&gt;
+ 
+-#include &quot;mm.h&quot;
++#include &quot;mm_arch.h&quot;
+ #include &quot;lock.h&quot;
+ 
+ #define PM_STATUS_READY 0
+diff --git a/src/kernel2/src/arch/i386/gdt.c b/src/kernel2/src/arch/i386/gdt.c
+index e42c973..3dcdd3b 100644
+--- a/src/kernel2/src/arch/i386/gdt.c
++++ b/src/kernel2/src/arch/i386/gdt.c
+@@ -35,6 +35,7 @@
+ 
+ #include &lt;types.h&gt;
+ 
++#include &quot;mm.h&quot;
+ #include &quot;cpu.h&quot;
+ #include &quot;lock.h&quot;
+ 
+diff --git a/src/kernel2/src/mm/shm.c b/src/kernel2/src/mm/shm.c
+index 67b4831..d05de0e 100644
+--- a/src/kernel2/src/mm/shm.c
++++ b/src/kernel2/src/mm/shm.c
+@@ -94,11 +94,12 @@ uint32_t shm_create(size_t size)
+ /**
+  * Bestehenden Shared Memory oeffnen.
+  *
++ * @param process Prozess, der den Shared Memory oeffnet
+  * @param id ID des zu oeffnenden Shared Memory
+  * @return Virtuelle Adresse des geoeffneten Shared Memory; NULL, wenn der
+  * Shared Memory mit der angegebenen ID nicht existiert.
+  */
+-void* shm_attach(uint32_t id)
++void* shm_attach(pm_process_t* process, uint32_t id)
+ {
+     struct shm_desc* shm = tree_search(shms, id);
+     void* ret;
+@@ -115,7 +116,7 @@ void* shm_attach(uint32_t id)
+     } else {
+         // Ansonsten Mapping von einem anderen Prozess uebernehmen
+         struct shm_process* first = list_get_element_at(shm-&gt;processes, 0);
+-        ret = mmc_automap_user(&amp;mmc_current_context(),
++        ret = mmc_automap_user(&amp;process-&gt;context,
+             &amp;first-&gt;process-&gt;context, first-&gt;vaddr, shm-&gt;num_pages,
+             MM_USER_START, MM_USER_END, MM_FLAGS_USER_DATA);
+     }
+@@ -125,7 +126,7 @@ void* shm_attach(uint32_t id)
+     }
+ 
+     shm_proc = calloc(1, sizeof(*shm_proc));
+-    shm_proc-&gt;process = current_process;
++    shm_proc-&gt;process = process;
+     shm_proc-&gt;vaddr = ret;
+     list_push(shm-&gt;processes, shm_proc);
+ 
+@@ -136,13 +137,13 @@ void* shm_attach(uint32_t id)
+  * Shared Memory schliessen. Wenn keine Prozesse den Shared Memory mehr
+  * geoeffnet haben, wird er geloescht.
+  *
++ * @param process Prozess, der den Shared Memory schliesst
+  * @param id ID des zu schliessenden Shared Memory
+  */
+-void shm_detach(uint32_t id)
++void shm_detach(pm_process_t* process, uint32_t id)
+ {
+     struct shm_desc* shm = tree_search(shms, id);
+     struct shm_process* shm_proc;
+-    pm_process_t* current_proc = current_process;
+     int i;
+ 
+     if (shm == NULL) {
+@@ -150,7 +151,7 @@ void shm_detach(uint32_t id)
+     }
+ 
+     for (i = 0; (shm_proc = list_get_element_at(shm-&gt;processes, i)); i++) {
+-        if (shm_proc-&gt;process == current_proc) {
++        if (shm_proc-&gt;process == process) {
+             list_remove(shm-&gt;processes, i);
+             goto found;
+         }
+diff --git a/src/kernel2/src/syscalls/pm.c b/src/kernel2/src/syscalls/pm.c
+index 8826a50..486b030 100644
+--- a/src/kernel2/src/syscalls/pm.c
++++ b/src/kernel2/src/syscalls/pm.c
+@@ -39,6 +39,7 @@
+ 
+ #include &quot;syscall.h&quot;
+ #include &quot;syscall_structs.h&quot;
++#include &quot;mm.h&quot;
+ #include &quot;tasks.h&quot;
+ #include &quot;cpu.h&quot;
+ 
+diff --git a/src/kernel2/src/syscalls/rpc.c b/src/kernel2/src/syscalls/rpc.c
+index 3c51ec6..515ad80 100644
+--- a/src/kernel2/src/syscalls/rpc.c
++++ b/src/kernel2/src/syscalls/rpc.c
+@@ -41,6 +41,7 @@
+ 
+ #include &quot;kernel.h&quot;
+ #include &quot;syscall.h&quot;
++#include &quot;mm.h&quot;
+ #include &quot;tasks.h&quot;
+ #include &quot;cpu.h&quot;
+ #include &quot;im.h&quot;
+diff --git a/src/kernel2/src/syscalls/shm.c b/src/kernel2/src/syscalls/shm.c
+index c3aed63..0892622 100644
+--- a/src/kernel2/src/syscalls/shm.c
++++ b/src/kernel2/src/syscalls/shm.c
+@@ -56,7 +56,7 @@ uint32_t syscall_shm_create(size_t size)
+  */
+ void* syscall_shm_attach(uint32_t id)
+ {
+-    return shm_attach(id);
++    return shm_attach(current_process, id);
+ }
+ 
+ /**
+@@ -67,6 +67,6 @@ void* syscall_shm_attach(uint32_t id)
+  */
+ void syscall_shm_detach(uint32_t id)
+ {
+-    shm_detach(id);
++    shm_detach(current_process, id);
+ }
+ 
+diff --git a/src/kernel2/src/tasks/pm.c b/src/kernel2/src/tasks/pm.c
+index e5c4b9f..8dc8f2b 100644
+--- a/src/kernel2/src/tasks/pm.c
++++ b/src/kernel2/src/tasks/pm.c
+@@ -39,6 +39,7 @@
+ #include &lt;string.h&gt;
+ #include &lt;collections.h&gt;
+ 
++#include &quot;mm.h&quot;
+ #include &quot;tasks.h&quot;
+ #include &quot;lock.h&quot;
+ #include &quot;timer.h&quot;
+-- 
+1.6.0.2
+
+</PRE>
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001615.html">[tyndur-devel] [PATCH v2 0/7] kernel2: Speicher beim Prozessende	freigeben (und andere Fixes)
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001624.html">[tyndur-devel] [PATCH v2 1/7] kernel2: SHM-Funktionen bekommen Prozess als Parameter
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1616">[ Datum ]</a>
+              <a href="thread.html#1616">[ Thema ]</a>
+              <a href="subject.html#1616">[ Betreff (Subject)]</a>
+              <a href="author.html#1616">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

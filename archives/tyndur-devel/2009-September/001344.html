@@ -1,0 +1,496 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [RFC] libc: sscanf
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BRFC%5D%20libc%3A%20sscanf&In-Reply-To=%3C1253220517-5304-1-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001355.html">
+   <LINK REL="Next"  HREF="001345.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [RFC] libc: sscanf</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BRFC%5D%20libc%3A%20sscanf&In-Reply-To=%3C1253220517-5304-1-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [RFC] libc: sscanf">kevin at tyndur.org
+                  </A><BR>
+    <I>Do Sep 17 22:48:37 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001355.html">[tyndur-devel] [PATCH] strto(u)l: 0x ist nur ein Praefix, wenn danach noch was kommt
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001345.html">[tyndur-devel] [PATCH] libc: scanf-Familie
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1344">[ Datum ]</a>
+              <a href="thread.html#1344">[ Thema ]</a>
+              <a href="subject.html#1344">[ Betreff (Subject) ]</a>
+              <a href="author.html#1344">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>Im Folgenden also wie gewuenscht, kein Patch. Bisher nur unter Linux getestet,
+scheint in den paar Testfaellen in main() was vernuenftiges zu tun. Ein paar
+Sachen fehlen noch (float ueberlasse ich uebrigens gern einem Freiwilligen),
+aber die ueblichsten Sachen (Strings und Integer) sollten gehen.
+
+---
+
+#include &lt;stdio.h&gt;
+#include &lt;stdarg.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;stdint.h&gt;
+#include &lt;stddef.h&gt;
+
+typedef int (*jscanf_getc)(void* state);
+typedef void (*jscanf_ungetc)(void* state, char c);
+
+/**
+ * @param base Basis der einzulesenden Zahl (8, 10 oder 16)
+ */
+static int jscanf_read_number(char* buf, int size, jscanf_getc jgetc,
+    jscanf_ungetc jungetc, void* state, int base)
+{
+    int valid;
+    int i;
+    int c;
+    int first_digit = 0;
+
+    i = 0;
+    while (i &lt; size) {
+        c = jgetc(state);
+
+        if (c == EOF) {
+            break;
+        }
+
+        valid = 0;
+        switch (c) {
+            case '+':
+            case '-':
+                if (i == 0) {
+                    valid = 1;
+                    first_digit++;
+                }
+                break;
+            case '0':
+                valid = 1;
+                break;
+            case '1' ... '7':
+                if (base == 0) {
+                    base = buf[first_digit] == '0' ? 8 : 10;
+                }
+                valid = 1;
+                break;
+            case '8' ... '9':
+                if (base == 0) {
+                    base = buf[first_digit] == '0' ? 8 : 10;
+                }
+                valid = (base != 8);
+                break;
+            case 'A' ... 'F':
+            case 'a' ... 'f':
+                valid = (base == 16);
+                break;
+            case 'x':
+                if (base == 0) {
+                    base = 16;
+                }
+                if ((base == 16) &amp;&amp; (i == first_digit + 1) &amp;&amp;
+                    (buf[first_digit] == '0'))
+                {
+                    valid = 1;
+                }
+                break;
+        }
+
+        if (!valid) {
+            jungetc(state, c);
+            break;
+        }
+
+        buf[i] = c;
+        i++;
+    }
+
+    buf[i] = '\0';
+
+    return i;
+}
+
+static int assign_number(void* ptr, uint64_t value, int size)
+{
+    if (size == 1) {
+        uint8_t* tptr = ptr;
+        *tptr = (uint8_t) value;
+    } else if (size == 2) {
+        uint16_t* tptr = ptr;
+        *tptr = (uint16_t) value;
+    } else if (size == 4) {
+        uint32_t* tptr = ptr;
+        *tptr = (uint32_t) value;
+    } else if (size == 8) {
+        uint64_t* tptr = ptr;
+        *tptr = (uint64_t) value;
+    } else {
+        abort();
+    }
+}
+
+static int jscanf(const char* fmt, va_list ap,
+    jscanf_getc jgetc, jscanf_ungetc jungetc, void* state)
+{
+    int ret = 0;
+    int assign;
+    int len;
+    int size;
+    int c;
+    char* endptr;
+    uint64_t value;
+
+    // 64 Bit oktal = 22 Zeichen, Vorzeichen und \0
+    char buf[24];
+
+    while (*fmt) {
+        switch (*fmt) {
+            case ' ':
+            case '\t':
+            case '\n':
+            case '\f':
+            case '\v':
+                do {
+                    c = jgetc(state);
+                } while (isspace(c));
+                break;
+
+            case '%':
+                fmt++;
+
+                // Ein * bedeutet, dass der Wert nur eingelesen, aber keiner
+                // Variablen zugewiesen wird
+                if (*fmt == '*') {
+                    assign = 0;
+                    fmt++;
+                } else {
+                    assign = 1;
+                }
+
+                // Optional kann jetzt die Feldlaenge kommen
+                if (isdigit(*fmt)) {
+                    len = strtol(fmt, (char**) &amp;fmt, 10);
+                    if (len == 0) {
+                        goto matching_error;
+                    }
+                } else {
+                    len = 0;
+                }
+
+                // Und die Laenge der Variablen kann auch noch angegeben sein
+                switch (*fmt) {
+                    case 'h':
+                        if (*++fmt == 'h') {
+                            fmt++;
+                            size = sizeof(char);
+                        } else {
+                            size = sizeof(short);
+                        }
+                        break;
+                    case 'l':
+                        if (*++fmt == 'l') {
+                            fmt++;
+                            size = sizeof(long long);
+                        } else {
+                            size = sizeof(long);
+                        }
+                        break;
+                    case 'j':
+                        size = sizeof(intmax_t);
+                        break;
+                    case 't':
+                        size = sizeof(ptrdiff_t);
+                        break;
+                    case 'z':
+                        size = sizeof(size_t);
+                        break;
+                    default:
+                        size = sizeof(int);
+                        break;
+                }
+
+                // Whitespace muss uebersprungen werden (ausser %[ %c %n)
+                if ((*fmt != '[') &amp;&amp; (*fmt != 'c') &amp;&amp; (*fmt != 'n')) {
+                    while (isspace(c = jgetc(state)));
+                    if (c != EOF) {
+                        jungetc(state, c);
+                    }
+                }
+
+                // Eingabe parsen
+                switch (*fmt) {
+                    int base;
+
+                    case 'i':
+                        base = 0;
+                        goto convert_number;
+                    case 'o':
+                        base = 8;
+                        goto convert_number;
+                    case 'x':
+                    case 'X':
+                        base = 16;
+                        goto convert_number;
+                    case 'p':
+                        base = 16;
+                        size = sizeof(void*);
+                        len = 0;
+                        goto convert_number;
+                    case 'd':
+                    case 'u':
+                        base = 10;
+                    convert_number:
+                        if (len == 0 || len &gt;= sizeof(buf)) {
+                            len = sizeof(buf) - 1;
+                        }
+                        len = jscanf_read_number(buf, len, jgetc, jungetc,
+                            state, base);
+
+                        value = strtoull(buf, &amp;endptr, base);
+                        if (endptr != buf + len) {
+                            goto matching_error;
+                        }
+
+                        if (assign) {
+                            void* ptr = va_arg(ap, void*);
+                            assign_number(ptr, value, size);
+                            ret++;
+                        }
+                        break;
+
+                    case 'n':
+                    {
+                        void* ptr = va_arg(ap, void*);
+                        assign_number(ptr, ret, size);
+                        break;
+                    }
+
+                    case 'c':
+                    {
+                        int i;
+                        char* ptr = va_arg(ap, char*);
+
+                        // TODO Multibyte-Zeichen
+                        if (len == 0) {
+                            len = 1;
+                        }
+
+                        for (i = 0; i &lt; len; i++) {
+                            c = jgetc(state);
+                            if (c == EOF) {
+                                goto matching_error;
+                            }
+                            ptr[i] = c;
+                        }
+
+                        break;
+                    }
+
+                    case 's':
+                    {
+                        char* ptr = va_arg(ap, char*);
+                        if (len == 0) {
+                            len = -1;
+                        }
+                        while ((len == -1) || len--) {
+                            c = jgetc(state);
+                            if (isspace(c)) {
+                                jungetc(state, c);
+                                break;
+                            } else if (c == EOF) {
+                                break;
+                            }
+                            *ptr++ = c;
+                        }
+                        *ptr = '\0';
+                        break;
+                    }
+
+                    case '%':
+                        goto parse_percent;
+                    default:
+                        abort();
+                }
+                break;
+
+            parse_percent:
+            default:
+                c = jgetc(state);
+                if (c == EOF) {
+                    goto input_error;
+                }
+                if (c != *fmt) {
+                    goto matching_error;
+                }
+                break;
+        }
+
+        fmt++;
+    }
+
+matching_error:
+    return ret;
+
+input_error:
+    if (ret == 0) {
+        return EOF;
+    }
+    return ret;
+}
+
+struct sscanf_state {
+    const char* input;
+    int pos;
+};
+
+int sscanf_getc(void* state)
+{
+    struct sscanf_state* s = state;
+    int ret = EOF;
+
+    if (s-&gt;input[s-&gt;pos]) {
+        ret = s-&gt;input[s-&gt;pos];
+        s-&gt;pos++;
+    }
+
+    return ret;
+}
+
+void sscanf_ungetc(void* state, char c)
+{
+    struct sscanf_state* s = state;
+
+    if (s-&gt;pos &gt; 0) {
+        s-&gt;pos--;
+        if (s-&gt;input[s-&gt;pos] != c) {
+            abort();
+        }
+    } else {
+        abort();
+    }
+}
+
+
+int vsscanf(const char* input, const char* fmt, va_list ap)
+{
+    struct sscanf_state state = {
+        .input = input,
+        .pos = 0,
+    };
+
+    return jscanf(fmt, ap, sscanf_getc, sscanf_ungetc, &amp;state);
+}
+
+int sscanf(const char* input, const char* fmt, ...)
+{
+    va_list ap;
+    int ret;
+
+    va_start(ap, fmt);
+    ret = vsscanf(input, fmt, ap);
+    va_end(ap);
+
+    return ret;
+}
+
+int main(void)
+{
+    int n;
+    int ret;
+    int cnt;
+    char buf[10] = { 0 };
+    char bufx[] = &quot;Vollgeschriebener Puffer&quot;;
+
+    ret = sscanf(&quot;42&quot;, &quot;%d&quot;, &amp;n);
+    printf(&quot;sscanf(%%d -- '42') = %d; read %d\n&quot;, ret, n);
+
+    ret = sscanf(&quot;42&quot;, &quot;%1d&quot;, &amp;n);
+    printf(&quot;sscanf(%%1d -- '42') = %d; read %d\n&quot;, ret, n);
+
+    ret = sscanf(&quot;42&quot;, &quot;%2d&quot;, &amp;n);
+    printf(&quot;sscanf(%%2d -- '42') = %d; read %d\n&quot;, ret, n);
+
+    ret = sscanf(&quot;42abc&quot;, &quot;%d%n%2c&quot;, &amp;n, &amp;cnt, buf);
+    printf(&quot;sscanf(%%d -- '42abc') = %d; read %d\n&quot;, ret, n);
+    printf(&quot;    cnt = %d, buf = '%s'\n&quot;, cnt, buf);
+
+    ret = sscanf(&quot;-42&quot;, &quot;%d&quot;, &amp;n);
+    printf(&quot;sscanf(%%d -- '-42') = %d; read %d\n&quot;, ret, n);
+
+    ret = sscanf(&quot;2a&quot;, &quot;%x&quot;, &amp;n);
+    printf(&quot;sscanf(%%x -- '2a') = %d; read %d\n&quot;, ret, n);
+
+    ret = sscanf(&quot;0x2a&quot;, &quot;%x&quot;, &amp;n);
+    printf(&quot;sscanf(%%x -- '0x2a') = %d; read %d\n&quot;, ret, n);
+
+    ret = sscanf(&quot;0xz&quot;, &quot;%x&quot;, &amp;n);
+    printf(&quot;sscanf(%%x -- '0xz') = %d; read %d\n&quot;, ret, n);
+
+    puts(&quot;&quot;);
+
+    ret = sscanf(&quot;020&quot;, &quot;%i&quot;, &amp;n);
+    printf(&quot;sscanf(%%i -- '020') = %d; read %d\n&quot;, ret, n);
+
+    ret = sscanf(&quot;0x20&quot;, &quot;%i&quot;, &amp;n);
+    printf(&quot;sscanf(%%i -- '0x20') = %d; read %d\n&quot;, ret, n);
+
+    ret = sscanf(&quot;20&quot;, &quot;%i&quot;, &amp;n);
+    printf(&quot;sscanf(%%i -- '20') = %d; read %d\n&quot;, ret, n);
+
+    puts(&quot;&quot;);
+
+    ret = sscanf(&quot;42abc&quot;, &quot;%*1d%d%n%1s&quot;, &amp;n, &amp;cnt, bufx);
+    printf(&quot;sscanf(%%d -- '42abc') = %d; read %d\n&quot;, ret, n);
+    printf(&quot;    cnt = %d, buf = '%s'\n&quot;, cnt, bufx);
+
+    ret = sscanf(&quot;42abc&quot;, &quot;%d%n%s&quot;, &amp;n, &amp;cnt, bufx);
+    printf(&quot;sscanf(%%d -- '42abc') = %d; read %d\n&quot;, ret, n);
+    printf(&quot;    cnt = %d, buf = '%s'\n&quot;, cnt, bufx);
+
+    ret = sscanf(&quot;42abc&quot;, &quot;%d%n%42s&quot;, &amp;n, &amp;cnt, bufx);
+    printf(&quot;sscanf(%%d -- '42abc') = %d; read %d\n&quot;, ret, n);
+    printf(&quot;    cnt = %d, buf = '%s'\n&quot;, cnt, bufx);
+
+    return 0;
+}
+</PRE>
+
+
+
+
+
+
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001355.html">[tyndur-devel] [PATCH] strto(u)l: 0x ist nur ein Praefix, wenn danach noch was kommt
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001345.html">[tyndur-devel] [PATCH] libc: scanf-Familie
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1344">[ Datum ]</a>
+              <a href="thread.html#1344">[ Thema ]</a>
+              <a href="subject.html#1344">[ Betreff (Subject)]</a>
+              <a href="author.html#1344">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

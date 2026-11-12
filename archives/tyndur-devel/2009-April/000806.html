@@ -1,0 +1,254 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] libc: Synchrones Lesen in LIO
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20libc%3A%20Synchrones%20Lesen%20in%20LIO&In-Reply-To=%3C200904251907.44553%40kevin-wolf.de%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="000785.html">
+   <LINK REL="Next"  HREF="000786.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] libc: Synchrones Lesen in LIO</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20libc%3A%20Synchrones%20Lesen%20in%20LIO&In-Reply-To=%3C200904251907.44553%40kevin-wolf.de%3E"
+           TITLE="[tyndur-devel] [PATCH] libc: Synchrones Lesen in LIO">mail at kevin-wolf.de
+                  </A><BR>
+    <I>Sa Apr 25 19:07:44 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="000785.html">[tyndur-devel] [PATCH] libc: Synchrones Lesen in LIO
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="000786.html">[tyndur-devel] libc: Mehr Multibyte- und wchar-Funktionen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#806">[ Datum ]</a>
+              <a href="thread.html#806">[ Thema ]</a>
+              <a href="subject.html#806">[ Betreff (Subject) ]</a>
+              <a href="author.html#806">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>Am Samstag, 25. April 2009 17:18 schrieb Antoine Kaufmann:
+&gt;<i> * libc: Anfaenge von Synchronem Lesen in LostIO brauchbar gemacht.
+</I>&gt;<i> ! vterm: lostio_dispatch() nur aufrufen wenn neue Eingaben da sind, und
+</I>&gt;<i>          nicht nach jedem rpc.
+</I>&gt;<i> ---
+</I>&gt;<i>  src/modules/lib/lostio/handler.c                 |   18 +++++---
+</I>&gt;<i>  src/modules/lib/lostio/include/lostio_internal.h |    9 ++++
+</I>&gt;<i>  src/modules/lib/lostio/sync.c                    |   49
+</I>&gt;<i> +++++++++++----------- src/modules/lib/stdlibc/file.c                   |  
+</I>&gt;<i>  4 ++
+</I>&gt;<i>  src/modules/vterm/input.c                        |    3 +
+</I>&gt;<i>  src/modules/vterm/vterm.c                        |    1 -
+</I>&gt;<i>  6 files changed, 53 insertions(+), 31 deletions(-)
+</I>&gt;<i>
+</I>&gt;<i> diff --git a/src/modules/lib/lostio/handler.c
+</I>&gt;<i> b/src/modules/lib/lostio/handler.c index 0c9c1b6..5e8f361 100644
+</I>&gt;<i> --- a/src/modules/lib/lostio/handler.c
+</I>&gt;<i> +++ b/src/modules/lib/lostio/handler.c
+</I>&gt;<i> @@ -191,7 +191,12 @@ void rpc_io_read(pid_t pid, dword correlation_id,
+</I>&gt;<i> size_t data_size, void* data) size_t size = typehandle-&gt;read(filehandle,
+</I>&gt;<i> buf,
+</I>&gt;<i>              read_request-&gt;blocksize, read_request-&gt;blockcount);
+</I>&gt;<i>
+</I>&gt;<i> -        rpc_send_response(pid, correlation_id, size, (char*) buf);
+</I>&gt;<i> +        if (!size &amp;&amp; (filehandle-&gt;flags &amp; IO_OPEN_MODE_SYNC)) {
+</I>&gt;<i> +            // Synchrones lesen
+</I>&gt;<i> +            lostio_sync_read_wait(pid, correlation_id, read_request);
+</I>&gt;<i> +        } else {
+</I>&gt;<i> +            rpc_send_response(pid, correlation_id, size, (char*) buf);
+</I>&gt;<i> +        }
+</I>&gt;<i>          return;
+</I>&gt;<i>      }
+</I>&gt;<i>
+</I>&gt;<i> @@ -200,11 +205,12 @@ void rpc_io_read(pid_t pid, dword correlation_id,
+</I>&gt;<i> size_t data_size, void* data) size_t size = typehandle-&gt;read(filehandle,
+</I>&gt;<i> shm_ptr,
+</I>&gt;<i>              read_request-&gt;blocksize, read_request-&gt;blockcount);
+</I>&gt;<i>      close_shared_memory(read_request-&gt;shared_mem_id);
+</I>&gt;<i> -
+</I>&gt;<i> -/*            printf(&quot;size = %d, ptr = %p, value = %d\n&quot;,
+</I>&gt;<i> -        sizeof(reply.size), &amp;reply.size, reply.size);
+</I>&gt;<i> -    fflush(stdout);*/
+</I>&gt;<i> -    rpc_send_dword_response(pid, correlation_id, size);
+</I>&gt;<i> +    if (!size &amp;&amp; (filehandle-&gt;flags &amp; IO_OPEN_MODE_SYNC)) {
+</I>&gt;<i> +        // Synchrones lesen
+</I>&gt;<i> +        lostio_sync_read_wait(pid, correlation_id, read_request);
+</I>&gt;<i> +    } else {
+</I>&gt;<i> +        rpc_send_dword_response(pid, correlation_id, size);
+</I>&gt;<i> +    }
+</I>&gt;<i>      //v();
+</I>&gt;<i>  }
+</I>&gt;<i>
+</I>&gt;<i> diff --git a/src/modules/lib/lostio/include/lostio_internal.h
+</I>&gt;<i> b/src/modules/lib/lostio/include/lostio_internal.h index ba7a691..49fa280
+</I>&gt;<i> 100644
+</I>&gt;<i> --- a/src/modules/lib/lostio/include/lostio_internal.h
+</I>&gt;<i> +++ b/src/modules/lib/lostio/include/lostio_internal.h
+</I>&gt;<i> @@ -76,6 +76,15 @@ void    rpc_io_unlink(pid_t pid, dword correlation_id,
+</I>&gt;<i> size_t data_size, void* d //bool vfstree_delete_node(char* path);
+</I>&gt;<i>
+</I>&gt;<i>
+</I>&gt;<i> +/**
+</I>&gt;<i> + * Schiebt eine Anfrage fuer synchrones Lesen auf, falls keine Daten
+</I>&gt;<i> vorhanden + * sind.
+</I>&gt;<i> + *
+</I>&gt;<i> + * @param read_request Gesendete anfrage
+</I>&gt;<i> + */
+</I>&gt;<i> +void lostio_sync_read_wait(pid_t pid, dword correlation_id,
+</I>&gt;<i> +    io_read_request_t* read_request);
+</I>&gt;<i> +
+</I>&gt;<i>
+</I>&gt;<i>  ///Filehandle aus der Liste holen
+</I>&gt;<i>  lostio_filehandle_t* get_filehandle(pid_t pid, dword id);
+</I>&gt;<i> diff --git a/src/modules/lib/lostio/sync.c b/src/modules/lib/lostio/sync.c
+</I>&gt;<i> index d57e7bd..d6e126f 100644
+</I>&gt;<i> --- a/src/modules/lib/lostio/sync.c
+</I>&gt;<i> +++ b/src/modules/lib/lostio/sync.c
+</I>&gt;<i> @@ -36,11 +36,11 @@
+</I>&gt;<i>  #include &quot;stdlib.h&quot;
+</I>&gt;<i>  #include &quot;string.h&quot;
+</I>&gt;<i>  #include &quot;stdio.h&quot;
+</I>&gt;<i> +#include &lt;syscall.h&gt;
+</I>&gt;<i>
+</I>&gt;<i>  /// In dieser Struktur werden die Informationen zu aufgeschobenen reads
+</I>&gt;<i>  /// gespeichert
+</I>&gt;<i>  struct sync_read_s {
+</I>&gt;<i> -    lostio_filehandle_t* filehandle;
+</I>&gt;<i>      io_read_request_t read_request;
+</I>&gt;<i>      dword correlation_id;
+</I>&gt;<i>      pid_t pid;
+</I>&gt;<i> @@ -48,32 +48,33 @@ struct sync_read_s {
+</I>&gt;<i>
+</I>&gt;<i>  static list_t* sync_read_list = NULL;
+</I>&gt;<i>
+</I>&gt;<i> +
+</I>&gt;<i>  /**
+</I>&gt;<i>   * Verarbeitet eventuell vorhandene aufgeschobene Anfragen fuer synchrones
+</I>&gt;<i>   * Lesen.
+</I>&gt;<i>   */
+</I>&gt;<i> -void lostio_sync_dispatch()
+</I>&gt;<i> +void lostio_sync_dispatch(void)
+</I>&gt;<i>  {
+</I>&gt;<i> -    int i = 0;
+</I>&gt;<i> -    struct sync_read_s* sync_read;
+</I>&gt;<i> +    int i;
+</I>&gt;<i> +    size_t sz;
+</I>&gt;<i>
+</I>&gt;<i>      // Wenn noch keine Anfragen vorhanden sind, wird abgebrochen.
+</I>&gt;<i>      if (sync_read_list == NULL) {
+</I>&gt;<i>          return;
+</I>&gt;<i>      }
+</I>&gt;<i>
+</I>&gt;<i> -    while ((sync_read = list_get_element_at(sync_read_list, i)) != NULL) {
+</I>&gt;<i> -        // Pruefen ob jetzt genug Daten vorhanden sind.
+</I>&gt;<i> -        if ((sync_read-&gt;filehandle-&gt;node-&gt;size -
+</I>&gt;<i> sync_read-&gt;filehandle-&gt;pos) &gt;= -           
+</I>&gt;<i> (sync_read-&gt;read_request.blocksize * sync_read-&gt;read_request. -           
+</I>&gt;<i> blockcount))
+</I>&gt;<i> -        {
+</I>&gt;<i> -            rpc_io_read(sync_read-&gt;pid, sync_read-&gt;correlation_id,
+</I>&gt;<i> -                sizeof(io_read_request_t), &amp;sync_read-&gt;read_request);
+</I>&gt;<i> +    p();
+</I>&gt;<i> +    sz = list_size(sync_read_list);
+</I>&gt;<i> +    {
+</I>&gt;<i> +        struct sync_read_s* reads[sz];
+</I>&gt;<i> +        i = 0;
+</I>&gt;<i> +        while ((reads[i++] = list_pop(sync_read_list))) { }
+</I>&gt;<i> +        v();
+</I>&gt;<i>
+</I>&gt;<i> -            list_remove(sync_read_list, i);
+</I>&gt;<i> -        } else {
+</I>&gt;<i> -            i++;
+</I>&gt;<i> +        for (i = 0; i &lt; sz; i++) {
+</I>&gt;<i> +            rpc_io_read(reads[i]-&gt;pid, reads[i]-&gt;correlation_id,
+</I>&gt;<i> +                sizeof(reads[i]-&gt;read_request), &amp;reads[i]-&gt;read_request);
+</I>&gt;<i> +            free(reads[i]);
+</I>&gt;<i>          }
+</I>&gt;<i>      }
+</I>&gt;<i>  }
+</I>
+Solltest du reads[] nicht rückwärts abarbeiten, damit die Anfragen, die nicht 
+erfüllt werden konnten, von rpc_io_read() wieder in der Originalreihenfolge 
+eingefügt werden? Sonst könnte es passieren, dass neue Requests verarbeitet 
+werden und alte ewig warten müssen.
+
+
+&gt;<i> @@ -82,27 +83,27 @@ void lostio_sync_dispatch()
+</I>&gt;<i>   * Schiebt eine Anfrage fuer synchrones Lesen auf, falls keine Daten
+</I>&gt;<i> vorhanden * sind.
+</I>&gt;<i>   *
+</I>&gt;<i> - * @param filehandle Filehandle von dem gelesen werden soll
+</I>&gt;<i>   * @param read_request Gesendete anfrage
+</I>&gt;<i>   */
+</I>&gt;<i> -void lostio_sync_read_wait(lostio_filehandle_t* filehandle, pid_t pid,
+</I>&gt;<i> -    dword correlation_id, io_read_request_t* read_request)
+</I>&gt;<i> +void lostio_sync_read_wait(pid_t pid, dword correlation_id,
+</I>&gt;<i> +    io_read_request_t* read_request)
+</I>&gt;<i>  {
+</I>&gt;<i> -    struct sync_read_s* sync_read = malloc(sizeof(struct sync_read_s));
+</I>&gt;<i> +    struct sync_read_s* sync_read = malloc(sizeof(*sync_read));
+</I>&gt;<i>
+</I>&gt;<i> +    p();
+</I>&gt;<i>      if (sync_read_list == NULL) {
+</I>&gt;<i>          sync_read_list = list_create();
+</I>&gt;<i>      }
+</I>&gt;<i>
+</I>&gt;<i> -    sync_read-&gt;pid = pid;
+</I>&gt;<i> -    sync_read-&gt;correlation_id = correlation_id;
+</I>&gt;<i> -
+</I>&gt;<i>      // Read-Request kopieren, da er beim zurueckspringen aus dem
+</I>&gt;<i> rpc-Handler // zerstoert wird.
+</I>&gt;<i> -    memcpy(&amp;sync_read-&gt;read_request, read_request,
+</I>&gt;<i> sizeof(io_read_request_t)); +    memcpy(&amp;sync_read-&gt;read_request,
+</I>&gt;<i> read_request,
+</I>&gt;<i> +        sizeof(sync_read-&gt;read_request));
+</I>&gt;<i>
+</I>&gt;<i> -    sync_read-&gt;filehandle = filehandle;
+</I>&gt;<i> +    sync_read-&gt;pid = pid;
+</I>&gt;<i> +    sync_read-&gt;correlation_id = correlation_id;
+</I>&gt;<i>
+</I>&gt;<i>      sync_read_list = list_push(sync_read_list, sync_read);
+</I>&gt;<i> +    v();
+</I>&gt;<i>  }
+</I>&gt;<i>
+</I>&gt;<i> diff --git a/src/modules/lib/stdlibc/file.c
+</I>&gt;<i> b/src/modules/lib/stdlibc/file.c index 6441fcd..4b1fdbe 100644
+</I>&gt;<i> --- a/src/modules/lib/stdlibc/file.c
+</I>&gt;<i> +++ b/src/modules/lib/stdlibc/file.c
+</I>&gt;<i> @@ -116,6 +116,10 @@ FILE* fopen (const char* filename, const char* mode)
+</I>&gt;<i>                  *attr |= IO_OPEN_MODE_LINK;
+</I>&gt;<i>                  break;
+</I>&gt;<i>
+</I>&gt;<i> +            case 's':
+</I>&gt;<i> +                *attr |= IO_OPEN_MODE_SYNC;
+</I>&gt;<i> +                break;
+</I>&gt;<i> +
+</I>
+Ich hab gehört, unter anderen Systemen ist blockierendes Lesen der 
+Default. ;-)
+
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="000785.html">[tyndur-devel] [PATCH] libc: Synchrones Lesen in LIO
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="000786.html">[tyndur-devel] libc: Mehr Multibyte- und wchar-Funktionen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#806">[ Datum ]</a>
+              <a href="thread.html#806">[ Thema ]</a>
+              <a href="subject.html#806">[ Betreff (Subject)]</a>
+              <a href="author.html#806">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

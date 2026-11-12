@@ -1,0 +1,1445 @@
+>From 28b3bb89b24a354e3689ae779ff5e20848df66f7 Mon Sep 17 00:00:00 2001
+From: Mathias Gottschlag <mathias-go@web.de>
+Date: Tue, 14 Oct 2008 15:57:04 +0200
+Subject: [PATCH] + Unfertiger Treiber fuer die von Qemu emulierte Cirrus Logic
+
+---
+ build/root-common/config/servmgr/cirrus/cmd |    1 +
+ build/root-common/config/servmgr/vterm/cmd  |    2 +-
+ build/root-common/config/servmgr/vterm/deps |    1 +
+ src/modules/cdi/cirrus/Makefile.all         |    6 +
+ src/modules/cdi/cirrus/bitmap.c             |   74 +++++++
+ src/modules/cdi/cirrus/bitmap.h             |   26 +++
+ src/modules/cdi/cirrus/cirrus.h             |  132 +++++++++++++
+ src/modules/cdi/cirrus/device.c             |   96 ++++++++++
+ src/modules/cdi/cirrus/display.c            |  110 +++++++++++
+ src/modules/cdi/cirrus/draw.c               |  273 +++++++++++++++++++++++++++
+ src/modules/cdi/cirrus/draw.h               |   32 +++
+ src/modules/cdi/cirrus/main.c               |  119 ++++++++++++
+ src/modules/cdi/cirrus/vesa.c               |  152 +++++++++++++++
+ src/modules/cdi/cirrus/vesa.h               |   91 +++++++++
+ src/modules/cdi/cirrus/vram.c               |  168 ++++++++++++++++
+ src/modules/cdi/cirrus/vram.h               |   26 +++
+ 16 files changed, 1308 insertions(+), 1 deletions(-)
+ create mode 100644 build/root-common/config/servmgr/cirrus/cmd
+ create mode 100644 src/modules/cdi/cirrus/Makefile.all
+ create mode 100644 src/modules/cdi/cirrus/bitmap.c
+ create mode 100644 src/modules/cdi/cirrus/bitmap.h
+ create mode 100644 src/modules/cdi/cirrus/cirrus.h
+ create mode 100644 src/modules/cdi/cirrus/device.c
+ create mode 100644 src/modules/cdi/cirrus/display.c
+ create mode 100644 src/modules/cdi/cirrus/draw.c
+ create mode 100644 src/modules/cdi/cirrus/draw.h
+ create mode 100644 src/modules/cdi/cirrus/main.c
+ create mode 100644 src/modules/cdi/cirrus/vesa.c
+ create mode 100644 src/modules/cdi/cirrus/vesa.h
+ create mode 100644 src/modules/cdi/cirrus/vram.c
+ create mode 100644 src/modules/cdi/cirrus/vram.h
+
+diff --git a/build/root-common/config/servmgr/cirrus/cmd b/build/root-common/config/servmgr/cirrus/cmd
+new file mode 100644
+index 0000000..75a0b37
+--- /dev/null
++++ b/build/root-common/config/servmgr/cirrus/cmd
+@@ -0,0 +1 @@
++/modules/cirrus
+diff --git a/build/root-common/config/servmgr/vterm/cmd b/build/root-common/config/servmgr/vterm/cmd
+index 582524e..3c539c3 100644
+--- a/build/root-common/config/servmgr/vterm/cmd
++++ b/build/root-common/config/servmgr/vterm/cmd
+@@ -1 +1 @@
+-/modules/vterm
++/modules/vterm cirrus
+diff --git a/build/root-common/config/servmgr/vterm/deps b/build/root-common/config/servmgr/vterm/deps
+index 0cd7911..48c9850 100644
+--- a/build/root-common/config/servmgr/vterm/deps
++++ b/build/root-common/config/servmgr/vterm/deps
+@@ -1 +1,2 @@
+ kbc
++cirrus
+diff --git a/src/modules/cdi/cirrus/Makefile.all b/src/modules/cdi/cirrus/Makefile.all
+new file mode 100644
+index 0000000..b652707
+--- /dev/null
++++ b/src/modules/cdi/cirrus/Makefile.all
+@@ -0,0 +1,6 @@
++shopt -s extglob
++source $LOST_BUILDMK_ROOT/config.sh
++
++echo "LD   $1/modules/cirrus"
++$LOST_TOOLS_LD -ocirrus.mod -Ttext=0x40000000 *.o --start-group $2 --end-group
++$LOST_TOOLS_STRIP -s cirrus.mod -o $1/modules/cirrus.mod
+diff --git a/src/modules/cdi/cirrus/bitmap.c b/src/modules/cdi/cirrus/bitmap.c
+new file mode 100644
+index 0000000..e6e2a2e
+--- /dev/null
++++ b/src/modules/cdi/cirrus/bitmap.c
+@@ -0,0 +1,74 @@
++/*
++ * Copyright (c) 2008 Mathias Gottschlag and Janosch Graef
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it 
++ * and/or modify it under the terms of the Do What The Fuck You Want 
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * http://sam.zoy.org/projects/COPYING.WTFPL for more details.
++ */
++
++#include "bitmap.h"
++#include "cirrus.h"
++
++#include <stdlib.h>
++
++// TODO: Depdendent on resolution
++static int vramoffset = 1024 * 768 * 3;
++
++static void convert1to24(char *src, char *dest, int pixelcount)
++{
++    int i;
++    for (i = 0; i < pixelcount; i++) {
++        if (src[i / 8] & (0x80 >> (i % 8))) {
++	    *(dest++) = 0xFF;
++	    *(dest++) = 0xFF;
++	    *(dest++) = 0xFF;
++        } else {
++	    *(dest++) = 0x00;
++	    *(dest++) = 0x00;
++	    *(dest++) = 0x00;
++        }
++    }
++}
++
++struct cdi_video_bitmap *cirrus_bitmap_create(struct cdi_video_device *device, unsigned int width, unsigned int height, cdi_video_bitmap_format_t format, void *data)
++{
++    struct cirrus_bitmap *newbitmap = malloc(sizeof(struct cirrus_bitmap));
++    newbitmap->bitmap.width = width;
++    newbitmap->bitmap.height = height;
++    newbitmap->bitmap.format = format;
++    newbitmap->bitmap.pixeldata = data;
++    newbitmap->vramaddr = 0;
++    ((struct cirrus_device*)device)->bitmaps = cdi_list_push(((struct cirrus_device*)device)->bitmaps, newbitmap);
++    // TODO: Upload texture?
++    return &newbitmap->bitmap;
++}
++int cirrus_bitmap_upload(struct cdi_video_device *device, struct cirrus_bitmap *bitmap)
++{
++    struct cirrus_display *display = ((struct cirrus_device*)device)->display;
++    int bitmapoffset = vramoffset;
++    vramoffset += bitmap->bitmap.width * bitmap->bitmap.height * display->dis.mode->depth / 8;
++    bitmap->vramaddr = bitmapoffset;
++    switch (bitmap->bitmap.format) {
++        case CDI_VIDEO_FMT_MONO_1:
++            if (display->dis.mode->depth == 24) {
++                convert1to24((char*)bitmap->bitmap.pixeldata, (char*)((struct cirrus_device*)device)->framebuf + bitmapoffset, bitmap->bitmap.width * bitmap->bitmap.height);
++                return 1;
++            }
++            break;
++        default:
++            break;
++    }
++    return 0;
++}
++
++void cirrus_bitmap_destroy(struct cdi_video_device *device, struct cdi_video_bitmap *bitmap)
++{
++    TODO("");
++}
++void cirrus_bitmap_set_usage_hint(struct cdi_video_device *device, struct cdi_video_bitmap *bitmap, cdi_video_usage_hint_t hint)
++{
++    TODO("");
++}
++
+diff --git a/src/modules/cdi/cirrus/bitmap.h b/src/modules/cdi/cirrus/bitmap.h
+new file mode 100644
+index 0000000..286576d
+--- /dev/null
++++ b/src/modules/cdi/cirrus/bitmap.h
+@@ -0,0 +1,26 @@
++/*
++ * Copyright (c) 2008 Mathias Gottschlag and Janosch Graef
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it 
++ * and/or modify it under the terms of the Do What The Fuck You Want 
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * http://sam.zoy.org/projects/COPYING.WTFPL for more details.
++ */
++
++#ifndef _BITMAP_H_
++#define _BITMAP_H_
++
++#include <cdi/video.h>
++
++#include "cirrus.h"
++
++int cirrus_bitmap_upload(struct cdi_video_device *device, struct cirrus_bitmap *bitmap);
++void cirrus_clean_vram(struct cdi_video_device *device);
++
++struct cdi_video_bitmap *cirrus_bitmap_create(struct cdi_video_device *device, unsigned int width, unsigned int height, cdi_video_bitmap_format_t format, void *data);
++void cirrus_bitmap_destroy(struct cdi_video_device *device, struct cdi_video_bitmap *bitmap);
++void cirrus_bitmap_set_usage_hint(struct cdi_video_device *device, struct cdi_video_bitmap *bitmap, cdi_video_usage_hint_t hint);
++
++#endif
++
+diff --git a/src/modules/cdi/cirrus/cirrus.h b/src/modules/cdi/cirrus/cirrus.h
+new file mode 100644
+index 0000000..58e2b4c
+--- /dev/null
++++ b/src/modules/cdi/cirrus/cirrus.h
+@@ -0,0 +1,132 @@
++/*
++ * Copyright (c) 2008 Mathias Gottschlag and Janosch Graef
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it 
++ * and/or modify it under the terms of the Do What The Fuck You Want 
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * http://sam.zoy.org/projects/COPYING.WTFPL for more details.
++ */
++
++#ifndef _CIRRUS_H_
++#define _CIRRUS_H_
++
++#include <stdio.h>
++#include <stdarg.h>
++#include <stdint.h>
++
++#include "cdi/video.h"
++#include "cdi/pci.h"
++
++#define TODO(s) printf("cirrus: TODO: %s: %s line %d: %s\n",__func__,__FILE__,__LINE__,s)
++
++#define CIRRUS_VENDORID 0x1013
++#define CIRRUS_DEVICEID 0x00B8
++
++/**
++ * VGA registers as they lie in the register memory area of the card
++ */
++struct cirrus_registers {
++    union {
++        uint8_t attr_index;
++        uint8_t attr_data_w;
++    };
++    uint8_t attr_data_r;
++    union {
++        uint8_t in_stat_0;
++        uint8_t misc_out_w;
++    };
++    uint8_t enable;
++    uint8_t seq_index;
++    uint8_t seq_data;
++    uint8_t dac_mask;
++    uint8_t dac_read_addr;
++    uint8_t dac_write_addr;
++    uint8_t dac_data;
++    uint8_t feature_r;
++    uint8_t reserved1;
++    uint8_t misc_out_r;
++    uint8_t reserved2;
++    uint8_t graph_index;
++    uint8_t graph_data;
++    uint8_t iobase_color;
++};
++
++struct cirrus_bitmap {
++    struct cdi_video_bitmap bitmap;
++    // Address of bitmap loaded into VRAM, or 0 if not loaded
++    int vramaddr;
++};
++
++/**
++ * Display connected to a Cirrus device
++ */
++struct cirrus_display {
++    // CDI video display
++    struct cdi_video_display dis;
++
++    // List of possible modes
++    cdi_list_t modes;
++    // Current raster op
++    cdi_video_raster_op_t rop;
++};
++
++struct cirrus_device {
++    // CDI video device
++    struct cdi_video_device dev;
++
++    // PCI device
++    struct cdi_pci_device *pci;
++
++    // One and only display
++    struct cirrus_display *display;
++
++    // Framebuffer
++    void *framebuf;
++    size_t framebuf_size;
++
++    // VGA Registers
++    struct cirrus_registers *regs;
++    
++    // Bitmaps
++    cdi_list_t bitmaps;
++    
++    // Memory Management data
++    struct cirrus_malloc_info *mm_first;
++};
++
++// Device
++struct cirrus_device *cirrus_device_create(const char *name, struct cdi_pci_device *pci);
++void cirrus_device_init(struct cdi_device *device);
++void cirrus_device_remove(struct cdi_device *device);
++
++// Display
++struct cirrus_display *cirrus_display_create(void);
++int cirrus_display_enable(struct cdi_video_display *dis);
++int cirrus_display_disable(struct cdi_video_display *dis);
++int cirrus_display_clear(struct cdi_video_display *dis);
++int cirrus_display_set_mode(struct cdi_video_display *dis, cdi_video_mode_t *mode);
++cdi_list_t cirrus_display_get_mode_list(struct cdi_video_display *dis);
++
++// Debug
++static inline void DEBUG(const char *fmt, ...)
++{
++    va_list args;
++    va_start(args, fmt);
++    printf("cirrus: ");
++    vprintf(fmt, args);
++    va_end(args);
++}
++
++// Error
++static inline void ERROR(const char *fmt, ...)
++{
++    va_list args;
++    va_start(args, fmt);
++    fprintf(stderr, "cirrus: ");
++    vfprintf(stderr, fmt, args);
++    va_end(args);
++}
++
++
++#endif
+diff --git a/src/modules/cdi/cirrus/device.c b/src/modules/cdi/cirrus/device.c
+new file mode 100644
+index 0000000..c951677
+--- /dev/null
++++ b/src/modules/cdi/cirrus/device.c
+@@ -0,0 +1,96 @@
++/*
++ * Copyright (c) 2008 Mathias Gottschlag and Janosch Graef
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it 
++ * and/or modify it under the terms of the Do What The Fuck You Want 
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * http://sam.zoy.org/projects/COPYING.WTFPL for more details.
++ */
++ 
++#include <stdlib.h>
++
++#include "cdi/lists.h"
++#include "cdi/pci.h"
++#include "cdi/video.h"
++#include "cdi/misc.h"
++
++#include "cirrus.h"
++
++/**
++ * Creates an Cirrus device
++ *  @param name Device name
++ *  @param pci CDI PCI object
++ *  @return Cirrus device
++ */
++struct cirrus_device *cirrus_device_create(const char *name, struct cdi_pci_device *pci)
++{
++    struct cirrus_device *dev = malloc(sizeof(struct cirrus_device));
++
++    DEBUG("New device %s: pci.%d.%d.%d\n", name, pci->bus, pci->dev, pci->function);
++
++    // Fill device struct
++    dev->dev.dev.name = name;
++    dev->dev.dev.type = CDI_VIDEO;
++    dev->dev.displays = cdi_list_create();
++    dev->pci = pci;
++    dev->display = cirrus_display_create();
++    dev->display->dis.device = (struct cdi_video_device*)dev;
++    dev->framebuf = NULL;
++    dev->framebuf_size = 0;
++    dev->regs = NULL;
++    dev->bitmaps = cdi_list_create();
++
++    cdi_list_push(dev->dev.displays,dev->display);
++
++    return dev;
++}
++
++/**
++ * Initializes a Cirrus device
++ */
++void cirrus_device_init(struct cdi_device *dev)
++{
++    struct cirrus_device *device = (struct cirrus_device*)dev;
++    struct cdi_pci_resource *res;
++    size_t i;
++    
++    // Allocate resources
++    cdi_pci_alloc_memory(device->pci);
++  
++    for (i=0; (res = cdi_list_get(device->pci->resources, i)); i++) {
++        if (res->index == 0) {
++            // This resource is the frame buffer
++            device->framebuf = res->address;
++            TODO("FIXME: Kann man die Groesse herausfinden, ohne eine feste Zahl zu benutzen?");
++            device->framebuf_size = 4*1024*1024;//res->length;
++            DEBUG("%s: Framebuffer size: %dkB\n",device->dev.dev.name,res->length/1024);
++        } else {
++            // This resource is the register region
++            // res->length wird nicht benoetigt
++            device->regs = res->address;
++        }
++    }
++    
++    if (device->framebuf == NULL) {
++        printf("Could not allocate frame buffer for device %s\n", device->dev.dev.name);
++    }
++    if (device->regs == NULL) {
++        printf("Could not allocate registers for device %s\n", device->dev.dev.name);
++    }
++    
++    // Enable acceleration
++    if (device->regs) {
++        device->regs->graph_index = 0x0E;
++        device->regs->graph_data = 0x20;
++    }
++}
++
++void cirrus_device_remove(struct cdi_device *dev) {
++    struct cirrus_device *device = (struct cirrus_device*)dev;
++
++    free((char*)device->dev.dev.name);
++    cdi_pci_device_destroy(device->pci);
++    // TODO: Delete bitmaps
++    cdi_list_destroy(device->bitmaps);
++}
+diff --git a/src/modules/cdi/cirrus/display.c b/src/modules/cdi/cirrus/display.c
+new file mode 100644
+index 0000000..99a2e4b
+--- /dev/null
++++ b/src/modules/cdi/cirrus/display.c
+@@ -0,0 +1,110 @@
++/*
++ * Copyright (c) 2008 Mathias Gottschlag and Janosch Graef
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it 
++ * and/or modify it under the terms of the Do What The Fuck You Want 
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * http://sam.zoy.org/projects/COPYING.WTFPL for more details.
++ */
++
++#include <stdlib.h>
++
++#include "cdi/lists.h"
++#include "cdi/video.h"
++
++#include "cirrus.h"
++#include "vesa.h"
++#include "vram.h"
++
++/**
++ * Creates a new display and adds it to the device
++ */		
++struct cirrus_display *cirrus_display_create()
++{
++    struct cirrus_display *display = malloc(sizeof(struct cirrus_display));
++
++    display->dis.activated = 0;
++    display->dis.mode = NULL;
++    display->modes = cdi_list_create();
++    display->rop = CDI_VIDEO_ROP_COPY;
++
++    display->modes = vesa_get_modes();
++
++    return display;
++}
++
++/**
++ * Enables the display
++ */
++int cirrus_display_enable(struct cdi_video_display *dis)
++{
++    struct cirrus_display *display = (struct cirrus_display*)dis;
++    if (!display->dis.activated) {
++        TODO("");
++        if (display->dis.mode) {
++            vesa_change_mode(display->dis.mode);
++        }
++        display->dis.activated = 1;
++    }
++    return -1;
++}
++
++/**
++ * Disables the display
++ */
++int cirrus_display_disable(struct cdi_video_display *dis)
++{
++    struct cirrus_display *display = (struct cirrus_display*)dis;
++    if (display->dis.activated) {
++        cirrus_display_clear(dis);
++        display->dis.activated = 0;
++    }
++    return -1;
++}
++
++/**
++ * Clears the given display to black
++ */
++int cirrus_display_clear(struct cdi_video_display *dis)
++{
++    struct cirrus_display *display = (struct cirrus_display*)dis;
++    if (display->dis.activated) {
++        TODO("");
++    }
++    return -1;
++}
++
++/**
++ * Sets the mode of the display
++ * @param dis Display to be changed
++ * @param mode New mode of the display
++ */
++int cirrus_display_set_mode(struct cdi_video_display *dis, cdi_video_mode_t *mode)
++{
++    struct cirrus_display *display = (struct cirrus_display*)dis;
++    struct cirrus_device *device = (struct cirrus_device*)(dis->device);
++    
++    if (display->dis.activated) {
++        display->dis.mode = mode;
++        return vesa_change_mode(display->dis.mode);
++    }
++    DEBUG("New mode for display 0x%x (Device: %s): %dx%dx%d (%s)\n", display, device->dev.dev.name, mode->width, mode->height, mode->depth, mode->type==CDI_VIDEO_TEXT?"Textmode":"Graph");
++    display->dis.mode = mode;
++    
++    // Calculate offscreen buffer
++    size_t screen_size = mode->width*mode->height*mode->depth/8;
++    cirrus_vram_setmem(device,device->framebuf+screen_size,device->framebuf_size-screen_size);
++    
++    return 0;
++}
++
++/**
++ * Returns a list with all possible modes for the display
++ */
++cdi_list_t cirrus_display_get_mode_list(struct cdi_video_display *dis)
++{
++    struct cirrus_display *display = (struct cirrus_display*)dis;
++    return display->modes;
++}
++
+diff --git a/src/modules/cdi/cirrus/draw.c b/src/modules/cdi/cirrus/draw.c
+new file mode 100644
+index 0000000..af9813c
+--- /dev/null
++++ b/src/modules/cdi/cirrus/draw.c
+@@ -0,0 +1,273 @@
++/*
++ * Copyright (c) 2008 Mathias Gottschlag and Janosch Graef
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it 
++ * and/or modify it under the terms of the Do What The Fuck You Want 
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * http://sam.zoy.org/projects/COPYING.WTFPL for more details.
++ */
++
++#include "draw.h"
++#include "cirrus.h"
++#include "bitmap.h"
++#include "vram.h"
++
++// FIXME: Beschleunigung geht nur für depth >= 8!
++
++static const unsigned char cirrus_rop[] = {
++    0x00, // clear
++    0x05, // and
++    0x09, // andreverse
++    0x0D, // copy        Einfaches Setzen der Farbe
++    0x50, // andinverted
++    0x06, // noop
++    0x59, // xor
++    0x6D, // or
++    0x95, // equiv
++    0x0B, // invert
++    0xAD, // orreverse
++    0xD0, // copyinverted
++    0xD6, // orinverted
++    0xDA, // nand
++    0x0E, // set
++};
++
++void cirrus_setup_rop(struct cdi_video_display *display)
++{
++    volatile struct cirrus_registers *regs = ((struct cirrus_device*)display->device)->regs;
++    // ROP nach GR32 schreiben
++    cdi_video_raster_op_t rop = ((struct cirrus_display*)display)->rop;
++    regs->graph_index = 0x32;
++    if (rop == CDI_VIDEO_ROP_COPY) {
++        regs->graph_data = cirrus_rop[3];
++    } else if (rop == CDI_VIDEO_ROP_OR) {
++        regs->graph_data = cirrus_rop[7];
++    } else if (rop == CDI_VIDEO_ROP_AND) {
++        regs->graph_data = cirrus_rop[1];
++    } else if (rop == CDI_VIDEO_ROP_XOR) {
++        regs->graph_data = cirrus_rop[6];
++    } else {
++        regs->graph_data = cirrus_rop[3];
++    }
++}
++
++void cirrus_set_raster_op(struct cdi_video_display *display, cdi_video_raster_op_t rop)
++{
++    ((struct cirrus_display*)display)->rop = rop;
++}
++
++void cirrus_set_target(struct cdi_video_display *display, struct cdi_video_bitmap *bitmap)
++{
++    TODO("");
++}
++
++void cirrus_draw_dot(struct cdi_video_display *display, unsigned int x, unsigned int y, int color)
++{
++    // TODO: ROP
++    char *framebuffer = (char*)((struct cirrus_device*)display->device)->framebuf;
++    int depth = display->mode->depth;
++    int displaywidth = display->mode->width;
++    int pitch = depth * displaywidth / 8;
++    if (depth == 24) {
++        char *position = framebuffer + y * pitch + x * 3;
++        position[0] = color & 0xFF;
++        *((unsigned short*)&position[1]) = (color & 0xFFFF00) >> 8;
++    } else if (depth == 16) {
++        TODO("");
++    } else if (depth == 15) {
++        TODO("");
++    } else if (depth == 8) {
++        TODO("");
++    }
++}
++void cirrus_draw_line(struct cdi_video_display *display, unsigned int x1, unsigned int y1, unsigned int x2, unsigned int y2, int color)
++{
++    // TODO: Optimieren
++    int i;
++    int m;
++    if (x1 != x2) m = 1000 * ((int)y1 - (int)y2) / ((int)x1 - (int)x2);
++    
++    if ((m > 1000) || (m < -1000) || (x1 == x2)) {
++        m = 1000 * ((int)x1 - (int)x2) / ((int)y1 - (int)y2);
++        int n = (int)x1 * 1000 - m * y1;
++        if (y2 > y1) {
++            for (i = y1; i < y2; i++) {
++                cirrus_draw_dot(display, (m * i + n) / 1000, i, color);
++            }
++        } else {
++            for (i = y2; i < y1; i++) {
++                cirrus_draw_dot(display, (m * i + n) / 1000, i, color);
++            }
++        }
++    } else {
++        int n = (int)y1 * 1000 - m * x1;
++        if (x2 > x1) {
++            for (i = x1; i < x2; i++) {
++                cirrus_draw_dot(display, i, (m * i + n) / 1000, color);
++            }
++        } else {
++            for (i = x2; i < x1; i++) {
++                cirrus_draw_dot(display, i, (m * i + n) / 1000, color);
++            }
++        }
++    }
++}
++void cirrus_draw_rectangle(struct cdi_video_display *display, unsigned int x, unsigned int y, unsigned int width, unsigned int height, int color)
++{
++    // Clip rect
++    if (x < 0) {
++        width += x;
++        x = 0;
++    }
++    if (y < 0) {
++        height += y;
++        y = 0;
++    }
++    if (x + width >= display->mode->width) {
++        width = display->mode->width - x;
++    }
++    if (y + height >= display->mode->height) {
++        height = display->mode->height - y;
++    }
++    if ((width <= 0) || (height <= 0)) return;
++    
++    cirrus_setup_rop(display);
++    
++    volatile struct cirrus_registers *regs = ((struct cirrus_device*)display->device)->regs;
++    int depth = display->mode->depth;
++    int displaywidth = display->mode->width;
++    int pitch = depth * displaywidth / 8;
++    
++    // Initialize
++    regs->graph_index = 0x33;
++    regs->graph_data = 0x04;
++    
++    // Set color depth
++    regs->graph_index = 0x30;
++    regs->graph_data = 0xC0 | ((depth - 8) << 1);
++    
++    // Set color
++    regs->graph_index = 0x01;
++    regs->graph_data = color & 0xFF;
++    regs->graph_index = 0x11;
++    regs->graph_data = (color & 0xFF00) >> 8;
++    regs->graph_index = 0x13;
++    regs->graph_data = (color & 0xFF0000) >> 16;
++    regs->graph_index = 0x15;
++    regs->graph_data = 0;
++    
++    // Set pitch
++    regs->graph_index = 0x24;
++    regs->graph_data = pitch & 0xFF;
++    regs->graph_index = 0x25;
++    regs->graph_data = (pitch & 0x1f00) >> 8;
++    
++    // Width
++    regs->graph_index = 0x20;
++    regs->graph_data = (width * 3 - 1) & 0xFF;
++    regs->graph_index = 0x21;
++    regs->graph_data = ((width * 3 - 1) & 0x1F00) >> 8;
++    // Height
++    regs->graph_index = 0x22;
++    regs->graph_data = height - 1;
++    regs->graph_index = 0x23;
++    regs->graph_data = ((height - 1) & 0x0700) >> 8;
++    // Position
++    int dest = pitch * y + x * depth / 8;
++    regs->graph_index = 0x28;
++    regs->graph_data = dest & 0xFF;
++    regs->graph_index = 0x29;
++    regs->graph_data = (dest & 0xFF00) >> 8;
++    regs->graph_index = 0x2A;
++    regs->graph_data = (dest & 0x3F0000) >> 16;
++    // Start drawing
++    regs->graph_index = 0x31;
++    regs->graph_data = 0x02;
++}
++void cirrus_draw_ellipse(struct cdi_video_display *display, unsigned int x, unsigned int y, unsigned int width, unsigned int height, int color)
++{
++    // TODO: Optimize this
++    int cx = width / 2;
++    int cy = height / 2;
++    int ix, iy;
++    int maxdist = cx * cx;
++    for (iy = 0; iy < height; iy++) {
++        for (ix = 0; ix < width; ix++) {
++            int dist = (((iy - cy) * (int)width) / (int)height) * (((iy - cy) * (int)width) / (int)height) + (ix - cx) * (ix - cx);
++            if (dist <= maxdist) {
++                cirrus_draw_dot(display, ix + x, iy + y, color);
++            }
++        }
++    }
++}
++
++void cirrus_copy_screen(struct cdi_video_display *display, unsigned int x, unsigned int y, unsigned int srcx, unsigned int srcy, unsigned int width, unsigned int height)
++{
++    // Draw bitmap
++    cirrus_setup_rop(display);
++    
++    int depth = display->mode->depth;
++    int destwidth = display->mode->width;
++    int destpitch = destwidth * depth / 8;
++    
++    vram_addr_t dest = y * destpitch + x * depth / 8;
++    vram_addr_t src = srcy * destpitch + srcx * depth / 8;
++    
++    cirrus_copy(display, src, destpitch, dest, destpitch, width, height, 1);
++}
++
++void cirrus_draw_bitmap(struct cdi_video_display *display, struct cdi_video_bitmap *bitmap, unsigned int x, unsigned int y)
++{
++    struct cirrus_bitmap *cirrusbitmap = (struct cirrus_bitmap*)bitmap;
++    // Bitmap has to be loaded into VRAM
++    // TODO: Direct copy
++    if (!cirrusbitmap->vramaddr) {
++        if (!cirrus_bitmap_upload(display->device, cirrusbitmap)) {
++            printf("cirrus: Cannot upload bitmap!\n");
++            return;
++        }
++    }
++    
++    // Draw bitmap
++    cirrus_setup_rop(display);
++    
++    int destdepth = display->mode->depth;
++    int destwidth = display->mode->width;
++    int destpitch = destwidth * destdepth / 8;
++    int srcwidth = bitmap->width;
++    int srcpitch = srcwidth * destdepth / 8;
++    
++    vram_addr_t dest = y * destpitch + x * destdepth / 8;
++    vram_addr_t src = cirrusbitmap->vramaddr;
++    
++    cirrus_copy(display, src, srcpitch, dest, destpitch, bitmap->width, bitmap->height, 1);
++}
++
++void cirrus_draw_bitmap_part(struct cdi_video_display *display, struct cdi_video_bitmap *bitmap, unsigned int x, unsigned int y, unsigned int srcx, unsigned int srcy, unsigned int width, unsigned int height)
++{
++    struct cirrus_bitmap *cirrusbitmap = (struct cirrus_bitmap*)bitmap;
++    // Bitmap has to be loaded into VRAM
++    // TODO: Direct copy
++    if (!cirrusbitmap->vramaddr) {
++        if (!cirrus_bitmap_upload(display->device, cirrusbitmap)) {
++            printf("cirrus: Cannot upload bitmap!\n");
++            return;
++        }
++    }
++    
++    // Draw bitmap
++    cirrus_setup_rop(display);
++    
++    int destdepth = display->mode->depth;
++    int destwidth = display->mode->width;
++    int destpitch = destwidth * destdepth / 8;
++    int srcwidth = bitmap->width;
++    int srcpitch = srcwidth * destdepth / 8;
++    
++    vram_addr_t dest = y * destpitch + x * destdepth / 8;
++    vram_addr_t src = cirrusbitmap->vramaddr + srcy * srcpitch + srcx * destdepth / 8;
++    
++    cirrus_copy(display, src, srcpitch, dest, destpitch, width, height, 1);
++}
++
+diff --git a/src/modules/cdi/cirrus/draw.h b/src/modules/cdi/cirrus/draw.h
+new file mode 100644
+index 0000000..7316d85
+--- /dev/null
++++ b/src/modules/cdi/cirrus/draw.h
+@@ -0,0 +1,32 @@
++/*
++ * Copyright (c) 2008 Mathias Gottschlag and Janosch Graef
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it 
++ * and/or modify it under the terms of the Do What The Fuck You Want 
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * http://sam.zoy.org/projects/COPYING.WTFPL for more details.
++ */
++
++#ifndef _DRAW_H_
++#define _DRAW_H_
++
++#include "cdi/video.h"
++
++void cirrus_set_raster_op(struct cdi_video_display *display, cdi_video_raster_op_t rop);
++
++void cirrus_set_target(struct cdi_video_display *display, struct cdi_video_bitmap *bitmap);
++
++void cirrus_draw_dot(struct cdi_video_display *display, unsigned int x, unsigned int y, int color);
++void cirrus_draw_line(struct cdi_video_display *display, unsigned int x1, unsigned int y1, unsigned int x2, unsigned int y2, int color);
++void cirrus_draw_rectangle(struct cdi_video_display *display, unsigned int x, unsigned int y, unsigned int width, unsigned int height, int color);
++void cirrus_draw_ellipse(struct cdi_video_display *display, unsigned int x, unsigned int y, unsigned int width, unsigned int height, int color);
++
++void cirrus_copy_screen(struct cdi_video_display *display, unsigned int x, unsigned int y, unsigned int srcx, unsigned int srcy, unsigned int width, unsigned int height);
++
++void cirrus_draw_bitmap(struct cdi_video_display *display, struct cdi_video_bitmap *bitmap, unsigned int x, unsigned int y);
++
++void cirrus_draw_bitmap_part(struct cdi_video_display *display, struct cdi_video_bitmap *bitmap, unsigned int x, unsigned int y, unsigned int srcx, unsigned int srcy, unsigned int width, unsigned int height);
++
++#endif
++
+diff --git a/src/modules/cdi/cirrus/main.c b/src/modules/cdi/cirrus/main.c
+new file mode 100644
+index 0000000..f7224f1
+--- /dev/null
++++ b/src/modules/cdi/cirrus/main.c
+@@ -0,0 +1,119 @@
++/*
++ * Copyright (c) 2008 Mathias Gottschlag and Janosch Graef
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it 
++ * and/or modify it under the terms of the Do What The Fuck You Want 
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * http://sam.zoy.org/projects/COPYING.WTFPL for more details.
++ */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "cdi.h"
++#include "cdi/misc.h"
++#include "cdi/video.h"
++#include "cdi/pci.h"
++#include "cdi/lists.h"
++
++#include "cirrus.h"
++#include "vesa.h"
++#include "draw.h"
++#include "bitmap.h"
++
++char *driver_name = "cirrus";
++struct cdi_video_driver cirrus_driver;
++
++static void cirrus_driver_init(void);
++static void cirrus_driver_destroy(struct cdi_driver* driver);
++
++#ifdef CDI_STANDALONE
++int main(void)
++#else
++int init_cirrus(void)
++#endif
++{
++    DEBUG("cirrus driver running\n");
++    cdi_init();
++    cirrus_driver_init();
++
++    #ifdef CDI_STANDALONE
++    cdi_run_drivers();
++    #endif
++    return 0;
++}
++
++/**
++ * Initializes the cirrus driver and registers it
++ */
++static void cirrus_driver_init(void)
++{
++    // Abort at once if we don't have VESA
++    if (vesa_initialize() == -1) {
++        return;
++    }
++
++    cdi_list_t pci_devices;
++    struct cdi_pci_device *pci;
++
++    memset(&cirrus_driver, 0, sizeof(cirrus_driver));
++    cdi_video_driver_init(&cirrus_driver);
++
++    // Fill driver struct
++    cirrus_driver.drv.name = driver_name;
++    cirrus_driver.drv.type = CDI_VIDEO;
++    cirrus_driver.drv.init_device = cirrus_device_init;
++    cirrus_driver.drv.remove_device = cirrus_device_remove;
++    cirrus_driver.drv.destroy = cirrus_driver_destroy;
++    cirrus_driver.display_enable = cirrus_display_enable;
++    cirrus_driver.display_disable = cirrus_display_disable;
++    cirrus_driver.display_clear = cirrus_display_clear;
++    cirrus_driver.display_set_mode = cirrus_display_set_mode;
++    cirrus_driver.display_get_mode_list = cirrus_display_get_mode_list;
++    /// @todo assignment from incompatible pointer type
++    cirrus_driver.bitmap_create = cirrus_bitmap_create;
++    /// @todo assignment from incompatible pointer type
++    cirrus_driver.bitmap_destroy = cirrus_bitmap_destroy;
++    /// @todo assignment from incompatible pointer type
++    cirrus_driver.bitmap_set_usage_hint = cirrus_bitmap_set_usage_hint;
++    cirrus_driver.set_raster_op = cirrus_set_raster_op;
++    cirrus_driver.set_target = cirrus_set_target;
++    cirrus_driver.draw_line = cirrus_draw_line;
++    cirrus_driver.draw_rectangle = cirrus_draw_rectangle;
++    cirrus_driver.draw_ellipse = cirrus_draw_ellipse;
++    cirrus_driver.copy_screen = cirrus_copy_screen;
++    cirrus_driver.draw_bitmap = cirrus_draw_bitmap;
++    cirrus_driver.draw_bitmap_part = cirrus_draw_bitmap_part;
++    /// @todo assignment from incompatible pointer type
++    cirrus_driver.draw_dot = cirrus_draw_dot;
++    TODO("Set rest of display handlers");
++
++    // Find Cirrus cards
++    pci_devices = cdi_list_create();
++    cdi_pci_get_all_devices(pci_devices);
++    while ((pci = cdi_list_pop(pci_devices))) {
++        if (pci->vendor_id == CIRRUS_VENDORID && pci->device_id == CIRRUS_DEVICEID) {
++            char *name = malloc(8);
++            snprintf(name, 8, "cirrus%01d", cdi_list_size(cirrus_driver.drv.devices));
++            struct cirrus_device *dev = cirrus_device_create(name, pci);
++            dev->dev.dev.driver = (struct cdi_driver*)&cirrus_driver;
++            cdi_list_push(cirrus_driver.drv.devices, dev);
++        } else cdi_pci_device_destroy(pci);
++    }
++    cdi_list_destroy(pci_devices);
++
++    // Registers the driver
++    cdi_video_driver_register(&cirrus_driver);
++}
++
++/**
++ * Destroys the cirrus driver
++ * @param driver Pointer to the driver (unused)
++ */
++static void cirrus_driver_destroy(struct cdi_driver* driver)
++{
++    TODO("");
++    cdi_video_driver_destroy((struct cdi_video_driver*)driver);
++}
+diff --git a/src/modules/cdi/cirrus/vesa.c b/src/modules/cdi/cirrus/vesa.c
+new file mode 100644
+index 0000000..d5064c2
+--- /dev/null
++++ b/src/modules/cdi/cirrus/vesa.c
+@@ -0,0 +1,152 @@
++/*
++ * Copyright (c) 2008 Mathias Gottschlag and Janosch Graef
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it 
++ * and/or modify it under the terms of the Do What The Fuck You Want 
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * http://sam.zoy.org/projects/COPYING.WTFPL for more details.
++ */
++
++#include "vesa.h"
++#include "cdi/bios.h"
++#include "cdi/video.h"
++
++#include <stdlib.h>
++#include <stdio.h>
++
++struct vesa_info_block vesainfo;
++
++static cdi_list_t modes = 0;
++
++/**
++ * Initializes VESA
++ * Reads in graphics card info like video modes etc
++ * @return 0, if VESA is available, -1 if it is not (because of some error)
++ */
++int vesa_initialize(void)
++{
++    // Setup registers/memory
++    struct cdi_bios_registers regs;
++    memset(&regs, 0, sizeof(regs));
++    regs.ax = 0x4F00;
++    regs.ds = 0x8000;
++    regs.es = 0x8000;
++    regs.di = 0x0000;
++    memcpy(&vesainfo, "VBE2", 4);
++    cdi_list_t memorylist = cdi_list_create();
++    struct cdi_bios_memory infomemory;
++    infomemory.src = &vesainfo;
++    infomemory.dest = 0x80000;
++    printf("Size: %d\n", sizeof(struct vesa_info_block));
++    infomemory.size = sizeof(struct vesa_info_block);
++    memorylist = cdi_list_push(memorylist, &infomemory);
++    // Call BIOS
++    int result = cdi_bios_int10(&regs, memorylist);
++    cdi_list_destroy(memorylist);
++    // cdi_bios_int10 not supported?
++    if (result == -1) {
++        fprintf(stderr, "cirrus: cdi_bios_int10 failed.\n");
++        return -1;
++    }
++    
++    printf("VESA: %c%c%c%c\n", vesainfo.signature[0], vesainfo.signature[1], vesainfo.signature[2], vesainfo.signature[3]);
++    printf("Version: %d.%d\n", vesainfo.version[1], vesainfo.version[0]);
++    printf("Modes: %05X\n", vesainfo.modeptr);
++    
++    // Read in modes
++    modes = cdi_list_create();
++    
++    int i;
++    uint16_t *modeptr = (uint16_t*)((char*)&vesainfo + (vesainfo.modeptr & 0xFFFF));
++    for (i = 0; i < 111; i++) {
++        if (modeptr[i] == 0xFFFF) break;
++        printf("Mode: %04X\n", modeptr[i]);
++        
++        // Get mode info
++        memset(&regs, 0, sizeof(regs));
++        regs.ax = 0x4F01;
++        regs.cx = modeptr[i];
++        regs.ds = 0x8000;
++        regs.es = 0x8000;
++        regs.di = 0x0000;
++        struct vesa_mode_info modeinfo;
++        infomemory.src = &modeinfo;
++        infomemory.size = 256;
++        memorylist = cdi_list_create();
++        memorylist = cdi_list_push(memorylist, &infomemory);
++        // Call BIOS
++        cdi_bios_int10(&regs, memorylist);
++        cdi_list_destroy(memorylist);
++        printf("Size: %dx%dx%d\n", modeinfo.width, modeinfo.height, modeinfo.depth);
++        printf("Framebuffer: %X\n", modeinfo.linearfb);
++        printf("Attr: %04X\n", modeinfo.modeattr);
++        
++        // Push mode onto list
++        struct vesa_mode *mode = malloc(sizeof(struct vesa_mode));
++        mode->mode.width = modeinfo.width;
++        mode->mode.height = modeinfo.height;
++        mode->mode.depth = modeinfo.depth;
++        mode->mode.type = CDI_VIDEO_GRAPHIC;
++        mode->vesamode = modeptr[i];
++        modes = cdi_list_push(modes, mode);
++    }
++    cdi_video_mode_t *mode = malloc(sizeof(cdi_video_mode_t));
++    mode->width = 80;
++    mode->height = 25;
++    mode->depth = 4;
++    mode->type = CDI_VIDEO_TEXT;
++    modes = cdi_list_push(modes, mode);
++    return 0;
++}
++
++cdi_list_t vesa_get_modes(void)
++{
++    return modes;
++}
++
++int vesa_change_mode(cdi_video_mode_t *newmode)
++{
++    // Text mode
++    if ((newmode->width == 80)
++     && (newmode->height == 25)
++     && (newmode->depth == 4)
++     && (newmode->type == CDI_VIDEO_TEXT)) {
++        struct cdi_bios_registers regs;
++        memset(&regs, 0, sizeof(regs));
++        regs.ax = 0x0083;
++        cdi_bios_int10(&regs, 0);
++    }
++    // Search for mode number
++    uint16_t modenumber = 0xFFFF;
++    int i;
++    for (i = 0; i < cdi_list_size(modes); i++) {
++        struct vesa_mode *mode = cdi_list_get(modes, i);
++        if ((cdi_video_mode_t*)mode == newmode) {
++            modenumber = mode->vesamode;
++            break;
++        }
++        if ((mode->mode.width == newmode->width)
++         && (mode->mode.height == newmode->height)
++         && (mode->mode.depth == newmode->depth)
++         && (mode->mode.type == newmode->type)) {
++            modenumber = mode->vesamode;
++            break;
++        }
++    }
++    if (modenumber == 0xFFFF) {
++        return -1;
++    }
++    
++    // Change mode
++    struct cdi_bios_registers regs;
++    memset(&regs, 0, sizeof(regs));
++    regs.ax = 0x4F02;
++    regs.bx = modenumber | 0xC000;
++    cdi_bios_int10(&regs, 0);
++    if ((regs.ax & 0xFF00) != 0x4F00) return -1;
++    if (regs.ax & 0xFF) return -1;
++    
++    return 0;
++}
++
+diff --git a/src/modules/cdi/cirrus/vesa.h b/src/modules/cdi/cirrus/vesa.h
+new file mode 100644
+index 0000000..e01c3c7
+--- /dev/null
++++ b/src/modules/cdi/cirrus/vesa.h
+@@ -0,0 +1,91 @@
++/*
++ * Copyright (c) 2008 Mathias Gottschlag and Janosch Graef
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it 
++ * and/or modify it under the terms of the Do What The Fuck You Want 
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * http://sam.zoy.org/projects/COPYING.WTFPL for more details.
++ */
++
++#ifndef _VESA_H_
++#define _VESA_H_
++
++#include <stdint.h>
++#include <cdi/lists.h>
++#include <cdi/video.h>
++
++/**
++ * VESA information block, used to get information about the card like video
++ * modes
++ */
++struct vesa_info_block {
++    char signature[4];
++    char version[2];
++    uint32_t oemname;
++    uint32_t capabilities;
++    uint32_t modeptr;
++    uint16_t videomem;
++    // VBE 2.0
++    uint16_t oemversion;
++    uint32_t vendornameptr;
++    uint32_t productnameptr;
++    uint32_t revisionptr;
++    uint16_t modes[111];
++    uint8_t  oem[256];
++} __attribute__ ((packed));
++
++struct vesa_mode_info {
++    uint16_t modeattr;
++    uint8_t  windowattra;
++    uint8_t  windowattrb;
++    uint16_t windowgran;
++    uint16_t windowsize;
++    uint16_t startsega;
++    uint16_t startsegb;
++    uint32_t posfunc;
++    uint16_t scanline;
++    
++    uint16_t width;
++    uint16_t height;
++    uint8_t  charwidth;
++    uint8_t  charheight;
++    uint8_t  planecount;
++    uint8_t  depth;
++    uint8_t  banks;
++    uint8_t  type;
++    uint8_t  banksize;
++    uint8_t  imagepages;
++    uint8_t  reserved;
++    // VBE v1.2+
++    uint8_t  redmasksize;
++    uint8_t  redfieldpos;
++    uint8_t  greenmasksize;
++    uint8_t  greenfieldsize;
++    uint8_t  bluemasksize;
++    uint8_t  bluefieldsize;
++    uint8_t  resmasksize;
++    uint8_t  resfieldsize;
++    uint8_t  dircolormode;
++    // VBE v2.0
++    uint32_t linearfb;
++    uint32_t offscreenmem;
++    uint32_t offscreensize;
++    
++    char reserved2[206];
++} __attribute__ ((packed));
++
++struct vesa_mode {
++    cdi_video_mode_t mode;
++    uint16_t vesamode;
++};
++
++struct vesa_info_block vesainfo;
++
++int vesa_initialize(void);
++
++cdi_list_t vesa_get_modes(void);
++
++int vesa_change_mode(cdi_video_mode_t *newmode);
++
++#endif
+diff --git a/src/modules/cdi/cirrus/vram.c b/src/modules/cdi/cirrus/vram.c
+new file mode 100644
+index 0000000..cf346e0
+--- /dev/null
++++ b/src/modules/cdi/cirrus/vram.c
+@@ -0,0 +1,168 @@
++/*
++ * Copyright (c) 2008 Mathias Gottschlag and Janosch Graef
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it 
++ * and/or modify it under the terms of the Do What The Fuck You Want 
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * http://sam.zoy.org/projects/COPYING.WTFPL for more details.
++ */
++
++#include <stddef.h>
++
++#include "cirrus.h"
++#include "vram.h"
++
++extern void cirrus_setup_rop(struct cdi_video_display *display);
++
++void cirrus_copy(struct cdi_video_display *display, vram_addr_t src, int srcpitch, vram_addr_t dest, int destpitch, int width, int height, int use_rop)
++{
++    volatile struct cirrus_registers *regs = ((struct cirrus_device*)display->device)->regs;
++    if (use_rop) {
++        cirrus_setup_rop(display);
++    } else {
++        // Use COPY rop
++        regs->graph_index = 0x32;
++        regs->graph_data = 0x0D;
++    }
++    
++    // Destination pitch
++    regs->graph_index = 0x24;
++    regs->graph_data = destpitch & 0xFF;
++    regs->graph_index = 0x25;
++    regs->graph_data = (destpitch & 0x1f00) >> 8;
++    // Source pitch
++    regs->graph_index = 0x26;
++    regs->graph_data = srcpitch & 0xFF;
++    regs->graph_index = 0x27;
++    regs->graph_data = (srcpitch & 0x1f00) >> 8;
++    
++    int ww = (width * display->mode->depth / 8) - 1;
++    int hh = height - 1;
++    
++    // From which side do we start?
++    int decrement = 0;
++    if (dest > src) {
++        decrement = 1;
++        
++        dest += hh * destpitch + ww;
++        src += hh * srcpitch + ww;
++    }
++    regs->graph_index = 0x30;
++    regs->graph_data = decrement;
++    
++    // Width
++    regs->graph_index = 0x20;
++    regs->graph_data = ww & 0xFF;
++    regs->graph_index = 0x21;
++    regs->graph_data = (ww & 0x1f00) >> 8;
++    // Height
++    regs->graph_index = 0x22;
++    regs->graph_data = hh & 0xFF;
++    regs->graph_index = 0x23;
++    regs->graph_data = (hh & 0x0700) >> 8;
++    // Source
++    regs->graph_index = 0x2C;
++    regs->graph_data = src & 0xFF;
++    regs->graph_index = 0x2D;
++    regs->graph_data = (src & 0xFF00) >> 8;
++    regs->graph_index = 0x2E;
++    regs->graph_data = (src & 0x3F0000) >> 16;
++    // Destination
++    regs->graph_index = 0x28;
++    regs->graph_data = dest & 0xFF;
++    regs->graph_index = 0x29;
++    regs->graph_data = (dest & 0xFF00) >> 8;
++    regs->graph_index = 0x2A;
++    regs->graph_data = (dest & 0x3F0000) >> 16;
++
++    // Start drawing
++    regs->graph_index = 0x31;
++    regs->graph_data = 0x02;
++}
++
++#define PTR2VRAMADDR(device,ptr) ((vram_addr_t)(ptr-((device)->framebuf)))
++
++static inline void *cirrus_memcpy(struct cirrus_device *device, void *dest, void *src, size_t size)
++{
++    cirrus_copy((struct cdi_video_display*)device->display, PTR2VRAMADDR(device, src), size, PTR2VRAMADDR(device, dest), size, (size*8)/device->display->dis.mode->depth, 1, 0);
++    return dest;
++}
++
++static struct cirrus_malloc_info *block_find_free(struct cirrus_device *device, size_t size)
++{
++    struct cirrus_malloc_info *cur = device->mm_first;
++    
++    while (cur->next!=NULL) {
++        if (cur->size==size) {
++            // Fits perfect
++            cur->prev->next = cur->next;
++            cur->next->prev = cur->prev;
++            return cur;
++        }
++        else if (cur->size>size+sizeof(struct cirrus_malloc_info)) {
++            // Split it
++            struct cirrus_malloc_info *new = ((void*)cur)+size;
++            new->size = cur->size-size;
++            new->prev = cur->prev;
++            new->next = cur->next;
++            cur->size = size;
++            return cur;
++        }
++         
++        // Next block
++        cur = cur->next;
++    }
++    
++    return NULL;
++}
++
++static void block_free(struct cirrus_device *device, struct cirrus_malloc_info *block)
++{
++    struct cirrus_malloc_info *cur = device->mm_first;
++    
++    if (((void*)block)+block->size<(void*)cur) {
++        // Put block before first block
++        block->next = cur;
++        block->prev = NULL;
++        cur->prev = block;
++        device->mm_first = block;
++    }
++    else {
++        // Find right place in list
++        while (cur!=NULL) {
++    	    if (((void*)cur)+cur->size<(void*)block && (((void*)block)+block->size<(void*)cur->next || cur->next==NULL)) {
++    	        // Put block here in list
++                block->next = cur->next;
++                block->prev = cur;
++                if (cur->next!=NULL) cur->next->prev = block;
++                cur->next = block;
++    	    }
++    	    /// @todo Join two/three blocks
++            cur = cur->next;
++        }
++    }
++    
++    ERROR("%s: Cannot free VRAM memory: 0x%x\n", device->dev.dev.name, block);
++}
++
++void cirrus_vram_setmem(struct cirrus_device *device, void *start, size_t size)
++{
++    device->mm_first = start;
++    device->mm_first->size = size;
++    device->mm_first->prev = NULL;
++    device->mm_first->next = NULL;
++}
++
++void *cirrus_malloc(struct cirrus_device *device, size_t size)
++{
++    struct cirrus_malloc_info *block = block_find_free(device, size+sizeof(struct cirrus_malloc_info));
++    if (block==NULL) return NULL;
++    else return ((void*)block)+sizeof(struct cirrus_malloc_info);
++}
++
++void cirrus_free(struct cirrus_device *device, void *mem)
++{
++    struct cirrus_malloc_info *block = mem-sizeof(struct cirrus_malloc_info);
++    block_free(device, block);
++}
+diff --git a/src/modules/cdi/cirrus/vram.h b/src/modules/cdi/cirrus/vram.h
+new file mode 100644
+index 0000000..be198e0
+--- /dev/null
++++ b/src/modules/cdi/cirrus/vram.h
+@@ -0,0 +1,26 @@
++/*
++ * Copyright (c) 2008 Mathias Gottschlag and Janosch Graef
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it 
++ * and/or modify it under the terms of the Do What The Fuck You Want 
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * http://sam.zoy.org/projects/COPYING.WTFPL for more details.
++ */
++
++#ifndef _VRAM_H_
++#define _VRAM_H_
++
++struct cirrus_malloc_info;
++struct cirrus_malloc_info {
++    size_t size;
++    struct cirrus_malloc_info *prev;
++    struct cirrus_malloc_info *next;
++};
++
++typedef unsigned int vram_addr_t;
++
++void cirrus_copy(struct cdi_video_display *display, vram_addr_t src, int srcpitch, vram_addr_t dest, int destpitch, int width, int height, int use_rop);
++void cirrus_vram_setmem(struct cirrus_device *device, void *start, size_t size);
++
++#endif
+-- 
+1.5.4.3
+

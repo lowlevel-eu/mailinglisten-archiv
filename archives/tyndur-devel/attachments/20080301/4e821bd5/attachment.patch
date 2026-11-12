@@ -1,0 +1,1142 @@
+=== Makefile
+==================================================================
+--- Makefile	(revision 1371)
++++ Makefile	(local)
+@@ -1,11 +1,11 @@
+-CC=gcc -m32 -g -c -nostdinc -fno-leading-underscore -fno-omit-frame-pointer -Wall -fno-strict-aliasing -O0 -fno-builtin -I . -I-  
+-CPP=g++ -m32 -g -c -fno-leading-underscore -fno-omit-frame-pointer -Wall -fno-strict-aliasing -nostdlib -fno-builtin -fno-rtti -fno-exceptions -fno-use-cxa-atexit -O0 
++CC=gcc -m32 -g -c -fno-stack-protector -nostdinc -fno-leading-underscore -fno-omit-frame-pointer -Wall -Werror -fno-strict-aliasing -O2 -fno-builtin -I . -I-  
++CPP=g++ -m32 -g -c -fno-stack-protector -fno-leading-underscore -fno-omit-frame-pointer -Wall -fno-strict-aliasing -nostdlib -fno-builtin -fno-rtti -fno-exceptions -fno-use-cxa-atexit -O0 
+ PPC=fpc -n -Cn -CX -Tlost  -Fu../lib/units -Fu../units
+ 
+ ASM_ELF=nasm -felf -O99 
+ ASM_BIN=nasm -fbin -O99
+ 
+-BUILD_ROOT=/shared/projects/LOSTclean/build
++BUILD_ROOT=/home/toni/arbeitskopien/lost_local_svk/build/output
+ BUILD_DIR=$(BUILD_ROOT)
+ 
+ AS=as -32
+@@ -28,34 +28,16 @@
+ 	rm -f *.o *.a
+ 	for file in *; do if [ -f "$$file/Makefile" -a ! -f "$$file/.nobuild" ]; then make -sC "$$file" clean; rm "$$file/Makefile"; fi done  
+ 
+-.SILENT: all makefiles subdirs obj clean image
+-internal_image:
+-	if ! [ -f build/lost.img ]; then         PATH=$$PATH:/sbin:/usr/sbin:/usr/local/sbin ;		dd if=/dev/zero of=build/lost.img bs=1024 count=1440 ;		mkfs.msdos build/lost.img ;		mmd -i build/lost.img ::/grub ;		mcopy -i build/lost.img /boot/grub/stage? ::/grub ;		mcopy -i build/lost.img build/default.cfg ::/grub/menu.lst ;		echo device '(fd0)' build/lost.img > build/grub.txt ;		echo root '(fd0)' >> build/grub.txt ;		echo setup '(fd0)' >> build/grub.txt ;        grub --batch < build/grub.txt ;		rm build/grub.txt ;	fi
+-	
+-	for i in build/*.krn; do 		gzip -c $$i > build/`basename $$i .krn`.kgz ;	done
+-	
+-	for i in build/*.mod; do 		gzip -c $$i > build/`basename $$i .mod`.mgz ;	done
++.SILENT: all makefiles subdirs obj clean updateroot image-floppy image-hd
++updateroot: subdirs
++	build/scripts/updateroot
+ 
+-	mcopy -D o -i build/lost.img build/default.cfg ::/grub/menu.lst
+-	mcopy -D o -i build/lost.img build/*.kgz ::/
+-	mcopy -D o -i build/lost.img build/*.mgz ::/
+-	mcopy -D o -i build/lost.img build/apps ::/
+-	mcopy -D o -i build/lost.img build/data ::/
++image-floppy: updateroot
++	build/scripts/image_floppy
+ 
+-image:
+-	make --no-print-directory -s all
+-	make --no-print-directory -s internal_image 
++image-hd: updateroot
++	build/scripts/image_hd
+ 
+-simage:
+-	make --no-print-directory -s subdirs
+-	make --no-print-directory -s internal_image 
+-	
+-test-qemu: image
+-	qemu -serial stdio -fda build/lost.img -boot a
+-
+-test-bochs: image
+-	bochs -f bochs.config
+-
+ menuconfig:
+ 	python config.py
+ 
+=== build/default.cfg
+==================================================================
+--- build/default.cfg	(revision 1371)
++++ build/default.cfg	(local)
+@@ -1,13 +0,0 @@
+-title LOST
+-kernel /lost.kgz debug=s
+-module /init.mgz
+-module /vterm.mgz
+-module /console.mgz vterm:/vterm0/out vterm:/vterm0/in
+-module /dma.mgz
+-module /floppy.mgz
+-module /fat.mgz
+-module /kbc.mgz
+-module /cmos.mgz
+-module /pci.mgz
+-module /apps/sh
+-boot
+=== build/makeimage.sh
+==================================================================
+--- build/makeimage.sh	(revision 1371)
++++ build/makeimage.sh	(local)
+@@ -1,28 +0,0 @@
+-dd if=/dev/zero of=$1 bs=1024 count=1440
+-mkfs.msdos $1
+-mkdir -p mnt
+-mount -oloop $1 mnt
+-
+-mkdir mnt/grub
+-cp /boot/grub/stage? mnt/grub
+-
+-echo timeout 2 >> mnt/grub/menu.lst
+-echo title LOST >> mnt/grub/menu.lst
+-echo kernel /lost.krn >> mnt/grub/menu.lst
+-echo module /init.mod >> mnt/grub/menu.lst
+-for i in *.mod; do 
+-    [ "$i" != "init.mod" ] && echo module /"$i" >> mnt/grub/menu.lst
+-done
+-
+-echo boot >> mnt/grub/menu.lst
+-
+-cp *.krn mnt
+-cp *.mod mnt
+-umount mnt
+-rmdir mnt
+-
+-echo device '(fd0)' lost.img > grub.txt
+-echo root '(fd0)' >> grub.txt
+-echo setup '(fd0)' >> grub.txt
+-grub --batch < grub.txt
+-rm grub.txt
+=== build/config/grub_floppy.cfg
+==================================================================
+--- build/config/grub_floppy.cfg	(revision 1371)
++++ build/config/grub_floppy.cfg	(local)
+@@ -0,0 +1,16 @@
++title LOST
++kernel /boot/lost debug=s
++module /modules/init boot=file:/
++module /modules/vterm
++module /modules/console vterm:/vterm0/out vterm:/vterm0/in
++module /modules/file
++module /modules/dma
++module /modules/floppy
++module /modules/fat
++module /modules/kbc
++module /modules/cmos
++module /modules/pci
++module /modules/file mount file:/ floppy:/devices/fd0|fat:/
++module /apps/getterm vterm:/vterm0/in vterm:/vterm0/out vterm:/vterm0/out /apps/sh
++module /apps/getterm vterm:/vterm1/in vterm:/vterm1/out vterm:/vterm1/out /apps/sh
++boot
+=== build/config/grub_hd.cfg
+==================================================================
+--- build/config/grub_hd.cfg	(revision 1371)
++++ build/config/grub_hd.cfg	(local)
+@@ -0,0 +1,16 @@
++title LOST
++kernel /boot/lost debug=s
++module /modules/init boot=file:/
++module /modules/vterm
++module /modules/console vterm:/vterm0/out vterm:/vterm0/in
++module /modules/file
++module /modules/ext2
++module /modules/fat
++module /modules/ata
++module /modules/kbc
++module /modules/cmos
++module /modules/pci
++module /modules/file mount file:/ ata:/ata00_p0|ext2:/
++module /apps/getterm vterm:/vterm0/in vterm:/vterm0/out vterm:/vterm0/out /apps/sh
++module /apps/getterm vterm:/vterm1/in vterm:/vterm1/out vterm:/vterm1/out /apps/sh
++boot
+=== build/config/image_floppy.cfg
+==================================================================
+--- build/config/image_floppy.cfg	(revision 1371)
++++ build/config/image_floppy.cfg	(local)
+@@ -0,0 +1 @@
++IMAGE_PATH="build/images/floppy.img"
+=== build/config/image_hd.cfg
+==================================================================
+--- build/config/image_hd.cfg	(revision 1371)
++++ build/config/image_hd.cfg	(local)
+@@ -0,0 +1,3 @@
++IMAGE_PATH="build/images/hd.img"
++# Imagegroesse in Megabytes
++IMAGE_SIZE=10
+=== build/scripts/create_partition
+==================================================================
+--- build/scripts/create_partition	(revision 1371)
++++ build/scripts/create_partition	(local)
+@@ -0,0 +1,115 @@
++#!/usr/bin/python
++
++# Copyright (c) 2008 The LOST Project. All rights reserved.
++#
++# This code is derived from software contributed to the LOST Project
++# by Antoine Kaufmann.
++#
++# Redistribution and use in source and binary forms, with or without
++# modification, are permitted provided that the following conditions
++# are met:
++# 1. Redistributions of source code must retain the above copyright
++#    notice, this list of conditions and the following disclaimer.
++# 2. Redistributions in binary form must reproduce the above copyright
++#    notice, this list of conditions and the following disclaimer in the
++#    documentation and/or other materials provided with the distribution.
++# 3. All advertising materials mentioning features or use of this software
++#    must display the following acknowledgement:
++#     This product includes software developed by the LOST Project
++#     and its contributors.
++# 4. Neither the name of the LOST Project nor the names of its
++#    contributors may be used to endorse or promote products derived
++#    from this software without specific prior written permission.
++#
++# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++# ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++# TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++# PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++# CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++# EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++# PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++# OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++# WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++# OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++# ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++import sys
++import array
++import stat
++import os
++
++sectors_per_track = 63
++head_count = 16
++
++# Berechnet die CHS-Adresse zur LBA und wandelt sie in das passende Format fuer
++# die Partitionstabelle um.
++# Zurueckgegeben wird ein Tuppel mit den 3 Bytes fuer die
++# Partitionstabelleneintraege.
++def lba2chs(lba):
++    # CHS Berechnen
++    cylinder = lba / (sectors_per_track * head_count)
++    temp = lba % (head_count * sectors_per_track)
++    head = temp / sectors_per_track;
++    sector = (temp % sectors_per_track) + 1;
++    
++    # Muss scheinbar so sein ???
++    if sector < 1:
++        sector = 1
++
++    # Fuer Partitionstabelle Formatieren
++    a = head
++    b = ((cylinder & 0x300) >> 2) + sector
++    c = cylinder & 0xFF
++    return a, b, c
++
++# DWORD in 4 Bytes umrechenen (Little Endian)
++# Zurueckgegeben wird ein Tuppel mit den Bytes
++def le_dword(dword):
++    return (dword >>  0) & 255, (dword >>  8) & 255, (dword >> 16) & 255, (dword >> 24) & 255
++
++
++# Abrrechen wenn kein Argument mit dem Pfad gefunden werden konnte
++if len(sys.argv) <= 1:
++    print 'Bitte Imagepfad angeben'
++    sys.exit(-1)
++
++# Ansonsten wird der Pfad gespeichert
++image_path = sys.argv[1]
++
++# Image oeffnen
++image_file = open(image_path, mode='r+b')
++if image_file == 0:
++    print 'Image konnte nicht geoeffnet werden.'
++    sys.exit(-1)
++stat_info = os.lstat(image_path)
++image_size = stat_info[stat.ST_SIZE]
++
++# Partitionstabelle vorbereiten
++part_table = array.array('B')
++for i in range(0, 66):
++    part_table.insert(i, 0)
++# Signatur setzen
++part_table[64] = int('55', 16)
++part_table[65] = int('aa', 16)
++
++
++# Daten fuer Eintrag vorbereiten
++sector_size = 512
++partition_start = 63
++partition_end = image_size / sector_size
++# Das Partitionsende muss auf einer Zylindergrenze liegen
++partition_end -= partition_end % (63 * 16)
++
++
++# In Partitionstabelle eintragen
++part_table[1], part_table[2], part_table[3] = lba2chs(partition_start)
++part_table[4] = int('83', 16)
++part_table[5], part_table[6], part_table[7] = lba2chs(partition_end - 1)
++part_table[8], part_table[9], part_table[10], part_table[11] = le_dword(partition_start)
++part_table[12], part_table[13], part_table[14], part_table[15] = le_dword(partition_end - partition_start)
++
++
++# Partitionstabelle apspeichern
++image_file.seek(446)
++part_table.tofile(image_file)
++
++image_file.close()
+
+Property changes on: build/scripts/create_partition
+___________________________________________________________________
+Name: svn:executable
+ +*
+Name: svn:mime-type
+ +text/script
+
+=== build/scripts/get_partition
+==================================================================
+--- build/scripts/get_partition	(revision 1371)
++++ build/scripts/get_partition	(local)
+@@ -0,0 +1,68 @@
++#!/usr/bin/python
++
++# Copyright (c) 2008 The LOST Project. All rights reserved.
++#
++# This code is derived from software contributed to the LOST Project
++# by Antoine Kaufmann.
++#
++# Redistribution and use in source and binary forms, with or without
++# modification, are permitted provided that the following conditions
++# are met:
++# 1. Redistributions of source code must retain the above copyright
++#    notice, this list of conditions and the following disclaimer.
++# 2. Redistributions in binary form must reproduce the above copyright
++#    notice, this list of conditions and the following disclaimer in the
++#    documentation and/or other materials provided with the distribution.
++# 3. All advertising materials mentioning features or use of this software
++#    must display the following acknowledgement:
++#     This product includes software developed by the LOST Project
++#     and its contributors.
++# 4. Neither the name of the LOST Project nor the names of its
++#    contributors may be used to endorse or promote products derived
++#    from this software without specific prior written permission.
++#
++# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++# ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++# TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++# PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++# CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++# EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++# PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++# OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++# WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++# OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++# ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++import sys
++import array
++import os
++
++# 4 Bytes in ein dword umwandeln (Little endian)
++# Zurueckgegeben wird ein Tuppel mit den Bytes
++def le_dword(a, b, c, d):
++    return ((a << 0) | (b << 8) | (c << 16) | (d << 24))
++
++
++# Abrrechen wenn kein Argument mit dem Pfad gefunden werden konnte
++if len(sys.argv) <= 1:
++    print 'Bitte Imagepfad angeben'
++    sys.exit(-1)
++
++# Ansonsten wird der Pfad gespeichert
++image_path = sys.argv[1]
++
++# Image oeffnen
++image_file = open(image_path, mode='rb')
++if image_file == 0:
++    print 'Image konnte nicht geoeffnet werden.'
++    sys.exit(-1)
++
++# Partitionstabelle vorbereiten und einlesen
++part_table = array.array('B')
++image_file.seek(446)
++part_table.fromfile(image_file, 63)
++
++# In Partitionstabelle eintragen
++print le_dword(part_table[8], part_table[9], part_table[10], part_table[11]), le_dword(part_table[12], part_table[13], part_table[14], part_table[15])
++
++image_file.close()
++
+
+Property changes on: build/scripts/get_partition
+___________________________________________________________________
+Name: svn:executable
+ +*
+Name: svn:mime-type
+ +text/script
+
+=== build/scripts/image_floppy
+==================================================================
+--- build/scripts/image_floppy	(revision 1371)
++++ build/scripts/image_floppy	(local)
+@@ -0,0 +1,77 @@
++#!/bin/bash
++
++# Copyright (c) 2008 The LOST Project. All rights reserved.
++#
++# This code is derived from software contributed to the LOST Project
++# by Antoine Kaufmann.
++#
++# Redistribution and use in source and binary forms, with or without
++# modification, are permitted provided that the following conditions
++# are met:
++# 1. Redistributions of source code must retain the above copyright
++#    notice, this list of conditions and the following disclaimer.
++# 2. Redistributions in binary form must reproduce the above copyright
++#    notice, this list of conditions and the following disclaimer in the
++#    documentation and/or other materials provided with the distribution.
++# 3. All advertising materials mentioning features or use of this software
++#    must display the following acknowledgement:
++#     This product includes software developed by the LOST Project
++#     and its contributors.
++# 4. Neither the name of the LOST Project nor the names of its
++#    contributors may be used to endorse or promote products derived
++#    from this software without specific prior written permission.
++#
++# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++# ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++# TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++# PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++# CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++# EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++# PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++# OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++# WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++# OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++# ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++
++ROOT=build/root
++source build/config/image_floppy.cfg
++
++export PATH="/sbin:/usr/sbin:$PATH"
++export MTOOLSRC=lostmtools.conf
++
++# Konfigurationsdatei fuer mtools generieren
++cat << EOF > $MTOOLSRC
++drive l:
++    file="$IMAGE_PATH" cylinders=80 heads=2 sectors=18 filter
++EOF
++
++# Wenn das Image neu erstellt werden muss, kommen noch ein paar schritte mehr
++# dazu.
++NEW=0
++if ! [ -f $IMAGE_PATH ]; then
++    # Leeres Image erstellen und formatieren
++    dd if=/dev/zero of=$IMAGE_PATH bs=1024 count=1440
++    mformat l:
++    NEW=1
++fi
++
++
++mcopy -D o -s $ROOT/* l:/
++
++# Grub-Konfiguration kopieren
++mcopy -D o build/config/grub_floppy.cfg l:/boot/grub/menu.lst
++
++if [ $NEW -ne 0 ]; then
++    # Grub kopieren und installieren
++    mmd -D s l:/boot/grub
++    mcopy -D o /boot/grub/stage? l:/boot/grub/
++
++    echo device '(fd0)' $IMAGE_PATH > build/grub.txt
++    echo root '(fd0)' >> build/grub.txt
++    echo setup '(fd0)' >> build/grub.txt
++    grub --batch < build/grub.txt
++    rm build/grub.txt
++fi
++
++# Konfigurationsdatei fuer mtools wieder loeschen
++rm -f $MTOOLSRC
+
+Property changes on: build/scripts/image_floppy
+___________________________________________________________________
+Name: svn:executable
+ +*
+
+=== build/scripts/image_hd
+==================================================================
+--- build/scripts/image_hd	(revision 1371)
++++ build/scripts/image_hd	(local)
+@@ -0,0 +1,127 @@
++#!/bin/bash
++
++# Copyright (c) 2008 The LOST Project. All rights reserved.
++#
++# This code is derived from software contributed to the LOST Project
++# by Antoine Kaufmann.
++#
++# Redistribution and use in source and binary forms, with or without
++# modification, are permitted provided that the following conditions
++# are met:
++# 1. Redistributions of source code must retain the above copyright
++#    notice, this list of conditions and the following disclaimer.
++# 2. Redistributions in binary form must reproduce the above copyright
++#    notice, this list of conditions and the following disclaimer in the
++#    documentation and/or other materials provided with the distribution.
++# 3. All advertising materials mentioning features or use of this software
++#    must display the following acknowledgement:
++#     This product includes software developed by the LOST Project
++#     and its contributors.
++# 4. Neither the name of the LOST Project nor the names of its
++#    contributors may be used to endorse or promote products derived
++#    from this software without specific prior written permission.
++#
++# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++# ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++# TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++# PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++# CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++# EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++# PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++# OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++# WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++# OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++# ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++
++ROOT=build/root
++MOUNT=build/mnt
++SUDO=sudo
++source build/config/image_hd.cfg
++
++# Wir brauchen Tools wie grub und mkfs.ext2
++PATH="/sbin:/usr/sbin:$PATH"
++
++
++die()
++{
++    echo $1
++    exit -1
++}
++
++# Wenn das Image neu erstellt werden muss, kommen noch ein paar schritte mehr
++# dazu.
++NEW=0
++#if ! [ -f $IMAGE_PATH ]; then
++    # Leeres Image erstellen und formatieren
++    dd if=/dev/zero of=$IMAGE_PATH bs=$((1024*1024)) count=$IMAGE_SIZE 2> /dev/null
++    build/scripts/create_partition $IMAGE_PATH
++    NEW=1
++#fi
++
++
++# Pruefen ob losetup installiert ist
++$SUDO which losetup > /dev/null
++if [ $? -ne 0 ]; then
++    die "losetup konnte nicht gefunden werden"
++fi
++
++LOOP=
++# Unbenutzes Loopdevice suchen
++for i in `seq 1 10`; do
++    p="/dev/loop$i"
++    $SUDO losetup $p 2> /dev/null 1> /dev/null
++    if [ $? -eq 1 ]; then
++        LOOP=$p
++        break
++    fi
++done
++if [ "$LOOP" == "" ]; then
++    die "Kein freies Loopback-Device gefunden"
++fi
++
++# Start und Ende der Partition einlesen
++PARTITIONS="`build/scripts/get_partition $IMAGE_PATH`"
++PART_START=`echo $PARTITIONS | awk '{print $1}'`
++PART_SIZE=`echo $PARTITIONS | awk '{print $2}'`
++
++# Loopback-Geraet einrichten
++$SUDO losetup -o $((${PART_START} * 512)) -s $((${PART_SIZE} * 512)) $LOOP $IMAGE_PATH || die "Loopback-Device konnte nicht eingerichtet werden"
++
++if [ $NEW -ne 0 ]; then
++    # Dateisystem erstellen
++    $SUDO mkfs.ext2 -q -r0 $LOOP || die "Dateisystem konnte nicht erstellt werden"
++fi
++
++# Partition mounten
++mkdir -p $MOUNT
++sudo mount $LOOP $MOUNT
++sudo chmod 777 -R $MOUNT
++
++# Daten Kopieren
++cp -rP --preserve=links,timestamps $ROOT/* $MOUNT/
++
++# GRUB-Konfiguration kopieren
++mkdir -p $MOUNT/boot/grub
++cp build/config/grub_hd.cfg $MOUNT/boot/grub/menu.lst
++
++
++# Grub kopieren
++if [ $NEW -ne 0 ]; then
++    cp /boot/grub/stage? $MOUNT/boot/grub/
++fi
++
++# Partition unmounten und loopback-Device freigeben
++sudo umount $MOUNT
++rm -rf $MOUNT
++$SUDO losetup -d $LOOP || die "Loopbackdevice konnte nicht ausgehaengt werden"
++
++
++# Grub installieren
++if [ $NEW -ne 0 ]; then
++    echo device '(hd0)' $IMAGE_PATH > build/grub.txt
++    echo root '(hd0,0)' >> build/grub.txt
++    echo setup '(hd0)' >> build/grub.txt
++    grub --no-floppy --batch < build/grub.txt > /dev/null
++    rm build/grub.txt
++fi
++
+
+Property changes on: build/scripts/image_hd
+___________________________________________________________________
+Name: svn:executable
+ +*
+
+=== build/scripts/updateroot
+==================================================================
+--- build/scripts/updateroot	(revision 1371)
++++ build/scripts/updateroot	(local)
+@@ -0,0 +1,60 @@
++#!/bin/bash
++
++# Copyright (c) 2006 The LOST Project. All rights reserved.
++#
++# This code is derived from software contributed to the LOST Project
++# by Kevin Wolf.
++#
++# Redistribution and use in source and binary forms, with or without
++# modification, are permitted provided that the following conditions
++# are met:
++# 1. Redistributions of source code must retain the above copyright
++#    notice, this list of conditions and the following disclaimer.
++# 2. Redistributions in binary form must reproduce the above copyright
++#    notice, this list of conditions and the following disclaimer in the
++#    documentation and/or other materials provided with the distribution.
++# 3. All advertising materials mentioning features or use of this software
++#    must display the following acknowledgement:
++#     This product includes software developed by the LOST Project
++#     and its contributors.
++# 4. Neither the name of the LOST Project nor the names of its
++#    contributors may be used to endorse or promote products derived
++#    from this software without specific prior written permission.
++#
++# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++# ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++# TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++# PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++# CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++# EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++# PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++# OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++# WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++# OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++# ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++
++
++ROOT=build/root
++OUTPUT=build/output
++
++# Verzeichnisstruktur anlegen
++mkdir -p $ROOT/boot/grub
++mkdir -p $ROOT/apps
++mkdir -p $ROOT/modules
++
++# Module Komprimieren und auf Image kopieren
++for f in $OUTPUT/modules/*; do
++    gzip -c $f > $ROOT/modules/`basename $f .mod`
++done
++
++# Anwendungen komprimieren und auf Image kopieren
++for f in $OUTPUT/apps/*; do
++    gzip -c $f > $ROOT/apps/`basename $f`
++done
++
++# Kernel komprimieren und auf Image kopieren
++for f in $OUTPUT/kernel/*; do
++    gzip -c $f > $ROOT/boot/`basename $f .krn`
++done
++
++
+
+Property changes on: build/scripts/updateroot
+___________________________________________________________________
+Name: svn:executable
+ +*
+
+=== buildmk.sh
+==================================================================
+--- buildmk.sh	(revision 1371)
++++ buildmk.sh	(local)
+@@ -77,7 +77,7 @@
+ ASM_ELF=nasm -felf -O99 $NASMINCLUDES
+ ASM_BIN=nasm -fbin -O99
+ 
+-BUILD_ROOT=$LOST_BUILDMK_ROOT/build
++BUILD_ROOT=$LOST_BUILDMK_ROOT/build/output
+ BUILD_DIR=`pwd | sed s#^$LOST_BUILDMK_ROOT#\$\(BUILD_ROOT\)#`
+ 
+ AS=$LOST_TOOLS_AS
+@@ -215,54 +215,20 @@
+ 	rm -f *.o *.a
+ 	for file in *; do if [ -f "\$\$file/Makefile" -a ! -f "\$\$file/.nobuild" ]; then make -sC "\$\$file" clean; rm "\$\$file/Makefile"; fi done  
+ 
+-.SILENT: all makefiles subdirs obj clean image
++.SILENT: all makefiles subdirs obj clean updateroot image-floppy image-hd
+ EOF
+ 
+ if [ "$LOST_BUILDMK_ROOT" == "`pwd`" ]; then
+ cat <<EOF >> Makefile
+-internal_image:
+-	if ! [ -f build/lost.img ]; then \
+-        PATH=\$\$PATH:/sbin:/usr/sbin:/usr/local/sbin ;\
+-		dd if=/dev/zero of=build/lost.img bs=1024 count=1440 ;\
+-		mkfs.msdos build/lost.img ;\
+-		mmd -i build/lost.img ::/grub ;\
+-		mcopy -i build/lost.img /boot/grub/stage? ::/grub ;\
+-		mcopy -i build/lost.img build/default.cfg ::/grub/menu.lst ;\
+-		echo device '(fd0)' build/lost.img > build/grub.txt ;\
+-		echo root '(fd0)' >> build/grub.txt ;\
+-		echo setup '(fd0)' >> build/grub.txt ;\
+-        grub --batch < build/grub.txt ;\
+-		rm build/grub.txt ;\
+-	fi
+-	
+-	for i in build/*.krn; do \
+-		gzip -c \$\$i > build/\`basename \$\$i .krn\`.kgz ;\
+-	done
+-	
+-	for i in build/*.mod; do \
+-		gzip -c \$\$i > build/\`basename \$\$i .mod\`.mgz ;\
+-	done
++updateroot: subdirs
++	build/scripts/updateroot
+ 
+-	mcopy -D o -i build/lost.img build/default.cfg ::/grub/menu.lst
+-	mcopy -D o -i build/lost.img build/*.kgz ::/
+-	mcopy -D o -i build/lost.img build/*.mgz ::/
+-	mcopy -D o -i build/lost.img build/apps ::/
+-	mcopy -D o -i build/lost.img build/data ::/
++image-floppy: updateroot
++	build/scripts/image_floppy
+ 
+-image:
+-	make --no-print-directory -s all
+-	make --no-print-directory -s internal_image 
++image-hd: updateroot
++	build/scripts/image_hd
+ 
+-simage:
+-	make --no-print-directory -s subdirs
+-	make --no-print-directory -s internal_image 
+-	
+-test-qemu: image
+-	qemu -serial stdio -fda build/lost.img -boot a
+-
+-test-bochs: image
+-	bochs -f bochs.config
+-
+ menuconfig:
+ 	python config.py
+ 
+=== src/kernel/src/Makefile.all
+==================================================================
+--- src/kernel/src/Makefile.all	(revision 1371)
++++ src/kernel/src/Makefile.all	(local)
+@@ -1,6 +1,6 @@
+ shopt -s extglob
+ source $LOST_BUILDMK_ROOT/config.sh
+ 
+-echo "LD   $1/lost.krn"
++echo "LD   $1/kernel/lost"
+ $LOST_TOOLS_LD -olost.krn -Tkernel.ld header.o !(header).o $2
+-mv lost.krn $1/
++mv lost.krn $1/kernel/lost
+=== src/kernel2/src/arch/amd64/Makefile.all
+==================================================================
+--- src/kernel2/src/arch/amd64/Makefile.all	(revision 1371)
++++ src/kernel2/src/arch/amd64/Makefile.all	(local)
+@@ -15,4 +15,4 @@
+ $LOST_TOOLS_LD -olost2.krn -Tloader/loader.ld loader/startup.o loader/!(startup).o kernel.o $2
+ 
+ 
+-mv lost2.krn $1/
++mv lost2.krn $1/kernel/lost2
+=== src/kernel2/src/arch/i386/Makefile.all
+==================================================================
+--- src/kernel2/src/arch/i386/Makefile.all	(revision 1371)
++++ src/kernel2/src/arch/i386/Makefile.all	(local)
+@@ -8,6 +8,6 @@
+ $LOST_TOOLS_OBJCOPY -B i386:i386 -I binary -O elf32-i386 rm_trampoline.o rm_trampo_conv.o
+ rm rm_trampoline.o
+ 
+-echo "LD   $1/lost2.krn"
++echo "LD   $1/kernel/lost2"
+ $LOST_TOOLS_LD -olost2.krn -Tkernel.ld header.o --start-group !(header).o */*.o  $KERNEL/*.o $KERNEL/*/!(rm_trampoline).o $2 --end-group
+-mv lost2.krn $1/
++mv lost2.krn $1/kernel/lost2
+=== src/modules/cdi/ata/Makefile.all
+==================================================================
+--- src/modules/cdi/ata/Makefile.all	(revision 1371)
++++ src/modules/cdi/ata/Makefile.all	(local)
+@@ -1,6 +1,6 @@
+ shopt -s extglob
+ source $LOST_BUILDMK_ROOT/config.sh
+ 
+-echo "LD   $1/ata.mod"
++echo "LD   $1/modules/ata"
+ $LOST_TOOLS_LD -oata.mod -Ttext=0x40000000 *.o --start-group $2 --end-group
+-$LOST_TOOLS_STRIP -s ata.mod -o $1/ata.mod
++$LOST_TOOLS_STRIP -s ata.mod -o $1/modules/ata
+=== src/modules/cdi/floppy/Makefile.all
+==================================================================
+--- src/modules/cdi/floppy/Makefile.all	(revision 1371)
++++ src/modules/cdi/floppy/Makefile.all	(local)
+@@ -1,6 +1,6 @@
+ shopt -s extglob
+ source $LOST_BUILDMK_ROOT/config.sh
+ 
+-echo "LD   $1/cdi_floppy.mod"
++echo "LD   $1/modules/cdi_floppy"
+ $LOST_TOOLS_LD -ocdi_floppy.mod -Ttext=0x40000000 *.o --start-group $2 --end-group
+-$LOST_TOOLS_STRIP -s cdi_floppy.mod -o $1/cdi_floppy.mod
++$LOST_TOOLS_STRIP -s cdi_floppy.mod -o $1/modules/cdi_floppy
+=== src/modules/cdi/sis900/Makefile.all
+==================================================================
+--- src/modules/cdi/sis900/Makefile.all	(revision 1371)
++++ src/modules/cdi/sis900/Makefile.all	(local)
+@@ -1,6 +1,6 @@
+ shopt -s extglob
+ source $LOST_BUILDMK_ROOT/config.sh
+ 
+-echo "LD   $1/sis900.mod"
++echo "LD   $1/modules/sis900"
+ $LOST_TOOLS_LD -osis900.mod -Ttext=0x40000000 *.o --start-group $2 --end-group
+-$LOST_TOOLS_STRIP -s sis900.mod -o $1/sis900.mod
++$LOST_TOOLS_STRIP -s sis900.mod -o $1/modules/sis900
+=== src/modules/cmos/Makefile.all
+==================================================================
+--- src/modules/cmos/Makefile.all	(revision 1371)
++++ src/modules/cmos/Makefile.all	(local)
+@@ -1,6 +1,6 @@
+ shopt -s extglob
+ source $LOST_BUILDMK_ROOT/config.sh
+ 
+-echo "LD   $1/cmos.mod"
++echo "LD   $1/modules/cmos"
+ $LOST_TOOLS_LD -ocmos.mod -Ttext=0x40000000 *.o --start-group $2 --end-group
+-$LOST_TOOLS_STRIP -s cmos.mod -o $1/cmos.mod
++$LOST_TOOLS_STRIP -s cmos.mod -o $1/modules/cmos
+=== src/modules/console/Makefile.all
+==================================================================
+--- src/modules/console/Makefile.all	(revision 1371)
++++ src/modules/console/Makefile.all	(local)
+@@ -1,6 +1,6 @@
+ shopt -s extglob
+ source $LOST_BUILDMK_ROOT/config.sh
+ 
+-echo "LD   $1/console.mod"
++echo "LD   $1/modules/console"
+ $LOST_TOOLS_LD -Ttext=0x40000000 -oconsole.mod  *.o --start-group $2 --end-group
+-$LOST_TOOLS_STRIP -s console.mod -o $1/console.mod
++$LOST_TOOLS_STRIP -s console.mod -o $1/modules/console
+=== src/modules/cpp/cpptest/Makefile.all
+==================================================================
+--- src/modules/cpp/cpptest/Makefile.all	(revision 1371)
++++ src/modules/cpp/cpptest/Makefile.all	(local)
+@@ -1,7 +1,7 @@
+ shopt -s extglob
+ source $LOST_BUILDMK_ROOT/config.sh
+ 
+-echo "LD   $1/cpptest.mod"
+-$LOST_TOOLS_LD -ocpptest.mod -T../lib/linkcpp.ld --start-group ../lib/start.o ../lib/startup.o *.o $2 --end-group
+-mv cpptest.mod $1/
++echo "LD   $1/apps/cpptest"
++$LOST_TOOLS_LD -ocpptest -T../lib/linkcpp.ld --start-group ../lib/start.o ../lib/startup.o *.o $2 --end-group
++$LOST_TOOLS_STRIP cpptest $1/apps/cpptest
+ 
+=== src/modules/dma/Makefile.all
+==================================================================
+--- src/modules/dma/Makefile.all	(revision 1371)
++++ src/modules/dma/Makefile.all	(local)
+@@ -1,6 +1,6 @@
+ shopt -s extglob
+ source $LOST_BUILDMK_ROOT/config.sh
+ 
+-echo "LD   $1/dma.mod"
++echo "LD   $1/modules/dma"
+ $LOST_TOOLS_LD -odma.mod -Ttext=0x40000000 *.o --start-group $2 --end-group
+-$LOST_TOOLS_STRIP -s dma.mod -o $1/dma.mod
++$LOST_TOOLS_STRIP -s dma.mod -o $1/modules/dma
+=== src/modules/ext2/Makefile.all
+==================================================================
+--- src/modules/ext2/Makefile.all	(revision 1371)
++++ src/modules/ext2/Makefile.all	(local)
+@@ -1,6 +1,6 @@
+ shopt -s extglob
+ source $LOST_BUILDMK_ROOT/config.sh
+ 
+-echo "LD   $1/ext2.mod"
++echo "LD   $1/modules/ext2"
+ $LOST_TOOLS_LD -Ttext=0x40000000 -oext2.mod  *.o libext2/*.o --start-group $2 --end-group
+-$LOST_TOOLS_STRIP -s ext2.mod -o $1/ext2.mod
++$LOST_TOOLS_STRIP -s ext2.mod -o $1/modules/ext2
+=== src/modules/fat/Makefile.all
+==================================================================
+--- src/modules/fat/Makefile.all	(revision 1371)
++++ src/modules/fat/Makefile.all	(local)
+@@ -1,6 +1,6 @@
+ shopt -s extglob
+ source $LOST_BUILDMK_ROOT/config.sh
+ 
+-echo "LD   $1/fat.mod"
++echo "LD   $1/modules/fat"
+ $LOST_TOOLS_LD -ofat.mod -Ttext=0x40000000 *.o --start-group $2 --end-group
+-$LOST_TOOLS_STRIP -s fat.mod -o $1/fat.mod
++$LOST_TOOLS_STRIP -s fat.mod -o $1/modules/fat
+=== src/modules/file/Makefile.all
+==================================================================
+--- src/modules/file/Makefile.all	(revision 1371)
++++ src/modules/file/Makefile.all	(local)
+@@ -1,6 +1,6 @@
+ shopt -s extglob
+ source $LOST_BUILDMK_ROOT/config.sh
+ 
+-echo "LD   $1/file.mod"
++echo "LD   $1/modules/file"
+ $LOST_TOOLS_LD -ofile.mod -Ttext=0x40000000 *.o --start-group $2 --end-group
+-$LOST_TOOLS_STRIP -s file.mod -o $1/file.mod
++$LOST_TOOLS_STRIP -s file.mod -o $1/modules/file
+=== src/modules/floppy/Makefile.all
+==================================================================
+--- src/modules/floppy/Makefile.all	(revision 1371)
++++ src/modules/floppy/Makefile.all	(local)
+@@ -1,6 +1,6 @@
+ shopt -s extglob
+ source $LOST_BUILDMK_ROOT/config.sh
+ 
+-echo "LD   $1/floppy.mod"
++echo "LD   $1/modules/floppy"
+ $LOST_TOOLS_LD -ofloppy.mod -Ttext=0x40000000 *.o --start-group $2 --end-group
+-$LOST_TOOLS_STRIP -s floppy.mod -o $1/floppy.mod
++$LOST_TOOLS_STRIP -s floppy.mod -o $1/modules/floppy
+=== src/modules/gui/Makefile.all
+==================================================================
+--- src/modules/gui/Makefile.all	(revision 1371)
++++ src/modules/gui/Makefile.all	(local)
+@@ -1,9 +1,9 @@
+ shopt -s extglob
+ source $LOST_BUILDMK_ROOT/config.sh
+ 
+-echo "LD   $1/gui.mod"
++echo "LD   $1/modules/gui"
+ $LOST_TOOLS_LD  -Ttext=0x40000000 -ogui.mod src/*.o src/freetype/base/ftbase.o src/freetype/base/ftsystem.o src/freetype/base/ftglyph.o src/freetype/base/ftbitmap.o src/freetype/base/ftinit.o src/freetype/autofit/autofit.o src/freetype/smooth/smooth.o src/freetype/psaux/psaux.o src/freetype/psnames/psnames.o src/freetype/pshinter/pshinter.o src/freetype/truetype/truetype.o src/freetype/raster/raster.o src/freetype/gzip/ftgzip.o src/freetype/lzw/ftlzw.o src/freetype/sfnt/sfnt.o --start-group $2 --end-group
+-mv gui.mod $1/
++mv gui.mod $1/modules/gui
+ #Andere Formate (in def ftmodule.h aktivieren):
+ #src/freetype/type42/type42.o
+ #src/freetype/type1/type1.o
+=== src/modules/init/Makefile.all
+==================================================================
+--- src/modules/init/Makefile.all	(revision 1371)
++++ src/modules/init/Makefile.all	(local)
+@@ -1,6 +1,6 @@
+ shopt -s extglob
+ source $LOST_BUILDMK_ROOT/config.sh
+ 
+-echo "LD   $1/init.mod"
++echo "LD   $1/modules/init"
+ $LOST_TOOLS_LD -Ttext=0x40000000 -oinit.mod  *.o */*.o --start-group $2 --end-group
+-$LOST_TOOLS_STRIP -s init.mod -o $1/init.mod
++$LOST_TOOLS_STRIP -s init.mod -o $1/modules/init
+=== src/modules/kbc/Makefile.all
+==================================================================
+--- src/modules/kbc/Makefile.all	(revision 1371)
++++ src/modules/kbc/Makefile.all	(local)
+@@ -1,6 +1,6 @@
+ shopt -s extglob
+ source $LOST_BUILDMK_ROOT/config.sh
+ 
+-echo "LD   $1/kbc.mod"
++echo "LD   $1/modules/kbc"
+ $LOST_TOOLS_LD -m elf_i386 -okbc.mod -Ttext=0x40000000 *.o --start-group $2 --end-group
+-$LOST_TOOLS_STRIP -s kbc.mod -o $1/kbc.mod
++$LOST_TOOLS_STRIP -s kbc.mod -o $1/modules/kbc
+=== src/modules/pas/kirc/Makefile.all
+==================================================================
+--- src/modules/pas/kirc/Makefile.all	(revision 1371)
++++ src/modules/pas/kirc/Makefile.all	(local)
+@@ -2,5 +2,5 @@
+ source $LOST_BUILDMK_ROOT/config.sh
+ 
+ echo "LD   $1/apps/kirc"
+-$LOST_TOOLS_LD -okirc.mod -Ttext=0x40000000 *.o --start-group ../lib/units/*.a $2 --end-group
+-$LOST_TOOLS_STRIP -s kirc.mod -o $1/apps/kirc
++$LOST_TOOLS_LD -okirc -Ttext=0x40000000 *.o --start-group ../lib/units/*.a $2 --end-group
++$LOST_TOOLS_STRIP -s kirc -o $1/apps/kirc
+=== src/modules/pas/pashello/Makefile.all
+==================================================================
+--- src/modules/pas/pashello/Makefile.all	(revision 1371)
++++ src/modules/pas/pashello/Makefile.all	(local)
+@@ -1,6 +1,6 @@
+ shopt -s extglob
+ source $LOST_BUILDMK_ROOT/config.sh
+ 
+-echo "LD   $1/pashello.mod"
+-$LOST_TOOLS_LD -opashello.mod -Ttext=0x40000000 *.o --start-group ../lib/units/*.a $2 --end-group
+-$LOST_TOOLS_STRIP -s pashello.mod -o $1/pashello.mod
++echo "LD   $1/apps/pashello"
++$LOST_TOOLS_LD -opashello -Ttext=0x40000000 *.o --start-group ../lib/units/*.a $2 --end-group
++$LOST_TOOLS_STRIP -s pashello -o $1/apps/pashello
+=== src/modules/pci/Makefile.all
+==================================================================
+--- src/modules/pci/Makefile.all	(revision 1371)
++++ src/modules/pci/Makefile.all	(local)
+@@ -1,6 +1,6 @@
+ shopt -s extglob
+ source $LOST_BUILDMK_ROOT/config.sh
+ 
+-echo "LD   $1/pci.mod"
++echo "LD   $1/modules/pci"
+ $LOST_TOOLS_LD -opci.mod -Ttext=0x40000000 *.o --start-group $2 --end-group
+-$LOST_TOOLS_STRIP -s pci.mod -o $1/pci.mod
++$LOST_TOOLS_STRIP -s pci.mod -o $1/modules/pci
+=== src/modules/rpcbench/Makefile.all
+==================================================================
+--- src/modules/rpcbench/Makefile.all	(revision 1371)
++++ src/modules/rpcbench/Makefile.all	(local)
+@@ -1,6 +1,6 @@
+ shopt -s extglob
+ source $LOST_BUILDMK_ROOT/config.sh
+ 
+-echo "LD   $1/rpcbench.mod"
++echo "LD   $1/modules/rpcbench"
+ $LOST_TOOLS_LD -Ttext=0x40000000 -orpcbench.mod  --start-group *.o $2 --end-group
+-$LOST_TOOLS_STRIP -s rpcbench.mod -o $1/rpcbench.mod
++$LOST_TOOLS_STRIP -s rpcbench.mod -o $1/modules/rpcbench
+=== src/modules/rtl8139/Makefile.all
+==================================================================
+--- src/modules/rtl8139/Makefile.all	(revision 1371)
++++ src/modules/rtl8139/Makefile.all	(local)
+@@ -1,6 +1,6 @@
+ shopt -s extglob
+ source $LOST_BUILDMK_ROOT/config.sh
+ 
+-echo "LD   $1/rtl8139.mod"
++echo "LD   $1/modules/rtl8139"
+ $LOST_TOOLS_LD -Ttext=0x40000000 -ortl8139.mod  *.o --start-group $2 --end-group
+-$LOST_TOOLS_STRIP -s rtl8139.mod -o $1/rtl8139.mod
++$LOST_TOOLS_STRIP -s rtl8139.mod -o $1/modules/rtl8139
+=== src/modules/skeleton/Makefile.all
+==================================================================
+--- src/modules/skeleton/Makefile.all	(revision 1371)
++++ src/modules/skeleton/Makefile.all	(local)
+@@ -1,6 +1,6 @@
+ shopt -s extglob
+ source $LOST_BUILDMK_ROOT/config.sh
+ 
+-echo "LD   $1/skeleton.mod"
++echo "LD   $1/modules/skeleton"
+ $LOST_TOOLS_LD -Ttext=0x40000000 -oskeleton.mod  *.o --start-group $2 --end-group
+-$LOST_TOOLS_STRIP -s skeleton.mod -o $1/skeleton.mod
++$LOST_TOOLS_STRIP -s skeleton.mod -o $1/modules/skeleton
+=== src/modules/sysinfo/Makefile.all
+==================================================================
+--- src/modules/sysinfo/Makefile.all	(revision 1371)
++++ src/modules/sysinfo/Makefile.all	(local)
+@@ -1,6 +1,6 @@
+ shopt -s extglob
+ source $LOST_BUILDMK_ROOT/config.sh
+ 
+-echo "LD   $1/sysinfo.mod"
++echo "LD   $1/modules/sysinfo"
+ $LOST_TOOLS_LD -Ttext=0x40000000 -osysinfo.mod  *.o --start-group $2 --end-group
+-mv sysinfo.mod $1/
++$LOST_TOOLS_STRIP -s sysinfo.mod -o $1/modules/sysinfo
+=== src/modules/tcpip/Makefile.all
+==================================================================
+--- src/modules/tcpip/Makefile.all	(revision 1371)
++++ src/modules/tcpip/Makefile.all	(local)
+@@ -1,6 +1,6 @@
+ shopt -s extglob
+ source $LOST_BUILDMK_ROOT/config.sh
+ 
+-echo "LD   $1/tcpip.mod"
++echo "LD   $1/modules/tcpip"
+ $LOST_TOOLS_LD -Ttext=0x40000000 -otcpip.mod  *.o --start-group $2 --end-group
+-$LOST_TOOLS_STRIP -s tcpip.mod -o $1/tcpip.mod
++$LOST_TOOLS_STRIP -s tcpip.mod -o $1/modules/tcpip
+=== src/modules/testlib/Makefile.all
+==================================================================
+--- src/modules/testlib/Makefile.all	(revision 1371)
++++ src/modules/testlib/Makefile.all	(local)
+@@ -1,7 +1,7 @@
+ shopt -s extglob
+ source $LOST_BUILDMK_ROOT/config.sh
+ 
+-echo "LD   $1/tests.mod"
++echo "LD   $1/modules/tests"
+ $LOST_TOOLS_LD -otests.mod -Ttext=0x40000000 *.o --start-group $2 --end-group
+ 
+-$LOST_TOOLS_STRIP -s tests.mod -o $1/tests.mod
++$LOST_TOOLS_STRIP -s tests.mod -o $1/modules/tests
+=== src/modules/tmp/Makefile.all
+==================================================================
+--- src/modules/tmp/Makefile.all	(revision 1371)
++++ src/modules/tmp/Makefile.all	(local)
+@@ -1,6 +1,6 @@
+ shopt -s extglob
+ source $LOST_BUILDMK_ROOT/config.sh
+ 
+-echo "LD   $1/tmp.mod"
++echo "LD   $1/modules/tmp"
+ $LOST_TOOLS_LD -otmp.mod -Ttext=0x40000000 *.o --start-group $2 --end-group
+-$LOST_TOOLS_STRIP -s tmp.mod -o $1/tmp.mod
++$LOST_TOOLS_STRIP -s tmp.mod -o $1/modules/tmp
+=== src/modules/vesa/Makefile.all
+==================================================================
+--- src/modules/vesa/Makefile.all	(revision 1371)
++++ src/modules/vesa/Makefile.all	(local)
+@@ -1,6 +1,6 @@
+ shopt -s extglob
+ source $LOST_BUILDMK_ROOT/config.sh
+ 
+-echo "LD   $1/vesa.mod"
++echo "LD   $1/modules/vesa"
+ $LOST_TOOLS_LD -Ttext=0x40000000 -ovesa.mod  *.o --start-group $2 --end-group
+-$LOST_TOOLS_STRIP -s vesa.mod -o $1/vesa.mod
++$LOST_TOOLS_STRIP -s vesa.mod -o $1/modules/vesa
+=== src/modules/vga/Makefile.all
+==================================================================
+--- src/modules/vga/Makefile.all	(revision 1371)
++++ src/modules/vga/Makefile.all	(local)
+@@ -1,6 +1,6 @@
+ shopt -s extglob
+ source $LOST_BUILDMK_ROOT/config.sh
+ 
+-echo "LD   $1/vga.mod"
++echo "LD   $1/modules/vga"
+ $LOST_TOOLS_LD -Ttext=0x40000000 -ovga.mod  *.o --start-group $2 --end-group
+-$LOST_TOOLS_STRIP -s vga.mod -o $1/vga.mod
++$LOST_TOOLS_STRIP -s vga.mod -o $1/modules/vga
+=== src/modules/vterm/Makefile.all
+==================================================================
+--- src/modules/vterm/Makefile.all	(revision 1371)
++++ src/modules/vterm/Makefile.all	(local)
+@@ -1,6 +1,6 @@
+ shopt -s extglob
+ source $LOST_BUILDMK_ROOT/config.sh
+ 
+-echo "LD   $1/vterm.mod"
++echo "LD   $1/modules/vterm"
+ $LOST_TOOLS_LD -Ttext=0x40000000 -ovterm.mod  *.o --start-group $2 --end-group
+-$LOST_TOOLS_STRIP -s vterm.mod -o $1/vterm.mod
++$LOST_TOOLS_STRIP -s vterm.mod -o $1/modules/vterm

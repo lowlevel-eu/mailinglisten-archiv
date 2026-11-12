@@ -1,0 +1,212 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH 1/5] usb: Extend interface for interrupt	transfers
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%201/5%5D%20usb%3A%20Extend%20interface%20for%20interrupt%0A%09transfers&In-Reply-To=%3C1451347254-25755-2-git-send-email-max%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000357.html">
+   <LINK REL="Next"  HREF="000359.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH 1/5] usb: Extend interface for interrupt	transfers</H1>
+    <B>Max Reitz</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%201/5%5D%20usb%3A%20Extend%20interface%20for%20interrupt%0A%09transfers&In-Reply-To=%3C1451347254-25755-2-git-send-email-max%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH 1/5] usb: Extend interface for interrupt	transfers">max at tyndur.org
+       </A><BR>
+    <I>Tue Dec 29 01:00:50 CET 2015</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000357.html">[cdi-devel] [PATCH 0/5] usb: HID
+</A></li>
+        <LI>Next message: <A HREF="000359.html">[cdi-devel] [PATCH 2/5] ehci: Implement interrupt transfers
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#358">[ date ]</a>
+              <a href="thread.html#358">[ thread ]</a>
+              <a href="subject.html#358">[ subject ]</a>
+              <a href="author.html#358">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>+ Add a way to make the HCD start transactions as interrupt transfers
++ Add a way to make the bus driver start an interrupt transfer
++ Add a way to make the bus driver cancel and destroy and asynchronous
+  transmission (such as an interrupt transfer)
+
+Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+---
+ include/cdi/usb.h     | 57 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ include/cdi/usb_hcd.h | 29 +++++++++++++++++++++++++-
+ 2 files changed, 85 insertions(+), 1 deletion(-)
+
+diff --git a/include/cdi/usb.h b/include/cdi/usb.h
+index c7fa751..894be0d 100644
+--- a/include/cdi/usb.h
++++ b/include/cdi/usb.h
+@@ -51,6 +51,21 @@ typedef uint32_t cdi_usb_port_status_t;
+ #define CDI_USB_PORT_SPEED_MASK (0x7)
+ #define CDI_USB_PORT_CONNECTED  (1 &lt;&lt; 3)
+ 
++/**
++ * Callback function pointer type for asynchronous transmissions.
++ */
++typedef void (*cdi_usb_async_cb_t)(void* opaque);
++
++/**
++ * Callback function pointer type for interrupt transfers.
++ */
++typedef cdi_usb_async_cb_t cdi_usb_interrupt_cb_t;
++
++/**
++ * Type of asynchronous transmissions.
++ */
++typedef void* cdi_usb_async_transmission_t;
++
+ struct cdi_usb_hub;
+ 
+ /**
+@@ -158,6 +173,27 @@ struct cdi_usb_driver {
+     cdi_usb_transmission_result_t (*bulk_transfer)(struct cdi_usb_device* dev,
+                                                    int ep, void* data,
+                                                    size_t size);
++
++    /**
++     * Enqueues an interrupt transfer to endpoint @ep (0 up until
++     * dev-&gt;endpoint_count - 1) of device @dev, trying to transfer @size bytes
++     * to @data every polling interval as specified by the given endpoint's
++     * descriptor. Each time a transfer is successful, the @cb is invoked.
++     *
++     * This function will return immediately. Use destroy_async_transfer()
++     * to dequeue and release its resources.
++     *
++     * Returns NULL on error.
++     */
++    cdi_usb_async_transmission_t
++        (*interrupt_transfer)(struct cdi_usb_device* dev, int ep,
++                              void* data, size_t size,
++                              cdi_usb_interrupt_cb_t cb, void* opaque);
++
++    /**
++     * Cancels the given asynchronous transmission and releases its resources.
++     */
++    void (*destroy_async_transfer)(cdi_usb_async_transmission_t transmission);
+ };
+ 
+ /**
+@@ -212,6 +248,27 @@ cdi_usb_transmission_result_t cdi_usb_bulk_transfer(struct cdi_usb_device* dev,
+                                                     int ep, void* data,
+                                                     size_t size);
+ 
++/**
++ * Enqueues an interrupt transfer to endpoint @ep (0 up until
++ * dev-&gt;endpoint_count - 1) of device @dev, trying to transfer @size bytes to
++ * @data every polling interval as specified by the given endpoint's descriptor.
++ * Each time a transfer is successful, the @cb is invoked.
++ *
++ * This function will return immediately. Use destroy_async_transfer() to
++ * dequeue and release its resources.
++ *
++ * Returns NULL on error.
++ */
++cdi_usb_async_transmission_t
++    cdi_usb_interrupt_transfer(struct cdi_usb_device* dev, int ep,
++                               void* data, size_t size,
++                               cdi_usb_interrupt_cb_t cb, void* opaque);
++
++/**
++ * Cancels the given asynchronous transmission and releases its resources.
++ */
++void cdi_usb_destroy_async_transfer(cdi_usb_async_transmission_t transmission);
++
+ #ifdef __cplusplus
+ }; // extern &quot;C&quot;
+ #endif
+diff --git a/include/cdi/usb_hcd.h b/include/cdi/usb_hcd.h
+index 842ae73..37f0400 100644
+--- a/include/cdi/usb_hcd.h
++++ b/include/cdi/usb_hcd.h
+@@ -20,6 +20,11 @@
+  */
+ typedef void* cdi_usb_hc_transaction_t;
+ 
++/**
++ * Callback function pointer type for interrupt transactions.
++ */
++typedef void (*cdi_usb_hc_interrupt_cb_t)(void* opaque);
++
+ typedef enum {
+     CDI_USB_IN,
+     CDI_USB_OUT,
+@@ -139,7 +144,7 @@ struct cdi_usb_hcd {
+                     const struct cdi_usb_hc_transmission* trans);
+ 
+     /**
+-     * Starts asynchronous execution of a transaction.
++     * Starts asynchronous execution of a control or bulk transaction.
+      */
+     void (*start_transaction)(struct cdi_usb_hc* hc,
+                               cdi_usb_hc_transaction_t ta);
+@@ -155,6 +160,28 @@ struct cdi_usb_hcd {
+                              cdi_usb_hc_transaction_t ta);
+ 
+     /**
++     * Starts periodic execution of an interrupt transaction.
++     *
++     * The unit of @interval depends on the transmission speed. For low and
++     * full speed devices, it is one frame (= 1 ms); for high speed devices, it
++     * is one microframe (= 1/8 ms).
++     *
++     * @interval must be a positive power of two. Depending on the host
++     * controller, there may be an upper limit; values greater than that limit
++     * will be capped accordingly.
++     *
++     * Whenever data is received, the @cb is invoked.
++     *
++     * All transmissions enqueued in this transaction must be CDI_USB_IN
++     * transmissions.
++     */
++    void (*start_interrupt_transaction)(struct cdi_usb_hc* hc,
++                                        cdi_usb_hc_transaction_t ta,
++                                        int interval,
++                                        cdi_usb_hc_interrupt_cb_t cb,
++                                        void* cb_opaque);
++
++    /**
+      * Destroys a transaction. Transmissions which have not been waited on may
+      * or may not have been executed by the time this function returns. The
+      * values of the variables pointed to by the @result field of unwaited-for
+-- 
+2.6.4
+
+</PRE>
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000357.html">[cdi-devel] [PATCH 0/5] usb: HID
+</A></li>
+	<LI>Next message: <A HREF="000359.html">[cdi-devel] [PATCH 2/5] ehci: Implement interrupt transfers
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#358">[ date ]</a>
+              <a href="thread.html#358">[ thread ]</a>
+              <a href="subject.html#358">[ subject ]</a>
+              <a href="author.html#358">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

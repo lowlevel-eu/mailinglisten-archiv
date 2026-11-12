@@ -1,0 +1,1129 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 2/3] cdi/fs: Auf LIOv2 umstellen
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_2/3%3D5D_cdi/fs%3D3A_Auf_LIOv2_umst%3F%3D%0A%09%3D%3Futf-8%3Fq%3Fellen%3F%3D&In-Reply-To=%3C1419873819-23365-3-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002462.html">
+   <LINK REL="Next"  HREF="002464.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 2/3] cdi/fs: Auf LIOv2 umstellen</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_2/3%3D5D_cdi/fs%3D3A_Auf_LIOv2_umst%3F%3D%0A%09%3D%3Futf-8%3Fq%3Fellen%3F%3D&In-Reply-To=%3C1419873819-23365-3-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 2/3] cdi/fs: Auf LIOv2 umstellen">kevin at tyndur.org
+                  </A><BR>
+    <I>Mo Dez 29 18:23:38 CET 2014</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002462.html">[tyndur-devel] [PATCH 1/3] file: Auf LIOv2 umstellen
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002464.html">[tyndur-devel] [PATCH 3/3] tests: LIOv2-Testfälle, die konvertiertes ext2 brauchen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2463">[ Datum ]</a>
+              <a href="thread.html#2463">[ Thema ]</a>
+              <a href="subject.html#2463">[ Betreff (Subject) ]</a>
+              <a href="author.html#2463">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* cdi/fs: Das alte RPC-Interface durch einen LIOv2-Userspace-Service
+  ersetzt.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ build/root-hd/config/servmgr/mount/deps |    1 -
+ src/modules/cdi/include/cdi-osdep.h     |    2 +-
+ src/modules/cdi/lib/fs/fs.c             |  136 ++----
+ src/modules/cdi/lib/fs/lostio_if.c      |  712 ++++++++++++-------------------
+ 4 files changed, 325 insertions(+), 526 deletions(-)
+ delete mode 100644 build/root-hd/config/servmgr/mount/deps
+
+diff --git a/build/root-hd/config/servmgr/mount/deps b/build/root-hd/config/servmgr/mount/deps
+deleted file mode 100644
+index f73f309..0000000
+--- a/build/root-hd/config/servmgr/mount/deps
++++ /dev/null
+@@ -1 +0,0 @@
+-file
+diff --git a/src/modules/cdi/include/cdi-osdep.h b/src/modules/cdi/include/cdi-osdep.h
+index ed8cc5d..94eba73 100644
+--- a/src/modules/cdi/include/cdi-osdep.h
++++ b/src/modules/cdi/include/cdi-osdep.h
+@@ -90,7 +90,7 @@ typedef struct {
+  * \endenglish
+  */
+ typedef struct {
+-    FILE* device;
++    struct lio_tree* tree;
+ } cdi_fs_osdep;
+ 
+ struct storage_drv_osdep {
+diff --git a/src/modules/cdi/lib/fs/fs.c b/src/modules/cdi/lib/fs/fs.c
+index 1ac1ab4..aeca3ea 100644
+--- a/src/modules/cdi/lib/fs/fs.c
++++ b/src/modules/cdi/lib/fs/fs.c
+@@ -36,105 +36,57 @@
+ 
+ #include &lt;stdint.h&gt;
+ #include &lt;lostio.h&gt;
++#include &lt;stdlib.h&gt;
+ 
+ #include &quot;cdi/fs.h&quot;
+ 
+-#define CDI_TYPEHANDLE 200
+-#define CDI_TYPEHANDLE_SYMLINK 201
+-
+-
+-struct cdi_fs_driver* the_one_and_only_driver = NULL;
+-
+-bool lostio_not_found_handler(char** path, uint8_t args, pid_t pid,
+-    FILE* source);
+-bool lostio_pre_open_handler(char** path, uint8_t args, pid_t pid,
+-    FILE* source);
+-size_t lostio_readahead_handler(lostio_filehandle_t* fh, void* buf,
+-    size_t bs, size_t bc);
+-size_t lostio_read_handler(lostio_filehandle_t* fh, void* buf,
+-    size_t bs, size_t bc);
+-size_t lostio_write_handler(lostio_filehandle_t* fh, size_t bs, size_t bc,
+-    void* data);
+-int lostio_seek_handler(lostio_filehandle_t* fh, uint64_t offset, int origin);
+-int lostio_unlink_handler(lostio_filehandle_t* fh, const char* name);
+-size_t lostio_symlink_read_handler(lostio_filehandle_t* fh, void* buf,
+-    size_t bs, size_t bc);
+-size_t lostio_symlink_write_handler(lostio_filehandle_t* fh, size_t bs,
+-    size_t bc, void* data);
+-
+-typehandle_t cdi_typehandle = {
+-    .id = CDI_TYPEHANDLE,
+-    .not_found = &amp;lostio_not_found_handler,
+-    .pre_open = &amp;lostio_pre_open_handler,
+-    .post_open = NULL,
+-    .read = &amp;lostio_read_handler,
+-    .readahead = &amp;lostio_readahead_handler,
+-    .write = &amp;lostio_write_handler,
+-    .seek = &amp;lostio_seek_handler,
+-    .unlink = &amp;lostio_unlink_handler,
+-    .close = NULL
+-};
+-
+-typehandle_t cdi_symlink_typehandle = {
+-    .id = CDI_TYPEHANDLE_SYMLINK,
+-    .not_found = &amp;lostio_not_found_handler,
+-    .pre_open = &amp;lostio_pre_open_handler,
+-    .post_open = NULL,
+-    .read = &amp;lostio_symlink_read_handler,
+-    .write = &amp;lostio_symlink_write_handler,
+-    .seek = &amp;lostio_seek_handler,
+-    .unlink = &amp;lostio_unlink_handler,
+-    .close = NULL
+-};
+-
+-
+-typehandle_t cdi_null_typehandle = {
+-    .id = 0,
+-    .not_found = &amp;lostio_not_found_handler,
+-    .pre_open = NULL,
+-    .post_open = NULL,
+-    .read = NULL,
+-    .write = NULL,
+-    .seek = NULL,
+-    .close = NULL
+-};
++struct lio_resource* cdi_fs_lio_load_root(struct lio_tree* tree);
++int cdi_fs_lio_load_children(struct lio_resource* res);
++int cdi_fs_lio_read(struct lio_resource* res, uint64_t offset,
++    size_t bytes, void* buf);
++int cdi_fs_lio_write(struct lio_resource* res, uint64_t offset,
++    size_t bytes, void* buf);
++int cdi_fs_lio_resize(struct lio_resource* res, uint64_t size);
++struct lio_resource* cdi_fs_lio_make_file(struct lio_resource* parent,
++    const char* name);
++struct lio_resource* cdi_fs_lio_make_dir(struct lio_resource* parent,
++    const char* name);
++struct lio_resource* cdi_fs_lio_make_symlink(struct lio_resource* parent,
++    const char* name, const char* target);
++int cdi_fs_lio_unlink(struct lio_resource* parent, const char* name);
++int cdi_fs_lio_sync(struct lio_resource* res);
+ 
+ 
+ void cdi_fs_driver_init(struct cdi_fs_driver* driver)
+ {
+-    static int initialized = 0;
+-
+-    if (!initialized) {
+-
+-        lostio_init();
+-        lostio_type_directory_use();
+-        lostio_register_typehandle(&amp;cdi_typehandle);
+-        lostio_register_typehandle(&amp;cdi_symlink_typehandle);
+-        lostio_register_typehandle(&amp;cdi_null_typehandle);
+-
+-
+-        // Preopen-Handler fuer Verzeichnisse setzen
+-        typehandle_t* typehandle = get_typehandle(LOSTIO_TYPES_DIRECTORY);
+-        typehandle-&gt;pre_open = &amp;lostio_pre_open_handler;
+-        typehandle-&gt;not_found = &amp;lostio_not_found_handler;
+-        typehandle-&gt;post_open = NULL;
+-        typehandle-&gt;unlink = &amp;lostio_unlink_handler;
+-
+-        initialized = 1;
+-    }
+ }
+ 
+ void cdi_fs_driver_destroy(struct cdi_fs_driver* driver)
+ {
++    // TODO
+ }
+ 
+ void cdi_fs_driver_register(struct cdi_fs_driver* driver)
+ {
+-    if (the_one_and_only_driver) {
+-        return;
+-    }
++    struct lio_service* service;
++
++    service = malloc(sizeof(*service));
++    service-&gt;name = driver-&gt;drv.name;
++    service-&gt;opaque = driver;
++    service-&gt;lio_ops = (struct lio_driver) {
++        .load_root      = cdi_fs_lio_load_root,
++        .load_children  = cdi_fs_lio_load_children,
++        .read           = cdi_fs_lio_read,
++        .write          = cdi_fs_lio_write,
++        .resize         = cdi_fs_lio_resize,
++        .make_file      = cdi_fs_lio_make_file,
++        .make_dir       = cdi_fs_lio_make_dir,
++        .make_symlink   = cdi_fs_lio_make_symlink,
++        .unlink         = cdi_fs_lio_unlink,
++        .sync           = cdi_fs_lio_sync,
++    };
+ 
+-    the_one_and_only_driver = driver;
++    lio_add_service(service);
+ }
+ 
+ 
+@@ -152,11 +104,14 @@ void cdi_fs_driver_register(struct cdi_fs_driver* driver)
+ size_t cdi_fs_data_read(struct cdi_fs_filesystem* fs, uint64_t start,
+     size_t size, void* buffer)
+ {
+-    if (fseek(fs-&gt;osdep.device, start, SEEK_SET) != 0) {
+-        return -1;
++    ssize_t result;
++
++    if ((result = lio_pread(fs-&gt;osdep.tree-&gt;source, start, size, buffer)) &lt; 0) {
++        // FIXME: Das ist irgendwie ein bescheiden
++        return 0;
+     }
+ 
+-    return fread(buffer, 1, size, fs-&gt;osdep.device);
++    return result;
+ }
+ 
+ /**
+@@ -173,9 +128,12 @@ size_t cdi_fs_data_read(struct cdi_fs_filesystem* fs, uint64_t start,
+ size_t cdi_fs_data_write(struct cdi_fs_filesystem* fs, uint64_t start,
+     size_t size, const void* buffer)
+ {
+-    if (fseek(fs-&gt;osdep.device, start, SEEK_SET) != 0) {
+-        return -1;
++    ssize_t result;
++
++    if ((result = lio_pwrite(fs-&gt;osdep.tree-&gt;source, start, size, buffer)) &lt; 0) {
++        // FIXME: Das ist irgendwie ein bescheiden
++        return 0;
+     }
+ 
+-    return fwrite(buffer, 1, size, fs-&gt;osdep.device);
++    return result;
+ }
+diff --git a/src/modules/cdi/lib/fs/lostio_if.c b/src/modules/cdi/lib/fs/lostio_if.c
+index ef0f5e6..2823c5f 100644
+--- a/src/modules/cdi/lib/fs/lostio_if.c
++++ b/src/modules/cdi/lib/fs/lostio_if.c
+@@ -44,472 +44,368 @@
+ 
+ #include &quot;cdi/fs.h&quot;
+ 
+-// FIXME -- doppelt mit fs.c
+-#define CDI_TYPEHANDLE 200
+-#define CDI_TYPEHANDLE_SYMLINK 201
++#define BLOCKSIZE 1024
+ 
+-#define debug_print(x) puts(x)
+ 
+-// So lang kann der Root-Pfad maximal werden
+-#define ROOT_PATH_SIZE 27
+-#define FULL_PATH_SIZE(x) (strlen(x) + ROOT_PATH_SIZE)
+-
+-static bool fs_fill_dir(vfstree_node_t* node);
+-
+-
+-extern struct cdi_fs_driver* the_one_and_only_driver;
+-
+-/**
+- * Diese Funktion generiert den Root-Pfad zu einem Source-Handle
+- *
+- * @param source Source-Handle
+- * @param buffer Puffer, in dem der Pfad abgelegt werden soll (muss mindestens
+- *               MAX_ROOT_PATH_SIZE Bytes lang sein.
+- */
+-static inline void get_root_path(io_resource_t* source, char* buffer)
+-{
+-    snprintf(buffer, ROOT_PATH_SIZE, &quot;/%08d_%016d&quot;, source-&gt;pid, (uint32_t)
+-        source-&gt;resid);
+-}
+-
+-/**
+- * Diese Funktion generiert den vollen Pfad zu einem Source-Handle
+- *
+- * @param source Source-Handle
+- * @param path Pfad
+- * @param buffer Puffer, in dem der Pfad abgelegt werden soll (muss mindestens
+- *               FULL_PATH_SIZE Bytes lang sein.
+- */
+-static inline void get_full_path(io_resource_t* source, char* path,
+-    char* buffer)
++static int ensure_loaded(struct cdi_fs_stream* s)
+ {
+-    size_t size = FULL_PATH_SIZE(path);
+-    // Abschliessender Slash rauswerfen
+-    if (path[strlen(path) - 1] == '/') {
+-        size--;
++    if (s-&gt;res-&gt;loaded || s-&gt;res-&gt;res-&gt;load(s)) {
++        return 1;
+     }
+ 
+-    snprintf(buffer, size, &quot;/%08d_%016d%s&quot;, source-&gt;pid,
+-        (uint32_t) source-&gt;resid, path);
++    return 0;
+ }
+ 
+-static int handle_dirent(struct cdi_fs_res* res, vfstree_node_t* node)
++static struct lio_resource* create_liores(struct cdi_fs_filesystem* fs,
++    struct cdi_fs_res* cdires)
+ {
+-    char* name;
+-    struct cdi_fs_stream* parent_stream = node-&gt;data;
+-    struct cdi_fs_stream* s;
+-    int flags;
+-    int type;
+-    uint64_t size;
++    struct lio_resource* liores;
++    struct cdi_fs_stream s;
+ 
+-    name = res-&gt;name;
++    s.res = cdires;
++    s.fs = fs;
++    s.error = 0;
+ 
+-    if (!strcmp(name, &quot;.&quot;) || !strcmp(name, &quot;..&quot;)) {
+-        return 0;
++    if (!ensure_loaded(&amp;s)) {
++        return NULL;
+     }
+ 
+-    s = malloc(sizeof(*s));
+-    s-&gt;fs = parent_stream-&gt;fs;
+-    s-&gt;res = res;
++    liores = lio_resource_create(fs-&gt;osdep.tree);
++    liores-&gt;opaque = cdires;
+ 
++    liores-&gt;moredata = 0;
+ 
+-    if (!res-&gt;loaded) {
+-        res-&gt;res-&gt;load(s);
++    /*
++     * CDI-Ressourcen können mehrere Klassen haben. Einige Kombinationen
++     * sind semantischer Müll, z.B. Datei und Symlink gleichzeitig. Wir geben
++     * Dateien den Vorzug. Gleichzeitig ein Verzeichnis zu sein ist vermutlich
++     * auch keine gute Idee, aber theoretisch irgendwie denkbar.
++     *
++     * Außerdem prüfen wir noch, ob die Flags überhaupt zu den Klassen
++     * passen.
++     */
++    if (cdires-&gt;file) {
++        liores-&gt;readable = liores-&gt;seekable = cdires-&gt;flags.read;
++        liores-&gt;writable = (cdires-&gt;flags.write &amp;&amp; !fs-&gt;read_only);
++    } else if (cdires-&gt;link) {
++        liores-&gt;resolvable = cdires-&gt;flags.read_link;
++        liores-&gt;retargetable = cdires-&gt;flags.write_link;
+     }
+-
+-    flags = 0;
+-    size = 0;
+-    type = CDI_TYPEHANDLE;
+-    if (res-&gt;dir) {
+-        flags |= LOSTIO_FLAG_BROWSABLE;
+-        type = LOSTIO_TYPES_DIRECTORY;
+-    } else if (res-&gt;link) {
+-        flags |= LOSTIO_FLAG_SYMLINK;
+-        type = CDI_TYPEHANDLE_SYMLINK;
+-    } else {
+-        type = CDI_TYPEHANDLE;
+-
+-        if (res-&gt;file) {
+-            size = res-&gt;res-&gt;meta_read(s, CDI_FS_META_SIZE);
+-            flags |= LOSTIO_FLAG_READAHEAD;
+-        }
++    if (cdires-&gt;dir) {
++        liores-&gt;browsable = cdires-&gt;flags.browse;
++        liores-&gt;changeable = cdires-&gt;flags.create_child;
+     }
+ 
++    liores-&gt;size = cdires-&gt;res-&gt;meta_read(&amp;s, CDI_FS_META_SIZE);
++    liores-&gt;blocksize = BLOCKSIZE;
+ 
+-    vfstree_create_child(node, name, type, size, s, flags);
++    lio_resource_modified(liores);
+ 
+-    if (res-&gt;dir) {
+-        fs_fill_dir(vfstree_get_node_by_name(node, name));
+-    }
+-
+-    return 0;
++    return liores;
+ }
+ 
+-static bool fs_fill_dir(vfstree_node_t* node)
++struct lio_resource* cdi_fs_lio_load_root(struct lio_tree* tree)
+ {
+-    struct cdi_fs_stream* stream = node-&gt;data;
+-
+-    cdi_list_t children;
+-    struct cdi_fs_res* cres;
+-    int i;
++    struct cdi_fs_driver* driver = tree-&gt;service-&gt;opaque;
++    struct cdi_fs_filesystem* fs;
+ 
+-    if (!stream-&gt;res-&gt;loaded) {
+-        stream-&gt;res-&gt;res-&gt;load(stream);
++    if (tree-&gt;source == -1ULL) {
++        return NULL;
+     }
+ 
+-    if (stream-&gt;res-&gt;dir) {
+-        children = stream-&gt;res-&gt;dir-&gt;list(stream);
++    fs = calloc(1, sizeof(*fs));
++    fs-&gt;driver = driver;
++    fs-&gt;osdep.tree = tree;
++    tree-&gt;opaque = fs;
+ 
+-        for (i = 0; (cres = cdi_list_get(children, i)); i++) {
+-            handle_dirent(cres, node);
+-        }
++    if (!driver-&gt;fs_init(fs)) {
++        free(fs);
++        return NULL;
+     }
+ 
+-    return true;
++    return create_liores(fs, fs-&gt;root_res);
+ }
+ 
+-static bool fs_read_tree(struct cdi_fs_filesystem* fs)
++int cdi_fs_lio_load_children(struct lio_resource* res)
+ {
+-    char rp[ROOT_PATH_SIZE];
+-    vfstree_node_t* node;
+-    struct cdi_fs_stream* dh;
++    struct cdi_fs_filesystem* fs = res-&gt;tree-&gt;opaque;
++    struct cdi_fs_res* cdires = res-&gt;opaque;
++    struct cdi_fs_stream s;
++    cdi_list_t children;
++    struct cdi_fs_res* child;
++    struct lio_resource* liochild;
++    size_t i;
+ 
+-    // Dirhandle = Verknuepfung zwischen LIO und Treiber
+-    // FIXME Dahinter kommen eigentlich noch private Daten des Treibers...
+-    dh = malloc(sizeof(*dh));
+-    dh-&gt;fs = fs;
+-    dh-&gt;res = fs-&gt;root_res;
++    s.fs = fs;
++    s.res = cdires;
++    s.error = 0;
+ 
+-    get_root_path(fs-&gt;osdep.device-&gt;res, rp);
+-    if ((!vfstree_create_node(rp, LOSTIO_TYPES_DIRECTORY, 0, dh,
+-        LOSTIO_FLAG_BROWSABLE)) || (!(node = vfstree_get_node_by_path(rp))))
+-    {
+-        goto out_err;
++    if (!ensure_loaded(&amp;s) || !cdires-&gt;dir) {
++        return -1;
+     }
+ 
+-    if (!fs_fill_dir(node)) {
+-        goto out_err;
++    children = cdires-&gt;dir-&gt;list(&amp;s);
++    for (i = 0; (child = cdi_list_get(children, i)); i++) {
++        liochild = create_liores(fs, child);
++        if (!liochild) {
++            return -1;
++        }
++        lio_node_create(res, liochild, child-&gt;name);
+     }
+ 
+-    return true;
+-
+-out_err:
+-    free(dh);
+-    return false;
++    return 0;
+ }
+ 
+-static bool fs_mount(FILE* source)
++int cdi_fs_lio_read_file(struct lio_resource* res, uint64_t offset,
++    size_t bytes, void *buf)
+ {
+-    struct cdi_fs_filesystem* fs = malloc(sizeof(*fs));
+-    struct cdi_fs_driver* drv = the_one_and_only_driver;
++    struct cdi_fs_filesystem* fs = res-&gt;tree-&gt;opaque;
++    struct cdi_fs_res* cdires = res-&gt;opaque;
++    struct cdi_fs_stream s;
++    int result;
+ 
+-    // FIXME ;-)
+-    fs-&gt;osdep.device = calloc(1, sizeof(*fs-&gt;osdep.device));
+-    *fs-&gt;osdep.device = *source;
++    s.fs = fs;
++    s.res = cdires;
++    s.error = 0;
+ 
+-    if (!drv-&gt;fs_init(fs)) {
+-        goto out_err;
++    if (!ensure_loaded(&amp;s) || !cdires-&gt;file || !cdires-&gt;file-&gt;read) {
++        return -1;
+     }
+ 
+-    if (!fs_read_tree(fs)) {
+-        goto out_err;
++    if (offset + bytes &gt; res-&gt;size) {
++        /* TODO Das ist grosszuegig */
++        memset(buf, 0, bytes);
++
++        if (res-&gt;size &gt; offset) {
++            bytes = res-&gt;size - offset;
++        } else {
++            bytes = 0;
++        }
+     }
+ 
+-    return true;
++    if (bytes) {
++        result = -!(cdires-&gt;file-&gt;read(&amp;s, offset, bytes, buf) == bytes);
++    } else {
++        result = 0;
++    }
+ 
+-out_err:
+-    free(fs-&gt;osdep.device);
+-    free(fs);
+-    return false;
++    return result;
+ }
+ 
+-/**
+- * Dieser Handler wird bei jedem fopen() aufgerufen, da das immer
+- * schief gehen wird weil ja die daten nicht direkt auf Root liegen. Dabei
+- * werden nur die Pfade richtig umgebeogen und es wird geprueft ob alle
+- * notwendigen Verzeichnisse geladen sind
+- */
+-bool lostio_not_found_handler(char** path, uint8_t args, pid_t pid,
+-    FILE* source)
++int cdi_fs_lio_read_symlink(struct lio_resource* res, uint64_t offset,
++    size_t bytes, void* buf)
+ {
+-    char root_path[ROOT_PATH_SIZE + 1];
+-    char full_path[FULL_PATH_SIZE(*path) + 1];
+-    vfstree_node_t* root_node;
+-    cdi_fs_res_class_t type;
++    struct cdi_fs_filesystem* fs = res-&gt;tree-&gt;opaque;
++    struct cdi_fs_res* cdires = res-&gt;opaque;
++    struct cdi_fs_stream s;
++    const char* str;
++    size_t str_len;
+ 
++    s.fs = fs;
++    s.res = cdires;
++    s.error = 0;
+ 
+-    p();
+-    get_root_path(source-&gt;res, root_path);
+-    get_full_path(source-&gt;res, *path, full_path);
+-
+-    // Wenn der Knoten nicht existiert muss gemountet werden
+-    root_node = vfstree_get_node_by_path(root_path);
++    if (!ensure_loaded(&amp;s) || !cdires-&gt;link || !cdires-&gt;link-&gt;read_link) {
++        return -1;
++    }
+ 
+-    if (!root_node) {
+-        if (!fs_mount(source)) {
+-            // Wenn das mounten nicht klappt wird abgebrochen
+-            puts(&quot;Fehler beim Mount!&quot;);
+-            goto out_err;
+-        }
++    str = cdires-&gt;link-&gt;read_link(&amp;s);
++    str_len = strlen(str);
+ 
+-        root_node = vfstree_get_node_by_path(root_path);
++    if (offset + bytes &gt; str_len) {
++        bytes = str_len - offset;
+     }
+ 
+-    // Testen ob ein Verzeichnis oder eine Datei geoeffnet werden soll
+-    if ((args &amp; IO_OPEN_MODE_DIRECTORY) != 0) {
+-        type = CDI_FS_CLASS_DIR;
+-    } else if ((args &amp; IO_OPEN_MODE_LINK) != 0) {
+-        type = CDI_FS_CLASS_LINK;
++    memcpy(buf, str + offset, bytes);
++
++    return 0;
++}
++
++int cdi_fs_lio_read(struct lio_resource* res, uint64_t offset,
++    size_t bytes, void* buf)
++{
++    if (res-&gt;resolvable) {
++        return cdi_fs_lio_read_symlink(res, offset, bytes, buf);
+     } else {
+-        type = CDI_FS_CLASS_FILE;
++        return cdi_fs_lio_read_file(res, offset, bytes, buf);
+     }
++}
+ 
+-    // Pfad aendern
+-    *path = malloc(strlen(full_path) + 1);
+-    memcpy(*path, full_path, strlen(full_path) + 1);
++int cdi_fs_lio_write_file(struct lio_resource* res, uint64_t offset,
++    size_t bytes, void* buf)
++{
++    struct cdi_fs_filesystem* fs = res-&gt;tree-&gt;opaque;
++    struct cdi_fs_res* cdires = res-&gt;opaque;
++    struct cdi_fs_stream s;
++    int result;
+ 
+-    // Jetzt wird der Knoten geholt, damit geprueft werden kann, ob auch kein
+-    // Verzeichnis als Datei geoeffnet werden soll und sowas ;-)
+-    vfstree_node_t* node = vfstree_get_node_by_path(*path);
+-    struct cdi_fs_stream* stream;
++    s.fs = fs;
++    s.res = cdires;
++    s.error = 0;
+ 
+-    // Abbrechen falls der Knoten nicht existiert und auch nicht erstellt
+-    // werden soll
+-    if ((node == NULL) &amp;&amp; ((args &amp; IO_OPEN_MODE_CREATE) == 0)) {
+-        goto out_err;
+-    } else if ((node == NULL)) {
+-        // Der Knoten exisitiert nicht, soll aber erstellt werden
+-        char* parent_path = vfstree_dirname(*path);
+-        char* child_name = vfstree_basename(*path);
+-        vfstree_node_t* parent = vfstree_get_node_by_path(parent_path);
+-        free(parent_path);
++    if (offset + bytes &gt; res-&gt;size) {
++        bytes = res-&gt;size - offset;
++    }
+ 
+-        if (parent == NULL) {
+-            goto out_err;
+-        }
++    if (!ensure_loaded(&amp;s) || !cdires-&gt;file || !cdires-&gt;file-&gt;write
++        || fs-&gt;read_only)
++    {
++        return -1;
++    }
+ 
+-        // Kindeintraege koennen nur in Verzeichnissen angelegt werden
+-        struct cdi_fs_stream* parent_stream = parent-&gt;data;
+-        if (parent_stream-&gt;res-&gt;dir == NULL) {
+-            goto out_err;
+-        }
++    result = -!(cdires-&gt;file-&gt;write(&amp;s, offset, bytes, buf) == bytes);
+ 
+-        // Stream erstellen fuer die neue Ressource
+-        struct cdi_fs_stream stream;;
+-        memset(&amp;stream, 0, sizeof(stream));
+-        stream.fs = parent_stream-&gt;fs;
++    return result;
++}
+ 
+-        if(!parent_stream-&gt;res-&gt;flags.create_child) {
+-            goto out_err;
+-        }
+-        if (!parent_stream-&gt;res-&gt;dir-&gt;create_child(&amp;stream, child_name,
+-            parent_stream-&gt;res))
+-        {
+-            puts(&quot;cdi_fs: Fehler beim Anlegen der Kindressource&quot;);
+-            goto out_err;
+-        }
++int cdi_fs_lio_write_symlink(struct lio_resource* res, uint64_t offset,
++    size_t bytes, void* buf)
++{
++    struct cdi_fs_filesystem* fs = res-&gt;tree-&gt;opaque;
++    struct cdi_fs_res* cdires = res-&gt;opaque;
++    struct cdi_fs_stream s;
++    int result;
++    char* path;
++    size_t path_len;
+ 
+-        if (!stream.res-&gt;res-&gt;assign_class(&amp;stream, type)) {
+-            puts(&quot;cdi_fs: Fehler beim Zuweisen der Klasse fuer die neue&quot;
+-                &quot;Ressource&quot;);
+-            goto out_err;
+-        }
++    s.fs = fs;
++    s.res = cdires;
++    s.error = 0;
+ 
+-        handle_dirent(stream.res, parent);
+-        node = vfstree_get_node_by_name(parent, child_name);
++    if (offset + bytes &gt; res-&gt;size) {
++        bytes = res-&gt;size - offset;
+     }
+ 
+-    stream = node-&gt;data;
+-
+-    if (stream-&gt;res-&gt;link) {
+-        type = CDI_FS_CLASS_LINK;
++    if (!ensure_loaded(&amp;s) || !cdires-&gt;link || !cdires-&gt;link-&gt;write_link
++        || fs-&gt;read_only)
++    {
++        return -1;
+     }
+ 
+-    switch (type) {
+-        case CDI_FS_CLASS_FILE:
+-            if (stream-&gt;res-&gt;file == NULL) {
+-                goto out_err;
+-            }
+-
+-            if ((args &amp; IO_OPEN_MODE_TRUNC)) {
+-                if (!stream-&gt;res-&gt;file-&gt;truncate(stream, 0)) {
+-                    puts(&quot;cdi_fs: Truncate fehlgeschlagen!&quot;);
+-                    goto out_err;
+-                }
+-                node-&gt;size = 0;
+-            }
+-            break;
+-
+-        case CDI_FS_CLASS_DIR:
+-            if (stream-&gt;res-&gt;dir == NULL) {
+-                goto out_err;
+-            }
+-            break;
+-
+-        case CDI_FS_CLASS_LINK:
+-            if (stream-&gt;res-&gt;link == NULL) {
+-                goto out_err;
+-            }
+-            break;
+-
+-        default:
+-            goto out_err;
++    path = strdup(cdires-&gt;link-&gt;read_link(&amp;s));
++    path_len = strlen(path);
++    if (path_len &lt; offset + bytes) {
++        path = realloc(path, offset + bytes + 1);
++        path[offset + bytes] = '\0';
+     }
+ 
+-    v();
+-    return true;
++    memcpy(path + offset, buf, bytes);
++    result = -cdires-&gt;link-&gt;write_link(&amp;s, path);
+ 
+-out_err:
+-    v();
+-    return false;
++    return result;
+ }
+ 
+-/**
+- * Handler der dazu benutzt wird, die Pfade umzubiegen
+- */
+-bool lostio_pre_open_handler(char** path, uint8_t args, pid_t pid,
+-    FILE* source)
++int cdi_fs_lio_write(struct lio_resource* res, uint64_t offset,
++    size_t bytes, void* buf)
+ {
+-    if ((strcmp(*path, &quot;/&quot;) == 0) || (vfstree_get_node_by_path(*path) == NULL))
+-    {
+-        if (lostio_not_found_handler(path, args, pid, source) == false) {
+-            return false;
+-        }
++    if (res-&gt;retargetable) {
++        return cdi_fs_lio_write_symlink(res, offset, bytes, buf);
++    } else {
++        return cdi_fs_lio_write_file(res, offset, bytes, buf);
+     }
+-    return true;
+ }
+ 
+-size_t lostio_readahead_handler(lostio_filehandle_t* fh, void* buf,
+-    size_t bs, size_t bc)
++extern void caches_sync_all(void);
++int cdi_fs_lio_sync(struct lio_resource* res)
+ {
+-    size_t size = 0;
+-    struct cdi_fs_stream* dh = fh-&gt;node-&gt;data;
+-
+-    p();
+-
+-    if (dh-&gt;res-&gt;file == NULL) {
+-        goto out;
+-    }
+-
+-    if (!dh-&gt;res-&gt;flags.read) {
+-        goto out;
+-    }
+-
+-    if (fh-&gt;pos &gt; fh-&gt;node-&gt;size) {
+-        goto out;
+-    }
++    struct cdi_fs_filesystem* fs = res-&gt;tree-&gt;opaque;
+ 
+-    size = bs * bc;
+-    if (size &gt; fh-&gt;node-&gt;size - fh-&gt;pos) {
+-        size = fh-&gt;node-&gt;size - fh-&gt;pos;
+-    }
+-    if (size == 0) {
+-        goto out;
+-    }
++    // FIXME Rückgabewert
++    caches_sync_all();
+ 
+-    size = dh-&gt;res-&gt;file-&gt;read(dh, fh-&gt;pos, size, buf);
+-
+-out:
+-    v();
+-    return size;
++    return lio_sync(fs-&gt;osdep.tree-&gt;source);
+ }
+ 
+-size_t lostio_read_handler(lostio_filehandle_t* fh, void* buf,
+-    size_t bs, size_t bc)
++int cdi_fs_lio_resize(struct lio_resource* res, uint64_t size)
+ {
+-    size_t ret;
++    struct cdi_fs_filesystem* fs = res-&gt;tree-&gt;opaque;
++    struct cdi_fs_res* cdires = res-&gt;opaque;
++    struct cdi_fs_stream s;
+ 
+-    p();
+-    ret = lostio_readahead_handler(fh, buf, bs, bc);
+-    fh-&gt;pos += ret;
+-    if(fh-&gt;pos &gt;= fh-&gt;node-&gt;size) {
+-        fh-&gt;flags |= LOSTIO_FLAG_EOF;
+-    } else {
+-        fh-&gt;flags &amp;= ~LOSTIO_FLAG_EOF;
++    s.fs = fs;
++    s.res = cdires;
++    s.error = 0;
++
++    if (cdires-&gt;file) {
++        if (!cdires-&gt;file-&gt;truncate || !cdires-&gt;file-&gt;truncate(&amp;s, size)) {
++            return -1;
++        }
++    } else if (!cdires-&gt;link) {
++        return -1;
+     }
+-    v();
+ 
+-    return ret;
++    res-&gt;size = size;
++    return 0;
+ }
+ 
+-size_t lostio_write_handler(lostio_filehandle_t* fh, size_t bs, size_t bc,
+-    void* data)
++static struct lio_resource* make_object(struct lio_resource* parent,
++    const char* name, cdi_fs_res_class_t cls)
+ {
+-    size_t size = bs * bc;
+-    struct cdi_fs_stream* stream = fh-&gt;node-&gt;data;
+-    size_t result = 0;
++    struct cdi_fs_filesystem* fs = parent-&gt;tree-&gt;opaque;
++    struct cdi_fs_res* cdiparent = parent-&gt;opaque;
++    struct cdi_fs_stream s;
++    struct lio_resource* res;
+ 
+-    p();
++    s.fs = fs;
++    s.res = NULL;
++    s.error = 0;
+ 
+-    if (!size) {
+-        goto out;
++    if (fs-&gt;read_only || !cdiparent-&gt;dir || !cdiparent-&gt;dir-&gt;create_child ||
++        !cdiparent-&gt;dir-&gt;create_child(&amp;s, name, cdiparent))
++    {
++        return NULL;
+     }
+ 
+-    if(!stream-&gt;res-&gt;flags.write) {
+-        goto out;
++    if (!ensure_loaded(&amp;s)) {
++        return NULL;
+     }
+ 
+-    result = stream-&gt;res-&gt;file-&gt;write(stream, fh-&gt;pos, size, data);
+-    fh-&gt;pos += size;
+-
+-    if (fh-&gt;pos &gt; fh-&gt;node-&gt;size) {
+-        fh-&gt;node-&gt;size = fh-&gt;pos;
++    if (!s.res-&gt;res-&gt;assign_class(&amp;s, cls)) {
++        return NULL;
+     }
+ 
+-    if(fh-&gt;pos &gt;= fh-&gt;node-&gt;size) {
+-        fh-&gt;flags |= LOSTIO_FLAG_EOF;
+-    } else {
+-        fh-&gt;flags &amp;= ~LOSTIO_FLAG_EOF;
++    res = create_liores(fs, s.res);
++    if (res) {
++        lio_node_create(parent, res, name);
+     }
+ 
+-out:
+-    v();
+-    return result;
++    return res;
+ }
+ 
+-
+-
+-int lostio_seek_handler(lostio_filehandle_t* fh, uint64_t offset, int origin)
++struct lio_resource* cdi_fs_lio_make_file(struct lio_resource* parent,
++    const char* name)
+ {
+-    uint64_t new_pos;
+-
+-    p();
++    return make_object(parent, name, CDI_FS_CLASS_FILE);
++}
+ 
+-    switch(origin)
+-    {
+-        case SEEK_SET:
+-            new_pos = offset;
+-            break;
++struct lio_resource* cdi_fs_lio_make_dir(struct lio_resource* parent,
++    const char* name)
++{
++    return make_object(parent, name, CDI_FS_CLASS_DIR);
++}
+ 
+-        case SEEK_CUR:
+-            new_pos = fh-&gt;pos + offset;
+-            break;
++struct lio_resource* cdi_fs_lio_make_symlink(struct lio_resource* parent,
++    const char* name, const char* target)
++{
++    struct lio_resource* res;
++    struct cdi_fs_res* cdires;
++    struct cdi_fs_filesystem* fs = parent-&gt;tree-&gt;opaque;
++    struct cdi_fs_stream s;
+ 
+-        case SEEK_END:
+-            new_pos = fh-&gt;node-&gt;size + offset;
+-            break;
++    res = make_object(parent, name, CDI_FS_CLASS_LINK);
++    if (res) {
++        cdires = res-&gt;opaque;
++        s.fs = fs;
++        s.res = cdires;
++        s.error = 0;
+ 
+-        default:
+-            return -1;
+-    }
++        cdires-&gt;link-&gt;write_link(&amp;s, target);
+ 
+-    if ((new_pos &gt; fh-&gt;node-&gt;size) &amp;&amp; ((origin == SEEK_SET) ||
+-        (origin == SEEK_CUR)) &amp;&amp; ((fh-&gt;flags &amp; IO_OPEN_MODE_WRITE) == 0))
+-    {
+-        v();
+-        return -1;
++        res-&gt;size = strlen(target);
++        lio_resource_modified(res);
+     }
+ 
+-    fh-&gt;pos = new_pos;
+-
+-    if(fh-&gt;pos &gt;= fh-&gt;node-&gt;size) {
+-        fh-&gt;flags |= LOSTIO_FLAG_EOF;
+-    } else {
+-        fh-&gt;flags &amp;= ~LOSTIO_FLAG_EOF;
+-    }
+-
+-    v();
+-    return 0;
++    return res;
+ }
+ 
+ /**
+@@ -545,100 +441,46 @@ static int cdi_remove_res(struct cdi_fs_stream* stream)
+     return 0;
+ }
+ 
+-int lostio_unlink_handler(lostio_filehandle_t* fh, const char* name)
++int cdi_fs_lio_unlink(struct lio_resource* parent, const char* name)
+ {
+-    struct cdi_fs_stream* stream;
+-    vfstree_node_t* node;
+-    int i;
+-    int result = 0;
+-
+-    p();
+-
+-    // Passender Kindknoten finden
+-    for (i = 0; (node = list_get_element_at(fh-&gt;node-&gt;children, i)); i++) {
+-        if (!strcmp(node-&gt;name, name)) {
+-            goto found;
+-        }
+-    }
+-
+-    result = -1;
+-    goto out;
++    struct cdi_fs_filesystem* fs = parent-&gt;tree-&gt;opaque;
++    struct cdi_fs_res* cdiparent = parent-&gt;opaque;
++    struct cdi_fs_res* child;
++    struct cdi_fs_stream s;
++    struct lio_node* node;
+ 
+-found:
+-    stream = node-&gt;data;
+-
+-    // Spezialfall: Es handelt sich um ein Verzeichnis. Das heisst es darf
+-    // nur geloescht werden wenn es keine Kind-Eintraege mehr hat.
+-    if (stream-&gt;res-&gt;dir &amp;&amp; list_size(node-&gt;children)) {
+-        result = -1;
+-        goto out;
+-    }
+-
+-    // Sonst kann die Ressource geloescht werden.
+-    if (cdi_remove_res(stream) || !vfstree_delete_child(fh-&gt;node, name)) {
+-        result = -1;
+-    }
+-
+-out:
+-    v();
+-    return result;
+-}
+-
+-size_t lostio_symlink_read_handler(lostio_filehandle_t* fh, void* buf,
+-    size_t bs, size_t bc)
+-{
+-    size_t size = bs*bc;
+-    struct cdi_fs_stream* dh = fh-&gt;node-&gt;data;
+-    const char* link;
+-
+-    p();
+-
+-    if (dh-&gt;res-&gt;link == NULL) {
+-        goto out;
+-    }
+-
+-    if (!dh-&gt;res-&gt;flags.read_link) {
+-        goto out;
++    if (fs-&gt;read_only) {
++        return -1;
+     }
+ 
+-    link = dh-&gt;res-&gt;link-&gt;read_link(dh);
+-    if (size &gt; strlen(link) + 1) {
+-        size = strlen(link) + 1;
++    s.fs = fs;
++    s.res = cdiparent;
++    s.error = 0;
++    if (!ensure_loaded(&amp;s)) {
++        return -1;
+     }
+-    strncpy(buf, link, size);
+-
+-out:
+-    v();
+-    return size;
+-}
+ 
+-size_t lostio_symlink_write_handler(lostio_filehandle_t* fh, size_t bs,
+-    size_t bc, void* data)
+-{
+-    size_t size = bs * bc;
+-    struct cdi_fs_stream* stream = fh-&gt;node-&gt;data;
+-    size_t result = 0;
+-
+-    p();
+-
+-    if ((stream-&gt;res-&gt;link == NULL) || (((char*) data)[size - 1] != 0)) {
+-        goto out;
++    if (!(node = lio_resource_get_child(parent, name))) {
++        return -1;
+     }
++    child = node-&gt;res-&gt;opaque;
+ 
+-    if (!size) {
+-        goto out;
++    s.res = child;
++    if (!ensure_loaded(&amp;s)) {
++        return -1;
+     }
+ 
+-    if (!stream-&gt;res-&gt;flags.write_link) {
+-        goto out;
++    // Wir haben es mit einem Verzeichnis zu tun, das duerfen wir nur loeschen
++    // wenn es keine Kindeintraege mehr hat.
++    if (child-&gt;dir &amp;&amp; cdi_list_size(child-&gt;children)) {
++        return -1;
+     }
+ 
+-    if (stream-&gt;res-&gt;link-&gt;write_link(stream, data)) {
+-        result = size;
++    if (cdi_remove_res(&amp;s)) {
++        return -1;
+     }
++    lio_resource_remove_child(parent, node);
+ 
+-out:
+-    v();
+-    return result;
++    return 0;
+ }
+ 
+-- 
+1.7.7
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002462.html">[tyndur-devel] [PATCH 1/3] file: Auf LIOv2 umstellen
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002464.html">[tyndur-devel] [PATCH 3/3] tests: LIOv2-Testfälle, die konvertiertes ext2 brauchen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2463">[ Datum ]</a>
+              <a href="thread.html#2463">[ Thema ]</a>
+              <a href="subject.html#2463">[ Betreff (Subject)]</a>
+              <a href="author.html#2463">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

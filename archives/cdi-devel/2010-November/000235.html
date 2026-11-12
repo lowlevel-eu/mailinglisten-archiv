@@ -1,0 +1,577 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [RFC] CDI.audio: ac97
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BRFC%5D%20CDI.audio%3A%20ac97&In-Reply-To=%3C1290108646-12916-1-git-send-email-max%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000236.html">
+   <LINK REL="Next"  HREF="000237.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [RFC] CDI.audio: ac97</H1>
+    <B>max at tyndur.org</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BRFC%5D%20CDI.audio%3A%20ac97&In-Reply-To=%3C1290108646-12916-1-git-send-email-max%40tyndur.org%3E"
+       TITLE="[cdi-devel] [RFC] CDI.audio: ac97">max at tyndur.org
+       </A><BR>
+    <I>Thu Nov 18 20:30:46 CET 2010</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000236.html">[cdi-devel] [PATCH] CDI.audio
+</A></li>
+        <LI>Next message: <A HREF="000237.html">[cdi-devel] [PATCH] ata: Fix bus master direction flag
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#235">[ date ]</a>
+              <a href="thread.html#235">[ thread ]</a>
+              <a href="subject.html#235">[ subject ]</a>
+              <a href="author.html#235">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>From: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+
+This is a sample driver for AC97 using the proposed CDI.audio interface
+(with some slight changes, e.g., num_buffers instead of buffers in
+struct cdi_audio_stream and the usage of cdi_mem_area for
+transfer_data).
+
+I don't know if it's the best example because AC97 doesn't support
+hardware mixing nor do I know anything about recording, thus this isn't
+supported either. However, I hope it makes clear how the interface is
+meant to be used.
+
+Max
+---
+ ac97/device.c |  296 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ ac97/device.h |  116 ++++++++++++++++++++++
+ ac97/main.c   |   65 +++++++++++++
+ 3 files changed, 477 insertions(+), 0 deletions(-)
+ create mode 100644 ac97/device.c
+ create mode 100644 ac97/device.h
+ create mode 100644 ac97/main.c
+
+diff --git a/ac97/device.c b/ac97/device.c
+new file mode 100644
+index 0000000..4525e8d
+--- /dev/null
++++ b/ac97/device.c
+@@ -0,0 +1,296 @@
++/******************************************************************************
++ * Copyright (c) 2010 Max Reitz                                               *
++ *                                                                            *
++ * Permission is hereby granted,  free of charge,  to any person  obtaining a *
++ * copy of this software and associated documentation files (the &quot;Software&quot;), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
++ * and/or  sell copies of the  Software,  and to permit  persons to whom  the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED,  INCLUDING BUT NOT LIMITED TO THE WARRANTIES  OF MERCHANTABILITY, *
++ * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH  THE SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#include &lt;stdint.h&gt;
++#include &lt;stdlib.h&gt;
++#include &lt;string.h&gt;
++
++#include &quot;cdi.h&quot;
++#include &quot;cdi/audio.h&quot;
++#include &quot;cdi/io.h&quot;
++#include &quot;cdi/lists.h&quot;
++#include &quot;cdi/mem.h&quot;
++#include &quot;cdi/misc.h&quot;
++#include &quot;cdi/pci.h&quot;
++
++#include &quot;device.h&quot;
++
++static void ac97_isr(struct cdi_device* device);
++
++struct cdi_device* ac97_init_device(struct cdi_bus_data* bus_data)
++{
++    struct cdi_pci_device* pci = (struct cdi_pci_device*) bus_data;
++
++    // Search for a usable device
++    if ((pci-&gt;vendor_id != 0x8086) || ((pci-&gt;device_id != 0x2415) &amp;&amp;
++        (pci-&gt;device_id != 0x2425) &amp;&amp;  (pci-&gt;device_id != 0x2445)))
++    {
++        return NULL;
++    }
++
++    struct ac97_device* dev = calloc(1, sizeof(*dev));
++
++    cdi_pci_alloc_ioports(pci);
++
++    // Get the I/O resources (NAMBAR and NABMBAR)
++    struct cdi_pci_resource* res;
++    for (int i = 0; (res = cdi_list_get(pci-&gt;resources, i)); i++) {
++        if (res-&gt;type == CDI_PCI_IOPORTS) {
++            if (!res-&gt;index) {
++                dev-&gt;nambar = res-&gt;start;
++            } else {
++                dev-&gt;nabmbar = res-&gt;start;
++                break;
++            }
++        }
++    }
++
++    if (!dev-&gt;nambar || !dev-&gt;nabmbar) {
++        free(dev);
++        cdi_pci_free_ioports(pci);
++        return NULL;
++    }
++
++    #ifdef CDI_PCI_DIRECT_ACCESS
++    // If possible, activate the I/O resources and the busmaster capability
++    cdi_pci_config_writew(pci, 4, cdi_pci_config_readw(pci, 4) | 5);
++    #endif
++
++    struct ac97_card* ac97_card = malloc(sizeof(*ac97_card));
++    struct ac97_stream* ac97_stream = malloc(sizeof(*ac97_stream));
++
++    // Define the CDI.audio sound card
++    ac97_card-&gt;card.record = 0;
++    ac97_card-&gt;card.streams = cdi_list_create();
++    ac97_card-&gt;device = dev;
++
++    // And the only stream
++    ac97_stream-&gt;stream.device = &amp;ac97_card-&gt;card;
++    ac97_stream-&gt;stream.num_buffers = 32;
++    ac97_stream-&gt;stream.buffer_size = 0xFFFE;
++    ac97_stream-&gt;stream.sample_format = CDI_AUDIO_16SI;
++
++    dev-&gt;output = &amp;ac97_stream-&gt;stream;
++
++    cdi_list_push(ac97_card-&gt;card.streams, ac97_stream);
++
++    // Register the IRQ
++    cdi_register_irq(pci-&gt;irq, &amp;ac97_isr, &amp;ac97_card-&gt;card.dev);
++
++    // Reset the card
++    cdi_outw(dev-&gt;nambar + NAM_RESET, 42);
++
++    cdi_sleep_ms(100);
++
++    // Reset some more...
++    cdi_outb(dev-&gt;nabmbar + NABM_GLB_CTRL_STAT, 0x02);
++
++    cdi_sleep_ms(100);
++
++    // And still something...
++    cdi_outw(dev-&gt;nabmbar + NABM_PICONTROL, 0x02);
++    cdi_outw(dev-&gt;nabmbar + NABM_POCONTROL, 0x02);
++    cdi_outw(dev-&gt;nabmbar + NABM_MCCONTROL, 0x02);
++
++    cdi_sleep_ms(100);
++
++    // Set volume to 100 %
++    cdi_outw(dev-&gt;nambar + NAM_MASTER_VOLUME, 0x0000);
++    cdi_outw(dev-&gt;nambar + NAM_MONO_VOLUME, 0x00);
++    cdi_outw(dev-&gt;nambar + NAM_PC_BEEP, 0x00);
++    cdi_outw(dev-&gt;nambar + NAM_PCM_VOLUME, 0x0000);
++
++    cdi_sleep_ms(10);
++
++    // Test if sample rate is adjustable
++    if (!(cdi_inw(dev-&gt;nambar + NAM_EXT_AUDIO_ID) &amp; 1)) {
++        // No it isn't; it's fixed to 48 kHz
++        ac97_stream-&gt;stream.fixed_sample_rate = 48000;
++    } else {
++        // Yes, it is
++        ac97_stream-&gt;stream.fixed_sample_rate = 0;
++
++        // Use that capability (Variable Audio Rate)
++        cdi_outw(dev-&gt;nambar + NAM_EXT_AUDIO_STC,
++            cdi_inw(dev-&gt;nambar + NAM_EXT_AUDIO_STC) | 1);
++
++        cdi_sleep_ms(10);
++
++        // Set the sample rate to 44.1 kHz
++        cdi_outw(dev-&gt;nambar + NAM_FRONT_SPLRATE, 44100);
++        cdi_outw(dev-&gt;nambar + NAM_LR_SPLRATE, 44100);
++    }
++
++    // TODO: Error handling
++
++    // Allocate the buffer descriptor array
++    struct cdi_mem_area* bd = cdi_mem_alloc(32 * sizeof(dev-&gt;bd[0]),
++        3 | CDI_MEM_DMA_4G | CDI_MEM_PHYS_CONTIGUOUS);
++
++    dev-&gt;bd  = bd-&gt;vaddr;
++    dev-&gt;vbd = calloc(32, sizeof(dev-&gt;vbd[0]));
++
++    for (int i = 0; i &lt; 32; i++)
++    {
++        // Allocate each buffer (actually, their sizes equals 131068, but who
++        // cares about those four bytes)
++        struct cdi_mem_area* buffer = cdi_mem_alloc(131072,
++            12 | CDI_MEM_DMA_4G | CDI_MEM_PHYS_CONTIGUOUS);
++
++        dev-&gt;bd[i].buffer = buffer-&gt;paddr.items-&gt;start;
++        dev-&gt;bd[i].length = 0xFFFE;
++        // Generate an IRQ on completion
++        dev-&gt;bd[i].flags = FLAG_IOC;
++        dev-&gt;vbd[i] = buffer-&gt;vaddr;
++
++        // Zero the buffer
++        memset(buffer-&gt;vaddr, 0, 131072);
++    }
++
++    // Set the base address of the descriptor array
++    cdi_outl(dev-&gt;nabmbar + NABM_POBDBAR, bd-&gt;paddr.items-&gt;start);
++
++    // Return the new device
++    return &amp;ac97_card-&gt;card.dev;
++}
++
++void ac97_remove_device(struct cdi_device* device)
++{
++    // TODO: Well...
++    (void) device;
++}
++
++int ac97_transfer_data(struct cdi_audio_stream* stream, size_t buffer,
++    struct cdi_mem_area* memory)
++{
++    // Check if buffer index is valid
++    if (buffer &gt;= 32)
++        return -1;
++
++    struct ac97_stream* s = (struct ac97_stream*) stream;
++
++    // Copy the content to the AC97 buffer
++    memcpy(s-&gt;device-&gt;vbd[buffer], memory, 0xFFFE);
++
++    return 0;
++}
++
++cdi_audio_status_t ac97_change_status(struct cdi_audio_device* device,
++    cdi_audio_status_t status)
++{
++    struct ac97_device* dev = ((struct ac97_card*) device)-&gt;device;
++
++    if (status == CDI_AUDIO_PLAY) {
++        // Start playback
++        cdi_outb(dev-&gt;nabmbar + NABM_POCONTROL, 0x11);
++        // Set last valid buffer index to 31
++        cdi_outb(dev-&gt;nabmbar + NABM_POLVI, 31);
++    } else if (status == CDI_AUDIO_STOP) {
++        // Stop playback
++        cdi_outb(dev-&gt;nabmbar + NABM_POCONTROL, 0x00);
++    }
++
++    // Returns whether the card is active or not
++    return cdi_inb(dev-&gt;nabmbar + NABM_POCONTROL) &amp; 0x1;
++}
++
++void ac97_set_volume(struct cdi_audio_stream* stream, uint8_t volume)
++{
++    struct ac97_device* dev = ((struct ac97_stream*) stream)-&gt;device;
++
++    // Calculate the AC97 volume (which is 63 - (volume * 63 / 255))
++    int rvolume = volume * 63;
++    rvolume /= 255;
++
++    rvolume = 63 - rvolume;
++
++    // And set it
++    cdi_outw(dev-&gt;nambar + NAM_MASTER_VOLUME, (rvolume &lt;&lt; 8) | rvolume);
++}
++
++int ac97_set_sample_rate(struct cdi_audio_stream* stream, int sample_rate)
++{
++    struct ac97_device* dev = ((struct ac97_stream*) stream)-&gt;device;
++
++    if (stream-&gt;fixed_sample_rate) {
++        // If the sample rate cannot be adjustet, return the fixed value
++        return stream-&gt;fixed_sample_rate;
++    }
++
++    if (sample_rate &gt; 0) {
++        // Try to set the requested sample rate
++        cdi_outw(dev-&gt;nambar + NAM_FRONT_SPLRATE, sample_rate);
++        cdi_outw(dev-&gt;nambar + NAM_LR_SPLRATE, sample_rate);
++
++        cdi_sleep_ms(10);
++    }
++
++    // And return the actual rate set
++    return cdi_inw(dev-&gt;nambar + NAM_FRONT_SPLRATE);
++}
++
++void ac97_get_position(struct cdi_audio_stream* stream,
++    cdi_audio_position_t* position)
++{
++    struct ac97_device* dev = ((struct ac97_stream*) stream)-&gt;device;
++
++    position-&gt;buffer = cdi_inb(dev-&gt;nabmbar + NABM_POCIV);
++    // Yes, really 0x7FFE, not 0x7FFF
++    // (POPICB contains the number of samples not yet read from the buffer,
++    // we are required to return the number of frames played)
++    position-&gt;frame = 0x7FFE - cdi_inw(dev-&gt;nabmbar + NABM_POPICB) / 2;
++}
++
++int ac97_set_channel_count(struct cdi_audio_device* dev, int channels)
++{
++    (void) dev;
++    (void) channels;
++
++    // TODO: Is that really fixed or is there any way to use e.g. mono?
++    return 2;
++}
++
++static void ac97_isr(struct cdi_device* device)
++{
++    struct ac97_device* dev = ((struct ac97_card*) device)-&gt;device;
++
++    int pi = cdi_inb(dev-&gt;nabmbar + NABM_PISTATUS) &amp; 0x1C;
++    int po = cdi_inb(dev-&gt;nabmbar + NABM_POSTATUS) &amp; 0x1C;
++    int mc = cdi_inb(dev-&gt;nabmbar + NABM_MCSTATUS) &amp; 0x1C;
++
++    // Check if just anything happened
++    if (!pi &amp;&amp; !po &amp;&amp; !mc) {
++        return;
++    }
++
++    // Tell the card we handled everything (no, we don't, but who cares).
++    cdi_outb(dev-&gt;nabmbar + NABM_PISTATUS, pi);
++    cdi_outb(dev-&gt;nabmbar + NABM_POSTATUS, po);
++    cdi_outb(dev-&gt;nabmbar + NABM_MCSTATUS, mc);
++
++    if (po &amp; (1 &lt;&lt; 3)) {
++        // If a buffer has been completed, tell that to the CDI library
++        cdi_audio_buffer_completed(dev-&gt;output,
++            cdi_inb(dev-&gt;nabmbar + NABM_POCIV));
++    }
++}
++
+diff --git a/ac97/device.h b/ac97/device.h
+new file mode 100644
+index 0000000..e096722
+--- /dev/null
++++ b/ac97/device.h
+@@ -0,0 +1,116 @@
++/******************************************************************************
++ * Copyright (c) 2010 Max Reitz                                               *
++ *                                                                            *
++ * Permission is hereby granted,  free of charge,  to any person  obtaining a *
++ * copy of this software and associated documentation files (the &quot;Software&quot;), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
++ * and/or  sell copies of the  Software,  and to permit  persons to whom  the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED,  INCLUDING BUT NOT LIMITED TO THE WARRANTIES  OF MERCHANTABILITY, *
++ * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH  THE SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#ifndef DEVICE_H
++#define DEVICE_H
++
++#include &lt;stddef.h&gt;
++#include &lt;stdint.h&gt;
++
++#include &quot;cdi.h&quot;
++#include &quot;cdi/audio.h&quot;
++#include &quot;cdi/mem.h&quot;
++#include &quot;cdi/pci.h&quot;
++
++// Some I/O port offsets
++// NAMBAR
++#define NAM_RESET          0x0000
++#define NAM_MASTER_VOLUME  0x0002
++#define NAM_MONO_VOLUME    0x0006
++#define NAM_PC_BEEP        0x000A
++#define NAM_PCM_VOLUME     0x0018
++#define NAM_EXT_AUDIO_ID   0x0028
++#define NAM_EXT_AUDIO_STC  0x002A
++#define NAM_FRONT_SPLRATE  0x002C
++#define NAM_LR_SPLRATE     0x0032
++// NABMBAR
++#define NABM_POBDBAR       0x0010
++#define NABM_POCIV         0x0014
++#define NABM_POLVI         0x0015
++#define NABM_PISTATUS      0x0006
++#define NABM_POSTATUS      0x0016
++#define NABM_MCSTATUS      0x0026
++#define NABM_POPICB        0x0018
++#define NABM_PICONTROL     0x000B
++#define NABM_POCONTROL     0x001B
++#define NABM_MCCONTROL     0x002B
++#define NABM_GLB_STAT      0x0030
++#define NABM_GLB_CTRL_STAT 0x0060
++
++// Buffer flags which may be set
++// Buffer underrun policy: If set, output 0 after the last sample, if there's no
++// new buffer; else, output the last sample.
++#define FLAG_BUP (1 &lt;&lt; 14)
++// Interrupt on completion: Request an interrupt when having completed the
++// buffer
++#define FLAG_IOC (1 &lt;&lt; 15)
++
++// A descriptor describing a buffer
++struct buf_desc
++{
++    // Physical address
++    uint32_t buffer;
++    // Number of samples contained
++    uint16_t length;
++    // Flags (BUP and/or IOC)
++    uint16_t flags;
++} __attribute__((packed));
++
++// A structure describing an AC97 card
++struct ac97_device {
++    // The two I/O spaces
++    uint16_t nambar, nabmbar;
++
++    // The buffer descriptor array
++    struct buf_desc* bd;
++    // The buffer's virtual addresses
++    void** vbd;
++
++    // Pointer to the output stream
++    struct cdi_audio_stream* output;
++};
++
++struct ac97_stream {
++    struct cdi_audio_stream stream;
++    struct ac97_device* device;
++};
++
++struct ac97_card {
++    struct cdi_audio_device card;
++    struct ac97_device* device;
++};
++
++struct cdi_device* ac97_init_device(struct cdi_bus_data* bus_data);
++void ac97_remove_device(struct cdi_device* device);
++
++int ac97_transfer_data(struct cdi_audio_stream* stream, size_t buffer,
++    struct cdi_mem_area* memory);
++cdi_audio_status_t ac97_change_status(struct cdi_audio_device* device,
++    cdi_audio_status_t status);
++void ac97_set_volume(struct cdi_audio_stream* stream, uint8_t volume);
++int ac97_set_sample_rate(struct cdi_audio_stream* stream, int sample_rate);
++void ac97_get_position(struct cdi_audio_stream* stream,
++    cdi_audio_position_t* position);
++int ac97_set_channel_count(struct cdi_audio_device* dev, int channels);
++
++#endif
++
+diff --git a/ac97/main.c b/ac97/main.c
+new file mode 100644
+index 0000000..5afa557
+--- /dev/null
++++ b/ac97/main.c
+@@ -0,0 +1,65 @@
++/******************************************************************************
++ * Copyright (c) 2010 Max Reitz                                               *
++ *                                                                            *
++ * Permission is hereby granted,  free of charge,  to any person  obtaining a *
++ * copy of this software and associated documentation files (the &quot;Software&quot;), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
++ * and/or  sell copies of the  Software,  and to permit  persons to whom  the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED,  INCLUDING BUT NOT LIMITED TO THE WARRANTIES  OF MERCHANTABILITY, *
++ * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH  THE SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#include &quot;cdi/audio.h&quot;
++
++#include &quot;device.h&quot;
++
++#define DRIVER_NAME &quot;ac97&quot;
++
++static struct cdi_audio_driver driver;
++
++static int ac97_driver_init(void)
++{
++    cdi_driver_init(&amp;driver.drv);
++
++    return 0;
++}
++
++static int ac97_driver_destroy(void)
++{
++    cdi_driver_destroy(&amp;driver.drv);
++
++    return 0;
++}
++
++static struct cdi_audio_driver driver = {
++    .drv = {
++        .name          = DRIVER_NAME,
++        .type          = CDI_AUDIO,
++        .bus           = CDI_PCI,
++        .init          = ac97_driver_init,
++        .destroy       = ac97_driver_destroy,
++        .init_device   = ac97_init_device,
++        .remove_device = ac97_remove_device
++    },
++
++    .transfer_data          = ac97_transfer_data,
++    .change_device_status   = ac97_change_status,
++    .set_volume             = ac97_set_volume,
++    .set_sample_rate        = ac97_set_sample_rate,
++    .get_position           = ac97_get_position,
++    .set_number_of_channels = ac97_set_channel_count
++};
++
++CDI_DRIVER(DRIVER_NAME, driver)
++
+-- 
+1.7.1
+
+</PRE>
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000236.html">[cdi-devel] [PATCH] CDI.audio
+</A></li>
+	<LI>Next message: <A HREF="000237.html">[cdi-devel] [PATCH] ata: Fix bus master direction flag
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#235">[ date ]</a>
+              <a href="thread.html#235">[ thread ]</a>
+              <a href="subject.html#235">[ subject ]</a>
+              <a href="author.html#235">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

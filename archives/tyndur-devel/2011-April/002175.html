@@ -1,0 +1,151 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] nixer: RPCs zum Teil abgesichert (Bug 77)
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20nixer%3A%20RPCs%20zum%20Teil%20abgesichert%20%28Bug%2077%29&In-Reply-To=%3C1303472147-32602-1-git-send-email-max%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002177.html">
+   
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] nixer: RPCs zum Teil abgesichert (Bug 77)</H1>
+    <B>Max Reitz</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20nixer%3A%20RPCs%20zum%20Teil%20abgesichert%20%28Bug%2077%29&In-Reply-To=%3C1303472147-32602-1-git-send-email-max%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH] nixer: RPCs zum Teil abgesichert (Bug 77)">max at tyndur.org
+                  </A><BR>
+    <I>Fr Apr 22 13:35:47 CEST 2011</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002177.html">[tyndur-devel] [PATCH v3] kernel2: IRQ-Sharing (Bug 79)
+</A></li>
+        
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2175">[ Datum ]</a>
+              <a href="thread.html#2175">[ Thema ]</a>
+              <a href="subject.html#2175">[ Betreff (Subject) ]</a>
+              <a href="author.html#2175">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>! Die Größe des SHMs muss immer ein Vielfaches der Framegröße sein.
+* Beim Konfigurieren des Nixers sollte der der aktuelle SHM ungültig
+  werden.
+! get_position sollte, wie alle anderen Funktionen auch, überprüfen, ob
+  der Aufrufer tatsächlich die aktuell angemeldete Anwendung ist.
+
+Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">max at tyndur.org</A>&gt;
+---
+ src/modules/c/mixer/input.c |   33 ++++++++++++++++++++++++++++-----
+ 1 files changed, 28 insertions(+), 5 deletions(-)
+
+diff --git a/src/modules/c/mixer/input.c b/src/modules/c/mixer/input.c
+index 2a0d800..b612e88 100644
+--- a/src/modules/c/mixer/input.c
++++ b/src/modules/c/mixer/input.c
+@@ -47,7 +47,7 @@ static pid_t current_source;
+ // Daten zum SHM in Richtung Anwendung
+ static uint32_t current_input_shm_id;
+ static size_t current_input_shm_size;
+-static void* current_input_shm;
++static void* current_input_shm = NULL;
+ 
+ // Anzahl der Eingabechannels
+ static int input_channel_count;
+@@ -80,8 +80,10 @@ RPC(mixer_config)
+     if (current_source &amp;&amp; !mc-&gt;channel_count) {
+         current_source = 0;
+         current_input_shm_size = 0;
+-        current_input_shm = NULL;
+-        close_shared_memory(current_input_shm_id);
++        if (current_input_shm != NULL) {
++            current_input_shm = NULL;
++            close_shared_memory(current_input_shm_id);
++        }
+ 
+         trash_sound(false);
+ 
+@@ -96,6 +98,13 @@ RPC(mixer_config)
+     input_format = mc-&gt;sample_format;
+     input_channel_count = mc-&gt;channel_count;
+ 
++    // Wenn bereits ein SHM existiert, wird die Anwendung den wohl eher nicht
++    // mehr nutzen wollen.
++    if (current_input_shm != NULL) {
++        current_input_shm = NULL;
++        close_shared_memory(current_input_shm_id);
++    }
++
+     // TODO: Rückgabewert nutzen und bei Bedarf resamplen
+     adriver-&gt;set_sample_rate(adriver, pbi, 0, mc-&gt;sample_rate);
+ 
+@@ -119,11 +128,18 @@ RPC(get_shm)
+     }
+ 
+     // Wenn es bereits einen SHM gibt, muss dieser zuerst geschlossen werden.
+-    if (current_input_shm_id) {
++    if (current_input_shm != NULL) {
+         current_input_shm = NULL;
+         close_shared_memory(current_input_shm_id);
+     }
+ 
++    // Die Größe des SHMs muss immer ein Vielfaches der Größe eines Frames sein
++    // (halbe Frames lassen sich schlecht abspielen).
++    if (*((size_t*) data) % (sample_size[input_format] * input_channel_count)) {
++        rpc_dword_resp(0);
++        return;
++    }
++
+     current_input_shm_size = *((size_t*) data);
+ 
+     current_input_shm_id = create_shared_memory(current_input_shm_size);
+@@ -147,7 +163,9 @@ RPC(play_input)
+     }
+ 
+     // Kleine Kontrolle
+-    if (*((uint32_t*) data) != current_input_shm_id) {
++    if ((current_input_shm == NULL) ||
++        (*((uint32_t*) data) != current_input_shm_id))
++    {
+         rpc_int_resp(0);
+         return;
+     }
+@@ -249,6 +267,11 @@ RPC(play_input)
+  */
+ RPC(get_position)
+ {
++    if (src != current_source) {
++        rpc_int_resp(0);
++        return;
++    }
++
+     if (!playing &amp;&amp; (iq_start == NULL)) {
+         rpc_int_resp(0);
+         return;
+-- 
+1.7.4.4
+
+</PRE>
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002177.html">[tyndur-devel] [PATCH v3] kernel2: IRQ-Sharing (Bug 79)
+</A></li>
+	
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2175">[ Datum ]</a>
+              <a href="thread.html#2175">[ Thema ]</a>
+              <a href="subject.html#2175">[ Betreff (Subject)]</a>
+              <a href="author.html#2175">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

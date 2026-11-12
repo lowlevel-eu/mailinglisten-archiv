@@ -1,0 +1,69 @@
+Index: src/kernel/include/rpc.h
+===================================================================
+--- src/kernel/include/rpc.h	(Revision 583)
++++ src/kernel/include/rpc.h	(Arbeitskopie)
+@@ -10,5 +10,6 @@
+     dword data_size, void* data, byte irq);
+ 
+ void return_from_rpc(struct int_stack_frame ** esp);
++void rpc_destroy_task_backlinks(struct task* destroyed_task);
+ 
+ #endif
+Index: src/kernel/src/task.c
+===================================================================
+--- src/kernel/src/task.c	(Revision 595)
++++ src/kernel/src/task.c	(Arbeitskopie)
+@@ -312,10 +312,10 @@
+         free((char*) task_ptr->cmdline);
+     }
+ 
+-    // FIXME Wenn der zu beendende Task kurz vorher einen RPC gemacht hat,
++    // Wenn der zu beendende Task kurz vorher einen RPC gemacht hat,
+     // hat der aufgerufene Prozess den jetzt beendeten Task in
+-    // callee->rpcs, beim Rücksprung gibt es einen Panic, weil den Speicher
+-    // mittlerweile gefreet wurde
++    // callee->rpcs und der Ruecksprung wurde im Desaster enden.
++    rpc_destroy_task_backlinks(task_ptr);
+ 
+     // Pagedir des tasks mappen, um den gesamten Speicher
+     // freigeben zu können
+Index: src/kernel/src/rpc.c
+===================================================================
+--- src/kernel/src/rpc.c	(Revision 583)
++++ src/kernel/src/rpc.c	(Arbeitskopie)
+@@ -305,7 +305,9 @@
+     callee_isf->eflags = rpc->eflags;
+ 
+     // Wechsel zum aufrufenden Task
+-    schedule_to_task(rpc->caller, (dword*) esp);
++    if (rpc->caller) {
++        schedule_to_task(rpc->caller, (dword*) esp);
++    }
+ 
+     // Wenn es ein IRQ-verarbeitender RPC war, den Interrupt jetzt
+     // wieder aktivieren
+@@ -316,3 +318,24 @@
+ 
+     free(rpc);
+ }
++
++/**
++ * Entfernt den gegebenen Task aus allen RPC-Backlinks.
++ *
++ * Diese Funktion wird benoetigt, wenn ein Task einen RPC aufruft und beendet
++ * wird, bevor der RPC fertig ist. Ansonsten zeigt rpc->caller ins Leere,
++ * was in return_from_rpc() zur Katastrophe führt.
++ */
++void rpc_destroy_task_backlinks(struct task* destroyed_task)
++{
++    struct task* task;
++    for (task = first_task; task != NULL; task = task->next_task) {
++        int i;
++        rpc_t* rpc;
++        for (i = 0; (rpc = list_get_element_at(task->rpcs, i)); i++) {
++            if (rpc->caller == destroyed_task) {
++                rpc->caller = NULL;
++            }
++        }
++    }
++}

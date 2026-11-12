@@ -1,0 +1,137 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH v3 10/10] usb-storage: Add USB mass storage driver
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%20v3%2010/10%5D%20usb-storage%3A%20Add%20USB%20mass%20storage%0A%20driver&In-Reply-To=%3C20151016210010.GA3987%40silvanus%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000329.html">
+   <LINK REL="Next"  HREF="000331.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH v3 10/10] usb-storage: Add USB mass storage driver</H1>
+    <B>Kevin Wolf</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%20v3%2010/10%5D%20usb-storage%3A%20Add%20USB%20mass%20storage%0A%20driver&In-Reply-To=%3C20151016210010.GA3987%40silvanus%3E"
+       TITLE="[cdi-devel] [PATCH v3 10/10] usb-storage: Add USB mass storage driver">kevin at tyndur.org
+       </A><BR>
+    <I>Fri Oct 16 23:00:12 CEST 2015</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000329.html">[cdi-devel] [PATCH v3 09/10] usb: Add USB 2.0 bus driver
+</A></li>
+        <LI>Next message: <A HREF="000331.html">[cdi-devel] [PATCH] rtl8168b: Add driver
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#330">[ date ]</a>
+              <a href="thread.html#330">[ thread ]</a>
+              <a href="subject.html#330">[ subject ]</a>
+              <a href="author.html#330">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>On Mon, May 11, 2015 at 09:59:30PM +0200, Max Reitz wrote:
+&gt;<i> + This adds a USB mass storage device driver. It is missing proper error
+</I>&gt;<i>   handling (e.g. for STALLed endpoints) and support for any USB MSD
+</I>&gt;<i>   class other than bulk-only (e.g. control-bulk-interrupt for USB floppy
+</I>&gt;<i>   drives).
+</I>&gt;<i> 
+</I>&gt;<i> Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+</I>
+&gt;<i> +struct cdi_device *init_usb_device(struct cdi_bus_data *bus_data)
+</I>&gt;<i> +{
+</I>&gt;<i> +    static int dev_counter = 0;
+</I>&gt;<i> +    usb_mass_storage_device_t *dev = calloc(1, sizeof(*dev));
+</I>&gt;<i> +    dev-&gt;usb = CDI_UPCAST(bus_data, struct cdi_usb_device, bus_data);
+</I>
+I think *dev-&gt;usb needs to be copied instead of just taking a pointer
+because CDI doesn't guarantee that the bus_data object isn't freed after
+the function returns.
+
+&gt;<i> +
+</I>&gt;<i> +    if ((dev-&gt;usb-&gt;subclass_id == USBMS_SUBCLS_SCSILEG ||
+</I>&gt;<i> +         dev-&gt;usb-&gt;subclass_id == USBMS_SUBCLS_SCSI) &amp;&amp;
+</I>&gt;<i> +        dev-&gt;usb-&gt;protocol_id == USBMS_PROTO_BBB)
+</I>&gt;<i> +    {
+</I>&gt;<i> +        dev-&gt;type = USBMS_BULK_ONLY;
+</I>&gt;<i> +    } else {
+</I>&gt;<i> +        free(dev);
+</I>&gt;<i> +        return NULL;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    if (dev-&gt;type == USBMS_BULK_ONLY) {
+</I>&gt;<i> +        if (bulk_only_reset(dev) &lt; 0) {
+</I>&gt;<i> +            free(dev);
+</I>&gt;<i> +            return NULL;
+</I>&gt;<i> +        }
+</I>&gt;<i> +
+</I>&gt;<i> +        struct cdi_usb_endpoint_descriptor ep_desc;
+</I>&gt;<i> +        for (int ep = 1; ep &lt; dev-&gt;usb-&gt;endpoint_count; ep++) {
+</I>&gt;<i> +            cdi_usb_get_endpoint_descriptor(dev-&gt;usb, ep, &amp;ep_desc);
+</I>&gt;<i> +
+</I>&gt;<i> +            if ((ep_desc.bm_attributes &amp; CDI_USB_EPDSC_ATTR_XFER_TYPE_MASK)
+</I>&gt;<i> +                == CDI_USB_EPDSC_ATTR_BULK)
+</I>&gt;<i> +            {
+</I>&gt;<i> +                bool is_in;
+</I>&gt;<i> +                is_in = ep_desc.b_endpoint_address &amp; CDI_USB_EPDSC_EPADR_DIR;
+</I>&gt;<i> +                if (!dev-&gt;bulk_in &amp;&amp; is_in) {
+</I>&gt;<i> +                    dev-&gt;bulk_in = ep;
+</I>&gt;<i> +                } else if (dev-&gt;bulk_in &amp;&amp; !is_in) {
+</I>
+Are you sure you didn't want to check !dev-&gt;bulk_out &amp;&amp; !is_in?
+
+&gt;<i> +                    dev-&gt;bulk_out = ep;
+</I>&gt;<i> +                }
+</I>&gt;<i> +            }
+</I>&gt;<i> +        }
+</I>&gt;<i> +
+</I>&gt;<i> +        if (!dev-&gt;bulk_in || !dev-&gt;bulk_out) {
+</I>&gt;<i> +            free(dev);
+</I>&gt;<i> +            return NULL;
+</I>&gt;<i> +        }
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    dev-&gt;dev.dev.name = malloc(5);
+</I>&gt;<i> +    sprintf((char *)dev-&gt;dev.dev.name, &quot;msd%c&quot;, 'a' + dev_counter++);
+</I>
+Numbers instead of letters would be more consistent with the existing
+block drivers.
+
+&gt;<i> +    dev-&gt;dev.type = CDI_STORAGE;
+</I>&gt;<i> +    dev-&gt;dev.lun_count = dev-&gt;luns;
+</I>&gt;<i> +
+</I>&gt;<i> +    return &amp;dev-&gt;dev.dev;
+</I>&gt;<i> +}
+</I>
+Rest looks good to me (whatever that means).
+
+Kevin
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000329.html">[cdi-devel] [PATCH v3 09/10] usb: Add USB 2.0 bus driver
+</A></li>
+	<LI>Next message: <A HREF="000331.html">[cdi-devel] [PATCH] rtl8168b: Add driver
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#330">[ date ]</a>
+              <a href="thread.html#330">[ thread ]</a>
+              <a href="subject.html#330">[ subject ]</a>
+              <a href="author.html#330">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

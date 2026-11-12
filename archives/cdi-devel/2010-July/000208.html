@@ -1,0 +1,1408 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [RFC][PATCH] fat: Beginnings of a FAT file system driver
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BRFC%5D%5BPATCH%5D%20fat%3A%20Beginnings%20of%20a%20FAT%20file%20system%20driver&In-Reply-To=%3C1280437803-26397-1-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000207.html">
+   <LINK REL="Next"  HREF="000209.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [RFC][PATCH] fat: Beginnings of a FAT file system driver</H1>
+    <B>Kevin Wolf</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BRFC%5D%5BPATCH%5D%20fat%3A%20Beginnings%20of%20a%20FAT%20file%20system%20driver&In-Reply-To=%3C1280437803-26397-1-git-send-email-kevin%40tyndur.org%3E"
+       TITLE="[cdi-devel] [RFC][PATCH] fat: Beginnings of a FAT file system driver">kevin at tyndur.org
+       </A><BR>
+    <I>Thu Jul 29 23:10:03 CEST 2010</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000207.html">[cdi-devel] [PATCH] pci.h: Improve documentation
+</A></li>
+        <LI>Next message: <A HREF="000209.html">[cdi-devel] [RFC][PATCH] fat: Beginnings of a FAT file system	driver
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#208">[ date ]</a>
+              <a href="thread.html#208">[ thread ]</a>
+              <a href="subject.html#208">[ subject ]</a>
+              <a href="author.html#208">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>This adds a read-only FAT driver for FAT12/16/32. Long file names are
+not yet supported.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">kevin at tyndur.org</A>&gt;
+---
+ fat/include              |    1 +
+ fat/libfat/dir.c         |  245 +++++++++++++++++++++++++++++++
+ fat/libfat/file.c        |  360 ++++++++++++++++++++++++++++++++++++++++++++++
+ fat/libfat/fs.c          |   80 ++++++++++
+ fat/libfat/include/fat.h |  273 +++++++++++++++++++++++++++++++++++
+ fat/main.c               |  334 ++++++++++++++++++++++++++++++++++++++++++
+ 6 files changed, 1293 insertions(+), 0 deletions(-)
+ create mode 120000 fat/include
+ create mode 100644 fat/libfat/dir.c
+ create mode 100644 fat/libfat/file.c
+ create mode 100644 fat/libfat/fs.c
+ create mode 100644 fat/libfat/include/fat.h
+ create mode 100644 fat/main.c
+
+diff --git a/fat/include b/fat/include
+new file mode 120000
+index 0000000..6f62628
+--- /dev/null
++++ b/fat/include
+@@ -0,0 +1 @@
++libfat/include/
+\ No newline at end of file
+diff --git a/fat/libfat/dir.c b/fat/libfat/dir.c
+new file mode 100644
+index 0000000..bbc7b42
+--- /dev/null
++++ b/fat/libfat/dir.c
+@@ -0,0 +1,245 @@
++#include &lt;stdint.h&gt;
++#include &lt;string.h&gt;
++#include &lt;stdio.h&gt;
++#include &lt;ctype.h&gt;
++#include &quot;fat.h&quot;
++
++static int fat_rootdir_open(struct fat_fs* fs, struct fat_dir* dir)
++{
++    int64_t rootdir_offset = fs-&gt;bpb.reserved_sectors +
++        (fs-&gt;bpb.num_fats * fs-&gt;bpb.fat_sectors);
++
++    uint32_t rootdir_sectors =
++        (fs-&gt;bpb.rootdir_length * sizeof(struct fat_disk_dir_entry) + 511)
++        / 512;
++
++    void* buf = malloc(512 * rootdir_sectors);
++
++    // Wurzelverzeichnis einlesen
++    if (!fs-&gt;dev_read(rootdir_offset * 512, rootdir_sectors * 512, buf,
++        fs-&gt;dev_private))
++    {
++        goto fail;
++    }
++
++    // Rueckgabestruktur befuellen
++    dir-&gt;entries = buf;
++    dir-&gt;fs = fs;
++    dir-&gt;i = 0;
++    dir-&gt;num = rootdir_sectors * 512 / sizeof(struct fat_disk_dir_entry);
++
++    return 0;
++
++fail:
++    free(buf);
++    return -1;
++}
++
++static int fat_rootdir32_open(struct fat_fs* fs, struct fat_dir* dir)
++{
++    struct fat_file file;
++    struct fat32_extended_bpb* ext = &amp;fs-&gt;bpb.extended.fat32;
++    struct fat_dir_entry dentry = {
++        .size = 0,
++        .first_cluster = ext-&gt;rootdir_cluster,
++    };
++    int ret;
++    void* buf;
++
++    ret = fat_file_open_by_dir_entry(fs, &amp;dentry, &amp;file);
++    if (ret &lt; 0) {
++        return ret;
++    }
++
++    buf = malloc(file.size);
++
++    ret = fat_file_read(&amp;file, buf, 0, file.size);
++    fat_file_close(&amp;file);
++    if (ret &lt; 0) {
++        free(buf);
++        return ret;
++    }
++
++    /* Rueckgabestruktur befuellen */
++    dir-&gt;entries = buf;
++    dir-&gt;fs = fs;
++    dir-&gt;i = 0;
++    dir-&gt;num = file.size / sizeof(struct fat_disk_dir_entry);
++
++    return 0;
++}
++
++int fat_subdir_open(struct fat_fs* fs, struct fat_dir* dir, const char* path,
++    struct fat_dir* subdir)
++{
++    struct fat_dir_entry dentry;
++    struct fat_file file;
++    void* buf;
++    int ret;
++
++    /* Vaterverzeichnis nach Unterverzeichnis durchsuchen */
++    do {
++        ret = fat_dir_read(dir, &amp;dentry);
++        if (ret &lt; 0) {
++            return ret;
++        }
++
++        if ((ret &gt;= 0) &amp;&amp; !strcmp(dentry.name, path)) {
++            goto found;
++        }
++    } while (ret &gt;= 0);
++
++    return -FAT_ENOENT;
++
++    /* Verzeichnis als Datei oeffnen und Eintraege laden */
++found:
++    ret = fat_file_open_by_dir_entry(fs, &amp;dentry, &amp;file);
++    if (ret &lt; 0) {
++        return ret;
++    }
++
++    buf = malloc(file.size);
++
++    ret = fat_file_read(&amp;file, buf, 0, file.size);
++    fat_file_close(&amp;file);
++    if (ret &lt; 0) {
++        free(buf);
++        return ret;
++    }
++
++    /* Rueckgabestruktur befuellen */
++    subdir-&gt;entries = buf;
++    subdir-&gt;fs = fs;
++    subdir-&gt;i = 0;
++    subdir-&gt;num = file.size / sizeof(struct fat_disk_dir_entry);
++
++    return 0;
++}
++
++int fat_dir_open(struct fat_fs* fs, const char* _path, struct fat_dir* dir)
++{
++    int ret;
++    char* path = strdup(_path);
++    char* p;
++    struct fat_dir subdir;
++
++    if (fs-&gt;type == FS_TYPE_FAT32) {
++        ret = fat_rootdir32_open(fs, dir);
++    } else {
++        ret = fat_rootdir_open(fs, dir);
++    }
++
++    if (ret &lt; 0) {
++        goto out;
++    }
++
++    /* Pfade muessen mit einem Slash anfangen */
++    if (*path != '/') {
++        ret = -FAT_EINVAL;
++        goto out;
++    }
++
++    /* Jetzt die Unterverzeichnisse parsen */
++    p = strtok(path + 1, &quot;/&quot;);
++    while (p != NULL) {
++        ret = fat_subdir_open(fs, dir, p, &amp;subdir);
++        fat_dir_close(dir);
++        if (ret &lt; 0) {
++            goto out;
++        }
++        *dir = subdir;
++        p = strtok(NULL, &quot;/&quot;);
++    }
++
++    ret = 0;
++out:
++    free(path);
++    return ret;
++}
++
++static void short_fn_to_string(struct fat_disk_dir_entry* entry, char* buf)
++{
++    int i;
++    int pos = -1;
++    int ext_start;
++
++    // 8 Zeichen Name in Kleinbuchstaben
++    for (i = 0; i &lt; 8; i++) {
++        buf[i] = tolower(entry-&gt;name[i]);
++        if (!isspace(buf[i])) {
++            pos = i;
++        }
++    }
++
++    // Punkt
++    buf[++pos] = '.';
++
++    // 3 Zeichen Erweiterung in Kleinbuchstaben
++    ext_start = pos + 1;
++    for (i = 0; i &lt; 3; i++) {
++        buf[ext_start + i] = tolower(entry-&gt;ext[i]);
++        if (!isspace(buf[ext_start + i])) {
++            pos = ext_start + i + 1;
++        }
++    }
++
++    // Nullterminieren
++    buf[pos] = '\0';
++}
++
++static int is_valid_entry(struct fat_disk_dir_entry* entry)
++{
++    // Die Datei existiert nicht
++    if (entry-&gt;name[0] == '\0') {
++        return 0;
++    }
++
++    // Die Datei ist geloescht
++    if (entry-&gt;name[0] == (char) 0xE5) {
++        return 0;
++    }
++
++    // Die Datentraegerbezeichnung interessiert uns nicht
++    if (entry-&gt;attrib &amp; FAT_ATTRIB_VOLUME) {
++        return 0;
++    }
++
++    // . und .. werden ignoriert
++    if (entry-&gt;name[0] == '.') {
++        return 0;
++    }
++
++    return 1;
++}
++
++int fat_dir_read(struct fat_dir* dir, struct fat_dir_entry* entry)
++{
++    if (dir-&gt;i &lt; 0 || dir-&gt;i &gt;= dir-&gt;num) {
++        return -1;
++    }
++
++    // Ungueltige Eintraege ueberspringen
++    while (dir-&gt;i &lt; dir-&gt;num &amp;&amp; !is_valid_entry(&amp;dir-&gt;entries[dir-&gt;i])) {
++        dir-&gt;i++;
++    }
++
++    // Fertig?
++    if (dir-&gt;i &gt;= dir-&gt;num) {
++        return -1;
++    }
++
++    short_fn_to_string(&amp;dir-&gt;entries[dir-&gt;i], entry-&gt;name);
++
++    entry-&gt;first_cluster = dir-&gt;entries[dir-&gt;i].first_cluster;
++    entry-&gt;size = dir-&gt;entries[dir-&gt;i].size;
++    entry-&gt;attrib = dir-&gt;entries[dir-&gt;i].attrib;
++
++    dir-&gt;i++;
++    return 0;
++}
++
++int fat_dir_close(struct fat_dir* dir)
++{
++    free(dir-&gt;entries);
++    return 0;
++}
+diff --git a/fat/libfat/file.c b/fat/libfat/file.c
+new file mode 100644
+index 0000000..677fb2d
+--- /dev/null
++++ b/fat/libfat/file.c
+@@ -0,0 +1,360 @@
++#include &lt;string.h&gt;
++#include &lt;assert.h&gt;
++
++#include &quot;fat.h&quot;
++
++#define NUM_CLUSTERS(x, cluster_size) \
++    (((x) + (cluster_size) - 1) / (cluster_size))
++#define SECTOR_BITS (512 * 8)
++
++#define MIN(a,b) ((a) &lt; (b) ? (a) : (b))
++
++// FIXME Sektorgroesse != 512
++
++static uint8_t* get_fat_buffer(struct fat_fs* fs, uint32_t sector)
++{
++    static uint8_t buf[1024];
++    static struct fat_fs* old_fs = NULL;
++    static uint32_t old_sector = 0;
++
++    if (fs == old_fs &amp;&amp; sector == old_sector) {
++        return buf;
++    }
++
++    /* TODO Evtl. reicht memcpy und lesen nur eines Sektors */
++    if (!fs-&gt;dev_read(sector * 512, 1024, buf, fs-&gt;dev_private)) {
++        old_fs = NULL;
++        return NULL;
++    }
++
++    old_fs = fs;
++    old_sector = sector;
++
++    return buf;
++}
++
++static uint32_t get_next_cluster_fat12(struct fat_fs* fs, uint32_t cluster)
++{
++    uint8_t* buf;
++    uint32_t fat_bit_offset = (cluster * 12ULL);
++    uint32_t fat_sector = fat_bit_offset / SECTOR_BITS;
++    uint32_t value;
++
++    fat_sector += fs-&gt;bpb.reserved_sectors;
++    fat_bit_offset %= SECTOR_BITS;
++
++    buf = get_fat_buffer(fs, fat_sector);
++    if (buf == NULL) {
++        return 0;
++    }
++
++    value = *((uint16_t*) &amp;buf[fat_bit_offset / 8]);
++    if ((fat_bit_offset &amp; 7) == 0) {
++        value &amp;= 0xFFF;
++    } else {
++        value &gt;&gt;= 4;
++    }
++
++    if (value &gt; 0xff5) {
++        value |= 0xfffff000;
++    }
++
++    return value;
++}
++
++static uint32_t get_next_cluster_fat16(struct fat_fs* fs, uint32_t cluster)
++{
++    uint8_t* buf;
++    uint32_t fat_sector = (cluster * sizeof(uint16_t)) / 512;
++    uint32_t fat_offset = (cluster * sizeof(uint16_t)) % 512;
++    uint32_t value;
++
++    fat_sector += fs-&gt;bpb.reserved_sectors;
++
++    buf = get_fat_buffer(fs, fat_sector);
++    if (buf == NULL) {
++        return 0;
++    }
++
++    value = *((uint16_t*) &amp;buf[fat_offset]);
++
++    if (value &gt; 0xfff5) {
++        value |= 0xffff0000;
++    }
++
++    return value;
++}
++
++static uint32_t get_next_cluster_fat32(struct fat_fs* fs, uint32_t cluster)
++{
++    uint8_t* buf;
++    uint32_t fat_sector = (cluster * sizeof(uint32_t)) / 512;
++    uint32_t fat_offset = (cluster * sizeof(uint32_t)) % 512;
++    uint32_t value;
++
++    fat_sector += fs-&gt;bpb.reserved_sectors;
++
++    buf = get_fat_buffer(fs, fat_sector);
++    if (buf == NULL) {
++        return 0;
++    }
++
++    value = *((uint32_t*) &amp;buf[fat_offset]);
++
++    if (value &gt; 0xffffff5) {
++        value |= 0xf0000000;
++    }
++
++    return value;
++}
++
++int fat_file_open_by_dir_entry(struct fat_fs* fs, struct fat_dir_entry* entry,
++    struct fat_file* file)
++{
++    uint32_t cluster_size = fs-&gt;bpb.cluster_sectors * 512;
++    uint32_t cluster;
++    uint32_t i;
++
++    /* Passende Clusterlesefunktion aussuchen */
++    uint32_t (*get_next_cluster)(struct fat_fs*, uint32_t);
++    switch (fs-&gt;type) {
++        case FS_TYPE_FAT12:
++            get_next_cluster = get_next_cluster_fat12;
++            break;
++
++        case FS_TYPE_FAT16:
++            get_next_cluster = get_next_cluster_fat16;
++            break;
++
++        case FS_TYPE_FAT32:
++            get_next_cluster = get_next_cluster_fat32;
++            break;
++
++        default:
++            return -FAT_EINVAL;
++    }
++
++    /* Dateistruktur anlegen */
++    file-&gt;fs = fs;
++    file-&gt;size = entry-&gt;size;
++
++    /*
++     * Blockliste anlegen und einlesen. Bei Groesse 0 (z.B. Verzeichnisse gehen
++     * wir von unbekannter Dateigroesse aus und lassen die Blockliste dynamisch
++     * wachsen.
++     */
++    if (file-&gt;size &gt; 0) {
++        file-&gt;blocklist_size = NUM_CLUSTERS(file-&gt;size, cluster_size);
++    } else {
++        file-&gt;blocklist_size = 1;
++    }
++
++    file-&gt;blocklist = malloc(file-&gt;blocklist_size * sizeof(uint32_t));
++    file-&gt;blocklist[0] = entry-&gt;first_cluster;
++
++    cluster = 0;
++    i = 1;
++    while (1) {
++        cluster = get_next_cluster(fs, file-&gt;blocklist[i - 1]);
++
++        /* Fehler und Dateiende */
++        if (cluster == 0) {
++            goto fail;
++        } else if (cluster &gt;= 0xfffffff8) {
++            break;
++        }
++
++        /* Blocklist vergroessern, falls noetig */
++        if (file-&gt;blocklist_size &lt;= i) {
++            file-&gt;blocklist_size *= 2;
++            file-&gt;blocklist = realloc(file-&gt;blocklist,
++                file-&gt;blocklist_size * sizeof(uint32_t));
++        }
++
++        /* In die Blockliste eintragen */
++        file-&gt;blocklist[i] = cluster;
++
++        i++;
++    }
++
++    /* Dateigroesse anpassen, wenn sie unbekannt war */
++    if (file-&gt;size == 0) {
++        file-&gt;size = i * cluster_size;
++    }
++
++    return 0;
++
++fail:
++    free(file-&gt;blocklist);
++    return -FAT_EIO;
++}
++
++int fat_file_open(struct fat_fs* fs, const char* path, struct fat_file* file)
++{
++    struct fat_dir dir;
++    struct fat_dir_entry dentry;
++    int ret;
++    char* p;
++
++    /* Letzten Pfadtrenner suchen */
++    p = strrchr(path, '/');
++    if (p == NULL) {
++        return -FAT_EINVAL;
++    }
++
++    /* Verzeichnis oeffnen */
++    int len = p - path + 1;
++    char dirname[len + 1];
++
++    memcpy(dirname, path, len);
++    dirname[len] = '\0';
++
++    ret = fat_dir_open(fs, dirname, &amp;dir);
++    if (ret&lt; 0) {
++        return ret;
++    }
++
++    /* Alles vor dem Dateinamen wegwerfen */
++    path = p + 1;
++
++    /* Verzeichnis nach Dateinamen durchsuchen */
++    do {
++        ret = fat_dir_read(&amp;dir, &amp;dentry);
++        if (ret &gt;= 0 &amp;&amp; !strcmp(dentry.name, path)) {
++            break;
++        }
++    } while (ret &gt;= 0);
++
++    /* Datei oeffnen oder -ENOENT zurueckgeben, wenn sie nicht existiert */
++    if (ret &lt; 0) {
++        return -FAT_ENOENT;
++    }
++
++    /* Verzeichnis wieder schliessen */
++    ret = fat_dir_close(&amp;dir);
++    if (ret &lt; 0) {
++        return ret;
++    }
++
++    return fat_file_open_by_dir_entry(fs, &amp;dentry, file);
++}
++
++static uint32_t file_get_cluster(struct fat_file* file, uint32_t file_cluster)
++{
++    if (file_cluster &gt;= file-&gt;blocklist_size) {
++        return 0;
++    }
++
++    return file-&gt;blocklist[file_cluster];
++}
++
++static int64_t get_data_cluster_offset(struct fat_fs* fs, uint32_t cluster_idx)
++{
++    uint32_t sector = fs-&gt;bpb.cluster_sectors * (cluster_idx - 2);
++
++    return (fs-&gt;first_data_cluster + sector) * 512;
++}
++
++static int read_cluster(struct fat_fs* fs, void* buf, uint32_t cluster_idx)
++{
++    uint32_t cluster_size = fs-&gt;bpb.cluster_sectors * 512;
++    uint32_t cluster_offset = get_data_cluster_offset(fs, cluster_idx);
++
++    if (!fs-&gt;dev_read(cluster_offset, cluster_size, buf, fs-&gt;dev_private)) {
++        return -FAT_EIO;
++    }
++
++    return 0;
++}
++
++static int read_cluster_part(struct fat_fs* fs, void* buf,
++    uint32_t cluster_idx,  size_t offset, size_t len)
++{
++    uint32_t cluster_size = fs-&gt;bpb.cluster_sectors * 512;
++    uint8_t cluster[cluster_size];
++    int ret;
++
++    assert (offset + len &lt;= cluster_size);
++
++    ret = read_cluster(fs, cluster, cluster_idx);
++    if (ret &lt; 0) {
++        return ret;
++    }
++
++    memcpy(buf, cluster + offset, len);
++    return 0;
++}
++
++int32_t fat_file_read(struct fat_file* file, void* buf, uint32_t offset,
++    size_t len)
++{
++    struct fat_fs* fs = file-&gt;fs;
++    uint32_t cluster_size = fs-&gt;bpb.cluster_sectors * 512;
++    uint8_t* p = buf;
++    size_t n = len;
++    int ret;
++    uint32_t file_cluster = offset / cluster_size;
++    uint32_t disk_cluster;
++    uint32_t offset_in_cluster;
++
++    /* Bei Ueberlaenge Fehler zurueckgeben */
++    if (offset + len &gt; file-&gt;size) {
++        return -FAT_EIO;
++    }
++
++    /* Angefangener Cluster am Anfang */
++    offset_in_cluster = offset &amp; (cluster_size - 1);
++    if (offset_in_cluster) {
++        uint32_t count = MIN(n, cluster_size - offset_in_cluster);
++
++        disk_cluster = file_get_cluster(file, file_cluster++);
++        if (disk_cluster == 0) {
++            return -FAT_EIO;
++        }
++
++        ret = read_cluster_part(fs, p, disk_cluster, offset_in_cluster, count);
++        if (ret &lt; 0) {
++            return ret;
++        }
++
++        p += count;
++        n -= count;
++    }
++
++    /* Eine beliebige Anzahl von ganzen Clustern in der Mitte */
++    while (n &gt;= cluster_size) {
++        disk_cluster = file_get_cluster(file, file_cluster++);
++        if (disk_cluster == 0) {
++            return -FAT_EIO;
++        }
++
++        ret = read_cluster(fs, p, disk_cluster);
++        if (ret &lt; 0) {
++            return ret;
++        }
++
++        p += cluster_size;
++        n -= cluster_size;
++    }
++
++    /* Und wieder ein angefangener Cluster am Ende */
++    if (n) {
++        disk_cluster = file_get_cluster(file, file_cluster);
++        if (disk_cluster == 0) {
++            return -FAT_EIO;
++        }
++
++        ret = read_cluster_part(fs, p, disk_cluster, 0, n);
++        if (ret &lt; 0) {
++            return ret;
++        }
++    }
++
++    return 0;
++}
++
++int fat_file_close(struct fat_file* file)
++{
++    free(file-&gt;blocklist);
++    return 0;
++}
+diff --git a/fat/libfat/fs.c b/fat/libfat/fs.c
+new file mode 100644
+index 0000000..5fcf583
+--- /dev/null
++++ b/fat/libfat/fs.c
+@@ -0,0 +1,80 @@
++#include &lt;stdio.h&gt;
++#include &quot;fat.h&quot;
++
++/**
++ * fat-Dateisystem einbinden. Dafuer muessen dev_read, dev_write und
++ * dev_private (falls notwendig) initialisiert sein.
++ *
++ * @return 1 bei Erfolg, im Fehlerfall 0
++ */
++int fat_fs_mount(struct fat_fs* fs)
++{
++    // BPB einlesen
++    if (!fs-&gt;dev_read(0, 512, &amp;fs-&gt;bpb, fs-&gt;dev_private)) {
++        return 0;
++    }
++
++    // Magic pruefen
++    if (fs-&gt;bpb.magic != 0xaa55) {
++        return 0;
++    }
++
++    // FAT-Variante bestimmen
++    uint32_t total_sectors;
++    uint32_t rootdir_sectors;
++    uint32_t data_sectors;
++    uint32_t data_clusters;
++
++    if (fs-&gt;bpb.total_sectors != 0) {
++        total_sectors = fs-&gt;bpb.total_sectors;
++    } else {
++        // TODO Hier ist auf jeden Fall FAT32, egal wie viele Cluster
++        total_sectors = fs-&gt;bpb.total_sectors_large;
++    }
++
++    rootdir_sectors =
++        (fs-&gt;bpb.rootdir_length * sizeof(struct fat_disk_dir_entry) + 511)
++        / 512;
++
++    // TODO fat_sectors ungueltig fuer FAT32
++    data_sectors = total_sectors
++        - fs-&gt;bpb.reserved_sectors
++        - (fs-&gt;bpb.num_fats * fs-&gt;bpb.fat_sectors)
++        - rootdir_sectors;
++    data_clusters = data_sectors / fs-&gt;bpb.cluster_sectors;
++
++    if (data_clusters &lt; 4085) {
++        fs-&gt;type = FS_TYPE_FAT12;
++    } else if (data_clusters &lt; 65525) {
++        fs-&gt;type = FS_TYPE_FAT16;
++    } else {
++        fs-&gt;type = FS_TYPE_FAT32;
++        data_sectors -=
++            (fs-&gt;bpb.num_fats * fs-&gt;bpb.extended.fat32.fat_sectors);
++    }
++
++
++    fs-&gt;total_sectors = total_sectors;
++    fs-&gt;first_data_cluster = total_sectors - data_sectors;
++
++    return 1;
++}
++
++/**
++ * fat-Dateisystem aushaengen. Dabei werden saemtliche gecachten Daten auf die
++ * Platte geschrieben. Die Member sb und cache_handle in der fs-Struktur sind
++ * danach NULL.
++ *
++ * @return 1 bei Erfolg, im Fehlerfall 0
++ */
++int fat_fs_unmount(struct fat_fs* fs)
++{
++    return 0;
++}
++
++/**
++ * Saetmliche gecachten Daten auf die Platte schreiben
++ */
++void fat_fs_sync(struct fat_fs* fs)
++{
++}
+diff --git a/fat/libfat/include/fat.h b/fat/libfat/include/fat.h
+new file mode 100644
+index 0000000..6acac1e
+--- /dev/null
++++ b/fat/libfat/include/fat.h
+@@ -0,0 +1,273 @@
++#ifndef _FAT_H_
++#define _FAT_H_
++
++#include &lt;stdint.h&gt;
++#include &lt;stdlib.h&gt;
++
++#ifdef CDI_HAS_ERRNO
++
++#include &lt;errno.h&gt;
++#define FAT_ENOENT  ENOENT
++#define FAT_EIO     EIO
++#define FAT_EINVAL  EINVAL
++
++#else
++
++#define FAT_ENOENT  1
++#define FAT_EIO     2
++#define FAT_EINVAL  3
++
++#endif
++
++// TODO Nur fuer Debugging - spaeter entfernen
++#include &lt;stdio.h&gt;
++
++struct fat32_extended_bpb {
++    uint32_t    fat_sectors;
++    uint16_t    flags;
++    uint16_t    version;
++    uint32_t    rootdir_cluster;
++} __attribute__((packed));
++
++/**
++ * BIOS Parameter Block
++ */
++struct fat_bpb {
++    uint8_t     jmp_code[3];
++    char        os_name[8];
++    uint16_t    sector_size;
++    uint8_t     cluster_sectors;
++    uint16_t    reserved_sectors;
++    uint8_t     num_fats;
++    uint16_t    rootdir_length;
++    uint16_t    total_sectors;
++    uint8_t     media_type;
++
++    /* Nur fuer FAT12/16; FAT32 benutzt fat32_extended_bpb.fat_sectors */
++    uint16_t    fat_sectors;
++
++    uint16_t    sectors_per_track;
++    uint16_t    heads;
++    uint32_t    hidden_sectors;
++    uint32_t    total_sectors_large;
++    union {
++        struct fat32_extended_bpb   fat32;
++        uint8_t                     bytes[474];
++    } extended;
++    uint16_t    magic;
++} __attribute__((packed));
++
++enum fat_type {
++    FS_TYPE_FAT12,
++    FS_TYPE_FAT16,
++    FS_TYPE_FAT32,
++};
++
++/**
++ * Zentrale Struktur zur Verwaltung eines eingebundenen Dateisystemes
++ */
++struct fat_fs {
++    /**
++     * Funktionspointer der von Aufrufer gesetzt werden muss. Diese Funktion
++     * liest Daten vom Datentraeger ein, auf dem sich das Dateisystem befindet.
++     *
++     * @param start Position von der an gelesen werden soll
++     * @param size  Anzahl der zu lesenden Bytes
++     * @param dest  Pointer auf den Puffer in dem die Daten abgelegt werden
++     *              sollen
++     * @param prv   Private Daten zum Zugriff auf den Datentraeger (z.B.
++     *              Dateideskriptor), aus dev_private zu entnehmen
++     *
++     * @return 1 wenn das Lesen geklappt hat, 0 sonst
++     */
++    int (*dev_read)(uint64_t start, size_t size, void* dest, void* prv);
++
++    /**
++     * Funktionspointer der von Aufrufer gesetzt werden muss. Diese Funktion
++     * schreibt Daten auf den Datentraeger, auf dem sich das Dateisystem
++     * befindet.
++     *
++     * @param start Position von der an gelesen werden soll
++     * @param size  Anzahl der zu lesenden Bytes
++     * @param dest  Pointer auf den Puffer, aus dem die Daten gelesen werden
++     *              sollen.
++     * @param prv   Private Daten zum Zugriff auf den Datentraeger (z.B.
++     *              Dateideskriptor), aus dev_private zu entnehmen
++     *
++     * @return 1 wenn das Schreiben geklappt hat, 0 sonst
++     */
++    int (*dev_write)(uint64_t start, size_t size, const void* source,
++        void* prv);
++
++    /**
++     * Funktionspointer der vom Aufrufer gesetzt werden muss. Diese Funktion
++     * erstellt einen neuen Cache und gibt ein Handle darauf zurueck.
++     *
++     * @param fs            Pointer auf das Dateisystem fuer das der Cache
++     *                      erstellt werden soll.
++     * @param block_size    Blockgroesse im Cache
++     *
++     * @return Handle oder NULL im Fehlerfall
++     */
++    void* (*cache_create)(struct fat_fs* fs, size_t block_size);
++
++    /**
++     * Funktionspointer der vom Aufrufer gesetzt werden muss. Diese Funktion
++     * zerstoert einen mit cache_create erstellten Cache
++     *
++     * @param cache Handle
++     */
++    void (*cache_destroy)(void* handle);
++
++    /**
++     * Funktionspointer der vom Aufrufer gesetzt werden muss. Diese Funktion
++     * schreibt alle veraenderten Cache-Blocks auf die Platte
++     *
++     * @param cache Handle
++     */
++    void (*cache_sync)(void* handle);
++
++    /**
++     * Funktionspointer der vom Aufrufer gesetzt werden muss. Diese Funktion
++     * holt einen Block aus dem Cache und gibt einen Pointer auf ein
++     * Block-Handle zrueck. Dieser Pointer ist mindestens solange gueltig, wie
++     * das Handle nicht freigegeben wird.
++     *
++     * @param cache     Cache-Handle
++     * @param block     Blocknummer
++     * @param noread    Wenn dieser Parameter != 0 ist, wird der Block nicht
++     *                  eingelesen. Das kann benutzt werden, wenn er eh
++     *                  vollstaendig ueberschrieben wird.
++     *
++     * @return Block-Handle
++     */
++    struct fat_cache_block* (*cache_block)(void* cache, uint64_t block,
++        int noread);
++
++    /**
++     * Funktionspointer der vom Aufrufer gesetzt werden muss. Diese Funktion
++     * markiert den angegebenen Block als veraendert, damit er geschrieben wird,
++     * bevor er aus dem Cache entfernt wird.
++     *
++     * @param handle Block-Handle
++     */
++    void (*cache_block_dirty)(struct fat_cache_block* handle);
++
++    /**
++     * Funktionspointer der vom Aufrufer gesetzt werden muss. Diese Funktion
++     * gibt einen mit cache_block alloziierten Block wieder frei.
++     *
++     * @param handle    Block-Handle
++     * @param dirty     Wenn != 0 wird der Block auch als Dirty markiert
++     */
++    void (*cache_block_free)(struct fat_cache_block* handle, int dirty);
++
++
++    /// Private Daten zum Zugriff auf den Datentraeger
++    void* dev_private;
++
++    /// Handle fuer Blockcache
++    void* cache_handle;
++
++    /// Darf vom Aufrufer benutzt werden
++    void* opaque;
++
++    /// BIOS Parameter Block
++    struct fat_bpb bpb;
++
++    enum fat_type type;
++    uint32_t total_sectors;
++    uint32_t first_data_cluster;
++};
++
++/**
++ * Cache-Block-Handle
++ */
++struct fat_cache_block {
++    /// Blocknummer
++    uint64_t number;
++
++    /// Daten
++    void* data;
++
++    /// Cache-Handle
++    void* cache;
++
++    /// Daten fuer die Implementierung
++    void* opaque;
++};
++
++/**
++ * fat-Dateisystem einbinden. Dafuer muessen dev_read, dev_write und
++ * dev_private (falls notwendig) initialisiert sein.
++ *
++ * @return 1 bei Erfolg, im Fehlerfall 0
++ */
++int fat_fs_mount(struct fat_fs* fs);
++
++/**
++ * fat-Dateisystem aushaengen. Dabei werden saemtliche gecachten Daten auf die
++ * Platte geschrieben. Die Member sb und cache_handle in der fs-Struktur sind
++ * danach NULL.
++ *
++ * @return 1 bei Erfolg, im Fehlerfall 0
++ */
++int fat_fs_unmount(struct fat_fs* fs);
++
++/**
++ * Saetmliche gecachten Daten auf die Platte schreiben
++ */
++void fat_fs_sync(struct fat_fs* fs);
++
++#define FAT_ATTRIB_READONLY 0x01
++#define FAT_ATTRIB_HIDDEN   0x02
++#define FAT_ATTRIB_SYSTEM   0x04
++#define FAT_ATTRIB_VOLUME   0x08
++#define FAT_ATTRIB_DIR      0x10
++#define FAT_ATTRIB_ARCHIVE  0x20
++
++struct fat_disk_dir_entry {
++    char name[8];
++    char ext[3];
++    uint8_t attrib;
++    uint8_t data[14];
++    uint16_t first_cluster;
++    uint32_t size;
++} __attribute__((packed));
++
++
++struct fat_dir_entry {
++    char name[13]; /* 8.3 plus \0 */
++    int first_cluster;
++    int attrib;
++    uint32_t size;
++};
++
++struct fat_file;
++
++struct fat_dir {
++    struct fat_fs* fs;
++    struct fat_disk_dir_entry* entries;
++    int i;
++    int num;
++};
++
++int fat_dir_open(struct fat_fs* fs, const char* path, struct fat_dir* dir);
++int fat_dir_read(struct fat_dir* dir, struct fat_dir_entry* entry);
++int fat_dir_close(struct fat_dir* dir);
++
++struct fat_file {
++    struct fat_fs* fs;
++    uint32_t size;
++    size_t blocklist_size;
++    uint32_t* blocklist;
++};
++
++int fat_file_open(struct fat_fs* fs, const char* path, struct fat_file* file);
++int fat_file_open_by_dir_entry(struct fat_fs* fs, struct fat_dir_entry* entry,
++    struct fat_file* file);
++int32_t fat_file_read(struct fat_file* file, void *buf, uint32_t offset,
++    size_t len);
++int fat_file_close(struct fat_file* file);
++
++#endif
+diff --git a/fat/main.c b/fat/main.c
+new file mode 100644
+index 0000000..8290c41
+--- /dev/null
++++ b/fat/main.c
+@@ -0,0 +1,334 @@
++/*
++ * Copyright (c) 2010 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include &lt;stdlib.h&gt;
++#include &lt;string.h&gt;
++
++#include &lt;cdi.h&gt;
++#include &lt;cdi/fs.h&gt;
++
++#include &quot;fat.h&quot;
++
++#define DRIVER_NAME &quot;fat&quot;
++
++struct fat_res {
++    struct cdi_fs_res       cdi;
++    char*                   path; /* TODO Remove this */
++    struct fat_dir_entry    dir_entry;
++    struct fat_file         file;
++};
++
++static int fat_res_load(struct cdi_fs_stream* s);
++static int64_t fat_res_meta_read(struct cdi_fs_stream* s, cdi_fs_meta_t meta);
++static cdi_list_t fat_dir_list(struct cdi_fs_stream* s);
++static size_t fat_file_op_read(struct cdi_fs_stream* s, uint64_t start,
++    size_t size, void* buffer);
++
++static struct cdi_fs_driver fat_driver;
++
++static struct cdi_fs_res_res fat_res_ops = {
++    .load = fat_res_load,
++    .meta_read = fat_res_meta_read,
++};
++
++static struct cdi_fs_res_dir fat_dir_ops = {
++    .list = fat_dir_list,
++};
++
++static struct cdi_fs_res_file fat_file_ops = {
++    .read = fat_file_op_read,
++};
++
++static int fat_data_read(uint64_t start, size_t size, void* dest, void* prv)
++{
++    int ret;
++    ret = cdi_fs_data_read(prv, start, size, dest);
++    return ret == size;
++}
++
++static int fat_data_write(uint64_t start, size_t size, const void* source,
++    void* prv)
++{
++    int ret;
++    ret = cdi_fs_data_write(prv, start, size, source);
++    return ret == size;
++}
++
++/**
++ * Initialisiert die Datenstrukturen fuer den fat-Treiber
++ */
++static int fat_driver_init(void)
++{
++    cdi_fs_driver_init(&amp;fat_driver);
++    return 0;
++}
++
++/**
++ * Deinitialisiert die Datenstrukturen fuer den fat-Treiber
++ */
++static int fat_driver_destroy(void)
++{
++    cdi_fs_driver_destroy(&amp;fat_driver);
++    return 0;
++}
++
++/**
++ * Neues Dateisystem initialisieren; Diese Funktion muss das root_object in
++ * der Dateisystemstruktur eintragen.
++ *
++ * @return Wenn das Dateisystem erfolgreich initialisiert wurde 1, sonst
++ *         0. Falls ein Fehler auftritt, muss das error-Feld in der
++ *         Dateisystemstruktur gesetzt werden.
++ */
++static int fat_fs_init(struct cdi_fs_filesystem* fs)
++{
++    struct fat_res* root;
++    struct fat_fs* fat_fs;
++
++    /* Initialize root node */
++    root = malloc(sizeof(*root));
++    *root = (struct fat_res) {
++        .cdi = {
++            .name = &quot;/&quot;,
++            .res = &amp;fat_res_ops,
++        },
++        .path = &quot;/&quot;,
++        .dir_entry = {
++            .attrib = FAT_ATTRIB_DIR,
++        },
++    };
++
++    /* Mount file system */
++    fat_fs = malloc(sizeof(*fat_fs));
++    fat_fs-&gt;dev_read    = fat_data_read;
++    fat_fs-&gt;dev_write   = fat_data_write;
++    fat_fs-&gt;dev_private = fs;
++
++    if (!fat_fs_mount(fat_fs)) {
++        goto fail;
++    }
++
++    /* Initialize fs structure */
++    fs-&gt;root_res = &amp;root-&gt;cdi;
++    fs-&gt;opaque = fat_fs;
++
++    return 1;
++
++fail:
++    free(root);
++    free(fat_fs);
++    return 0;
++}
++
++/**
++ * Dateisystem deinitialisieren
++ *
++ * @return Wenn das Dateisystem erfolgreich deinitialisiert wurde 1, 0
++ *         sonst. Falls ein Fehler auftritt, muss das error-Feld in der
++ *         Dateisystemstruktur gesetzt werden.
++ */
++static int fat_fs_destroy(struct cdi_fs_filesystem* fs)
++{
++    return 1;
++}
++
++static int fat_res_load_dir(struct fat_fs* fs, struct fat_res* res)
++{
++    struct fat_dir dir;
++    struct fat_dir_entry dentry;
++    struct fat_res* child;
++    int ret;
++
++    res-&gt;cdi.children = cdi_list_create();
++
++    ret = fat_dir_open(fs, res-&gt;path, &amp;dir);
++    if (ret &lt; 0) {
++        goto fail;
++    }
++
++    while(1) {
++        ret = fat_dir_read(&amp;dir, &amp;dentry);
++        if (ret &lt; 0) {
++            break;
++        }
++
++        child = calloc(1, sizeof(*child));
++        child-&gt;cdi.res = &amp;fat_res_ops;
++        child-&gt;cdi.name = strdup(dentry.name);
++        asprintf(&amp;child-&gt;path, &quot;%s/%s&quot;, res-&gt;path, dentry.name);
++        child-&gt;dir_entry = dentry;
++
++        cdi_list_push(res-&gt;cdi.children, child);
++    }
++
++    fat_dir_close(&amp;dir);
++
++    res-&gt;cdi.dir = &amp;fat_dir_ops;
++    res-&gt;cdi.flags.browse = 1;
++
++    return 1;
++
++fail:
++    cdi_list_destroy(res-&gt;cdi.children);
++    return 0;
++}
++
++static int fat_res_load_file(struct fat_fs* fs, struct fat_res* res)
++{
++    int ret;
++
++    ret  = fat_file_open_by_dir_entry(fs, &amp;res-&gt;dir_entry, &amp;res-&gt;file);
++    if (ret &lt; 0) {
++        return 0;
++    }
++
++    res-&gt;cdi.file = &amp;fat_file_ops;
++    res-&gt;cdi.flags.read = 1;
++
++    return 1;
++}
++
++/**
++ * Ressource laden
++ *
++ * @param stream Stream
++ *
++ * @return Falls die Ressource erfolgreich geladen wurde 1, sonst 0
++ */
++static int fat_res_load(struct cdi_fs_stream* s)
++{
++    struct fat_res* res = (struct fat_res*) s-&gt;res;
++    int ret;
++
++    if (res-&gt;dir_entry.attrib &amp; FAT_ATTRIB_DIR) {
++        ret = fat_res_load_dir(s-&gt;fs-&gt;opaque, res);
++    } else {
++        ret = fat_res_load_file(s-&gt;fs-&gt;opaque, res);
++    }
++
++    if (!ret) {
++        goto fail;
++    }
++
++    s-&gt;res-&gt;loaded = 1;
++
++    return 1;
++
++fail:
++    return 0;
++}
++
++/**
++ * Metaeigenschaft lesen
++ *
++ * @param stream Stream
++ * @param meta Konstante fuer die gewuenschte Metaeigenschaft
++ *
++ * @return Wert der Metaeigenschaft
++ */
++static int64_t fat_res_meta_read(struct cdi_fs_stream* s, cdi_fs_meta_t meta)
++{
++    struct fat_res* res = (struct fat_res*) s-&gt;res;
++    struct fat_fs* fs = s-&gt;fs-&gt;opaque;
++
++    switch (meta) {
++        case CDI_FS_META_SIZE:
++            return res-&gt;dir_entry.size;
++
++        case CDI_FS_META_BLOCKSZ:
++        case CDI_FS_META_BESTBLOCKSZ:
++            return fs-&gt;bpb.sector_size * fs-&gt;bpb.cluster_sectors;
++
++        default:
++            return -1;
++    }
++}
++
++/**
++ * Diese Funktion gibt einen Pointer auf die Liste mit den Eintraegen
++ * zurueck. Hier wird nicht einfach fix der Pointer in fs_res genommen,
++ * damit dort auch &quot;versteckte&quot; Eintraege vorhanden sein koennten. (Ich
++ * meine hier nicht irgend ein versteckt-Flag dass die Dateien vor dem
++ * Benutzer Verstecken soll, sondern eher von fuer den Internen gebrauch
++ * angelegten Eintraegen.
++ * Diese Liste muss nicht vom Aufrufer freigegeben werden, da einige
++ * Treiber hier direkt children aus fs_res benutzen, und andere dafuer eine
++ * eigene Liste erstellen, die sie intern abspeichern.
++ *
++ * @param stream Stream
++ *
++ * @return Pointer auf eine Liste mit den Untereintraegen vom Typ
++ * cdi_fs_res.
++ */
++static cdi_list_t fat_dir_list(struct cdi_fs_stream* s)
++{
++    return s-&gt;res-&gt;children;
++}
++
++/**
++ * Daten aus dieser Datei lesen. Wird nur aufgerufen, wenn es durch die
++ * Flags oder Berechtigungen nicht verhindert wird.
++ *
++ * Im Fehlerfall wird je nach Fehler die Fehlernummer im Handle und die im
++ * Device gesetzt.
++ *
++ * @param stream Stream
++ * @param start Position von der an gelesen werden soll
++ * @param size Groesse der zu lesenden Daten
++ * @param buffer Puffer in den die Daten gelsen werden sollen
++ *
++ * @return Gelesene Bytes, oder 0 im Fehlerfall
++ */
++static size_t fat_file_op_read(struct cdi_fs_stream* s, uint64_t start,
++    size_t size, void* buffer)
++{
++    struct fat_res* res = (struct fat_res*) s-&gt;res;
++    int32_t ret;
++
++    ret = fat_file_read(&amp;res-&gt;file, buffer, start, size);
++    if (ret &lt; 0) {
++        /* TODO Set error */
++        return 0;
++    } else {
++        return size;
++    }
++}
++
++
++static struct cdi_fs_driver fat_driver = {
++    .drv = {
++        .type           = CDI_FILESYSTEM,
++        .name           = DRIVER_NAME,
++        .init           = fat_driver_init,
++        .destroy        = fat_driver_destroy,
++    },
++    .fs_init            = fat_fs_init,
++    .fs_destroy         = fat_fs_destroy,
++};
++
++CDI_DRIVER(DRIVER_NAME, fat_driver)
+-- 
+1.6.0.2
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000207.html">[cdi-devel] [PATCH] pci.h: Improve documentation
+</A></li>
+	<LI>Next message: <A HREF="000209.html">[cdi-devel] [RFC][PATCH] fat: Beginnings of a FAT file system	driver
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#208">[ date ]</a>
+              <a href="thread.html#208">[ thread ]</a>
+              <a href="subject.html#208">[ subject ]</a>
+              <a href="author.html#208">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

@@ -1,0 +1,128 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [Lost] [Patch] UTF8-Unterstützung in vterm
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5BLost%5D%20%3D%3Futf-8%3Fq%3F%3D5BPatch%3D5D_UTF8-Unterst%3DC3%3DBCtzung_in_vterm%3F%3D&In-Reply-To=%3C200806212019.49858%40kevin-wolf.de%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="000309.html">
+   <LINK REL="Next"  HREF="000343.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[Lost] [Patch] UTF8-Unterstützung in vterm</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5BLost%5D%20%3D%3Futf-8%3Fq%3F%3D5BPatch%3D5D_UTF8-Unterst%3DC3%3DBCtzung_in_vterm%3F%3D&In-Reply-To=%3C200806212019.49858%40kevin-wolf.de%3E"
+           TITLE="[Lost] [Patch] UTF8-Unterstützung in vterm">mail at kevin-wolf.de
+                  </A><BR>
+    <I>Sa Jun 21 20:19:49 CEST 2008</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="000309.html">[Lost] [Patch] UTF8-Unterstützung in vterm
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="000343.html">[Lost] [Patch] UTF8-Unterstützung in vterm
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#337">[ Datum ]</a>
+              <a href="thread.html#337">[ Thema ]</a>
+              <a href="subject.html#337">[ Betreff (Subject) ]</a>
+              <a href="author.html#337">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>Am Montag, 2. Juni 2008 23:08:24 schrieb Antoine Kaufmann:
+&gt;<i> Index: src/modules/vterm/output.c
+</I>&gt;<i> ===================================================================
+</I>&gt;<i> --- src/modules/vterm/output.c	(Revision 767)
+</I>&gt;<i> +++ src/modules/vterm/output.c	(Arbeitskopie)
+</I>&gt;<i> @@ -151,9 +151,16 @@
+</I>&gt;<i>  void vterm_process_output(vterminal_t* vterm, char* data, size_t length)
+</I>&gt;<i>  {
+</I>&gt;<i>      vterm_output_t* out = &amp;(vterm-&gt;output);
+</I>&gt;<i> +    char cpdata[length + vterm-&gt;utf8_buffer_offset];
+</I>&gt;<i> +    int len;
+</I>&gt;<i>
+</I>&gt;<i> +    if ((len = utf8_to_cp437(vterm, data, length, cpdata)) == 0) {
+</I>&gt;<i> +        return;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i>      // Ausgaben durch vt100-Emulation taetigen
+</I>&gt;<i> -    vt100_process_output(vterm, data, length);
+</I>&gt;<i> +    vt100_process_output(vterm, cpdata, len);
+</I>&gt;<i> +    free(cpdata);
+</I>
+Also ich habe Variablen auf dem Stack noch nie mit free() behandelt...
+
+&gt;<i>
+</I>&gt;<i>      // Anzeige aktualisieren falls es sich um aenderungen auf dem aktiven
+</I>&gt;<i>      // Terminal handelt.
+</I>&gt;<i> Index: src/modules/vterm/vterm.h
+</I>&gt;<i> ===================================================================
+</I>&gt;<i> --- src/modules/vterm/vterm.h	(Revision 767)
+</I>&gt;<i> +++ src/modules/vterm/vterm.h	(Arbeitskopie)
+</I>&gt;<i> @@ -151,6 +151,12 @@
+</I>&gt;<i>
+</I>&gt;<i>      /// Anzahl der Zeichen im vt100-Puffer
+</I>&gt;<i>      size_t vt100_buffer_offset;
+</I>&gt;<i> +
+</I>&gt;<i> +    /// UTF-8 Puffer
+</I>&gt;<i> +    char utf8_buffer[4];
+</I>
+Wenn du den hier ein Byte größer machst...
+
+&gt;<i> +static bool convert_char(vterminal_t* vterm, char c, char* dest)
+</I>&gt;<i> +{
+</I>&gt;<i> +    int len = vterm-&gt;utf8_buffer_offset + 1;
+</I>&gt;<i> +    char buf[len];
+</I>&gt;<i> +    wchar_t wc;
+</I>&gt;<i> +
+</I>&gt;<i> +    // Zeichen aus dem Unicode-Puffer kopieren
+</I>&gt;<i> +    memcpy(buf, vterm-&gt;utf8_buffer, vterm-&gt;utf8_buffer_offset);
+</I>&gt;<i> +    buf[len - 1] = c;
+</I>
+...könntest du hier auf die Kopiererei verzichten.
+
+&gt;<i> +
+</I>&gt;<i> +    // Versuchen ein Zeichen zu konvertieren
+</I>&gt;<i> +    if (mbtowc(&amp;wc, buf, len) == -1) {
+</I>&gt;<i> +        char* p = buf;
+</I>&gt;<i> +
+</I>&gt;<i> +        // Wenn das nicht klappt, wird das ganze in den Buffer kopiert
+</I>&gt;<i> +        if (len &gt; 4) {
+</I>&gt;<i> +            // Erstes Zeichen abschneiden bei mehr als 4
+</I>&gt;<i> +            len--;
+</I>&gt;<i> +            p++;
+</I>&gt;<i> +        }
+</I>&gt;<i> +
+</I>&gt;<i> +        memcpy(vterm-&gt;utf8_buffer, p, len);
+</I>&gt;<i> +        vterm-&gt;utf8_buffer_offset = len;
+</I>&gt;<i> +        return FALSE;
+</I>&gt;<i> +    } else {
+</I>&gt;<i> +        *dest = to_cp437(wc);
+</I>
+Hm, also irgendein unbekanntes Zeichen nehmen und dest ist an dieser Stelle zu 
+Ende? Ich würde da lieber ein if(!*dest) { *dest = '?' } oder so machen. 
+Sieht auch besser aus statt einfach einem Leerzeichen. ;-)
+
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="000309.html">[Lost] [Patch] UTF8-Unterstützung in vterm
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="000343.html">[Lost] [Patch] UTF8-Unterstützung in vterm
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#337">[ Datum ]</a>
+              <a href="thread.html#337">[ Thema ]</a>
+              <a href="subject.html#337">[ Betreff (Subject)]</a>
+              <a href="author.html#337">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

@@ -1,0 +1,1269 @@
+From kevin at tyndur.org  Sun Jan  3 21:42:12 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  3 Jan 2016 21:42:12 +0100
+Subject: [cdi-devel] [PATCH 0/9] hdaudio: Patches for real hardware
+Message-ID: <1451853741-6440-1-git-send-email-kevin@tyndur.org>
+
+This makes the hdaudio driver work (in a basic way) on the Thinkpad T500.
+
+Kevin Wolf (9):
+  hdaudio: Fix use of wrong loop counter
+  hdaudio: Skip non-audio function groups
+  hdaudio: Extract widget_init()
+  hdaudio: Debug output for every widget
+  hdaudio: Enable output pins
+  hdaudio: Fix hda_set_volume() scaling
+  hdaudio: Power up audio function and all widgets
+  hdaudio: Set EAPD bit for all widgets
+  hdaudio: Set the right format for the output stream
+
+ hdaudio/device.h |  48 +++++++++++++++
+ hdaudio/main.c   | 182 +++++++++++++++++++++++++++++++++++++++++++++++++------
+ 2 files changed, 213 insertions(+), 17 deletions(-)
+
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Sun Jan  3 21:42:13 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  3 Jan 2016 21:42:13 +0100
+Subject: [cdi-devel] [PATCH 1/9] hdaudio: Fix use of wrong loop counter
+In-Reply-To: <1451853741-6440-1-git-send-email-kevin@tyndur.org>
+References: <1451853741-6440-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1451853741-6440-2-git-send-email-kevin@tyndur.org>
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ hdaudio/main.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/hdaudio/main.c b/hdaudio/main.c
+index bd7a269..c46d3f7 100644
+--- a/hdaudio/main.c
++++ b/hdaudio/main.c
+@@ -238,7 +238,7 @@ static int find_output_widget(struct hda_device* hda, int codec)
+ 
+         DPRINTF("    %d widgets starting at ID %d\n",
+             num_widgets, widgets_start);
+-        for (j = 0; i < num_widgets; j++) {
++        for (j = 0; j < num_widgets; j++) {
+             param = codec_query(hda, codec, widgets_start + j,
+                 VERB_GET_PARAMETER | PARAM_AUDIO_WID_CAP);
+             if ((param != 0) && ((param & 0xf00000) == 0)) {
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Sun Jan  3 21:42:14 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  3 Jan 2016 21:42:14 +0100
+Subject: [cdi-devel] [PATCH 2/9] hdaudio: Skip non-audio function groups
+In-Reply-To: <1451853741-6440-1-git-send-email-kevin@tyndur.org>
+References: <1451853741-6440-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1451853741-6440-3-git-send-email-kevin@tyndur.org>
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ hdaudio/device.h | 6 ++++++
+ hdaudio/main.c   | 9 +++++++++
+ 2 files changed, 15 insertions(+)
+
+diff --git a/hdaudio/device.h b/hdaudio/device.h
+index 8552521..6af4ddc 100644
+--- a/hdaudio/device.h
++++ b/hdaudio/device.h
+@@ -73,6 +73,7 @@ enum hda_reg {
+     REG_O0_STS      = 0x103,    ///< Output 0 - Status
+     REG_O0_CBL      = 0x108,    ///< Output 0 - Cyclic Buffer Length
+     REG_O0_STLVI    = 0x10c,    ///< Output 0 - Last Valid Index
++    REG_O0_FMT      = 0x112,    ///< Output 0 - Format
+     REG_O0_BDLPL    = 0x118,    ///< Output 0 - BDL Pointer Lower
+     REG_O0_BDLPU    = 0x11c,    ///< Output 0 - BDL Pointer Upper
+ };
+@@ -181,9 +182,14 @@ enum codec_verbs {
+ 
+ enum codec_parameters {
+     PARAM_NODE_COUNT        = 0x04,
++    PARAM_FN_GROUP_TYPE     = 0x05,
+     PARAM_AUDIO_WID_CAP     = 0x09,
+ };
+ 
++enum fn_group_type {
++    FN_GROUP_AUDIO          = 0x01,
++};
++
+ enum sample_format {
+     SR_48_KHZ               = 0,
+     SR_44_KHZ               = (1 << 14),
+diff --git a/hdaudio/main.c b/hdaudio/main.c
+index c46d3f7..e179b28 100644
+--- a/hdaudio/main.c
++++ b/hdaudio/main.c
+@@ -238,6 +238,15 @@ static int find_output_widget(struct hda_device* hda, int codec)
+ 
+         DPRINTF("    %d widgets starting at ID %d\n",
+             num_widgets, widgets_start);
++
++        param = codec_query(hda, codec, fg_start + i,
++            VERB_GET_PARAMETER | PARAM_FN_GROUP_TYPE);
++        param &= 0x7f;
++        if (param != FN_GROUP_AUDIO) {
++            DPRINTF("    Function group type %x\n", param);
++            continue;
++        }
++
+         for (j = 0; j < num_widgets; j++) {
+             param = codec_query(hda, codec, widgets_start + j,
+                 VERB_GET_PARAMETER | PARAM_AUDIO_WID_CAP);
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Sun Jan  3 21:42:15 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  3 Jan 2016 21:42:15 +0100
+Subject: [cdi-devel] [PATCH 3/9] hdaudio: Extract widget_init()
+In-Reply-To: <1451853741-6440-1-git-send-email-kevin@tyndur.org>
+References: <1451853741-6440-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1451853741-6440-4-git-send-email-kevin@tyndur.org>
+
+The code now continues iterating over all widgets even if it already
+found an output widget. That is exactly what it should be doing.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ hdaudio/main.c | 37 ++++++++++++++++++++++++-------------
+ 1 file changed, 24 insertions(+), 13 deletions(-)
+
+diff --git a/hdaudio/main.c b/hdaudio/main.c
+index e179b28..313f59b 100644
+--- a/hdaudio/main.c
++++ b/hdaudio/main.c
+@@ -215,7 +215,27 @@ static void init_output_widget(struct hda_device* hda)
+     configure_output_widget(hda);
+ }
+ 
+-static int find_output_widget(struct hda_device* hda, int codec)
++static void widget_init(struct hda_device* hda, int codec, int nid)
++{
++    uint32_t widget_cap;
++
++    widget_cap = codec_query(hda, codec, nid,
++                             VERB_GET_PARAMETER | PARAM_AUDIO_WID_CAP);
++    if (widget_cap == 0) {
++        return;
++    }
++
++    if ((widget_cap & 0xf00000) == 0) {
++        DPRINTF("    Audio output at ID %d!\n", nid);
++        if (!hda->output.nid) {
++            DPRINTF("    * Using output at ID %d!\n", nid);
++            hda->output.codec = codec;
++            hda->output.nid = nid;
++        }
++    }
++}
++
++static int codec_enumerate_widgets(struct hda_device* hda, int codec)
+ {
+     uint32_t param;
+     int num_fg, num_widgets;
+@@ -248,20 +268,11 @@ static int find_output_widget(struct hda_device* hda, int codec)
+         }
+ 
+         for (j = 0; j < num_widgets; j++) {
+-            param = codec_query(hda, codec, widgets_start + j,
+-                VERB_GET_PARAMETER | PARAM_AUDIO_WID_CAP);
+-            if ((param != 0) && ((param & 0xf00000) == 0)) {
+-                DPRINTF("    Audio output at ID %d!\n", widgets_start + j);
+-
+-                hda->output.codec = codec;
+-                hda->output.nid = widgets_start + j;
+-
+-                return 0;
+-            }
++            widget_init(hda, codec, widgets_start + j);
+         }
+     }
+ 
+-    return -1;
++    return hda->output.nid ? 0 : -1;
+ }
+ 
+ static void hda_enumerate_codecs(struct hda_device* hda)
+@@ -283,7 +294,7 @@ static void hda_enumerate_codecs(struct hda_device* hda)
+     for (i = 0; i < 15; i++) {
+         if ((statests & (1 << i))) {
+             DPRINTF("   Found codec at %d\n", i);
+-            if (find_output_widget(hda, i)) {
++            if (codec_enumerate_widgets(hda, i)) {
+                 return;
+             }
+         }
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Sun Jan  3 21:42:16 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  3 Jan 2016 21:42:16 +0100
+Subject: [cdi-devel] [PATCH 4/9] hdaudio: Debug output for every widget
+In-Reply-To: <1451853741-6440-1-git-send-email-kevin@tyndur.org>
+References: <1451853741-6440-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1451853741-6440-5-git-send-email-kevin@tyndur.org>
+
+Even for non-output widgets, gather some data and print it in debug
+mode.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ hdaudio/device.h | 25 +++++++++++++++++
+ hdaudio/main.c   | 84 +++++++++++++++++++++++++++++++++++++++++++++++++++++++-
+ 2 files changed, 108 insertions(+), 1 deletion(-)
+
+diff --git a/hdaudio/device.h b/hdaudio/device.h
+index 6af4ddc..eb4746c 100644
+--- a/hdaudio/device.h
++++ b/hdaudio/device.h
+@@ -177,19 +177,44 @@ enum codec_verbs {
+     VERB_GET_PARAMETER      = 0xf0000,
+     VERB_SET_STREAM_CHANNEL = 0x70600,
+     VERB_SET_FORMAT         = 0x20000,
++    VERB_GET_AMP_GAIN_MUTE  = 0xb0000,
+     VERB_SET_AMP_GAIN_MUTE  = 0x30000,
++    VERB_GET_CONN_LIST      = 0xf0200,
++    VERB_GET_CONN_SELECT    = 0xf0100,
++    VERB_GET_EAPD_BTL       = 0xf0c00,
+ };
+ 
+ enum codec_parameters {
+     PARAM_NODE_COUNT        = 0x04,
+     PARAM_FN_GROUP_TYPE     = 0x05,
+     PARAM_AUDIO_WID_CAP     = 0x09,
++    PARAM_CONN_LIST_LEN     = 0x0e,
++    PARAM_OUT_AMP_CAP       = 0x12,
+ };
+ 
+ enum fn_group_type {
+     FN_GROUP_AUDIO          = 0x01,
+ };
+ 
++enum widget_type {
++    WIDGET_OUTPUT           = 0x0,
++    WIDGET_INPUT            = 0x1,
++    WIDGET_MIXER            = 0x2,
++    WIDGET_SELECTOR         = 0x3,
++    WIDGET_PIN              = 0x4,
++    WIDGET_POWER            = 0x5,
++    WIDGET_VOLUME_KNOB      = 0x6,
++    WIDGET_BEEP_GEN         = 0x7,
++    WIDGET_VENDOR_DEFINED   = 0xf,
++};
++
++enum widget_capabilities {
++    WIDGET_CAP_POWER_CNTRL  = (1 << 10),
++
++    WIDGET_CAP_TYPE_SHIFT   = 20,
++    WIDGET_CAP_TYPE_MASK    = (0xf << 20),
++};
++
+ enum sample_format {
+     SR_48_KHZ               = 0,
+     SR_44_KHZ               = (1 << 14),
+diff --git a/hdaudio/main.c b/hdaudio/main.c
+index 313f59b..416aa80 100644
+--- a/hdaudio/main.c
++++ b/hdaudio/main.c
+@@ -215,6 +215,53 @@ static void init_output_widget(struct hda_device* hda)
+     configure_output_widget(hda);
+ }
+ 
++#ifdef DEBUG
++static void widget_dump_connections(struct hda_device* hda, int codec, int nid)
++{
++    uint32_t num_conn;
++    uint32_t sel;
++    int i;
++
++    num_conn = codec_query(hda, codec, nid,
++                           VERB_GET_PARAMETER | PARAM_CONN_LIST_LEN);
++    if (!num_conn) {
++        return;
++    }
++
++    DPRINTF("        conn:");
++
++    for (i = 0; i < (num_conn & 0x7f); i++) {
++        uint32_t conn;
++        bool range;
++        int idx, shift;
++
++        if (num_conn & 0x80) {
++            idx = i & ~3;
++            shift = 8 * (i & 3);
++        } else {
++            idx = i & ~1;
++            shift = 8 * (i & 1);
++        }
++
++        conn = codec_query(hda, codec, nid, VERB_GET_CONN_LIST | idx);
++        conn >>= shift;
++
++        if (num_conn & 0x80) {
++            range = conn & 0x8000;
++            conn &= 0x7fff;
++        } else {
++            range = conn & 0x80;
++            conn &= 0x7f;
++        }
++
++        printf("%c%d", range ? '-' : ' ', conn);
++    }
++
++    sel = codec_query(hda, codec, nid, VERB_GET_CONN_SELECT);
++    printf(" [current: %d]\n", sel);
++}
++#endif
++
+ static void widget_init(struct hda_device* hda, int codec, int nid)
+ {
+     uint32_t widget_cap;
+@@ -225,8 +272,42 @@ static void widget_init(struct hda_device* hda, int codec, int nid)
+         return;
+     }
+ 
++#ifdef DEBUG
++    enum widget_type type;
++    uint32_t eapd_btl;
++    uint32_t amp_gain;
++    uint32_t amp_cap;
++    const char* s;
++
++    type = (widget_cap & WIDGET_CAP_TYPE_MASK) >> WIDGET_CAP_TYPE_SHIFT;
++
++    switch (type) {
++        case 0:     s = "output"; break;
++        case 1:     s = "input"; break;
++        case 2:     s = "mixer"; break;
++        case 3:     s = "selector"; break;
++        case 4:     s = "pin complex"; break;
++        case 5:     s = "power"; break;
++        case 6:     s = "volume knob"; break;
++        case 7:     s = "beep generator"; break;
++        case 15:    s = "vendor defined"; break;
++        default:    s = "unknown"; break;
++    }
++
++    amp_gain = codec_query(hda, codec, nid,
++                           VERB_GET_AMP_GAIN_MUTE | 0x8000) << 8;
++    amp_gain |= codec_query(hda, codec, nid, VERB_GET_AMP_GAIN_MUTE | 0xa000);
++    amp_cap = codec_query(hda, codec, nid,
++                          VERB_GET_PARAMETER | PARAM_OUT_AMP_CAP);
++    eapd_btl = codec_query(hda, codec, nid, VERB_GET_EAPD_BTL);
++
++    DPRINTF("    %s at ID %d; cap %x, eapd %x, amp %x/%x\n",
++            s, nid, widget_cap, eapd_btl, amp_gain, amp_cap);
++
++    widget_dump_connections(hda, codec, nid);
++#endif
++
+     if ((widget_cap & 0xf00000) == 0) {
+-        DPRINTF("    Audio output at ID %d!\n", nid);
+         if (!hda->output.nid) {
+             DPRINTF("    * Using output at ID %d!\n", nid);
+             hda->output.codec = codec;
+@@ -270,6 +351,7 @@ static int codec_enumerate_widgets(struct hda_device* hda, int codec)
+         for (j = 0; j < num_widgets; j++) {
+             widget_init(hda, codec, widgets_start + j);
+         }
++        DPRINTF("\n");
+     }
+ 
+     return hda->output.nid ? 0 : -1;
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Sun Jan  3 21:42:17 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  3 Jan 2016 21:42:17 +0100
+Subject: [cdi-devel] [PATCH 5/9] hdaudio: Enable output pins
+In-Reply-To: <1451853741-6440-1-git-send-email-kevin@tyndur.org>
+References: <1451853741-6440-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1451853741-6440-6-git-send-email-kevin@tyndur.org>
+
+While enumerating widgets, don't only consider output widgets (i.e.
+DACs), but also output pins (i.e. the jack or internal device wherer the
+sound actually goes). We need to enable the output there.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ hdaudio/device.h | 13 +++++++++++++
+ hdaudio/main.c   | 47 +++++++++++++++++++++++++++++++++++++++--------
+ 2 files changed, 52 insertions(+), 8 deletions(-)
+
+diff --git a/hdaudio/device.h b/hdaudio/device.h
+index eb4746c..b9cedb6 100644
+--- a/hdaudio/device.h
++++ b/hdaudio/device.h
+@@ -179,8 +179,11 @@ enum codec_verbs {
+     VERB_SET_FORMAT         = 0x20000,
+     VERB_GET_AMP_GAIN_MUTE  = 0xb0000,
+     VERB_SET_AMP_GAIN_MUTE  = 0x30000,
++    VERB_GET_CONFIG_DEFAULT = 0xf1c00,
+     VERB_GET_CONN_LIST      = 0xf0200,
+     VERB_GET_CONN_SELECT    = 0xf0100,
++    VERB_GET_PIN_CONTROL    = 0xf0700,
++    VERB_SET_PIN_CONTROL    = 0x70700,
+     VERB_GET_EAPD_BTL       = 0xf0c00,
+ };
+ 
+@@ -188,6 +191,7 @@ enum codec_parameters {
+     PARAM_NODE_COUNT        = 0x04,
+     PARAM_FN_GROUP_TYPE     = 0x05,
+     PARAM_AUDIO_WID_CAP     = 0x09,
++    PARAM_PIN_CAP           = 0x0c,
+     PARAM_CONN_LIST_LEN     = 0x0e,
+     PARAM_OUT_AMP_CAP       = 0x12,
+ };
+@@ -215,6 +219,15 @@ enum widget_capabilities {
+     WIDGET_CAP_TYPE_MASK    = (0xf << 20),
+ };
+ 
++enum pin_capabilities {
++    PIN_CAP_OUTPUT          = (1 << 4),
++    PIN_CAP_INPUT           = (1 << 5),
++};
++
++enum pin_ctl_flags {
++    PIN_CTL_ENABLE_OUTPUT   = (1 << 6),
++};
++
+ enum sample_format {
+     SR_48_KHZ               = 0,
+     SR_44_KHZ               = (1 << 14),
+diff --git a/hdaudio/main.c b/hdaudio/main.c
+index 416aa80..5bc0e54 100644
+--- a/hdaudio/main.c
++++ b/hdaudio/main.c
+@@ -265,6 +265,7 @@ static void widget_dump_connections(struct hda_device* hda, int codec, int nid)
+ static void widget_init(struct hda_device* hda, int codec, int nid)
+ {
+     uint32_t widget_cap;
++    enum widget_type type;
+ 
+     widget_cap = codec_query(hda, codec, nid,
+                              VERB_GET_PARAMETER | PARAM_AUDIO_WID_CAP);
+@@ -272,15 +273,14 @@ static void widget_init(struct hda_device* hda, int codec, int nid)
+         return;
+     }
+ 
++    type = (widget_cap & WIDGET_CAP_TYPE_MASK) >> WIDGET_CAP_TYPE_SHIFT;
++
+ #ifdef DEBUG
+-    enum widget_type type;
+     uint32_t eapd_btl;
+     uint32_t amp_gain;
+     uint32_t amp_cap;
+     const char* s;
+ 
+-    type = (widget_cap & WIDGET_CAP_TYPE_MASK) >> WIDGET_CAP_TYPE_SHIFT;
+-
+     switch (type) {
+         case 0:     s = "output"; break;
+         case 1:     s = "input"; break;
+@@ -307,12 +307,43 @@ static void widget_init(struct hda_device* hda, int codec, int nid)
+     widget_dump_connections(hda, codec, nid);
+ #endif
+ 
+-    if ((widget_cap & 0xf00000) == 0) {
+-        if (!hda->output.nid) {
+-            DPRINTF("    * Using output at ID %d!\n", nid);
+-            hda->output.codec = codec;
+-            hda->output.nid = nid;
++    switch (type) {
++        case WIDGET_PIN:
++        {
++            uint32_t pin_cap, ctl;
++
++#ifdef DEBUG
++            uint32_t conf = codec_query(hda, codec, nid,
++                                        VERB_GET_CONFIG_DEFAULT);
++            DPRINTF("        pin config: %x\n", conf);
++#endif
++
++            pin_cap = codec_query(hda, codec, nid,
++                                  VERB_GET_PARAMETER | PARAM_PIN_CAP);
++            if ((pin_cap & PIN_CAP_OUTPUT) == 0) {
++                return;
++            }
++
++            ctl = codec_query(hda, codec, nid, VERB_GET_PIN_CONTROL);
++            DPRINTF("        ctl: %x\n", ctl);
++
++            ctl |= PIN_CTL_ENABLE_OUTPUT;
++            codec_query(hda, codec, nid, VERB_SET_PIN_CONTROL | ctl);
++            break;
+         }
++
++        case WIDGET_OUTPUT:
++        {
++            if (!hda->output.nid) {
++                DPRINTF("    * Using output at ID %d!\n", nid);
++                hda->output.codec = codec;
++                hda->output.nid = nid;
++            }
++            break;
++        }
++
++        default:
++            return;
+     }
+ }
+ 
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Sun Jan  3 21:42:18 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  3 Jan 2016 21:42:18 +0100
+Subject: [cdi-devel] [PATCH 6/9] hdaudio: Fix hda_set_volume() scaling
+In-Reply-To: <1451853741-6440-1-git-send-email-kevin@tyndur.org>
+References: <1451853741-6440-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1451853741-6440-7-git-send-email-kevin@tyndur.org>
+
+hda_set_volume() scaled the volume (which is between 0 and 255 in the
+CDI interface) to something between 0 and 127. That's not generally what
+the hardware wants. The number of "steps" are given in the amplifier
+capabilities parameter and this is what we need to scale to.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ hdaudio/device.h |  1 +
+ hdaudio/main.c   | 14 +++++++++-----
+ 2 files changed, 10 insertions(+), 5 deletions(-)
+
+diff --git a/hdaudio/device.h b/hdaudio/device.h
+index b9cedb6..c9fc3d1 100644
+--- a/hdaudio/device.h
++++ b/hdaudio/device.h
+@@ -107,6 +107,7 @@ struct hda_output {
+     uint16_t    nid;
+ 
+     uint32_t    sample_rate;
++    int         amp_gain_steps;
+     int         num_channels;
+ };
+ 
+diff --git a/hdaudio/main.c b/hdaudio/main.c
+index 5bc0e54..98e2a8a 100644
+--- a/hdaudio/main.c
++++ b/hdaudio/main.c
+@@ -266,6 +266,7 @@ static void widget_init(struct hda_device* hda, int codec, int nid)
+ {
+     uint32_t widget_cap;
+     enum widget_type type;
++    uint32_t amp_cap;
+ 
+     widget_cap = codec_query(hda, codec, nid,
+                              VERB_GET_PARAMETER | PARAM_AUDIO_WID_CAP);
+@@ -275,10 +276,12 @@ static void widget_init(struct hda_device* hda, int codec, int nid)
+ 
+     type = (widget_cap & WIDGET_CAP_TYPE_MASK) >> WIDGET_CAP_TYPE_SHIFT;
+ 
++    amp_cap = codec_query(hda, codec, nid,
++                          VERB_GET_PARAMETER | PARAM_OUT_AMP_CAP);
++
+ #ifdef DEBUG
+     uint32_t eapd_btl;
+     uint32_t amp_gain;
+-    uint32_t amp_cap;
+     const char* s;
+ 
+     switch (type) {
+@@ -297,8 +300,6 @@ static void widget_init(struct hda_device* hda, int codec, int nid)
+     amp_gain = codec_query(hda, codec, nid,
+                            VERB_GET_AMP_GAIN_MUTE | 0x8000) << 8;
+     amp_gain |= codec_query(hda, codec, nid, VERB_GET_AMP_GAIN_MUTE | 0xa000);
+-    amp_cap = codec_query(hda, codec, nid,
+-                          VERB_GET_PARAMETER | PARAM_OUT_AMP_CAP);
+     eapd_btl = codec_query(hda, codec, nid, VERB_GET_EAPD_BTL);
+ 
+     DPRINTF("    %s at ID %d; cap %x, eapd %x, amp %x/%x\n",
+@@ -338,6 +339,7 @@ static void widget_init(struct hda_device* hda, int codec, int nid)
+                 DPRINTF("    * Using output at ID %d!\n", nid);
+                 hda->output.codec = codec;
+                 hda->output.nid = nid;
++                hda->output.amp_gain_steps = (amp_cap >> 8) & 0x7f;
+             }
+             break;
+         }
+@@ -583,12 +585,14 @@ static void hda_set_volume(struct cdi_audio_stream* stream, uint8_t volume)
+     struct hda_device* hda = (struct hda_device*) stream->device;
+     int meta = 0xb000; /* Output Amp, Left and Right */
+ 
++    DPRINTF("hda_set_volume: %d\n", volume);
++
+     if (volume == 0) {
+         /* Set the mute bit */
+         volume = 0x80;
+     } else {
+-        /* Scale to 7-bit value */
+-        volume >>= 1;
++        /* Scale to NumSteps */
++        volume = volume * hda->output.amp_gain_steps / 255;
+     }
+ 
+     codec_query(hda, hda->output.codec, hda->output.nid,
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Sun Jan  3 21:42:19 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  3 Jan 2016 21:42:19 +0100
+Subject: [cdi-devel] [PATCH 7/9] hdaudio: Power up audio function and all
+	widgets
+In-Reply-To: <1451853741-6440-1-git-send-email-kevin@tyndur.org>
+References: <1451853741-6440-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1451853741-6440-8-git-send-email-kevin@tyndur.org>
+
+Widgets that aren't fully powered stay silent. So power them up.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ hdaudio/device.h | 2 ++
+ hdaudio/main.c   | 6 ++++++
+ 2 files changed, 8 insertions(+)
+
+diff --git a/hdaudio/device.h b/hdaudio/device.h
+index c9fc3d1..2697da0 100644
+--- a/hdaudio/device.h
++++ b/hdaudio/device.h
+@@ -186,6 +186,8 @@ enum codec_verbs {
+     VERB_GET_PIN_CONTROL    = 0xf0700,
+     VERB_SET_PIN_CONTROL    = 0x70700,
+     VERB_GET_EAPD_BTL       = 0xf0c00,
++    VERB_GET_POWER_STATE    = 0xf0500,
++    VERB_SET_POWER_STATE    = 0x70500,
+ };
+ 
+ enum codec_parameters {
+diff --git a/hdaudio/main.c b/hdaudio/main.c
+index 98e2a8a..4d0b02f 100644
+--- a/hdaudio/main.c
++++ b/hdaudio/main.c
+@@ -347,6 +347,10 @@ static void widget_init(struct hda_device* hda, int codec, int nid)
+         default:
+             return;
+     }
++
++    if (widget_cap & WIDGET_CAP_POWER_CNTRL) {
++        codec_query(hda, codec, nid, VERB_SET_POWER_STATE | 0x0);
++    }
+ }
+ 
+ static int codec_enumerate_widgets(struct hda_device* hda, int codec)
+@@ -381,6 +385,8 @@ static int codec_enumerate_widgets(struct hda_device* hda, int codec)
+             continue;
+         }
+ 
++        codec_query(hda, codec, fg_start + i, VERB_SET_POWER_STATE | 0x0);
++
+         for (j = 0; j < num_widgets; j++) {
+             widget_init(hda, codec, widgets_start + j);
+         }
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Sun Jan  3 21:42:20 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  3 Jan 2016 21:42:20 +0100
+Subject: [cdi-devel] [PATCH 8/9] hdaudio: Set EAPD bit for all widgets
+In-Reply-To: <1451853741-6440-1-git-send-email-kevin@tyndur.org>
+References: <1451853741-6440-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1451853741-6440-9-git-send-email-kevin@tyndur.org>
+
+This is the "External Amplifier Power Down" flag and a 1 must be written
+to power the amplifier up.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ hdaudio/device.h | 1 +
+ hdaudio/main.c   | 7 +++++--
+ 2 files changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/hdaudio/device.h b/hdaudio/device.h
+index 2697da0..196f692 100644
+--- a/hdaudio/device.h
++++ b/hdaudio/device.h
+@@ -186,6 +186,7 @@ enum codec_verbs {
+     VERB_GET_PIN_CONTROL    = 0xf0700,
+     VERB_SET_PIN_CONTROL    = 0x70700,
+     VERB_GET_EAPD_BTL       = 0xf0c00,
++    VERB_SET_EAPD_BTL       = 0x70c00,
+     VERB_GET_POWER_STATE    = 0xf0500,
+     VERB_SET_POWER_STATE    = 0x70500,
+ };
+diff --git a/hdaudio/main.c b/hdaudio/main.c
+index 4d0b02f..e198e01 100644
+--- a/hdaudio/main.c
++++ b/hdaudio/main.c
+@@ -267,6 +267,7 @@ static void widget_init(struct hda_device* hda, int codec, int nid)
+     uint32_t widget_cap;
+     enum widget_type type;
+     uint32_t amp_cap;
++    uint32_t eapd_btl;
+ 
+     widget_cap = codec_query(hda, codec, nid,
+                              VERB_GET_PARAMETER | PARAM_AUDIO_WID_CAP);
+@@ -278,9 +279,9 @@ static void widget_init(struct hda_device* hda, int codec, int nid)
+ 
+     amp_cap = codec_query(hda, codec, nid,
+                           VERB_GET_PARAMETER | PARAM_OUT_AMP_CAP);
++    eapd_btl = codec_query(hda, codec, nid, VERB_GET_EAPD_BTL);
+ 
+ #ifdef DEBUG
+-    uint32_t eapd_btl;
+     uint32_t amp_gain;
+     const char* s;
+ 
+@@ -300,7 +301,6 @@ static void widget_init(struct hda_device* hda, int codec, int nid)
+     amp_gain = codec_query(hda, codec, nid,
+                            VERB_GET_AMP_GAIN_MUTE | 0x8000) << 8;
+     amp_gain |= codec_query(hda, codec, nid, VERB_GET_AMP_GAIN_MUTE | 0xa000);
+-    eapd_btl = codec_query(hda, codec, nid, VERB_GET_EAPD_BTL);
+ 
+     DPRINTF("    %s at ID %d; cap %x, eapd %x, amp %x/%x\n",
+             s, nid, widget_cap, eapd_btl, amp_gain, amp_cap);
+@@ -330,6 +330,7 @@ static void widget_init(struct hda_device* hda, int codec, int nid)
+ 
+             ctl |= PIN_CTL_ENABLE_OUTPUT;
+             codec_query(hda, codec, nid, VERB_SET_PIN_CONTROL | ctl);
++            codec_query(hda, codec, nid, VERB_SET_EAPD_BTL | eapd_btl | 0x2);
+             break;
+         }
+ 
+@@ -341,6 +342,8 @@ static void widget_init(struct hda_device* hda, int codec, int nid)
+                 hda->output.nid = nid;
+                 hda->output.amp_gain_steps = (amp_cap >> 8) & 0x7f;
+             }
++
++            codec_query(hda, codec, nid, VERB_SET_EAPD_BTL | eapd_btl | 0x2);
+             break;
+         }
+ 
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Sun Jan  3 21:42:21 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  3 Jan 2016 21:42:21 +0100
+Subject: [cdi-devel] [PATCH 9/9] hdaudio: Set the right format for the
+	output stream
+In-Reply-To: <1451853741-6440-1-git-send-email-kevin@tyndur.org>
+References: <1451853741-6440-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1451853741-6440-10-git-send-email-kevin@tyndur.org>
+
+So far we only set the format for the output widget. The stream must
+have the same format set.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ hdaudio/main.c | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/hdaudio/main.c b/hdaudio/main.c
+index e198e01..0953fd6 100644
+--- a/hdaudio/main.c
++++ b/hdaudio/main.c
+@@ -191,10 +191,12 @@ static uint32_t codec_query(struct hda_device* hda, int codec, int nid,
+ static void configure_output_widget(struct hda_device* hda)
+ {
+     /* Set sample format */
++    uint16_t format = BITS_16 | hda->output.sample_rate |
++                      (hda->output.num_channels - 1);
++
+     codec_query(hda, hda->output.codec, hda->output.nid,
+-        VERB_SET_FORMAT |
+-        BITS_16 | hda->output.sample_rate |
+-        (hda->output.num_channels - 1));
++        VERB_SET_FORMAT | format);
++    reg_outl(hda, REG_O0_FMT, format);
+ }
+ 
+ static void init_output_widget(struct hda_device* hda)
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Sun Jan  3 23:15:17 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 3 Jan 2016 23:15:17 +0100
+Subject: [cdi-devel] [PATCH 2/5] ehci: Implement interrupt transfers
+In-Reply-To: <1451347254-25755-3-git-send-email-max@tyndur.org>
+References: <1451347254-25755-1-git-send-email-max@tyndur.org>
+	<1451347254-25755-3-git-send-email-max@tyndur.org>
+Message-ID: <20160103221515.GA3010@silvanus>
+
+On Tue, Dec 29, 2015 at 01:00:51AM +0100, Max Reitz wrote:
+> Signed-off-by: Max Reitz <max at tyndur.org>
+> ---
+>  ehci/ehci.c | 265 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++---
+>  ehci/ehci.h |  20 +++++
+>  ehci/main.c |  11 +--
+>  3 files changed, 278 insertions(+), 18 deletions(-)
+> 
+> diff --git a/ehci/ehci.c b/ehci/ehci.c
+> index addec00..4b548ae 100644
+> --- a/ehci/ehci.c
+> +++ b/ehci/ehci.c
+> @@ -40,6 +40,13 @@
+>  
+>  static void bios_handoff(struct cdi_pci_device *pci_dev, struct ehci *hc);
+>  static void irq_handler(struct cdi_device *dev);
+> +static void init_periodic_pseudo_qhs(struct ehci *hc);
+> +
+> +
+> +static inline bool is_power_of_two(unsigned value)
+> +{
+> +    return !(value & (value - 1));
+> +}
+>  
+>  
+>  struct cdi_device *ehci_init_device(struct cdi_bus_data *bus_data)
+> @@ -111,6 +118,18 @@ struct cdi_device *ehci_init_device(struct cdi_bus_data *bus_data)
+>      }
+>      hc->regs->periodiclistbase = hc->periodic_list_mem->paddr.items[0].start;
+>  
+> +    hc->periodic_qhs = calloc(1024, sizeof(*hc->periodic_qhs));
+> +    // 10 = |0..10| = |ld(1)..ld(1024)|
+
+I gues you mean "// 11 = ..."?
+
+> +    hc->periodic_pseudo_qhs_mem =
+> +        cdi_mem_alloc(11 * sizeof(hc->periodic_pseudo_qhs[0]),
+> +                      6
+> +                      | CDI_MEM_PHYS_CONTIGUOUS
+> +                      | CDI_MEM_DMA_4G
+> +                      | CDI_MEM_NOINIT);
+> +    hc->periodic_pseudo_qhs = hc->periodic_pseudo_qhs_mem->vaddr;
+> +
+> +    init_periodic_pseudo_qhs(hc);
+> +
+>      // Create anchor
+>      struct cdi_mem_area *anchor_qh;
+>      anchor_qh = cdi_mem_alloc(sizeof(ehci_fat_qh_t), 6
+
+> @@ -323,7 +442,28 @@ static void enter_async_qh(struct ehci *hc, ehci_fat_qh_t *qh)
+>  }
+>  
+>  
+> -static void retire_qh(struct ehci *hc, ehci_fat_qh_t *qh)
+> +static void enter_interrupt_qh(struct ehci *hc, ehci_fat_qh_t *qh,
+> +                               int frame_interval_shift)
+> +{
+> +    qh->next = hc->periodic_functional_qhs;
+
+This value...
+
+> +    hc->periodic_functional_qhs = qh;
+> +
+> +    ehci_fat_qh_t *pseudo_qh = &hc->periodic_pseudo_qhs[frame_interval_shift];
+> +
+> +    qh->next = pseudo_qh->next;
+
+...is immediately overwritten here.
+
+As I don't understand yet what functional and pseudo QHs are and the
+header doesn't tell anything about it, I can't say how bad this is, but
+we seem to throw away all of the QHs in hc->periodic_functional_qhs and
+replace them by qh.
+
+My guess is that the first assignment should be qh->next_periodic.
+
+> +    qh->previous = pseudo_qh;
+> +
+> +    pseudo_qh->next = qh;
+> +    if (qh->next) {
+> +        qh->next->previous = qh;
+> +    }
+> +
+> +    qh->qh.next_qh = pseudo_qh->qh.next_qh;
+> +    pseudo_qh->qh.next_qh = qh->paddr | EHCI_QH;
+> +}
+> +
+> +
+> +static void retire_async_qh(struct ehci *hc, ehci_fat_qh_t *qh)
+>  {
+>      qh->previous->qh.next_qh = qh->qh.next_qh;
+>  
+> @@ -336,11 +476,29 @@ static void retire_qh(struct ehci *hc, ehci_fat_qh_t *qh)
+>  }
+>  
+>  
+> -static void retire_first_qtd(ehci_fat_qh_t *qh)
+> +static void retire_periodic_qh(struct ehci *hc, ehci_fat_qh_t *qh)
+>  {
+> -    ehci_fat_qtd_t *qtd = qh->first_qtd;
+> +    qh->previous->qh.next_qh = qh->qh.next_qh;
+>  
+> -    assert(qtd);
+> +    qh->previous->next = qh->next;
+> +    if (qh->next) {
+> +        qh->next->previous = qh->previous;
+> +    }
+> +
+> +    ehci_fat_qh_t **func_periodic_ptr = &hc->periodic_functional_qhs;
+> +    while (*func_periodic_ptr && *func_periodic_ptr != qh) {
+> +        func_periodic_ptr = &(*func_periodic_ptr)->next_periodic;
+> +    }
+> +    assert(*func_periodic_ptr == qh);
+> +    *func_periodic_ptr = qh->next_periodic;
+> +
+> +    cdi_list_push(hc->retired_qhs, qh);
+
+I think this will only be processed when the next async QH is retired.
+Is this good enough?
+
+> +}
+> +
+> +
+> +static void qtd_write_back(ehci_fat_qtd_t *qtd)
+> +{
+> +    ehci_fat_qh_t *qh = qtd->qh;
+>  
+>      uint32_t err_mask = (qh->qh.ep_state[0] & EHCI_QHES0_EPS_MASK)
+>                           == EHCI_QHES0_EPS_HS
+
+> diff --git a/ehci/ehci.h b/ehci/ehci.h
+> index fb8dd9e..4b55391 100644
+> --- a/ehci/ehci.h
+> +++ b/ehci/ehci.h
+> @@ -87,8 +87,14 @@ struct ehci_fat_qh {
+>      struct cdi_mem_area *cdi_mem_area;
+>      uintptr_t paddr;
+>  
+> +    cdi_usb_hc_interrupt_cb_t cb;
+> +    void *cb_opaque;
+
+Maybe comment that cb != NULL if, and only if, this is a periodic QH?
+
+> +
+>      ehci_fat_qh_t *next, *previous;
+> +    ehci_fat_qh_t *next_periodic;
+>      ehci_fat_qtd_t *first_qtd, *last_qtd;
+> +
+> +    bool is_pseudo_qh;
+>  } __attribute__((aligned(64)));
+>  
+>  static_assert(!(sizeof(struct ehci_fat_qh) % 64),
+> @@ -122,9 +128,17 @@ struct ehci {
+>  
+>      struct cdi_mem_area *periodic_list_mem;
+>      volatile uint32_t *periodic_list;
+> +    ehci_fat_qh_t **periodic_qhs;
+> +
+> +    struct cdi_mem_area *periodic_pseudo_qhs_mem;
+> +    ehci_fat_qh_t *periodic_pseudo_qhs;
+> +    ehci_fat_qh_t *periodic_functional_qhs;
+
+As I mentioned above, a comment explaining these wouldn't hurt either.
+
+After reading the rest of the patch I have the impression that the job
+of the pseudo QHs is just to sit there permanently so that the
+(transient) functional QHs have a place to attach to. I'm not sure,
+though.
+
+>      ehci_fat_qh_t *async_start;
+>      cdi_list_t retired_qhs;
+> +
+> +    // For a bit of load balancing
+> +    int periodic_start_microframe;
+>  };
+>  
+>  #define PCI_CLASS_SERIAL_BUS_CONTROLLER     0x0c
+
+Kevin
+
+From kevin at tyndur.org  Sun Jan  3 23:30:54 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 3 Jan 2016 23:30:54 +0100
+Subject: [cdi-devel] [PATCH 4/5] hid: Specify interface
+In-Reply-To: <1451347254-25755-5-git-send-email-max@tyndur.org>
+References: <1451347254-25755-1-git-send-email-max@tyndur.org>
+	<1451347254-25755-5-git-send-email-max@tyndur.org>
+Message-ID: <20160103223054.GB3010@silvanus>
+
+On Tue, Dec 29, 2015 at 01:00:53AM +0100, Max Reitz wrote:
+> Signed-off-by: Max Reitz <max at tyndur.org>
+> ---
+>  include/cdi-osdep.h        |  20 ++++
+>  include/cdi.h              |   1 +
+>  include/cdi/hid-keycodes.h | 262 +++++++++++++++++++++++++++++++++++++++++++++
+>  include/cdi/hid-ledcodes.h |  85 +++++++++++++++
+>  include/cdi/hid.h          | 113 +++++++++++++++++++
+>  5 files changed, 481 insertions(+)
+>  create mode 100644 include/cdi/hid-keycodes.h
+>  create mode 100644 include/cdi/hid-ledcodes.h
+>  create mode 100644 include/cdi/hid.h
+
+> diff --git a/include/cdi/hid.h b/include/cdi/hid.h
+> new file mode 100644
+> index 0000000..0196a62
+> --- /dev/null
+> +++ b/include/cdi/hid.h
+> @@ -0,0 +1,113 @@
+> +/*
+> + * Copyright (c) 2015 Max Reitz
+> + *
+> + * This program is free software. It comes without any warranty, to
+> + * the extent permitted by applicable law. You can redistribute it
+> + * and/or modify it under the terms of the Do What The Fuck You Want
+> + * To Public License, Version 2, as published by Sam Hocevar. See
+> + * http://sam.zoy.org/projects/COPYING.WTFPL for more details.
+> + */
+> +
+> +#ifndef _CDI_HID_H_
+> +#define _CDI_HID_H_
+> +
+> +#include <stdint.h>
+> +
+> +#include <cdi.h>
+> +#include <cdi-osdep.h>
+> +#include <cdi/hid-keycodes.h>
+> +#include <cdi/hid-ledcodes.h>
+> +
+> +
+> +/**
+> + * Entry of the bitmaps used in this header. In each entry (i.e. each byte),
+> + * the LSb is bit 0 and the MSb is bit 7.
+> + */
+> +typedef uint8_t cdi_hid_bitmap_t;
+> +
+> +/**
+> + * This array will be extended in the future. The CDI library should ignore
+> + * unknown device types.
+> + */
+> +enum cdi_hid_type {
+> +    CDI_HID_KEYBOARD,
+> +    CDI_HID_MOUSE,
+> +};
+> +
+> +struct cdi_hid {
+> +    struct cdi_device dev;
+> +
+> +    /**
+> +     * Type of the HID. If it is in a meaningful way possible to interpret a
+> +     * device as a keyboard or a mouse, this interpretation should be done by
+> +     * the HID driver and this field should be set to CDI_HID_KEYBOARD or
+> +     * CDI_HID_MOUSE accordingly. The operating system may safely assume that
+> +     * any HID that is not reported to be a keyboard or mouse actually to be
+> +     * unusable as keyboard or mouse.
+> +     *
+> +     * Note that a HID driver is free to provide multiple cdi_hid objects with
+> +     * differing types for a single physical device.
+> +     */
+> +    enum cdi_hid_type type;
+> +
+> +    /**
+> +     * Number of buttons, axes and LEDs offered by this HID.
+> +     */
+> +    size_t button_count, axes_count, led_count;
+> +
+> +    /**
+> +     * Bitmap representing the state of the buttons the HID provides. It has
+> +     * @button_count entries. The interpretation of a set or cleared bit is
+> +     * depending on the device (e.g. whether a set bit means a button is down or
+> +     * that its state changed).
+> +     *
+> +     * For keyboards and mice the button order is fixed (see cdi/hid-keycodes.h
+> +     * for keyboards), and a set bit indicates the respective button is down.
+> +     */
+> +    cdi_hid_bitmap_t* button_states;
+> +
+> +    /**
+> +     * Array containing the state of the axes the HID provides, with @axes_count
+> +     * entries. The interpretation of these values is completely depending on
+> +     * the device (e.g. the range of values allowed; whether the value is
+> +     * relative or absolute, etc.).
+> +     *
+> +     * Keyboards do not have any axes.
+> +     *
+> +     * Mice have two or three axes:
+> +     * - Axis 1: Relative X movement, range [-1.0, 1.0] (positive is right)
+> +     * - Axis 2: Relative Y movement, range [-1.0, 1.0] (positive is up)
+> +     * - Axis 3: Relative wheel movement, 1.0 per tick (positive is forwards)
+> +     */
+> +    float* axes_states;
+
+Do we really have to use floating point types? That won't be very nice for
+monolithic kernels.
+
+> +    cdi_hid_osdep meta;
+> +};
+> +
+> +struct cdi_hid_driver {
+> +    struct cdi_driver drv;
+> +
+> +    /**
+> +     * Sets the state of the LEDs the HID provides.
+> +     *
+> +     * For the LEDs keyboards can provide (and all USB HIDs can provide), see
+> +     * cdi/hid-ledcodes.h.
+> +     */
+> +    void (*set_leds)(struct cdi_hid* device, const cdi_hid_bitmap_t* states);
+> +};
+
+Kevin
+
+From kevin at tyndur.org  Sun Jan  3 23:45:05 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 3 Jan 2016 23:45:05 +0100
+Subject: [cdi-devel] [PATCH 5/5] usb-hid: Add driver
+In-Reply-To: <1451347254-25755-6-git-send-email-max@tyndur.org>
+References: <1451347254-25755-1-git-send-email-max@tyndur.org>
+	<1451347254-25755-6-git-send-email-max@tyndur.org>
+Message-ID: <20160103224505.GC3010@silvanus>
+
+On Tue, Dec 29, 2015 at 01:00:54AM +0100, Max Reitz wrote:
+> Signed-off-by: Max Reitz <max at tyndur.org>
+> ---
+>  usb-hid/main.c    |  74 ++++++++++++++++++++++++++
+>  usb-hid/usb-hid.c | 153 ++++++++++++++++++++++++++++++++++++++++++++++++++++++
+>  usb-hid/usb-hid.h |  54 +++++++++++++++++++
+>  3 files changed, 281 insertions(+)
+>  create mode 100644 usb-hid/main.c
+>  create mode 100644 usb-hid/usb-hid.c
+>  create mode 100644 usb-hid/usb-hid.h
+
+I guess I should send patches to merge that stub main.c of all drivers
+into their real main file. Or do you think it's actually useful?
+
+> diff --git a/usb-hid/usb-hid.h b/usb-hid/usb-hid.h
+> new file mode 100644
+> index 0000000..54c63a6
+> --- /dev/null
+> +++ b/usb-hid/usb-hid.h
+> @@ -0,0 +1,54 @@
+> +/******************************************************************************
+> + * Copyright (c) 2015 Max Reitz                                               *
+> + *                                                                            *
+> + * Permission is hereby granted,  free of charge,  to any person  obtaining a *
+> + * copy of this software and associated documentation files (the "Software"), *
+> + * to deal in the Software without restriction,  including without limitation *
+> + * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
+> + * and/or  sell copies of the  Software,  and to permit  persons to whom  the *
+> + * Software is furnished to do so, subject to the following conditions:       *
+> + *                                                                            *
+> + * The above copyright notice and this permission notice shall be included in *
+> + * all copies or substantial portions of the Software.                        *
+> + *                                                                            *
+> + * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
+> + * IMPLIED,  INCLUDING BUT NOT LIMITED TO THE WARRANTIES  OF MERCHANTABILITY, *
+> + * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
+> + * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
+> + * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
+> + * FROM,  OUT OF  OR IN CONNECTION  WITH  THE SOFTWARE  OR THE  USE OR  OTHER *
+> + * DEALINGS IN THE SOFTWARE.                                                  *
+> + ******************************************************************************/
+> +
+> +#ifndef USB_HID_H
+> +#define USB_HID_H
+> +
+> +#include <cdi.h>
+> +#include <cdi/scsi.h>
+
+Are you sure?
+
+Kevin
+
+From kevin at tyndur.org  Sun Jan  3 23:45:21 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 3 Jan 2016 23:45:21 +0100
+Subject: [cdi-devel] [PATCH 3/5] usb: Implement interrupt transfers
+In-Reply-To: <1451347254-25755-4-git-send-email-max@tyndur.org>
+References: <1451347254-25755-1-git-send-email-max@tyndur.org>
+	<1451347254-25755-4-git-send-email-max@tyndur.org>
+Message-ID: <20160103224521.GD3010@silvanus>
+
+On Tue, Dec 29, 2015 at 01:00:52AM +0100, Max Reitz wrote:
+> Signed-off-by: Max Reitz <max at tyndur.org>
+
+Acked-by: Kevin Wolf <kevin at tyndur.org>
+
+From kevin at tyndur.org  Sun Jan  3 23:45:41 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 3 Jan 2016 23:45:41 +0100
+Subject: [cdi-devel] [PATCH 1/5] usb: Extend interface for interrupt
+ transfers
+In-Reply-To: <1451347254-25755-2-git-send-email-max@tyndur.org>
+References: <1451347254-25755-1-git-send-email-max@tyndur.org>
+	<1451347254-25755-2-git-send-email-max@tyndur.org>
+Message-ID: <20160103224541.GE3010@silvanus>
+
+On Tue, Dec 29, 2015 at 01:00:50AM +0100, Max Reitz wrote:
+> + Add a way to make the HCD start transactions as interrupt transfers
+> + Add a way to make the bus driver start an interrupt transfer
+> + Add a way to make the bus driver cancel and destroy and asynchronous
+>   transmission (such as an interrupt transfer)
+> 
+> Signed-off-by: Max Reitz <max at tyndur.org>
+
+Acked-by: Kevin Wolf <kevin at tyndur.org>
+
+From kevin at tyndur.org  Wed Jan  6 22:36:50 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Wed, 6 Jan 2016 22:36:50 +0100
+Subject: [cdi-devel] [PATCH 0/7] e1000: Support the NIC in the T500
+In-Reply-To: <1451492843-6394-1-git-send-email-kevin@tyndur.org>
+References: <1451492843-6394-1-git-send-email-kevin@tyndur.org>
+Message-ID: <20160106213649.GA7742@silvanus>
+
+On Wed, Dec 30, 2015 at 05:27:16PM +0100, Kevin Wolf wrote:
+> This series fixes a few bugs in the e1000 driver and adds support for the
+> e1000e chip used in the Thinkpad T500.
+> 
+> Kevin Wolf (7):
+>   e1000: Fix TCTL Pad Short Packets bit
+>   e1000: Make descriptors volatile
+>   e1000: Fix error path for full TX queue
+>   e1000: Introduce e1000_model
+>   e1000: Move a few model-specific things to e1000_model
+>   e1000: Implement support for 8086:10f5 e1000e chip
+>   e1000: Wait for Link Up
+
+Without objection, series applied.
+
+Kevin
+
+From kevin at tyndur.org  Sat Jan 16 18:30:00 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 16 Jan 2016 18:30:00 +0100
+Subject: [cdi-devel] [PATCH 0/9] hdaudio: Patches for real hardware
+In-Reply-To: <1451853741-6440-1-git-send-email-kevin@tyndur.org>
+References: <1451853741-6440-1-git-send-email-kevin@tyndur.org>
+Message-ID: <20160116173000.GA6563@silvanus>
+
+On Sun, Jan 03, 2016 at 09:42:12PM +0100, Kevin Wolf wrote:
+> This makes the hdaudio driver work (in a basic way) on the Thinkpad T500.
+> 
+> Kevin Wolf (9):
+>   hdaudio: Fix use of wrong loop counter
+>   hdaudio: Skip non-audio function groups
+>   hdaudio: Extract widget_init()
+>   hdaudio: Debug output for every widget
+>   hdaudio: Enable output pins
+>   hdaudio: Fix hda_set_volume() scaling
+>   hdaudio: Power up audio function and all widgets
+>   hdaudio: Set EAPD bit for all widgets
+>   hdaudio: Set the right format for the output stream
+
+Without objection, series applied.
+
+Kevin
+

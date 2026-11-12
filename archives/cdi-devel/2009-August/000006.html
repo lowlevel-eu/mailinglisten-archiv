@@ -1,0 +1,471 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH] usb: struct usb_packet
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%5D%20usb%3A%20struct%20usb_packet&In-Reply-To=%3C1250894342-8484-1-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000009.html">
+   <LINK REL="Next"  HREF="000007.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH] usb: struct usb_packet</H1>
+    <B>Kevin Wolf</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%5D%20usb%3A%20struct%20usb_packet&In-Reply-To=%3C1250894342-8484-1-git-send-email-kevin%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH] usb: struct usb_packet">kevin at tyndur.org
+       </A><BR>
+    <I>Sat Aug 22 00:39:02 CEST 2009</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000009.html">[cdi-devel] [PATCH 2/2] cdi: Fix compilation on Linux
+</A></li>
+        <LI>Next message: <A HREF="000007.html">[cdi-devel] [PATCH] usb: struct usb_packet
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#6">[ date ]</a>
+              <a href="thread.html#6">[ thread ]</a>
+              <a href="subject.html#6">[ subject ]</a>
+              <a href="author.html#6">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>Als ersten Schritt zu einem netteren Interface nimmt usb_do_packet jetzt
+statt einer endlosen Kette von Parametern jetzt eine struct, die ein
+Paket beschreibt.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">kevin at tyndur.org</A>&gt;
+---
+ usb/include/usb.h |   27 ++++++++++--
+ usb/main.c        |   85 +++++++++++++++++++++++++--------------
+ usb/msd.c         |  114 +++++++++++++++++++++++++++++++++++++++++-----------
+ 3 files changed, 167 insertions(+), 59 deletions(-)
+
+diff --git a/usb/include/usb.h b/usb/include/usb.h
+index 2c435d8..cca698a 100644
+--- a/usb/include/usb.h
++++ b/usb/include/usb.h
+@@ -28,10 +28,11 @@
+ #include &quot;cdi/misc.h&quot;
+ #include &quot;cdi/pci.h&quot;
+ 
+-
+-#define PACKET_SETUP 0x2D
+-#define PACKET_IN    0x69
+-#define PACKET_OUT   0xE1
++enum usb_packet_type {
++    PACKET_SETUP = 0x2D,
++    PACKET_IN    = 0x69,
++    PACKET_OUT   = 0xE1,
++};
+ 
+ #define NO_DATA       0x01
+ #define DEV_TO_HOST   0x80
+@@ -270,6 +271,22 @@ struct msclass_data
+     struct endpoint_desc *bulk_ep_out;
+ };
+ 
++/** Beschreibt ein USB-Paket */
++struct usb_packet {
++    /// Der Typ des Pakets (PACKET_IN, PACKET_OUT, PACKET_SETUP)
++    enum usb_packet_type type;
++    /// Der gewuenschte Endpoint (0 bis 15)
++    int endpoint;
++    /// Die physische Adresse des zu verwendenden Datenpuffers
++    uintptr_t phys_data;
++    /// Die Laenge des Puffers
++    int length;
++    /// Gibt an, ob DATA0 (0) oder DATA1 (1) verwendet werden soll
++    int datatoggle;
++    /// Typ der Daten (zur Sicherheit, damit es kein doofes STALL gibt)
++    int type_of_data;
++};
++
+ 
+ #include &quot;uhci.h&quot;
+ 
+@@ -277,7 +294,7 @@ struct msclass_data
+ #define HCI_STRUCT_SIZE sizeof(struct uhci)
+ 
+ 
+-int do_packet(struct usb_device *device, int type, int endpoint, uintptr_t phys_data, int length, int datatoggle, int type_of_data);
++int usb_do_packet(struct usb_device *device, struct usb_packet* packet);
+ void enumerate_hci(struct hci *);
+ struct cdi_driver *init_uhcd(void);
+ void init_msc_driver(void);
+diff --git a/usb/main.c b/usb/main.c
+index c06f15d..92a7096 100644
+--- a/usb/main.c
++++ b/usb/main.c
+@@ -97,44 +97,41 @@ static const int next_data_type[9] = {
+ * Verarbeitet ein USB-Paket.
+ *
+ * @param device Das USB-Ger&#195;&#164;t
+-* @param type Der Typ des Pakets (PACKET_IN, PACKET_OUT, PACKET_SETUP)
+-* @param endpoint Der gew&#195;&#188;nschte Endpoint (0 bis 15)
+-* @param phys_data Die physische Adresse des zu verwendenden Datenpuffers
+-* @param length Die L&#195;&#164;nge des Puffers
+-* @param datatoggle Gibt an, ob DATA0 (0) oder DATA1 (1) verwendet werden soll
+-* @param type_of_data Typ der Daten (zur Sicherheit, damit es kein doofes STALL gibt)
+ */
+ 
+-int do_packet(struct usb_device *device, int type, int endpoint, uintptr_t phys_data, int length, int datatoggle, int type_of_data)
++int usb_do_packet(struct usb_device *device, struct usb_packet* packet)
+ {
+     int error;
+     int tod_short;
+ 
+-    if (!(device-&gt;expects &amp; type_of_data)) {
+-        dprintf(&quot;Expected 0x%04X, got 0x%04X...?\n&quot;, device-&gt;expects, type_of_data);
++    if (!(device-&gt;expects &amp; packet-&gt;type_of_data)) {
++        dprintf(&quot;Expected 0x%04X, got 0x%04X...?\n&quot;, device-&gt;expects,
++            packet-&gt;type_of_data);
++        // FIXME Das ist keine elegante Loesung des Problems
+         for (;;);
+     }
+-    type_of_data &gt;&gt;= 1;
+-    for (tod_short = 0; type_of_data; tod_short++) {
+-        type_of_data &gt;&gt;= 1;
++    packet-&gt;type_of_data &gt;&gt;= 1;
++    for (tod_short = 0; packet-&gt;type_of_data; tod_short++) {
++        packet-&gt;type_of_data &gt;&gt;= 1;
+     }
+     //dprintf(&quot;TOD: %s\n&quot;, tod_name[tod_short]);
+     device-&gt;expects = next_data_type[tod_short];
+-    endpoint &amp;= 0x07;
+-    type &amp;= 0xFF;
++    packet-&gt;endpoint &amp;= 0x07;
++    packet-&gt;type &amp;= 0xFF;
+     if (device-&gt;stalled) //TODO: Irgendwie entstallen, evtl.? oO
+     {
+         dprintf(&quot;Zugriff auf stalled-Ger&#195;&#164;t verweigert.\n&quot;);
+         return USB_STALLED;
+     }
+     error = device-&gt;hci-&gt;do_packet(device-&gt;hci,
+-                                   (device-&gt;hci-&gt;get_frame(device-&gt;hci) + 3) &amp; 0x3FF,
+-                                   type, device-&gt;id, endpoint,
+-                                   device-&gt;low_speed, phys_data, length,
+-                                   datatoggle);
++        (device-&gt;hci-&gt;get_frame(device-&gt;hci) + 3) &amp; 0x3FF,
++        packet-&gt;type, device-&gt;id, packet-&gt;endpoint,
++        device-&gt;low_speed, packet-&gt;phys_data, packet-&gt;length,
++        packet-&gt;datatoggle);
+     if (error == USB_STALLED)
+     {
+-        printf(&quot;[usb] ENDPOINT %i DES GER&#195;&#132;TS %i STALLED!\n&quot;, endpoint, device-&gt;id);
++        printf(&quot;[usb] ENDPOINT %i DES GER&#195;&#132;TS %i STALLED!\n&quot;,
++            packet-&gt;endpoint, device-&gt;id);
+         device-&gt;stalled = 1;
+     }
+     return error;
+@@ -164,10 +161,21 @@ static void *do_control(struct usb_device *device, int direction, void *buffer,
+     setup-&gt;value = value;
+     setup-&gt;index = index;
+     setup-&gt;length = length;
+-    if (do_packet(device, PACKET_SETUP, 0, psetup, sizeof(struct setup_packet),
+-                  0, USB_TOD_SETUP) != USB_NO_ERROR) {
++
++    struct usb_packet setup_packet = {
++        .type           = PACKET_SETUP,
++        .endpoint       = 0,
++        .phys_data      = psetup,
++        .length         = sizeof(*setup),
++        .datatoggle     = 0,
++        .type_of_data   = USB_TOD_SETUP,
++    };
++
++
++    if (usb_do_packet(device, &amp;setup_packet)) {
+         return NULL;
+     }
++
+     cdi_sleep_ms(20);
+     if (no_data)
+     {
+@@ -176,22 +184,39 @@ static void *do_control(struct usb_device *device, int direction, void *buffer,
+     }
+     else
+     {
+-        if (direction == DEV_TO_HOST) {
+-            rval = do_packet(device, PACKET_IN, 0, pbuf, length, 1,
+-                             USB_TOD_SETUP_DATA_IN);
+-        } else {
+-            rval = do_packet(device, PACKET_OUT, 0, pbuf, length, 1,
+-                             USB_TOD_SETUP_DATA_OUT);
+-        }
++        struct usb_packet data_packet = {
++            .type           = PACKET_IN,
++            .endpoint       = 0,
++            .phys_data      = pbuf,
++            .length         = length,
++            .datatoggle     = 1,
++            .type_of_data   = (direction == DEV_TO_HOST ?
++                              USB_TOD_SETUP_DATA_IN : USB_TOD_SETUP_DATA_OUT),
++        };
++
++        rval = usb_do_packet(device, &amp;data_packet);
+     }
++
+     if (rval == USB_NO_ERROR)
+     {
++        struct usb_packet ack_packet = {
++            .endpoint       = 0,
++            .phys_data      = 0,
++            .length         = 0,
++            .datatoggle     = 1,
++        };
++
+         cdi_sleep_ms(20);
++
+         if (no_data || (direction == HOST_TO_DEV)) {
+-            rval = do_packet(device, PACKET_IN, 0, 0, 0, 1, USB_TOD_SETUP_ACK_IN);
++            ack_packet.type         = PACKET_IN;
++            ack_packet.type_of_data = USB_TOD_SETUP_ACK_IN;
+         } else {
+-            rval = do_packet(device, PACKET_OUT, 0, 0, 0, 1, USB_TOD_SETUP_ACK_OUT);
++            ack_packet.type         = PACKET_OUT;
++            ack_packet.type_of_data = USB_TOD_SETUP_ACK_OUT;
+         }
++
++        rval = usb_do_packet(device, &amp;ack_packet);
+     }
+     return (rval == USB_NO_ERROR) ? rbuf : NULL;
+ }
+diff --git a/usb/msd.c b/usb/msd.c
+index 11fbd6a..0f9b79e 100644
+--- a/usb/msd.c
++++ b/usb/msd.c
+@@ -187,7 +187,7 @@ void register_msd(struct usb_device *usbdev)
+         strgdev-&gt;block_count = bc;
+         size = bs;
+         size *= bc;
+-        dprintf(&quot;%s: %i * %i B (ca. %i MB).\n&quot;, strgdev-&gt;dev.name, bc, bs, size &gt;&gt; 20);
++        dprintf(&quot;%s: %i * %i B (ca. %lld MB).\n&quot;, strgdev-&gt;dev.name, bc, bs, size &gt;&gt; 20);
+     }
+     cdi_storage_device_init(strgdev);
+     cdi_list_push(cdi_driver.drv.devices, strgdev);
+@@ -210,6 +210,36 @@ static void deinit_msd(struct cdi_device *cdi_msd)
+     //TODO: Und gerade hier...
+ }
+ 
++static int write_cmd(struct usb_device* usbdev, uintptr_t src)
++{
++    struct msclass_data *msc = (struct msclass_data*) usbdev-&gt;classd;
++    struct usb_packet cmd_packet = {
++        .type           = PACKET_OUT,
++        .endpoint       = msc-&gt;bulk_ep_out-&gt;endpoint_address,
++        .phys_data      = src,
++        .length         = 0x1F,
++        .datatoggle     = 0,
++        .type_of_data   = USB_TOD_COMMAND,
++    };
++
++    return usb_do_packet(usbdev, &amp;cmd_packet);
++}
++
++static int read_status(struct usb_device* usbdev, uintptr_t dest)
++{
++    struct msclass_data *msc = (struct msclass_data*) usbdev-&gt;classd;
++    struct usb_packet status_packet = {
++        .type           = PACKET_IN,
++        .endpoint       = msc-&gt;bulk_ep_in-&gt;endpoint_address,
++        .phys_data      = dest,
++        .length         = 0x0D,
++        .datatoggle     = 0,
++        .type_of_data   = USB_TOD_STATUS,
++    };
++
++    return usb_do_packet(usbdev, &amp;status_packet);
++}
++
+ static int msd_get_capacity(struct usb_device *usbdev, uint32_t *block_size, uint32_t *block_count)
+ {
+     struct msclass_data *msc;
+@@ -244,29 +274,43 @@ static int msd_get_capacity(struct usb_device *usbdev, uint32_t *block_size, uin
+     cbw-&gt;cbw_cb_length = 12;
+     cbw-&gt;cbw_cb[0] = MSC_CMD_CAPACITY;
+     cbw-&gt;cbw_cb[1] = 0; //LUN: 0
+-    if (do_packet(usbdev, PACKET_OUT, msc-&gt;bulk_ep_out-&gt;endpoint_address, pcbw,
+-                  0x1F, 0, USB_TOD_COMMAND) != USB_NO_ERROR) {
++
++    if (write_cmd(usbdev, pcbw) != USB_NO_ERROR) {
+         return 0;
+     }
++
+     cdi_sleep_ms(20);
+-    if (do_packet(usbdev, PACKET_IN, msc-&gt;bulk_ep_in-&gt;endpoint_address, pcap,
+-                  sizeof(struct msd_capacity), 0, USB_TOD_DATA_IN)
+-           != USB_NO_ERROR) {
++
++    struct usb_packet in_packet = {
++        .type           = PACKET_IN,
++        .endpoint       = msc-&gt;bulk_ep_in-&gt;endpoint_address,
++        .phys_data      = pcap,
++        .length         = sizeof(*cap),
++        .datatoggle     = 0,
++        .type_of_data   = USB_TOD_DATA_IN,
++    };
++
++    if (usb_do_packet(usbdev, &amp;in_packet) != USB_NO_ERROR) {
+         return 0;
+     }
++
+     cdi_sleep_ms(5);
+-    if (do_packet(usbdev, PACKET_IN, msc-&gt;bulk_ep_in-&gt;endpoint_address, pcsw,
+-                  0x0D, 0, USB_TOD_STATUS) != USB_NO_ERROR) {
++
++    if (read_status(usbdev, pcsw) != USB_NO_ERROR) {
+         return 0;
+     }
++
+     cdi_sleep_ms(5);
++
+     if ((csw-&gt;csw_signature != CSW_SIGNATURE) ||
+          (csw-&gt;csw_tag      !=  expected_tag) ||
+           csw-&gt;csw_status) {
+         return 0;
+     }
++
+     *block_size = BE2CPU(cap-&gt;block_length);
+     *block_count = BE2CPU(cap-&gt;last_lba) + 1;
++
+     return 1;
+ }
+ 
+@@ -295,21 +339,23 @@ static int msd_ready(struct usb_device *usbdev)
+    cbw-&gt;cbw_flags = 0x80; //IN
+    cbw-&gt;cbw_lun = 0; //Was wei&#195;&#159; ich, wie viele LUNs datt Dingens hat?
+    cbw-&gt;cbw_cb_length = 12; //Alles null, also &quot;Test unit ready&quot;
+-   if (do_packet(usbdev, PACKET_OUT, msc-&gt;bulk_ep_out-&gt;endpoint_address, pcbw,
+-                 0x1F, 0, USB_TOD_COMMAND) != USB_NO_ERROR) {
++
++   if (write_cmd(usbdev, pcbw) != USB_NO_ERROR) {
+        return 0;
+    }
++
+    cdi_sleep_ms(7);
+-   if (do_packet(usbdev, PACKET_IN, msc-&gt;bulk_ep_in-&gt;endpoint_address, pcsw,
+-                 0x0D, 0, USB_TOD_STATUS) != USB_NO_ERROR) {
++   if (read_status(usbdev, pcsw) != USB_NO_ERROR) {
+        return 0;
+    }
++
+    cdi_sleep_ms(4);
+    if ((csw-&gt;csw_signature != CSW_SIGNATURE) ||
+        (csw-&gt;csw_tag       !=  expected_tag) ||
+         csw-&gt;csw_status) {
+       return 0;
+    }
++
+    return 1;
+ }
+ #endif
+@@ -409,23 +455,33 @@ static uint32_t msd_read(struct usb_device *usbdev, uint32_t lba, uint16_t secto
+     cbw-&gt;cbw_cb[5] =  lba &amp; 0x000000FF;
+     cbw-&gt;cbw_cb[7] = (sectors &amp; 0x0000FF00) &gt;&gt; 8;
+     cbw-&gt;cbw_cb[8] =  sectors &amp; 0x000000FF;
+-    error = do_packet(usbdev, PACKET_OUT, msc-&gt;bulk_ep_out-&gt;endpoint_address,
+-                      pcbw, 0x1F, 0, USB_TOD_COMMAND);
++
++    error = write_cmd(usbdev, pcbw);
+     if (error != USB_NO_ERROR) {
+         return error;
+     }
+     cdi_sleep_ms(20);
+-    error = do_packet(usbdev, PACKET_IN, msc-&gt;bulk_ep_in-&gt;endpoint_address,
+-                      phys_buffer, length, 0, USB_TOD_DATA_IN);
++
++    struct usb_packet in_packet = {
++        .type           = PACKET_IN,
++        .endpoint       = msc-&gt;bulk_ep_in-&gt;endpoint_address,
++        .phys_data      = phys_buffer,
++        .length         = length,
++        .datatoggle     = 0,
++        .type_of_data   = USB_TOD_DATA_IN,
++    };
++
++    error = usb_do_packet(usbdev, &amp;in_packet);
+     if (error != USB_NO_ERROR) {
+         return error;
+     }
+     cdi_sleep_ms(5);
+-    error = do_packet(usbdev, PACKET_IN, msc-&gt;bulk_ep_in-&gt;endpoint_address,
+-                      pcsw, 0x0D, 0, USB_TOD_STATUS);
++
++    error = read_status(usbdev, pcsw);
+     if (error != USB_NO_ERROR) {
+         return error;
+     }
++
+     cdi_sleep_ms(4);
+     if ((csw-&gt;csw_signature != CSW_SIGNATURE) ||
+         (csw-&gt;csw_tag       !=  expected_tag) ||
+@@ -522,23 +578,33 @@ static uint32_t msd_write(struct usb_device *usbdev, uint32_t lba, uint16_t sect
+     cbw-&gt;cbw_cb[5] =  lba &amp; 0x000000FF;
+     cbw-&gt;cbw_cb[7] = (sectors &amp; 0x0000FF00) &gt;&gt; 8;
+     cbw-&gt;cbw_cb[8] =  sectors &amp; 0x000000FF;
+-    error = do_packet(usbdev, PACKET_OUT, msc-&gt;bulk_ep_out-&gt;endpoint_address,
+-                      pcbw, 0x1F, 0, USB_TOD_COMMAND);
++
++    error = write_cmd(usbdev, pcbw);
+     if (error != USB_NO_ERROR) {
+         return error;
+     }
+     cdi_sleep_ms(20);
+-    error = do_packet(usbdev, PACKET_OUT, msc-&gt;bulk_ep_out-&gt;endpoint_address,
+-                      phys_buffer, length, 0, USB_TOD_DATA_OUT);
++
++    struct usb_packet out_packet = {
++        .type           = PACKET_OUT,
++        .endpoint       = msc-&gt;bulk_ep_out-&gt;endpoint_address,
++        .phys_data      = phys_buffer,
++        .length         = length,
++        .datatoggle     = 0,
++        .type_of_data   = USB_TOD_DATA_OUT,
++    };
++
++    error = usb_do_packet(usbdev, &amp;out_packet);
+     if (error != USB_NO_ERROR) {
+         return error;
+     }
++
+     cdi_sleep_ms(5);
+-    error = do_packet(usbdev, PACKET_IN, msc-&gt;bulk_ep_in-&gt;endpoint_address,
+-                      pcsw, 0x0D, 0, USB_TOD_STATUS);
++    error = read_status(usbdev, pcsw);
+     if (error != USB_NO_ERROR) {
+         return error;
+     }
++
+     cdi_sleep_ms(4);
+     if ((csw-&gt;csw_signature != CSW_SIGNATURE) ||
+         (csw-&gt;csw_tag       !=  expected_tag) ||
+-- 
+1.6.0.2
+
+</PRE>
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000009.html">[cdi-devel] [PATCH 2/2] cdi: Fix compilation on Linux
+</A></li>
+	<LI>Next message: <A HREF="000007.html">[cdi-devel] [PATCH] usb: struct usb_packet
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#6">[ date ]</a>
+              <a href="thread.html#6">[ thread ]</a>
+              <a href="subject.html#6">[ subject ]</a>
+              <a href="author.html#6">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

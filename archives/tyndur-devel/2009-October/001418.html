@@ -1,0 +1,304 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 2/5] kedit: Syntaxhighlighting-Modus anhand	der Dateientdung einstellen
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%202/5%5D%20kedit%3A%20Syntaxhighlighting-Modus%20anhand%0A%09der%20Dateientdung%20einstellen&In-Reply-To=%3C1255061820-15945-3-git-send-email-hartmut%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001417.html">
+   <LINK REL="Next"  HREF="001419.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 2/5] kedit: Syntaxhighlighting-Modus anhand	der Dateientdung einstellen</H1>
+    <B>Alexander Hartmut Kluth</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%202/5%5D%20kedit%3A%20Syntaxhighlighting-Modus%20anhand%0A%09der%20Dateientdung%20einstellen&In-Reply-To=%3C1255061820-15945-3-git-send-email-hartmut%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 2/5] kedit: Syntaxhighlighting-Modus anhand	der Dateientdung einstellen">hartmut at tyndur.org
+                  </A><BR>
+    <I>Fr Okt  9 06:16:57 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001417.html">[tyndur-devel] [PATCH 1/5] kedit: syntax.pas aufgesplitted
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001419.html">[tyndur-devel] [PATCH 3/5] kedit: Pascal-Highlighting hinzugefügt
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1418">[ Datum ]</a>
+              <a href="thread.html#1418">[ Thema ]</a>
+              <a href="subject.html#1418">[ Betreff (Subject) ]</a>
+              <a href="author.html#1418">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* kedit.pas: Feld 'extension' hinzugefügt für die Dateiendung
+* kedit_tui.pas: Funktion zum Setzen des Syntax-Modus implementiert
+* kedit_main.pas: Auseinanderfrickeln der Dateiendung und Syntax-Modus setzen
+
+Signed-off-by: Alexander Hartmut Kluth &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">hartmut at tyndur.org</A>&gt;
+---
+ src/modules/pas/kedit/kedit.pas      |    5 +-
+ src/modules/pas/kedit/kedit_main.pas |   29 ++++++++-
+ src/modules/pas/kedit/kedit_tui.pas  |  103 +++++++++++++++++++++++++++++++++-
+ 3 files changed, 128 insertions(+), 9 deletions(-)
+
+diff --git a/src/modules/pas/kedit/kedit.pas b/src/modules/pas/kedit/kedit.pas
+index dc956d5..5741842 100644
+--- a/src/modules/pas/kedit/kedit.pas
++++ b/src/modules/pas/kedit/kedit.pas
+@@ -12,7 +12,7 @@ var
+     state:  kedit_state;
+ 
+ (***********************************************
+- * Dummyfunktionen für LOST                    *
++ * Dummyfunktionen für tyndur                  *
+  ***********************************************)
+ 
+ procedure DisableFlushing(var f: Textfile); external name 'disable_flushing';
+@@ -61,6 +61,7 @@ var
+ begin
+     with state do begin
+         filename    := '(unbenannt)';
++        extension   := '';
+ 
+         highlight   := false;
+         readonly    := false;
+@@ -103,7 +104,7 @@ procedure Edit;
+             case key of
+                 #27: { VT100-Escapesequenz }
+                     begin
+-                        key := ReadEscapeSequence();
++                        key := HandleEscapeSequence();
+                         if (key &gt;= SK_MIN) and (key &lt;= SK_MAX) and (special_key_handler[key] &lt;&gt; nil) then begin
+                             special_key_handler[key](@state);
+                         end else begin
+diff --git a/src/modules/pas/kedit/kedit_main.pas b/src/modules/pas/kedit/kedit_main.pas
+index 18dbef7..0195ca3 100644
+--- a/src/modules/pas/kedit/kedit_main.pas
++++ b/src/modules/pas/kedit/kedit_main.pas
+@@ -12,6 +12,7 @@ type
+     // Beschreibt einen offenen Puffer
+     kedit_state = record
+         filename:   String;
++        extension:  String;
+ 
+         cursX:      longint;
+         cursY:      longint;
+@@ -141,6 +142,8 @@ var lfile: textfile;
+     i: integer;
+     attr: word;
+     s: String;
++    ext: String;
++    reversed: String;
+ begin
+     if loadname = '' then begin
+         Textbackground(1);
+@@ -149,10 +152,6 @@ begin
+         Textbackground(0);
+     end;
+ 
+-    if loadname = '' then begin
+-        exit;
+-    end;
+-
+     if not FileExists(loadname) then begin
+         if create then begin
+             state^.filename := loadname;
+@@ -167,6 +166,28 @@ begin
+     end;
+ 
+     with state^ do begin
++        loadname := Trim(loadname);
++
++        {
++            Dieses wundervolle Code-Konstrukt ist das Ergebnis
++            stundenlanger Codearbeit von Patrick Pokatilo a.k.a
++            the incredible SHyx0rmz und von Alexander H. Kluth a.k.a.
++            'Pagefault-it!'-DerHartmut.
++        }
++        if RightStr(loadname, 4) = '.pas' then begin
++            extension := 'pas';
++        end else if RightStr(loadname, 4) = '.asm' then begin
++            extension := 'asm';
++        end else if RightStr(loadname, 2) = '.c' then begin
++            extension := 'c';
++        end else if RightStr(loadname, 2) = '.S' then begin
++            extension := 's';
++        end else if RightStr(loadname, 2) = '.s' then begin
++            extension := 's';
++        end;
++
++        SetSyntaxHighlighting(state);
++
+         Assign(lfile,loadname);
+         GetFAttr(lfile, attr);
+         if attr and dos.ReadOnly = dos.ReadOnly then readonly := true;
+diff --git a/src/modules/pas/kedit/kedit_tui.pas b/src/modules/pas/kedit/kedit_tui.pas
+index 028d9b6..f9bd5b7 100644
+--- a/src/modules/pas/kedit/kedit_tui.pas
++++ b/src/modules/pas/kedit/kedit_tui.pas
+@@ -16,6 +16,40 @@ const
+     OPT_NO      = 2;
+     OPT_CANCEL  = 3;
+ 
++
++    SK_F1       = #59;
++    SK_F2       = #60;
++    SK_F3       = #61;
++    SK_F4       = #62;
++    SK_F5       = #63;
++    SK_F6       = #64;
++    SK_F7       = #65;
++    SK_F8       = #66;
++    SK_F9       = #67;
++    SK_F10      = #68;
++    SK_F11      = #133;
++    SK_F12      = #134;
++
++    SK_INS      = #82;
++    SK_DEL      = #83;
++    SK_HOME     = #71;
++    SK_END      = #79;
++    SK_PGUP     = #73;
++    SK_PGDN     = #81;
++
++    SK_UP       = #72;
++    SK_DOWN     = #80;
++    SK_LEFT     = #75;
++    SK_RIGHT    = #77;
++
++    SK_CTRL_PGUP    =   #132;
++    SK_CTRL_PGDN    =   #118;
++
++    SK_MIN = #59;
++    SK_MAX = #134;
++
++function HandleEscapeSequence: char;
++
+ procedure ShowCursor(visible: boolean);
+ procedure FillRectangle(x1, y1, x2, y2: integer);
+ function Space(n: integer): string;
+@@ -27,10 +61,12 @@ function YesNoCancel(question: string; cancel: boolean): integer;
+ procedure RedrawLine(state: pkedit_state; y: longint);
+ procedure DrawTitleBar(state: pkedit_state);
+ procedure DrawEditor(state: pkedit_state);
++procedure SetSyntaxHighlighting(state: pkedit_state);
+ 
+ implementation
+ 
+-uses crt, syntax;
++uses crt, strutils, sysutils, syntax, syntax_c, syntax_pas, syntax_intel,
++syntax_atandt;
+ 
+ var
+     highlighter: TSyntax;
+@@ -40,6 +76,54 @@ begin
+     if visible then CursorOn else CursorOff;
+ end;
+ 
++(* Eingabeverarbeitung ************************************************)
++
++function HandleEscapeSequence: char;
++begin
++    HandleEscapeSequence := #0;
++
++    case readkey of
++        'O':
++            case readkey of
++                'P': exit(SK_F1);
++                'Q': exit(SK_F2);
++                'R': exit(SK_F3);
++                'S': exit(SK_F4);
++            end;
++
++        '[':
++            case readkey of
++                'A': exit(SK_UP);
++                'B': exit(SK_DOWN);
++                'C': exit(SK_RIGHT);
++                'D': exit(SK_LEFT);
++                'F': exit(SK_END);
++                'H': exit(SK_HOME);
++
++                '3': if readkey = '~' then exit(SK_DEL);
++                '5': if readkey = '~' then exit(SK_PGUP);
++                '6': if readkey = '~' then exit(SK_PGDN);
++
++                '1':
++                    case readkey of
++                        '5': if readkey = '~' then exit(SK_F5);
++                        '7': if readkey = '~' then exit(SK_F6);
++                        '8': if readkey = '~' then exit(SK_F7);
++                        '9': if readkey = '~' then exit(SK_F8);
++                    end;
++
++                '2':
++                    case readkey of
++                        '0': if readkey = '~' then exit(SK_F9);
++                        '1': if readkey = '~' then exit(SK_F10);
++                        '3': if readkey = '~' then exit(SK_F11);
++                        '4': if readkey = '~' then exit(SK_F12);
++                        '~': exit(SK_INS);
++                    end;
++            end;
++    end;
++end;
++
+ (* Rein grafisches Zeug ***********************************************)
+ 
+ procedure FillRectangle(x1, y1, x2, y2: integer);
+@@ -194,7 +278,7 @@ begin
+     GotoXY(1,2);
+     firstVisible := 1 + state^.scrolly;
+     lastVisible := TextLines + state^.scrolly;
+-    if not highlight then begin
++    if (not highlight) or (highlighter = nil) then begin
+         for i := firstVisible to lastVisible do begin
+             s := Copy(state^.text^[i], 1 + state^.scrollx, 80);
+             Write(Utf8Encode(s));
+@@ -275,6 +359,19 @@ begin
+     flush(output);
+ end;
+ 
++procedure SetSyntaxHighlighting(state: pkedit_state);
++begin
++    if state^.extension = 'c' then begin
++        highlighter := TSyntax_C.create;
++    end else if state^.extension = 'pas' then begin
++        highlighter := TSyntax_Pas.create;
++    end else if state^.extension = 'asm' then begin
++        highlighter := TSyntax_INTEL.create;
++    end else if state^.extension = 's' then begin
++        highlighter := TSyntax_ATANDT.create;
++    end;
++end;
++
+ begin
+-    highlighter := TSyntax_C.create;
++    highlighter := nil;
+ end.
+-- 
+1.6.3.3
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001417.html">[tyndur-devel] [PATCH 1/5] kedit: syntax.pas aufgesplitted
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001419.html">[tyndur-devel] [PATCH 3/5] kedit: Pascal-Highlighting hinzugefügt
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1418">[ Datum ]</a>
+              <a href="thread.html#1418">[ Thema ]</a>
+              <a href="subject.html#1418">[ Betreff (Subject)]</a>
+              <a href="author.html#1418">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

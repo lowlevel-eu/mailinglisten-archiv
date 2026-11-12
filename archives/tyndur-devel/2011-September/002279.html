@@ -1,0 +1,792 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 3/6] libc: LIOv2-Syscalls
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%203/6%5D%20libc%3A%20LIOv2-Syscalls&In-Reply-To=%3C1316966578-19691-4-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002285.html">
+   <LINK REL="Next"  HREF="002287.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 3/6] libc: LIOv2-Syscalls</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%203/6%5D%20libc%3A%20LIOv2-Syscalls&In-Reply-To=%3C1316966578-19691-4-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 3/6] libc: LIOv2-Syscalls">kevin at tyndur.org
+                  </A><BR>
+    <I>So Sep 25 18:02:55 CEST 2011</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002285.html">[tyndur-devel] [PATCH 2/6] libc: lio_seek in lio_compat_seek umbenannt
+</A></li>
+        <LI>N�chste Nachricht: <A HREF="002287.html">[tyndur-devel] [PATCH 3/6] libc: LIOv2-Syscalls
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2279">[ Datum ]</a>
+              <a href="thread.html#2279">[ Thema ]</a>
+              <a href="subject.html#2279">[ Betreff (Subject) ]</a>
+              <a href="author.html#2279">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ libc: LIOv2-Syscalls implementiert (aber noch nicht benutzt)
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/include/syscall.h     |  214 ++++++++++++++++
+ src/modules/lib/syscalls/lostio.c |  492 +++++++++++++++++++++++++++++++++++++
+ 2 files changed, 706 insertions(+), 0 deletions(-)
+ create mode 100644 src/modules/lib/syscalls/lostio.c
+
+diff --git a/src/modules/include/syscall.h b/src/modules/include/syscall.h
+index 74ef0be..ec56196 100644
+--- a/src/modules/include/syscall.h
++++ b/src/modules/include/syscall.h
+@@ -105,4 +105,218 @@ void syscall_timer(uint32_t timer_id, uint32_t usec);
+ 
+ void syscall_debug_stacktrace(pid_t pid);
+ 
++
++// LIO2
++
++typedef lio_usp_stream_t lio_stream_t;
++typedef lio_usp_resource_t lio_resource_t;
++
++/* FIXME Duplikat von lio_usp_dir_entry in syscall_structs.h */
++struct lio_dir_entry {
++    lio_usp_resource_t resource;
++    char               name[LIO_MAX_FNLEN + 1];
++    struct lio_stat    stat;
++} __attribute__((packed));
++
++/**
++ * Sucht eine Ressource anhand eines Pfads und gibt ihre ID zurück.
++ *
++ * @param follow_symlink Wenn follow_symlink true ist und der Pfad auf eine
++ * symbolische Verknüpfung zeigt, dann wird die Verknüfung aufgelöst. Ist
++ * follow_symlink false, wird in diesem Fall die Verknüpfung selbst
++ * zurückgegeben.
++ *
++ * @return 0 bei Erfolg, negativ im Fehlerfall. Insbesondere:
++ *
++ *      -ENOENT     Es wurde keine Ressource mit dem gegebenen Pfad gefunden
++ */
++lio_resource_t lio_resource(const char* path, bool follow_symlink);
++
++/**
++ * Öffnet eine Ressource und gibt die ID des entstandenen Streams zurück.
++ *
++ * @param resource ID der zu öffnenden Ressource
++ * @param flags Bitmaske aus LIO_*-Flags
++ *
++ * @return 0 bei Erfolg, negativ im Fehlerfall. Insbesondere:
++ *
++ *      -EINVAL     Es gibt keine Ressource mit der gegebenen ID
++ *      -EACCES     Die Ressource unterstützt ein gesetztes Flag nicht
++ */
++lio_stream_t lio_open(lio_resource_t resource, int flags);
++
++/**
++ * Gibt Informationen zu einer Ressource zurück.
++ *
++ * @param resource ID der Ressource
++ * @param sbuf Puffer für die Informationen
++ *
++ * @return 0 bei Erfolg, negativ im Fehlerfall. Insbesondere:
++ *
++ *      -EINVAL     Es gibt keine Ressource mit der gegebenen ID
++ */
++int lio_stat(lio_resource_t resource, struct lio_stat* sbuf);
++
++/**
++ * Schließt einen Stream.
++ *
++ * @param s Der zu schließende Stream
++ * @return 0 bei Erfolg, negativ im Fehlerfall.
++ */
++int lio_close(lio_stream_t s);
++
++/**
++ * Liest aus dem Stream ab der aktuellen Position des Dateizeigers und bewegt
++ * den Dateizeiger hinter das letzte gelesene Byte.
++ *
++ * @param s Auszulesender Stream
++ * @param bytes Zu lesende Bytes
++ * @param buf Zielpuffer, in dem die ausgelesenen Daten abgelegt werden
++ *
++ * @return Die Anzahl der erfolgreich gelesenen Bytes (&quot;short reads&quot; sind
++ * möglich) oder negativ, falls sofort ein Fehler aufgetreten ist.
++ */
++ssize_t lio_read(lio_stream_t s, size_t bytes, void* buf);
++
++/**
++ * Liest aus dem Stream ab der gegebenen Position.
++ *
++ * @param s Auszulesender Stream
++ * @param offset Position, ab der gelesen werden soll, in Bytes vom Dateianfang
++ * @param bytes Zu lesende Bytes
++ * @param buf Zielpuffer, in dem die ausgelesenen Daten abgelegt werden
++ *
++ * @return Die Anzahl der erfolgreich gelesenen Bytes (&quot;short reads&quot; sind
++ * möglich) oder negativ, falls sofort ein Fehler aufgetreten ist.
++ */
++ssize_t lio_pread(lio_stream_t s, uint64_t offset, size_t bytes, void* buf);
++
++/**
++ * Schreibt in den Stream ab der aktuellen Position des Dateizeigers und bewegt
++ * den Dateizeiger hinter das letzte geschriebene Byte.
++ *
++ * @param s Zu schreibender Stream
++ * @param bytes Zu schreibende Bytes
++ * @param buf Quellpuffer, dessen Inhalt geschrieben werden soll
++ *
++ * @return Die Anzahl der erfolgreich gegeschriebenen Bytes (&quot;short writes&quot;
++ * sind möglich) oder negativ, falls sofort ein Fehler aufgetreten ist.
++ */
++ssize_t lio_write(lio_stream_t s, size_t bytes, const void* buf);
++
++/**
++ * Schreibt in den Stream ab der gegebenen Position.
++ *
++ * @param s Zu schreibender Stream
++ * @param offset Position, ab der geschrieben werden soll, in Bytes vom
++ * Dateianfang
++ * @param bytes Zu schreibende Bytes
++ * @param buf Quellpuffer, dessen Inhalt geschrieben werden soll
++ *
++ * @return Die Anzahl der erfolgreich gegeschriebenen Bytes (&quot;short writes&quot;
++ * sind möglich) oder negativ, falls sofort ein Fehler aufgetreten ist.
++ */
++ssize_t lio_pwrite(lio_stream_t s, uint64_t offset, size_t bytes,
++    const void* buf);
++
++/**
++ * Bewegt den Dateizeiger des Streams und gibt seine aktuelle Position zurück
++ *
++ * @param s Stream, dessen Dateizeiger verändert werden soll
++ * @param offset Neue Dateizeigerposition als Offset in Bytes
++ * @param whence Gibt an, wozu das Offset relativ ist (LIO_SEEK_*-Konstanten)
++ *
++ * @return Die neue Position des Dateizeigers in Bytes vom Dateianfang, oder
++ * negativ im Fehlerfall.
++ */
++int64_t lio_seek(lio_stream_t s, uint64_t offset, int whence);
++
++/**
++ * Ändert die Dateigröße der Ressource eines Streams
++ * TODO Wieso nimmt das einen Stream und keine Ressource?
++ *
++ * @param s Zu ändernder Stream
++ * @param size Neue Dateigröße in Bytes
++ *
++ * @return 0 bei Erfolg, negativ im Fehlerfall.
++ */
++int lio_truncate(lio_stream_t s, uint64_t size);
++
++/**
++ * Liest Einträge einer Verzeichnisressource aus.
++ *
++ * @param res Auszulesende Verzeichnisressource
++ * @param start Index des ersten zurückzugebenden Verzeichniseintrags
++ * @param num Maximale Anzahl zurückzugebender Verzeichniseinträge
++ * (Puffergröße)
++ * @param buf Array von Verzeichniseinträgen, die befüllt werden
++ *
++ * @return Anzahl der zurückgegebenen Verzeichniseinträge, oder negativ im
++ * Fehlerfall.
++ */
++ssize_t lio_read_dir(lio_resource_t res, size_t start, size_t num,
++    struct lio_dir_entry* buf);
++
++/**
++ * Erstellt eine neue Datei.
++ *
++ * @param parent Verzeichnis, das die neue Datei enthalten soll
++ * @param name Name der neuen Datei
++ *
++ * @return 0 bei Erfolg, negativ im Fehlerfall.
++ */
++lio_resource_t lio_mkfile(lio_resource_t parent, const char* name);
++
++/**
++ * Erstellt ein neues Verzeichnis.
++ *
++ * @param parent Verzeichnis, das das neue Unterverzeichnis enthalten soll
++ * @param name Name des neuen Verzeichnisses
++ *
++ * @return 0 bei Erfolg, negativ im Fehlerfall.
++ */
++lio_resource_t lio_mkdir(lio_resource_t parent, const char* name);
++
++/**
++ * Erstellt eine neue symbolische Verknüpfung
++ *
++ * @param parent Verzeichnis, das die neue Verknüofung enthalten soll
++ * @param name Name der neuen Verknüpfung
++ *
++ * @return 0 bei Erfolg, negativ im Fehlerfall.
++ */
++lio_resource_t lio_mksymlink(lio_resource_t parent,
++    const char* name, const char* target);
++
++/*
++ * Sofern die Ressource grundsätzlich auf persistentem Speicher liegt, aber
++ * unter Umständen bisher nur in einem nichtpersistentem Cache liegt, werden
++ * alle Änderungen, die an diesem Stream durchgeführt worden sind, persistent
++ * gemacht.
++ *
++ * @param s Zurückzuschreibender Stream
++ *
++ * @return 0 bei Erfolg, negativ im Fehlerfall.
++ */
++int lio_sync(lio_stream_t s);
++
++/*
++ * Löscht den Verzeichniseintrag einer Ressource aus ihrem Verzeichnis. Wenn
++ * es keine weiteren Verweise (Hardlinks) auf die Ressource mehr gibt, wird sie
++ * gelöscht.
++ *
++ * @param parent Verzeichnis, das die zu löschende Ressource enthält
++ * @param name Dateiname der zu löschenden Ressource
++ *
++ * @return 0 bei Erfolg, negativ im Fehlerfall.
++ */
++int lio_unlink(lio_resource_t parent, const char* name);
++
++/**
++ * Schreibt alle Änderungen im Kernelcache zurück.
++ *
++ * @return 0 bei Erfolg, negativ im Fehlerfall.
++ */
++int lio_sync_all(void);
++
+ #endif
+diff --git a/src/modules/lib/syscalls/lostio.c b/src/modules/lib/syscalls/lostio.c
+new file mode 100644
+index 0000000..3ea52e1
+--- /dev/null
++++ b/src/modules/lib/syscalls/lostio.c
+@@ -0,0 +1,492 @@
++/*
++ * Copyright (c) 2009 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Antoine Kaufmann.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include &lt;syscall.h&gt;
++#include &lt;string.h&gt;
++
++/**
++ * Sucht eine Ressource anhand eines Pfads und gibt ihre ID zurück.
++ *
++ * @param follow_symlink Wenn follow_symlink true ist und der Pfad auf eine
++ * symbolische Verknüpfung zeigt, dann wird die Verknüfung aufgelöst. Ist
++ * follow_symlink false, wird in diesem Fall die Verknüpfung selbst
++ * zurückgegeben.
++ *
++ * @return 0 bei Erfolg, negativ im Fehlerfall. Insbesondere:
++ *
++ *      -ENOENT     Es wurde keine Ressource mit dem gegebenen Pfad gefunden
++ */
++lio_resource_t lio_resource(const char* path, bool follow_symlink)
++{
++    volatile lio_resource_t result;
++    size_t len;
++
++    len = strlen(path) + 1;
++    asm(
++        &quot;pushl %4;&quot;
++        &quot;pushl %3;&quot;
++        &quot;pushl %2;&quot;
++        &quot;pushl %1;&quot;
++        &quot;mov %0, %%eax;&quot;
++        &quot;int $0x30;&quot;
++        &quot;add $0x10, %%esp;&quot;
++    : : &quot;i&quot; (SYSCALL_LIO_RESOURCE), &quot;r&quot; (path), &quot;r&quot; (len),
++        &quot;r&quot; ((uint32_t) follow_symlink), &quot;r&quot; (&amp;result) : &quot;memory&quot;);
++
++    return result;
++}
++
++/**
++ * Öffnet eine Ressource und gibt die ID des entstandenen Streams zurück.
++ *
++ * @param resource ID der zu öffnenden Ressource
++ * @param flags Bitmaske aus LIO_*-Flags
++ *
++ * @return 0 bei Erfolg, negativ im Fehlerfall. Insbesondere:
++ *
++ *      -EINVAL     Es gibt keine Ressource mit der gegebenen ID
++ *      -EACCES     Die Ressource unterstützt ein gesetztes Flag nicht
++ */
++lio_stream_t lio_open(lio_resource_t resource, int flags)
++{
++    volatile lio_stream_t result;
++
++    asm(
++        &quot;pushl %3;&quot;
++        &quot;pushl %2;&quot;
++        &quot;pushl %1;&quot;
++        &quot;mov %0, %%eax;&quot;
++        &quot;int $0x30;&quot;
++        &quot;add $0xc, %%esp;&quot;
++    : : &quot;i&quot; (SYSCALL_LIO_OPEN), &quot;r&quot; (&amp;resource), &quot;r&quot; (flags), &quot;r&quot; (&amp;result)
++    : &quot;memory&quot;);
++
++    return result;
++}
++
++/**
++ * Gibt Informationen zu einer Ressource zurück.
++ *
++ * @param resource ID der Ressource
++ * @param sbuf Puffer für die Informationen
++ *
++ * @return 0 bei Erfolg, negativ im Fehlerfall. Insbesondere:
++ *
++ *      -EINVAL     Es gibt keine Ressource mit der gegebenen ID
++ */
++int lio_stat(lio_resource_t resource, struct lio_stat* sbuf)
++{
++    volatile int result;
++
++    asm(
++        &quot;pushl %3;&quot;
++        &quot;pushl %2;&quot;
++        &quot;mov %1, %%eax;&quot;
++        &quot;int $0x30;&quot;
++        &quot;add $0xc, %%esp;&quot;
++    : &quot;=a&quot; (result) : &quot;i&quot; (SYSCALL_LIO_STAT), &quot;r&quot; (&amp;resource), &quot;r&quot; (sbuf)
++    : &quot;memory&quot;);
++
++    return result;
++}
++
++/**
++ * Schließt einen Stream.
++ *
++ * @param s Der zu schließende Stream
++ * @return 0 bei Erfolg, negativ im Fehlerfall.
++ */
++int lio_close(lio_stream_t s)
++{
++    int result;
++
++    asm(
++        &quot;pushl %2;&quot;
++        &quot;mov %1, %%eax;&quot;
++        &quot;int $0x30;&quot;
++        &quot;add $0x4, %%esp;&quot;
++    : &quot;=a&quot; (result): &quot;i&quot; (SYSCALL_LIO_CLOSE), &quot;r&quot; (&amp;s) : &quot;memory&quot;);
++
++    return result;
++}
++
++static ssize_t read_syscall(lio_stream_t s, uint64_t offset, size_t bytes,
++    void* buf, int updatepos)
++{
++    volatile ssize_t result;
++
++    asm(
++        &quot;pushl %6;&quot;
++        &quot;pushl %5;&quot;
++        &quot;pushl %4;&quot;
++        &quot;pushl %3;&quot;
++        &quot;pushl %2;&quot;
++        &quot;pushl %1;&quot;
++        &quot;mov %0, %%eax;&quot;
++        &quot;int $0x30;&quot;
++        &quot;add $0x18, %%esp;&quot;
++    : : &quot;i&quot; (SYSCALL_LIO_READ), &quot;r&quot; (&amp;s), &quot;r&quot; (&amp;offset), &quot;r&quot; (bytes),
++        &quot;r&quot; (buf), &quot;r&quot; (updatepos), &quot;r&quot; (&amp;result) : &quot;memory&quot;);
++
++    return result;
++}
++
++/**
++ * Liest aus dem Stream ab der aktuellen Position des Dateizeigers und bewegt
++ * den Dateizeiger hinter das letzte gelesene Byte.
++ *
++ * @param s Auszulesender Stream
++ * @param bytes Zu lesende Bytes
++ * @param buf Zielpuffer, in dem die ausgelesenen Daten abgelegt werden
++ *
++ * @return Die Anzahl der erfolgreich gelesenen Bytes (&quot;short reads&quot; sind
++ * möglich) oder negativ, falls sofort ein Fehler aufgetreten ist.
++ */
++ssize_t lio_read(lio_stream_t s, size_t bytes, void* buf)
++{
++    return read_syscall(s, 0, bytes, buf, 1);
++}
++
++/**
++ * Liest aus dem Stream ab der gegebenen Position.
++ *
++ * @param s Auszulesender Stream
++ * @param offset Position, ab der gelesen werden soll, in Bytes vom Dateianfang
++ * @param bytes Zu lesende Bytes
++ * @param buf Zielpuffer, in dem die ausgelesenen Daten abgelegt werden
++ *
++ * @return Die Anzahl der erfolgreich gelesenen Bytes (&quot;short reads&quot; sind
++ * möglich) oder negativ, falls sofort ein Fehler aufgetreten ist.
++ */
++ssize_t lio_pread(lio_stream_t s, uint64_t offset, size_t bytes, void* buf)
++{
++    return read_syscall(s, offset, bytes, buf, 0);
++}
++
++static ssize_t write_syscall(lio_stream_t s, uint64_t offset, size_t bytes,
++    const void* buf, int updatepos)
++{
++    volatile ssize_t result;
++
++    asm(
++        &quot;pushl %6;&quot;
++        &quot;pushl %5;&quot;
++        &quot;pushl %4;&quot;
++        &quot;pushl %3;&quot;
++        &quot;pushl %2;&quot;
++        &quot;pushl %1;&quot;
++        &quot;mov %0, %%eax;&quot;
++        &quot;int $0x30;&quot;
++        &quot;add $0x18, %%esp;&quot;
++    : : &quot;i&quot; (SYSCALL_LIO_WRITE), &quot;r&quot; (&amp;s), &quot;r&quot; (&amp;offset), &quot;r&quot; (bytes),
++        &quot;r&quot; (buf), &quot;r&quot; (updatepos), &quot;r&quot; (&amp;result) : &quot;memory&quot;);
++
++    return result;
++}
++
++/**
++ * Schreibt in den Stream ab der aktuellen Position des Dateizeigers und bewegt
++ * den Dateizeiger hinter das letzte geschriebene Byte.
++ *
++ * @param s Zu schreibender Stream
++ * @param bytes Zu schreibende Bytes
++ * @param buf Quellpuffer, dessen Inhalt geschrieben werden soll
++ *
++ * @return Die Anzahl der erfolgreich gegeschriebenen Bytes (&quot;short writes&quot;
++ * sind möglich) oder negativ, falls sofort ein Fehler aufgetreten ist.
++ */
++ssize_t lio_write(lio_stream_t s, size_t bytes, const void* buf)
++{
++    return write_syscall(s, 0, bytes, buf, 1);
++}
++
++/**
++ * Schreibt in den Stream ab der gegebenen Position.
++ *
++ * @param s Zu schreibender Stream
++ * @param offset Position, ab der geschrieben werden soll, in Bytes vom
++ * Dateianfang
++ * @param bytes Zu schreibende Bytes
++ * @param buf Quellpuffer, dessen Inhalt geschrieben werden soll
++ *
++ * @return Die Anzahl der erfolgreich gegeschriebenen Bytes (&quot;short writes&quot;
++ * sind möglich) oder negativ, falls sofort ein Fehler aufgetreten ist.
++ */
++ssize_t lio_pwrite(lio_stream_t s, uint64_t offset, size_t bytes,
++    const void* buf)
++{
++    return write_syscall(s, offset, bytes, buf, 0);
++}
++
++/**
++ * Bewegt den Dateizeiger des Streams und gibt seine aktuelle Position zurück
++ *
++ * @param s Stream, dessen Dateizeiger verändert werden soll
++ * @param offset Neue Dateizeigerposition als Offset in Bytes
++ * @param whence Gibt an, wozu das Offset relativ ist (LIO_SEEK_*-Konstanten)
++ *
++ * @return Die neue Position des Dateizeigers in Bytes vom Dateianfang, oder
++ * negativ im Fehlerfall.
++ */
++int64_t lio_seek(lio_stream_t s, uint64_t offset, int whence)
++{
++    volatile int64_t result;
++
++    asm(
++        &quot;pushl %4;&quot;
++        &quot;pushl %3;&quot;
++        &quot;pushl %2;&quot;
++        &quot;pushl %1;&quot;
++        &quot;mov %0, %%eax;&quot;
++        &quot;int $0x30;&quot;
++        &quot;add $0x10, %%esp;&quot;
++    : : &quot;i&quot; (SYSCALL_LIO_SEEK), &quot;r&quot; (&amp;s), &quot;r&quot; (&amp;offset), &quot;r&quot; (whence),
++        &quot;r&quot; (&amp;result) : &quot;memory&quot;);
++
++    return result;
++}
++
++/**
++ * Ändert die Dateigröße der Ressource eines Streams
++ * TODO Wieso nimmt das einen Stream und keine Ressource?
++ *
++ * @param s Zu ändernder Stream
++ * @param size Neue Dateigröße in Bytes
++ *
++ * @return 0 bei Erfolg, negativ im Fehlerfall.
++ */
++int lio_truncate(lio_stream_t s, uint64_t size)
++{
++    volatile int result;
++
++    asm(
++        &quot;pushl %3;&quot;
++        &quot;pushl %2;&quot;
++        &quot;mov %1, %%eax;&quot;
++        &quot;int $0x30;&quot;
++        &quot;add $0x08, %%esp;&quot;
++    : &quot;=a&quot; (result)
++    : &quot;i&quot; (SYSCALL_LIO_TRUNCATE), &quot;r&quot; (&amp;s), &quot;r&quot; (&amp;size)
++    : &quot;memory&quot;);
++
++    return result;
++}
++
++/**
++ * Liest Einträge einer Verzeichnisressource aus.
++ *
++ * @param res Auszulesende Verzeichnisressource
++ * @param start Index des ersten zurückzugebenden Verzeichniseintrags
++ * @param num Maximale Anzahl zurückzugebender Verzeichniseinträge
++ * (Puffergröße)
++ * @param buf Array von Verzeichniseinträgen, die befüllt werden
++ *
++ * @return Anzahl der zurückgegebenen Verzeichniseinträge, oder negativ im
++ * Fehlerfall.
++ */
++ssize_t lio_read_dir(lio_resource_t res, size_t start, size_t num,
++    struct lio_dir_entry* buf)
++{
++    volatile ssize_t result;
++
++    asm(
++        &quot;pushl %5;&quot;
++        &quot;pushl %4;&quot;
++        &quot;pushl %3;&quot;
++        &quot;pushl %2;&quot;
++        &quot;pushl %1;&quot;
++        &quot;mov %0, %%eax;&quot;
++        &quot;int $0x30;&quot;
++        &quot;add $0x14, %%esp;&quot;
++    : : &quot;i&quot; (SYSCALL_LIO_READ_DIR), &quot;r&quot; (&amp;res), &quot;r&quot; (start), &quot;r&quot; (num),
++        &quot;r&quot; (buf), &quot;r&quot; (&amp;result) : &quot;memory&quot;);
++
++    return result;
++
++}
++
++/**
++ * Erstellt eine neue Datei.
++ *
++ * @param parent Verzeichnis, das die neue Datei enthalten soll
++ * @param name Name der neuen Datei
++ *
++ * @return 0 bei Erfolg, negativ im Fehlerfall.
++ */
++lio_resource_t lio_mkfile(lio_resource_t parent, const char* name)
++{
++    volatile lio_resource_t result;
++    size_t len;
++
++    len = strlen(name) + 1;
++    asm(
++        &quot;pushl %4;&quot;
++        &quot;pushl %3;&quot;
++        &quot;pushl %2;&quot;
++        &quot;pushl %1;&quot;
++        &quot;mov %0, %%eax;&quot;
++        &quot;int $0x30;&quot;
++        &quot;add $0x10, %%esp;&quot;
++    : : &quot;i&quot; (SYSCALL_LIO_MKFILE), &quot;r&quot; (&amp;parent), &quot;r&quot; (name), &quot;r&quot; (len),
++        &quot;r&quot; (&amp;result) : &quot;memory&quot;);
++
++    return result;
++}
++
++/**
++ * Erstellt ein neues Verzeichnis.
++ *
++ * @param parent Verzeichnis, das das neue Unterverzeichnis enthalten soll
++ * @param name Name des neuen Verzeichnisses
++ *
++ * @return 0 bei Erfolg, negativ im Fehlerfall.
++ */
++lio_resource_t lio_mkdir(lio_resource_t parent, const char* name)
++{
++    volatile lio_resource_t result;
++    size_t len;
++
++    len = strlen(name) + 1;
++    asm(
++        &quot;pushl %4;&quot;
++        &quot;pushl %3;&quot;
++        &quot;pushl %2;&quot;
++        &quot;pushl %1;&quot;
++        &quot;mov %0, %%eax;&quot;
++        &quot;int $0x30;&quot;
++        &quot;add $0x10, %%esp;&quot;
++    : : &quot;i&quot; (SYSCALL_LIO_MKDIR), &quot;r&quot; (&amp;parent), &quot;r&quot; (name), &quot;r&quot; (len),
++        &quot;r&quot; (&amp;result) : &quot;memory&quot;);
++
++    return result;
++}
++
++/**
++ * Erstellt eine neue symbolische Verknüpfung
++ *
++ * @param parent Verzeichnis, das die neue Verknüofung enthalten soll
++ * @param name Name der neuen Verknüpfung
++ *
++ * @return 0 bei Erfolg, negativ im Fehlerfall.
++ */
++lio_resource_t lio_mksymlink(lio_resource_t parent,
++    const char* name, const char* target)
++{
++    volatile lio_resource_t result;
++    size_t name_len;
++    size_t target_len;
++
++    name_len = strlen(name) + 1;
++    target_len = strlen(target) + 1;
++    asm(
++        &quot;pushl %6;&quot;
++        &quot;pushl %5;&quot;
++        &quot;pushl %4;&quot;
++        &quot;pushl %3;&quot;
++        &quot;pushl %2;&quot;
++        &quot;pushl %1;&quot;
++        &quot;mov %0, %%eax;&quot;
++        &quot;int $0x30;&quot;
++        &quot;add $0x18, %%esp;&quot;
++    : : &quot;i&quot; (SYSCALL_LIO_MKSYMLINK), &quot;r&quot; (&amp;parent), &quot;r&quot; (name), &quot;r&quot; (name_len),
++        &quot;r&quot; (target), &quot;r&quot; (target_len), &quot;r&quot; (&amp;result) : &quot;memory&quot;);
++
++    return result;
++}
++
++/*
++ * Sofern die Ressource grundsätzlich auf persistentem Speicher liegt, aber
++ * unter Umständen bisher nur in einem nichtpersistentem Cache liegt, werden
++ * alle Änderungen, die an diesem Stream durchgeführt worden sind, persistent
++ * gemacht.
++ *
++ * @param s Zurückzuschreibender Stream
++ *
++ * @return 0 bei Erfolg, negativ im Fehlerfall.
++ */
++int lio_sync(lio_stream_t s)
++{
++    int result;
++
++    asm(
++        &quot;pushl %2;&quot;
++        &quot;mov %1, %%eax;&quot;
++        &quot;int $0x30;&quot;
++        &quot;add $0x4, %%esp;&quot;
++    : &quot;=a&quot; (result): &quot;i&quot; (SYSCALL_LIO_SYNC), &quot;r&quot; (&amp;s) : &quot;memory&quot;);
++
++    return result;
++}
++
++/*
++ * Löscht den Verzeichniseintrag einer Ressource aus ihrem Verzeichnis. Wenn
++ * es keine weiteren Verweise (Hardlinks) auf die Ressource mehr gibt, wird sie
++ * gelöscht.
++ *
++ * @param parent Verzeichnis, das die zu löschende Ressource enthält
++ * @param name Dateiname der zu löschenden Ressource
++ *
++ * @return 0 bei Erfolg, negativ im Fehlerfall.
++ */
++int lio_unlink(lio_resource_t parent, const char* name)
++{
++    int result;
++    size_t name_len;
++
++    name_len = strlen(name) + 1;
++    asm(
++        &quot;pushl %4;&quot;
++        &quot;pushl %3;&quot;
++        &quot;pushl %2;&quot;
++        &quot;mov %1, %%eax;&quot;
++        &quot;int $0x30;&quot;
++        &quot;add $0xc, %%esp;&quot;
++    : &quot;=a&quot; (result) : &quot;i&quot; (SYSCALL_LIO_UNLINK), &quot;r&quot; (&amp;parent), &quot;r&quot; (name),
++        &quot;r&quot; (name_len) : &quot;memory&quot;);
++
++    return result;
++}
++
++/**
++ * Schreibt alle Änderungen im Kernelcache zurück.
++ *
++ * @return 0 bei Erfolg, negativ im Fehlerfall.
++ */
++int lio_sync_all(void)
++{
++    int result;
++
++    asm(
++        &quot;pushl $0;&quot;
++        &quot;int $0x30;&quot;
++        &quot;add $0x4, %%esp;&quot;
++    : &quot;=a&quot; (result) : &quot;0&quot; (SYSCALL_LIO_SYNC_ALL));
++
++    return result;
++}
++
+-- 
+1.6.0.2
+
+</PRE>
+
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002285.html">[tyndur-devel] [PATCH 2/6] libc: lio_seek in lio_compat_seek umbenannt
+</A></li>
+	<LI>N�chste Nachricht: <A HREF="002287.html">[tyndur-devel] [PATCH 3/6] libc: LIOv2-Syscalls
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2279">[ Datum ]</a>
+              <a href="thread.html#2279">[ Thema ]</a>
+              <a href="subject.html#2279">[ Betreff (Subject)]</a>
+              <a href="author.html#2279">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

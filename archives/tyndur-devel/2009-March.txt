@@ -1,0 +1,3295 @@
+From kevin at tyndur.org  Sun Mar 22 16:19:09 2009
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 22 Mar 2009 16:19:09 +0100
+Subject: [tyndur-devel] [PATCH] shell: Pagefault bei 'cd '
+Message-ID: <1237735149-10083-1-git-send-email-kevin@tyndur.org>
+
+! shell: Pfad auf NULL pruefen, bevor er an opendir() verfuettert wird
+---
+ src/modules/c/shell/commmands.c |    4 ++++
+ 1 files changed, 4 insertions(+), 0 deletions(-)
+
+diff --git a/src/modules/c/shell/commmands.c b/src/modules/c/shell/commmands.c
+index 1ce37a6..bc41bba 100644
+--- a/src/modules/c/shell/commmands.c
++++ b/src/modules/c/shell/commmands.c
+@@ -213,6 +213,10 @@ int shell_command_cd(int argc, char* argv[], const char* args)
+     } else {
+         cd_args++;
+         char* path = io_get_absolute_path(cd_args);
++        if (path == NULL) {
++            puts("Aufruf: cd <Verzeichnis>");
++            return -1;
++        }
+ 
+         DIR* dir = opendir(path);
+         if (dir == NULL) {
+-- 
+1.5.6.5
+
+
+
+From kevin at tyndur.org  Sun Mar 22 16:20:34 2009
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 22 Mar 2009 16:20:34 +0100
+Subject: [tyndur-devel] [PATCH] kernel: Stackoverflows besser erkennen
+Message-ID: <1237735234-10126-1-git-send-email-kevin@tyndur.org>
+
+* kernel: Ein Page Fault verlangt eine Vergroesserung des Stacks, wenn
+  esp und cr2 maximal zwei Pages voneinander entfernt sind
+---
+ src/kernel/src/intr.c |    5 ++++-
+ 1 files changed, 4 insertions(+), 1 deletions(-)
+
+diff --git a/src/kernel/src/intr.c b/src/kernel/src/intr.c
+index 5baaefc..65e7b7c 100644
+--- a/src/kernel/src/intr.c
++++ b/src/kernel/src/intr.c
+@@ -414,6 +414,8 @@ void handle_exception(dword* esp)
+     struct int_stack_frame * isf = *((struct int_stack_frame **)esp);
+ 
+     dword cr2;
++    intptr_t diff;
++
+     switch(isf->interrupt_number)
+     {
+         case 13:
+@@ -427,9 +429,10 @@ void handle_exception(dword* esp)
+ 
+         case 14:
+             cr2 = read_cr2();
++            diff = (cr2 >> PAGE_SHIFT) - (isf->esp >> PAGE_SHIFT);
+             // Ueberprüfen ob der Pagefault durch einen Stackoverflow
+             // hervorgerufen wurde
+-            if ((cr2 <= isf->esp + 0x800) && (cr2 >= isf->esp - 0x20)
++            if ((diff >= -2) && (diff <= 2)
+                 && (current_task != NULL)
+                 && ((void*)cr2 >= current_task->user_stack_bottom - 0x1000000))
+             {
+-- 
+1.5.6.5
+
+
+
+From kevin at tyndur.org  Sun Mar 22 16:20:40 2009
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 22 Mar 2009 16:20:40 +0100
+Subject: [tyndur-devel] [PATCH] lpt: Neu installieren
+Message-ID: <1237735240-10153-1-git-send-email-kevin@tyndur.org>
+
++ lpt: Parameter reget
+---
+ src/modules/pas/lpt/lpt.pas |   17 ++++++++++++-----
+ 1 files changed, 12 insertions(+), 5 deletions(-)
+
+diff --git a/src/modules/pas/lpt/lpt.pas b/src/modules/pas/lpt/lpt.pas
+index ca62971..e7243e0 100644
+--- a/src/modules/pas/lpt/lpt.pas
++++ b/src/modules/pas/lpt/lpt.pas
+@@ -191,10 +191,10 @@ begin
+     end;
+ end;
+ 
+-procedure Get(pkgname: String);
++procedure Get(pkgname: String; reinstall: boolean);
+ 
+ 
+-    function Install(version: TPackageVersion): boolean;
++    function Install(version: TPackageVersion; reinstall: boolean): boolean;
+     var
+         filename: String;
+         url: String;
+@@ -205,7 +205,7 @@ procedure Get(pkgname: String);
+         // Paket bereits installiert ist
+         filename := 'file:/packages/' + version.pkg.name + '/' +
+             version.version + '/' + version.section.section + '/';
+-        if FileExists(filename) then begin
++        if FileExists(filename) and not reinstall then begin
+             TextColor(15);
+             WriteLn('Bereits installiert: ' + version.pkg.name + '/' +
+                 version.section.section);
+@@ -286,7 +286,7 @@ begin
+             sect := TPackageSection(pkg.sections.items[j]);
+             for k := 0 to sect.versions.count - 1 do begin
+                 version := TPackageVersion(sect.versions.items[k]);
+-                if not Install(version) then begin
++                if not Install(version, reinstall) then begin
+                     WriteLn('Breche Paketinstallationen ab.');
+                     exit;
+                 end;
+@@ -379,7 +379,14 @@ begin
+         List;
+     end else if system.ParamStr(1) = 'get' then begin
+         if system.ParamCount = 2 then begin
+-            Get(system.ParamStr(2));
++            Get(system.ParamStr(2), false);
++        end else begin
++            WriteLn('Falsche Parameterzahl');
++            PrintUsage;
++        end;
++    end else if system.ParamStr(1) = 'reget' then begin
++        if system.ParamCount = 2 then begin
++            Get(system.ParamStr(2), true);
+         end else begin
+             WriteLn('Falsche Parameterzahl');
+             PrintUsage;
+-- 
+1.5.6.5
+
+
+
+From kevin at tyndur.org  Sun Mar 22 16:21:17 2009
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 22 Mar 2009 16:21:17 +0100
+Subject: [tyndur-devel] [PATCH 1/2] kedit: Fix fuer Schluesselworterkennung
+Message-ID: <1237735278-10189-1-git-send-email-kevin@tyndur.org>
+
+! kedit: Wenn nach einem Schluesselwort nochmal Buchstaben kommen, ist
+  es wohl doch keins
+---
+ src/modules/pas/kedit/syntax.pas |    3 +++
+ 1 files changed, 3 insertions(+), 0 deletions(-)
+
+diff --git a/src/modules/pas/kedit/syntax.pas b/src/modules/pas/kedit/syntax.pas
+index c7cc5a9..71a23a0 100644
+--- a/src/modules/pas/kedit/syntax.pas
++++ b/src/modules/pas/kedit/syntax.pas
+@@ -128,6 +128,9 @@ begin
+ 
+     for i := Low(p) to High(p) do begin
+         if Matches(s, pos, p[i]) then begin
++            if (pos + Length(p[i]) <= Length(s)) and (s[pos + Length(p[i])] in ['A'..'Z', 'a'..'z', '0'..'9', '_']) then begin
++                exit(0);
++            end;
+             exit(length(p[i]));
+         end;
+     end;
+-- 
+1.5.6.5
+
+
+
+From kevin at tyndur.org  Sun Mar 22 16:21:18 2009
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 22 Mar 2009 16:21:18 +0100
+Subject: [tyndur-devel] [PATCH 2/2] kedit: Erkennung von Zahlen
+In-Reply-To: <1237735278-10189-1-git-send-email-kevin@tyndur.org>
+References: <1237735278-10189-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1237735278-10189-2-git-send-email-kevin@tyndur.org>
+
+! kedit: Ziffern A bis F in Hexzahlen erkennen
++ kedit: Zahlen duerfen Vorzeichen haben
+---
+ src/modules/pas/kedit/syntax.pas |   21 +++++++++++++++++----
+ 1 files changed, 17 insertions(+), 4 deletions(-)
+
+diff --git a/src/modules/pas/kedit/syntax.pas b/src/modules/pas/kedit/syntax.pas
+index 71a23a0..4a0fe87 100644
+--- a/src/modules/pas/kedit/syntax.pas
++++ b/src/modules/pas/kedit/syntax.pas
+@@ -77,6 +77,8 @@ var
+     i: integer;
+     long: integer;
+     needfig: boolean;
++    hex: boolean;
++    prefix: boolean;
+ begin
+     if (pos > 1) and (s[pos - 1] <> ' ') then begin
+         exit(0);
+@@ -84,14 +86,19 @@ begin
+ 
+     long := 0;
+     needfig := false;
++    hex := false;
++    prefix := false;
+     for i := pos to length(s) do begin
+-        if not (s[i] in ['A'..'Z', 'a'..'z', '0'..'9', '_']) then begin
++        if not (s[i] in ['A'..'Z', 'a'..'z', '0'..'9', '_', '-', '+']) then begin
+             if needfig then begin
+                 MatchesNumber := 0;
+             end else begin
+                 MatchesNumber := i - pos;
+             end;
+             exit;
++        end else if (s[i] in ['-', '+']) and not prefix and (i = pos) then begin
++            prefix := true;
++            needfig := true;
+         end else if (s[i] in ['l', 'L']) then begin
+             Inc(long);
+             if long > 2 then begin
+@@ -101,14 +108,20 @@ begin
+         end else if (long > 0) then begin
+             MatchesNumber := 0;
+             exit;
+-        end else if (s[i] = 'x') and (i = pos + 1) then begin
++        end else if (s[i] = 'x') and not prefix and (i = pos + 1) then begin
++            needfig := true;
++            hex := true;
++        end else if (s[i] = 'x') and prefix and (i = pos + 2) then begin
+             needfig := true;
++            hex := true;
+         end else if s[i] in ['0' .. '9'] then begin
+             needfig := false;
++        end else if (s[i] in ['A' .. 'F', 'a' .. 'f']) and hex then begin
++            needfig := false;
+         end else begin
+             MatchesNumber := 0;
+             exit;
+-        end
++        end;
+     end;
+ 
+     if needfig then begin
+@@ -247,7 +260,7 @@ begin
+                             exit(Highlight(syn_comment));
+                         end;
+ 
+-                    '0' .. '9':
++                    '0' .. '9', '-', '+':
+                         begin
+                             tmp := MatchesNumber(line, pos);
+                             if tmp <> 0 then begin
+-- 
+1.5.6.5
+
+
+
+From kevin at tyndur.org  Sun Mar 22 16:21:49 2009
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 22 Mar 2009 16:21:49 +0100
+Subject: [tyndur-devel] [PATCH] build hinzugefuegt
+Message-ID: <1237735309-10223-1-git-send-email-kevin@tyndur.org>
+
++ build: Erster Commit des Buildtools fuer tyndur
+---
+ src/modules/c/build/Makefile.all    |    7 ++
+ src/modules/c/build/build.c         |  202 +++++++++++++++++++++++++++++++++++
+ src/modules/c/build/dir.c           |  138 ++++++++++++++++++++++++
+ src/modules/c/build/include/build.h |   41 +++++++
+ src/modules/c/build/main.c          |   61 +++++++++++
+ 5 files changed, 449 insertions(+), 0 deletions(-)
+ create mode 100644 src/modules/c/build/Makefile.all
+ create mode 100644 src/modules/c/build/build.c
+ create mode 100644 src/modules/c/build/dir.c
+ create mode 100644 src/modules/c/build/include/build.h
+ create mode 100644 src/modules/c/build/main.c
+
+diff --git a/src/modules/c/build/Makefile.all b/src/modules/c/build/Makefile.all
+new file mode 100644
+index 0000000..8c9b17a
+--- /dev/null
++++ b/src/modules/c/build/Makefile.all
+@@ -0,0 +1,7 @@
++shopt -s extglob
++source $LOST_BUILDMK_ROOT/config.sh
++
++echo "LD   $1/apps/build"
++
++$LOST_TOOLS_LD -obuild -Ttext=0x40000000 *.o --start-group $2 --end-group
++$LOST_TOOLS_STRIP -s build -o $1/apps/build
+diff --git a/src/modules/c/build/build.c b/src/modules/c/build/build.c
+new file mode 100644
+index 0000000..391e025
+--- /dev/null
++++ b/src/modules/c/build/build.c
+@@ -0,0 +1,202 @@
++#include <stdio.h>
++#include <string.h>
++#include <stdlib.h>
++#include <stdarg.h>
++#include <unistd.h>
++
++#include "build.h"
++
++#if 0
++static const char* cflags = "-m32 -g -O0 -Wall -fno-stack-protector -nostdinc"
++    " -fno-leading-underscore -fno-omit-frame-pointer -fno-strict-aliasing"
++    " -fno-builtin -c";
++#else
++//static const char* cflags = "-c -combine";
++static const char* cflags = "-c";
++#endif
++
++static const char* fpcflags = "-n -Cn -CX -Tlost";
++static const char* nasmflags = "-felf -O99";
++static const char* gasflags = "-32";
++
++static int dry_run = 0;
++static char* root_path;
++
++extern int verbose;
++
++static void do_command(const char* path, const char* binary,
++    const char* args_fmt, ...)
++{
++    char* buf;
++    char* buf2;
++    char* dirname;
++    va_list ap;
++
++    asprintf(&dirname, "%s/%s", root_path, path);
++    if (verbose) {
++        printf(">>> cd %s\n", dirname);
++    }
++    chdir(dirname);
++
++    va_start(ap, args_fmt);
++    vasprintf(&buf, args_fmt, ap);
++    va_end(ap);
++
++    asprintf(&buf2, "%s %s", binary, buf);
++
++    if (verbose) {
++        printf(">>> %s\n", buf2);
++    }
++    if (!dry_run) {
++        system(buf2);
++    }
++
++    free(buf);
++    free(buf2);
++    chdir(root_path);
++}
++
++static char* get_obj_files(const char* path)
++{
++    struct build_dir* dir;
++    struct build_dir* subdir;
++    struct build_file* file;
++    char* tmp = NULL;
++    char* subdir_files;
++    char* file_list = strdup("");
++    int i;
++
++    dir = scan_directory(NULL, path);
++    for (i = 0; (file = list_get_element_at(dir->obj_files, i)); i++) {
++        tmp = file_list;
++        asprintf(&file_list, "%s %s/%s", tmp, dir->path, file->name);
++        free(tmp);
++    }
++
++    for (i = 0; (subdir = list_get_element_at(dir->subdirs, i)); i++) {
++        tmp = file_list;
++        subdir_files = get_obj_files(subdir->path);
++        asprintf(&file_list, "%s %s", tmp, subdir_files);
++        free(subdir_files);
++        free(tmp);
++    }
++
++    return file_list;
++}
++
++static void compile(const char* path, list_t* files, const char* compiler,
++    const char* flags, const char* include)
++{
++    struct build_file* file;
++    char* file_list = strdup("");
++    char* tmp;
++    int i;
++
++    for (i = 0; (file = list_get_element_at(files, i)); i++) {
++        tmp = file_list;
++        asprintf(&file_list, "%s %s", tmp, file->name);
++        free(tmp);
++    }
++
++    if (*file_list) {
++        do_command(path, compiler, "%s -I %s/%s %s %s",
++            flags, root_path, path, include, file_list);
++    }
++}
++
++static void do_build(struct build_dir* dir, const char* parent_include,
++    const char* parent_lib, int depth)
++{
++    char* include;
++    char* lib;
++    char* tmp = NULL;
++
++    char* objs;
++    struct build_dir* subdir;
++    struct build_file* file;
++    int i;
++
++    for (i = 0; i < depth; i++) {
++        printf("| ");
++    }
++    printf("+ %s\n", dir->path);
++
++    // Ggf. include-Verzeichnis anhaengen
++    if (dir->has_include) {
++        asprintf(&include, "%s -I %s/%s/include",
++            parent_include, root_path, dir->path);
++    } else {
++        include = strdup(parent_include);
++    }
++
++    if (dir->has_arch_include) {
++        tmp = include;
++        asprintf(&include, "%s -I %s/%s/include/arch/%s",
++            tmp, root_path, dir->path, arch);
++        free(tmp);
++    }
++
++    // Ggf. Lib-Verzeichnis anhaengen
++    if (dir->lib != NULL) {
++        asprintf(&lib, "%s %s/%s/lib/library.a",
++            parent_lib, root_path, dir->path);
++    } else {
++        lib = strdup(parent_lib);
++    }
++
++    // lib-Verzeichnis wird als erstes kompiliert
++    if (dir->lib) {
++        do_build(dir->lib, include, lib, depth + 1);
++        objs = get_obj_files(dir->lib->path);
++        do_command(".", "ar", "rs %s/library.a %s",
++            dir->lib->path, objs);
++        free(objs);
++    }
++
++    // Dann alle anderen Unterverzeichnisse
++    for (i = 0; (subdir = list_get_element_at(dir->subdirs, i)); i++) {
++        do_build(subdir, include, lib, depth + 1);
++    }
++
++    // Und schliesslich noch die einzelnen Dateien
++    // TODO Pruefen, ob sich Abhaengigkeiten veraendert haben
++    printf("%s: Kompilieren (C)...", dir->path);
++    fflush(stdout);
++    compile(dir->path, dir->src_files[LANG_C], "gcc", cflags, include);
++
++    printf("\r%s: Kompilieren (Pascal)...\033[K", dir->path);
++    fflush(stdout);
++    compile(dir->path, dir->src_files[LANG_PAS], "fpc", fpcflags, include);
++
++    printf("\r%s: Assemblieren (gas)...\033[K", dir->path);
++    fflush(stdout);
++    compile(dir->path, dir->src_files[LANG_ASM_GAS], "as", gasflags, include);
++
++    for (i = 0; (file = list_get_element_at(dir->src_files[LANG_ASM_NASM], i)); i++) {
++        do_command(dir->path, "nasm", "%s %s", nasmflags, file->name);
++    }
++
++    // Im Wurzelverzeichnis wird gelinkt (TODO einstellbar machen)
++    if (dir->parent == NULL) {
++        printf("\r%s: Linken...\033[K", dir->path);
++        fflush(stdout);
++
++        objs = get_obj_files(dir->path);
++        do_command(".", "gcc", "-o %s/run %s %s", dir->path, lib, objs);
++        free(objs);
++    }
++
++    printf("\r\033[K");
++    fflush(stdout);
++
++    free(include);
++    free(lib);
++}
++
++void build(struct build_dir* root)
++{
++    root_path = getcwd(NULL, 0);
++    do_build(root, "", "", 0);
++    printf("Fertig gebaut.\n");
++    free(root_path);
++}
+diff --git a/src/modules/c/build/dir.c b/src/modules/c/build/dir.c
+new file mode 100644
+index 0000000..0a9210f
+--- /dev/null
++++ b/src/modules/c/build/dir.c
+@@ -0,0 +1,138 @@
++#include <dirent.h>
++#include <stdio.h>
++#include <string.h>
++#include <stdlib.h>
++#include <sys/stat.h>
++
++#include "build.h"
++
++struct build_dir* scan_directory(struct build_dir* parent, const char* path)
++{
++    DIR* dir = opendir(path);
++    struct dirent* ent;
++    char* suffix;
++    struct build_file* file;
++    enum filetype filetype;
++    struct stat stat_buf;
++    struct build_dir* build_dir;
++    struct build_dir* subdir;
++    char* file_path;
++    int i;
++
++    int nobuild = 0;
++    int ignorenobuild = 0;
++
++    if (dir == NULL) {
++        fprintf(stderr, "Verzeichnis %s kann nicht geoeffnet werden.\n",
++            path);
++        return NULL;
++    }
++
++    build_dir = calloc(1, sizeof(*build_dir));
++    build_dir->path = strdup(path);
++    build_dir->parent = parent;
++    build_dir->subdirs = list_create();
++    build_dir->obj_files = list_create();
++    for (i = 0; i < MAX_LANG; i++) {
++        build_dir->src_files[i] = list_create();
++    }
++
++//    printf("---> %s\n", path);
++    while ((ent = readdir(dir))) {
++
++        filetype = OTHER_FILE;
++        suffix = strrchr(ent->d_name, '.');
++
++        asprintf(&file_path, "%s/%s", path, ent->d_name);
++        stat(file_path, &stat_buf);
++
++        if (!strcmp(ent->d_name, ".nobuild")) {
++            nobuild = 1;
++            goto next;
++        } else if (!strcmp(ent->d_name, ".ignorenobuild")) {
++            ignorenobuild = 1;
++            goto next;
++        } else if (*ent->d_name == '.') {
++            goto next;
++        } else if (S_ISDIR(stat_buf.st_mode)) {
++            filetype = SUBDIR;
++        } else if (suffix == NULL) {
++            filetype = OTHER_FILE;
++        } else if (!strcmp(suffix, ".o")) {
++            filetype = OBJ;
++        } else if (!strcmp(suffix, ".c")) {
++            filetype = LANG_C;
++        } else if (!strcmp(suffix, ".pas")) {
++            filetype = LANG_PAS;
++        } else if (!strcmp(suffix, ".asm")) {
++            filetype = LANG_ASM_NASM;
++        } else if (!strcmp(suffix, ".S")) {
++            filetype = LANG_ASM_GAS;
++        }
++
++//        printf("[%s] %s\n", filetype_str[filetype], ent->d_name);
++
++        if (filetype == OTHER_FILE) {
++            goto next;
++        }
++
++        file = calloc(1, sizeof(*file));
++        file->type = LANG_ASM_GAS;
++        file->name = strdup(ent->d_name);
++
++        switch (filetype) {
++            case SUBDIR:
++                if (!strcmp(file->name, "include")) {
++                    DIR* arch_dir;
++                    char* tmp;
++
++                    build_dir->has_include = 1;
++
++                    asprintf(&tmp, "include/arch/%s", arch);
++                    arch_dir = opendir(tmp);
++                    free(tmp);
++
++                    if (arch_dir != NULL) {
++                        closedir(arch_dir);
++                        build_dir->has_arch_include = 1;
++                    }
++
++                } else if (!strcmp(file->name, "lib")) {
++                    build_dir->lib = scan_directory(build_dir, file_path);
++                } else if (!strcmp(file->name, "arch")) {
++                    char* tmp;
++                    asprintf(&tmp, "%s/%s", file_path, arch);
++                    subdir = scan_directory(build_dir, tmp);
++                    free(tmp);
++                    if (subdir != NULL) {
++                        list_push(build_dir->subdirs, subdir);
++                    }
++                } else {
++                    subdir = scan_directory(build_dir, file_path);
++                    if (subdir != NULL) {
++                        list_push(build_dir->subdirs, subdir);
++                    }
++                }
++                break;
++            case OBJ:
++                list_push(build_dir->obj_files, file);
++                break;
++            default:
++                list_push(build_dir->src_files[filetype], file);
++                break;
++        }
++
++    next:
++        free(file_path);
++    }
++//    printf("<--- %s\n", path);
++
++    closedir(dir);
++
++    if (nobuild && !ignorenobuild) {
++        // TODO Freigeben
++        return NULL;
++    }
++
++    return build_dir;
++}
+diff --git a/src/modules/c/build/include/build.h b/src/modules/c/build/include/build.h
+new file mode 100644
+index 0000000..2bd2326
+--- /dev/null
++++ b/src/modules/c/build/include/build.h
+@@ -0,0 +1,41 @@
++#ifndef _BUILD_H_
++#define _BUILD_H_
++
++#include "collections.h"
++
++enum filetype {
++    LANG_C,
++    LANG_PAS,
++    LANG_ASM_GAS,
++    LANG_ASM_NASM,
++
++#define MAX_LANG OTHER_FILE
++    OTHER_FILE,
++    SUBDIR,
++    OBJ,
++};
++
++
++extern char* filetype_str[];
++extern char* arch;
++
++struct build_dir {
++    int                 has_include;
++    int                 has_arch_include;
++    char*               path;
++    struct build_dir*   parent;
++    struct build_dir*   lib;
++    list_t*             src_files[MAX_LANG];
++    list_t*             obj_files;
++    list_t*             subdirs;
++};
++
++struct build_file {
++    enum filetype   type;
++    char*           name;
++};
++
++struct build_dir* scan_directory(struct build_dir* parent, const char* path);
++void build(struct build_dir* root);
++
++#endif
+diff --git a/src/modules/c/build/main.c b/src/modules/c/build/main.c
+new file mode 100644
+index 0000000..ef91ea8
+--- /dev/null
++++ b/src/modules/c/build/main.c
+@@ -0,0 +1,61 @@
++#include <stdio.h>
++#include <unistd.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "build.h"
++
++char* filetype_str[] = {
++    [OTHER_FILE]    = " ? ",
++    [SUBDIR]        = "DIR",
++    [OBJ]           = "OBJ",
++    [LANG_C]        = " C ",
++    [LANG_PAS]      = "PAS",
++    [LANG_ASM_GAS]  = "ASM",
++    [LANG_ASM_NASM] = "ASM",
++};
++
++char* arch = "i386";
++int verbose = 0;
++
++static void usage(char* binary)
++{
++    fprintf(stderr, "Aufruf: %s [-v] [<Wurzelverzeichnis>]\n", binary);
++    exit(1);
++}
++
++int main(int argc, char** argv)
++{
++    struct build_dir* rootdir;
++    int i;
++    char* rootdir_path = NULL;
++
++    for (i = 1; i < argc; i++) {
++        if (!strcmp(argv[i], "-v")) {
++            verbose = 1;
++        } else if (argv[i][0] == '-') {
++            usage(argv[0]);
++        } else if (rootdir_path) {
++            usage(argv[0]);
++        } else {
++            rootdir_path = argv[i];
++        }
++    }
++
++    if (rootdir_path) {
++        if (chdir(argv[i])) {
++            fprintf(stderr, "Verzeichnis nicht gefunden\n");
++            return 1;
++        }
++    }
++
++    rootdir = scan_directory(NULL, ".");
++    if (rootdir == NULL) {
++        fprintf(stderr, "Verzeichnis nicht gefunden\n");
++        return 1;
++    }
++
++    build(rootdir);
++
++    return 0;
++}
+-- 
+1.5.6.5
+
+
+
+From toni at tyndur.org  Sun Mar 22 16:35:43 2009
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Sun, 22 Mar 2009 16:35:43 +0100
+Subject: [tyndur-devel] [PATCH] shell: Pagefault bei 'cd '
+In-Reply-To: <1237735149-10083-1-git-send-email-kevin@tyndur.org>
+References: <1237735149-10083-1-git-send-email-kevin@tyndur.org>
+Message-ID: <20090322153543.GA8060@einstein.produktiv.lan>
+
+On Sun, Mar 22 16:19, Kevin Wolf wrote:
+> ! shell: Pfad auf NULL pruefen, bevor er an opendir() verfuettert wird
+Klingt vernünftig.
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 197 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20090322/f2b3d3ba/attachment.pgp>
+
+From kevin at tyndur.org  Wed Mar 25 18:49:20 2009
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Wed, 25 Mar 2009 18:49:20 +0100
+Subject: [tyndur-devel] [PATCH] ctype.h: Fix fuer toupper/tolower
+Message-ID: <1238003360-10458-1-git-send-email-kevin@tyndur.org>
+
+! ctype.h: toupper/tolower muessen Funktionen statt Makros sein, da der
+  Parameter sonst mehrmals ausgewertet wird. strcasecmp hat im Parameter
+  ein ++ drin und geht daran kaputt.
+---
+ src/include/ctype.h |   12 ++++++++++--
+ 1 files changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/src/include/ctype.h b/src/include/ctype.h
+index 0ae5657..4ab0b1d 100644
+--- a/src/include/ctype.h
++++ b/src/include/ctype.h
+@@ -50,7 +50,15 @@
+ #define ispunct(c) (isprint(c) && (!isspace(c)) && (!isalpha(c)))
+ #define isgraph(c) (isprint(c) && !isspace(c))
+ 
+-#define tolower(c) (isupper(c) ? (c) - 'A' + 'a' : (c))
+-#define toupper(c) (islower(c) ? (c) - 'a' + 'A' : (c))
++
++static inline int tolower(int c)
++{
++    return isupper(c) ? c + ('a' - 'A') : c;
++}
++
++static inline int toupper(int c)
++{
++    return islower(c) ? c - ('a' - 'A') : c;
++}
+ 
+ #endif /* ndef CTYPE_H */
+-- 
+1.6.0.2
+
+
+
+From toni at tyndur.org  Wed Mar 25 20:50:32 2009
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Wed, 25 Mar 2009 20:50:32 +0100
+Subject: [tyndur-devel] [PATCH] ctype.h: Fix fuer toupper/tolower
+In-Reply-To: <1238003360-10458-1-git-send-email-kevin@tyndur.org>
+References: <1238003360-10458-1-git-send-email-kevin@tyndur.org>
+Message-ID: <20090325195031.GA12574@einstein.produktiv.lan>
+
+On Wed, Mar 25 18:49, Kevin Wolf wrote:
+> ! ctype.h: toupper/tolower muessen Funktionen statt Makros sein, da der
+>   Parameter sonst mehrmals ausgewertet wird. strcasecmp hat im Parameter
+>   ein ++ drin und geht daran kaputt.
+Ack. Aber das sind vermutlich nicht die einzigen kaputten Funktionen da,
+oder?
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 197 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20090325/41722476/attachment.pgp>
+
+From toni at tyndur.org  Wed Mar 25 21:05:53 2009
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Wed, 25 Mar 2009 21:05:53 +0100
+Subject: [tyndur-devel] [PATCH] lpt: Neu installieren
+In-Reply-To: <1237735240-10153-1-git-send-email-kevin@tyndur.org>
+References: <1237735240-10153-1-git-send-email-kevin@tyndur.org>
+Message-ID: <20090325200553.GB12574@einstein.produktiv.lan>
+
+On Sun, Mar 22 16:20, Kevin Wolf wrote:
+> + lpt: Parameter reget
+Sieht vernünftig aus.
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 197 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20090325/29a59d78/attachment.pgp>
+
+From mail at kevin-wolf.de  Wed Mar 25 21:49:44 2009
+From: mail at kevin-wolf.de (Kevin Wolf)
+Date: Wed, 25 Mar 2009 21:49:44 +0100
+Subject: [tyndur-devel] [PATCH] ctype.h: Fix fuer toupper/tolower
+In-Reply-To: <20090325195031.GA12574@einstein.produktiv.lan>
+References: <1238003360-10458-1-git-send-email-kevin@tyndur.org>
+	<20090325195031.GA12574@einstein.produktiv.lan>
+Message-ID: <200903252149.44499@kevin-wolf.de>
+
+Am Mittwoch, 25. März 2009 20:50 schrieb Antoine Kaufmann:
+> On Wed, Mar 25 18:49, Kevin Wolf wrote:
+> > ! ctype.h: toupper/tolower muessen Funktionen statt Makros sein, da der
+> >   Parameter sonst mehrmals ausgewertet wird. strcasecmp hat im Parameter
+> >   ein ++ drin und geht daran kaputt.
+>
+> Ack. Aber das sind vermutlich nicht die einzigen kaputten Funktionen da,
+> oder?
+
+Vermutlich nicht, aber die einzigen, die bei mir tatsächlich nachweisbar was 
+kaputt gemacht haben. yasm ging halt nicht wirklich - jetzt macht er 
+irgendwas, aber nicht das, was ich will...
+
+
+From mail at kevin-wolf.de  Thu Mar 26 17:51:24 2009
+From: mail at kevin-wolf.de (Kevin Wolf)
+Date: Thu, 26 Mar 2009 17:51:24 +0100
+Subject: [tyndur-devel] Locking in pm_thread_unblock
+Message-ID: <200903261751.24616@kevin-wolf.de>
+
+Welchen Sinn exakt hat die folgende Konstruktion (aus pm_thread_unblock in 
+kernel2) in Bezug auf das Locking? Sollte da das lock() in dem if nicht immer 
+blockieren, weil ja genau dasselbe schon davor gelockt wurde?
+
+    lock(&thread->lock);
+
+    // Der Thread wird nur entsperrt, wenn er auch wirklich blockiert ist
+    if (thread->status == PM_STATUS_BLOCKED) {
+        lock(&thread->lock);
+        unlock(&thread->lock);
+        return TRUE;
+    }
+
+    unlock(&thread->lock);
+
+Andererseits habe ich ihn an dieser Stelle auch noch nicht hängen sehen. 
+Vielleicht verstehe ich grad nur nicht, wozu das gut ist.
+
+Kevin
+
+
+From mail at kevin-wolf.de  Thu Mar 26 18:09:18 2009
+From: mail at kevin-wolf.de (Kevin Wolf)
+Date: Thu, 26 Mar 2009 18:09:18 +0100
+Subject: [tyndur-devel] [RFC] Taskwechsel beim RPC
+Message-ID: <200903261809.18968@kevin-wolf.de>
+
+Ich habe vorhin mal diesen Patch zusammengeschustert. Idee ist ganz einfach, 
+wie in kernel auch bei einem RPC bzw. nach dem Ende eines RPCs direkt den 
+Task zu wechseln.
+
+Dummerweise führt die aktuelle Implementierung in erster Linie zu Hängern. 
+Ideen?
+
+Kevin
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : rpc-schedule.patch
+Dateityp    : text/x-diff
+Dateigröße  : 3791 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20090326/b67aed3b/attachment.patch>
+
+From toni at tyndur.org  Fri Mar 27 22:25:50 2009
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Fri, 27 Mar 2009 22:25:50 +0100
+Subject: [tyndur-devel] [PATCH] kernel: Stackoverflows besser erkennen
+In-Reply-To: <1237735234-10126-1-git-send-email-kevin@tyndur.org>
+References: <1237735234-10126-1-git-send-email-kevin@tyndur.org>
+Message-ID: <20090327212550.GA16038@einstein.produktiv.lan>
+
+On Sun, Mar 22 16:20, Kevin Wolf wrote:
+> * kernel: Ein Page Fault verlangt eine Vergroesserung des Stacks, wenn
+>   esp und cr2 maximal zwei Pages voneinander entfernt sind
+Ack.
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 197 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20090327/634bafe4/attachment.pgp>
+
+From toni at tyndur.org  Fri Mar 27 22:37:58 2009
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Fri, 27 Mar 2009 22:37:58 +0100
+Subject: [tyndur-devel] [PATCH 1/2] kedit: Fix
+	fuer	Schluesselworterkennung
+In-Reply-To: <1237735278-10189-1-git-send-email-kevin@tyndur.org>
+References: <1237735278-10189-1-git-send-email-kevin@tyndur.org>
+Message-ID: <20090327213757.GB16038@einstein.produktiv.lan>
+
+On Sun, Mar 22 16:21, Kevin Wolf wrote:
+> ! kedit: Wenn nach einem Schluesselwort nochmal Buchstaben kommen, ist
+>   es wohl doch keins
+> ---
+>  src/modules/pas/kedit/syntax.pas |    3 +++
+>  1 files changed, 3 insertions(+), 0 deletions(-)
+> 
+> diff --git a/src/modules/pas/kedit/syntax.pas b/src/modules/pas/kedit/syntax.pas
+> index c7cc5a9..71a23a0 100644
+> --- a/src/modules/pas/kedit/syntax.pas
+> +++ b/src/modules/pas/kedit/syntax.pas
+> @@ -128,6 +128,9 @@ begin
+>  
+>      for i := Low(p) to High(p) do begin
+>          if Matches(s, pos, p[i]) then begin
+> +            if (pos + Length(p[i]) <= Length(s)) and (s[pos + Length(p[i])] in ['A'..'Z', 'a'..'z', '0'..'9', '_']) then begin
+Falls du sicher bist, dass das da mit dem <= kein off by one gibt, ist
+das ok. Ich habe ja keine Ahnung davon. ;-)
+
+> +                exit(0);
+> +            end;
+>              exit(length(p[i]));
+>          end;
+>      end;
+
+Also immer schön rein damit, falls ich Schwachfug erzähle. ;-)
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 197 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20090327/35505964/attachment.pgp>
+
+From toni at tyndur.org  Fri Mar 27 22:47:36 2009
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Fri, 27 Mar 2009 22:47:36 +0100
+Subject: [tyndur-devel] [PATCH 2/2] kedit: Erkennung von Zahlen
+In-Reply-To: <1237735278-10189-2-git-send-email-kevin@tyndur.org>
+References: <1237735278-10189-1-git-send-email-kevin@tyndur.org>
+	<1237735278-10189-2-git-send-email-kevin@tyndur.org>
+Message-ID: <20090327214736.GC16038@einstein.produktiv.lan>
+
+On Sun, Mar 22 16:21, Kevin Wolf wrote:
+> ! kedit: Ziffern A bis F in Hexzahlen erkennen
+> + kedit: Zahlen duerfen Vorzeichen haben
+
+Ich glaube das sieht vernünftig aus. ;-)
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 197 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20090327/76a745e3/attachment.pgp>
+
+From kevin at tyndur.org  Sun Mar 29 20:12:56 2009
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 29 Mar 2009 20:12:56 +0200
+Subject: [tyndur-devel] [PATCH v2] build hinzugefuegt
+In-Reply-To: <1237735309-10223-1-git-send-email-kevin@tyndur.org>
+References: <1237735309-10223-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1238350376-5207-1-git-send-email-kevin@tyndur.org>
+
++ build: Erster Commit des Buildtools fuer tyndur
+---
+ src/modules/c/build/Makefile.all    |    7 +
+ src/modules/c/build/build.c         |  273 +++++++++++++++++++++++++++++++++++
+ src/modules/c/build/dir.c           |  201 ++++++++++++++++++++++++++
+ src/modules/c/build/include/build.h |   76 ++++++++++
+ src/modules/c/build/main.c          |  115 +++++++++++++++
+ 5 files changed, 672 insertions(+), 0 deletions(-)
+ create mode 100644 src/modules/c/build/Makefile.all
+ create mode 100644 src/modules/c/build/build.c
+ create mode 100644 src/modules/c/build/dir.c
+ create mode 100644 src/modules/c/build/include/build.h
+ create mode 100644 src/modules/c/build/main.c
+
+diff --git a/src/modules/c/build/Makefile.all b/src/modules/c/build/Makefile.all
+new file mode 100644
+index 0000000..8c9b17a
+--- /dev/null
++++ b/src/modules/c/build/Makefile.all
+@@ -0,0 +1,7 @@
++shopt -s extglob
++source $LOST_BUILDMK_ROOT/config.sh
++
++echo "LD   $1/apps/build"
++
++$LOST_TOOLS_LD -obuild -Ttext=0x40000000 *.o --start-group $2 --end-group
++$LOST_TOOLS_STRIP -s build -o $1/apps/build
+diff --git a/src/modules/c/build/build.c b/src/modules/c/build/build.c
+new file mode 100644
+index 0000000..e043efe
+--- /dev/null
++++ b/src/modules/c/build/build.c
+@@ -0,0 +1,273 @@
++/*
++ * Copyright (c) 2009 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the tyndur Project
++ *     and its contributors.
++ * 4. Neither the name of the tyndur Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <stdio.h>
++#include <string.h>
++#include <stdlib.h>
++#include <stdarg.h>
++#include <unistd.h>
++
++#include "build.h"
++
++#ifdef __LINUX__
++static const char* cflags = "-m32 -g -O0 -Wall -fno-stack-protector -nostdinc"
++    " -fno-leading-underscore -fno-omit-frame-pointer -fno-strict-aliasing"
++    " -fno-builtin -c";
++#else
++//static const char* cflags = "-c -combine";
++static const char* cflags = "-c";
++#endif
++
++static const char* fpcflags = "-n -Cn -CX -Tlost";
++static const char* nasmflags = "-felf -O99";
++static const char* gasflags = "-32";
++
++static int dry_run = 0;
++static char* root_path;
++
++extern int verbose;
++
++
++/**
++ * Fuehrt einen Shellbefehl in einem gegebenen Arbeitsverzeichnis aus
++ */
++static void do_command(const char* path, const char* binary,
++    const char* args_fmt, ...)
++{
++    char* buf;
++    char* buf2;
++    char* dirname;
++    va_list ap;
++
++    asprintf(&dirname, "%s/%s", root_path, path);
++    if (verbose) {
++        printf(">>> cd %s\n", dirname);
++    }
++    chdir(dirname);
++
++    va_start(ap, args_fmt);
++    vasprintf(&buf, args_fmt, ap);
++    va_end(ap);
++
++    asprintf(&buf2, "%s %s", binary, buf);
++
++    if (verbose) {
++        printf(">>> %s\n", buf2);
++    }
++    if (!dry_run) {
++        system(buf2);
++    }
++
++    free(buf);
++    free(buf2);
++    chdir(root_path);
++}
++
++/**
++ * Sammelt alle Objektdateien in einem gegebenen Pfad ein und gibt sie durch
++ * Leerzeichen getrennt zurueck.
++ *
++ * FIXME Mit Leerzeichen im Dateinamen ist das offensichtlich kaputt
++ */
++static char* get_obj_files(const char* path)
++{
++    struct build_dir* dir;
++    struct build_dir* subdir;
++    struct build_file* file;
++    char* tmp = NULL;
++    char* subdir_files;
++    char* file_list = strdup("");
++    int i;
++
++    dir = scan_directory(NULL, path);
++    for (i = 0; (file = list_get_element_at(dir->obj_files, i)); i++) {
++        tmp = file_list;
++        asprintf(&file_list, "%s %s/%s", tmp, dir->path, file->name);
++        free(tmp);
++    }
++
++    for (i = 0; (subdir = list_get_element_at(dir->subdirs, i)); i++) {
++        tmp = file_list;
++        subdir_files = get_obj_files(subdir->path);
++        asprintf(&file_list, "%s %s", tmp, subdir_files);
++        free(subdir_files);
++        free(tmp);
++    }
++
++    return file_list;
++}
++
++/**
++ * Kompiliert eine Anzahl von Dateien
++ *
++ * @param path Arbeitsverzeichnis
++ * @param files Liste von zu kompilierenden Dateinamen
++ * @param compiler Dateiname des Compilers
++ * @param flags Flags, die in den Aufruf eingebunden werden sollen
++ * @param include Zusaezlicher String, der in den Aufruf eingebunden werden
++ * soll; primaer fuer die Angabe von Includeverzeichnissen.
++ */
++static void compile(const char* path, list_t* files, const char* compiler,
++    const char* flags, const char* include)
++{
++    struct build_file* file;
++    char* file_list = strdup("");
++    char* tmp;
++    int i;
++
++    for (i = 0; (file = list_get_element_at(files, i)); i++) {
++        tmp = file_list;
++        asprintf(&file_list, "%s %s", tmp, file->name);
++        free(tmp);
++    }
++
++    if (*file_list) {
++        do_command(path, compiler, "%s -I %s/%s %s %s",
++            flags, root_path, path, include, file_list);
++    }
++}
++
++/**
++ * Baut ein Projektverzeichnis
++ *
++ * @param dir Verzeichnis, das gebaut werden soll
++ * @param parent_include Includeverzeichnisse des Vaterverzeichnisses, die fuer
++ * Quellcodedateien in diesem Verzeichnis zur Verfuegung stehen sollen
++ * @param parent_lib lib-Verzeichnisse der Vaterverzeichnisse, deren
++ * Bibliotheken in diesem Verzeichnis zur Verfuegung stehen sollen
++ * @param depth Verschachtelungstiefe ausgehend vom Wurzelverzeichnis, in dem
++ * gebaut wird (fuer Baumdarstellung)
++ */
++static void do_build(struct build_dir* dir, const char* parent_include,
++    const char* parent_lib, int depth)
++{
++    char* include;
++    char* lib;
++    char* tmp = NULL;
++
++    char* objs;
++    struct build_dir* subdir;
++    struct build_file* file;
++    int i;
++
++    for (i = 0; i < depth; i++) {
++        printf("| ");
++    }
++    printf("+ %s\n", dir->path);
++
++    // Ggf. include-Verzeichnis anhaengen
++    if (dir->has_include) {
++        asprintf(&include, "%s -I %s/%s/include",
++            parent_include, root_path, dir->path);
++    } else {
++        include = strdup(parent_include);
++    }
++
++    if (dir->has_arch_include) {
++        tmp = include;
++        asprintf(&include, "%s -I %s/%s/include/arch/%s",
++            tmp, root_path, dir->path, arch);
++        free(tmp);
++    }
++
++    // Ggf. Lib-Verzeichnis anhaengen
++    if (dir->lib != NULL) {
++        asprintf(&lib, "%s %s/%s/lib/library.a",
++            parent_lib, root_path, dir->path);
++    } else {
++        lib = strdup(parent_lib);
++    }
++
++    // lib-Verzeichnis wird als erstes kompiliert
++    if (dir->lib) {
++        do_build(dir->lib, include, lib, depth + 1);
++        objs = get_obj_files(dir->lib->path);
++        do_command(".", "ar", "rs %s/library.a %s",
++            dir->lib->path, objs);
++        free(objs);
++    }
++
++    // Dann alle anderen Unterverzeichnisse
++    for (i = 0; (subdir = list_get_element_at(dir->subdirs, i)); i++) {
++        do_build(subdir, include, lib, depth + 1);
++    }
++
++    // Und schliesslich noch die einzelnen Dateien
++    // TODO Pruefen, ob sich Abhaengigkeiten veraendert haben
++    printf("%s: Kompilieren (C)...", dir->path);
++    fflush(stdout);
++    compile(dir->path, dir->src_files[LANG_C], "gcc", cflags, include);
++
++    printf("\r%s: Kompilieren (Pascal)...\033[K", dir->path);
++    fflush(stdout);
++    compile(dir->path, dir->src_files[LANG_PAS], "fpc", fpcflags, include);
++
++    printf("\r%s: Assemblieren (gas)...\033[K", dir->path);
++    fflush(stdout);
++    compile(dir->path, dir->src_files[LANG_ASM_GAS], "as", gasflags, include);
++
++    for (i = 0; (file = list_get_element_at(dir->src_files[LANG_ASM_NASM], i)); i++) {
++        do_command(dir->path, "nasm", "%s %s", nasmflags, file->name);
++    }
++
++    // Im Wurzelverzeichnis wird gelinkt (TODO einstellbar machen)
++    if (dir->parent == NULL) {
++        printf("\r%s: Linken...\033[K", dir->path);
++        fflush(stdout);
++
++        objs = get_obj_files(dir->path);
++        do_command(".", "gcc", "-o %s/run %s %s", dir->path, lib, objs);
++        free(objs);
++    }
++
++    printf("\r\033[K");
++    fflush(stdout);
++
++    free(include);
++    free(lib);
++}
++
++/**
++ * Bauen!
++ *
++ * @param root Wurzelverzeichnis des Projekts
++ */
++void build(struct build_dir* root)
++{
++    root_path = getcwd(NULL, 0);
++    do_build(root, "", "", 0);
++    printf("Fertig gebaut.\n");
++    free(root_path);
++}
+diff --git a/src/modules/c/build/dir.c b/src/modules/c/build/dir.c
+new file mode 100644
+index 0000000..83d72e8
+--- /dev/null
++++ b/src/modules/c/build/dir.c
+@@ -0,0 +1,201 @@
++/*
++ * Copyright (c) 2009 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the tyndur Project
++ *     and its contributors.
++ * 4. Neither the name of the tyndur Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <dirent.h>
++#include <stdio.h>
++#include <string.h>
++#include <stdlib.h>
++#include <sys/stat.h>
++
++#include "build.h"
++
++/**
++ * Durchsucht ein Verzeichnis und speichert alle fuer das Bauen noetige
++ * Informationen in einer per malloc angelegten struct build_dir, die
++ * zurueckgegeben wird und vom Aufrufer freigegeben werden muss.
++ *
++ * Das bedeutet:
++ * - Alle Quellcodedateien sammeln (*.c, *.pas, ...)
++ * - Includeverzeichnisse speichern
++ * - lib-Verzeichnisse erfassen
++ * - Bei arch/-Verzeichnissen nur die richtige Architektur beruecksichtigen
++ * - .nobuild und .ignorenobuild beachten
++ */
++struct build_dir* scan_directory(struct build_dir* parent, const char* path)
++{
++    DIR* dir = opendir(path);
++    struct dirent* ent;
++    char* suffix;
++    struct build_file* file;
++    enum filetype filetype;
++    struct stat stat_buf;
++    struct build_dir* build_dir;
++    struct build_dir* subdir;
++    char* file_path;
++    int i;
++
++    int nobuild = 0;
++    int ignorenobuild = 0;
++
++    if (dir == NULL) {
++        fprintf(stderr, "Verzeichnis %s kann nicht geoeffnet werden.\n",
++            path);
++        return NULL;
++    }
++
++    // Speicher fuer Verzeichnis-struct anlegen und initialiseren
++    build_dir = calloc(1, sizeof(*build_dir));
++    build_dir->path = strdup(path);
++    build_dir->parent = parent;
++    build_dir->subdirs = list_create();
++    build_dir->obj_files = list_create();
++    for (i = 0; i < MAX_LANG; i++) {
++        build_dir->src_files[i] = list_create();
++    }
++
++    // Dateien und Unterverzeichnisse einlesen
++    while ((ent = readdir(dir))) {
++
++        filetype = OTHER_FILE;
++        suffix = strrchr(ent->d_name, '.');
++
++        asprintf(&file_path, "%s/%s", path, ent->d_name);
++        stat(file_path, &stat_buf);
++
++        // Dateityp erkennen
++        if (!strcmp(ent->d_name, ".nobuild")) {
++            nobuild = 1;
++            goto next;
++        } else if (!strcmp(ent->d_name, ".ignorenobuild")) {
++            ignorenobuild = 1;
++            goto next;
++        } else if (*ent->d_name == '.') {
++            goto next;
++        } else if (S_ISDIR(stat_buf.st_mode)) {
++            filetype = SUBDIR;
++        } else if (suffix == NULL) {
++            filetype = OTHER_FILE;
++        } else if (!strcmp(suffix, ".o")) {
++            filetype = OBJ;
++        } else if (!strcmp(suffix, ".c")) {
++            filetype = LANG_C;
++        } else if (!strcmp(suffix, ".pas")) {
++            filetype = LANG_PAS;
++        } else if (!strcmp(suffix, ".asm")) {
++            filetype = LANG_ASM_NASM;
++        } else if (!strcmp(suffix, ".S")) {
++            filetype = LANG_ASM_GAS;
++        }
++
++        // Wenn bis hierher nichts verwertbares gefunden wurde, wird die Datei
++        // einfach ignoriert.
++        if (filetype == OTHER_FILE) {
++            goto next;
++        }
++
++        // Datei je nach Typ verarbeiten
++        file = calloc(1, sizeof(*file));
++        file->type = LANG_ASM_GAS;
++        file->name = strdup(ent->d_name);
++
++        switch (filetype) {
++            case SUBDIR:
++                // Unterverzeichnisse werden je nach Namen unterschiedlich
++                // erfasst:
++                //
++                // - include/ wird zu den Includepfaden hinzugefuegt, das
++                //   Verzeicnis wird nicht weiter durchsucht
++                // - In include/arch/ und arch/ wird nur das richtige
++                //   Unterverzeichnis weiterverfolgt
++                // - lib/ wird gesondert gespeichert, damit es vor allen
++                //   anderen Verzeichnissen gebaut werden kann
++                // - Alles andere wird einfach als Unterverzeichnis gemerkt
++                if (!strcmp(file->name, "include")) {
++                    DIR* arch_dir;
++                    char* tmp;
++
++                    build_dir->has_include = 1;
++
++                    asprintf(&tmp, "include/arch/%s", arch);
++                    arch_dir = opendir(tmp);
++                    free(tmp);
++
++                    if (arch_dir != NULL) {
++                        closedir(arch_dir);
++                        build_dir->has_arch_include = 1;
++                    }
++
++                } else if (!strcmp(file->name, "lib")) {
++                    build_dir->lib = scan_directory(build_dir, file_path);
++                } else if (!strcmp(file->name, "arch")) {
++                    char* tmp;
++                    asprintf(&tmp, "%s/%s", file_path, arch);
++                    subdir = scan_directory(build_dir, tmp);
++                    free(tmp);
++                    if (subdir != NULL) {
++                        list_push(build_dir->subdirs, subdir);
++                    }
++                } else {
++                    subdir = scan_directory(build_dir, file_path);
++                    if (subdir != NULL) {
++                        list_push(build_dir->subdirs, subdir);
++                    }
++                }
++                break;
++            case OBJ:
++                // Objektdateien haben ihre eigene Liste
++                list_push(build_dir->obj_files, file);
++                break;
++            default:
++                // Quellcodedateien werden nach Sprache getrennt gespeichert
++                list_push(build_dir->src_files[filetype], file);
++                break;
++        }
++
++    next:
++        free(file_path);
++    }
++
++    closedir(dir);
++
++    // Wenn das Verzeichnis gar nicht gebaut werden soll, besser nichts
++    // zurueckgeben
++    if (nobuild && !ignorenobuild) {
++        // TODO Freigeben
++        return NULL;
++    }
++
++    return build_dir;
++}
+diff --git a/src/modules/c/build/include/build.h b/src/modules/c/build/include/build.h
+new file mode 100644
+index 0000000..f4b8614
+--- /dev/null
++++ b/src/modules/c/build/include/build.h
+@@ -0,0 +1,76 @@
++/*
++ * Copyright (c) 2009 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the tyndur Project
++ *     and its contributors.
++ * 4. Neither the name of the tyndur Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef _BUILD_H_
++#define _BUILD_H_
++
++#include "collections.h"
++
++enum filetype {
++    LANG_C,
++    LANG_PAS,
++    LANG_ASM_GAS,
++    LANG_ASM_NASM,
++
++#define MAX_LANG OTHER_FILE
++    OTHER_FILE,
++    SUBDIR,
++    OBJ,
++};
++
++
++extern char* filetype_str[];
++extern char* arch;
++
++struct build_dir {
++    int                 has_include;
++    int                 has_arch_include;
++    char*               path;
++    struct build_dir*   parent;
++    struct build_dir*   lib;
++    list_t*             src_files[MAX_LANG];
++    list_t*             obj_files;
++    list_t*             subdirs;
++};
++
++struct build_file {
++    enum filetype   type;
++    char*           name;
++};
++
++struct build_dir* scan_directory(struct build_dir* parent, const char* path);
++void build(struct build_dir* root);
++
++#endif
+diff --git a/src/modules/c/build/main.c b/src/modules/c/build/main.c
+new file mode 100644
+index 0000000..74a6292
+--- /dev/null
++++ b/src/modules/c/build/main.c
+@@ -0,0 +1,115 @@
++/*
++ * Copyright (c) 2009 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the tyndur Project
++ *     and its contributors.
++ * 4. Neither the name of the tyndur Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <stdio.h>
++#include <unistd.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "build.h"
++
++/**
++ * Legt Kuerzel fuer Dateitypen fest, die fuer die Anzeige benutzt werden
++ * koennen, waehrend die Datei verarbeitet wird
++ */
++char* filetype_str[] = {
++    [OTHER_FILE]    = " ? ",
++    [SUBDIR]        = "DIR",
++    [OBJ]           = "OBJ",
++    [LANG_C]        = " C ",
++    [LANG_PAS]      = "PAS",
++    [LANG_ASM_GAS]  = "ASM",
++    [LANG_ASM_NASM] = "ASM",
++};
++
++/**
++ * Legt die aktuelle Architektur fest.
++ *
++ * Wird benutzt, falls arch/-Verzeichnisse im Projekt existieren
++ */
++char* arch = "i386";
++
++/**
++ * Mit verbose != 0 wird die Kommandozeile aller aufgerufenen Tools angezeigt.
++ * Sonst wird nur eine kurze Statusmeldung ausgegeben.
++ */
++int verbose = 0;
++
++
++static void usage(char* binary)
++{
++    fprintf(stderr, "Aufruf: %s [-v] [<Wurzelverzeichnis>]\n", binary);
++    exit(1);
++}
++
++int main(int argc, char** argv)
++{
++    struct build_dir* rootdir;
++    int i;
++    char* rootdir_path = NULL;
++
++    // Verarbeitung der Kommandozeilenparameter
++    for (i = 1; i < argc; i++) {
++        if (!strcmp(argv[i], "-v")) {
++            verbose = 1;
++        } else if (argv[i][0] == '-') {
++            usage(argv[0]);
++        } else if (rootdir_path) {
++            usage(argv[0]);
++        } else {
++            rootdir_path = argv[i];
++        }
++    }
++
++    // Ins Wurzelverzeichnis des Projekts wechseln
++    if (rootdir_path) {
++        if (chdir(argv[i])) {
++            fprintf(stderr, "Verzeichnis nicht gefunden\n");
++            return 1;
++        }
++    }
++
++    // Alle zu kompilierenden Dateien, Includeverzeichnisse usw. erfassen
++    rootdir = scan_directory(NULL, ".");
++    if (rootdir == NULL) {
++        fprintf(stderr, "Verzeichnis nicht gefunden\n");
++        return 1;
++    }
++
++    // Bauen!
++    build(rootdir);
++
++    return 0;
++}
+-- 
+1.5.6.5
+
+
+
+From toni at tyndur.org  Sun Mar 29 21:54:11 2009
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Sun, 29 Mar 2009 21:54:11 +0200
+Subject: [tyndur-devel] [PATCH v2] build hinzugefuegt
+In-Reply-To: <1238350376-5207-1-git-send-email-kevin@tyndur.org>
+References: <1237735309-10223-1-git-send-email-kevin@tyndur.org>
+	<1238350376-5207-1-git-send-email-kevin@tyndur.org>
+Message-ID: <20090329195411.GA7684@einstein.produktiv.lan>
+
+On Sun, Mar 29 20:12, Kevin Wolf wrote:
+> + build: Erster Commit des Buildtools fuer tyndur
+> ---
+> diff --git a/src/modules/c/build/build.c b/src/modules/c/build/build.c
+> new file mode 100644
+> index 0000000..e043efe
+> --- /dev/null
+> +++ b/src/modules/c/build/build.c
+> @@ -0,0 +1,273 @@
+> +/*
+> + * Copyright (c) 2009 The tyndur Project. All rights reserved.
+> + *
+> + * This code is derived from software contributed to the tyndur Project
+> + * by Kevin Wolf.
+> + *
+> + * Redistribution and use in source and binary forms, with or without
+> + * modification, are permitted provided that the following conditions
+> + * are met:
+> + * 1. Redistributions of source code must retain the above copyright
+> + *    notice, this list of conditions and the following disclaimer.
+> + * 2. Redistributions in binary form must reproduce the above copyright
+> + *    notice, this list of conditions and the following disclaimer in the
+> + *    documentation and/or other materials provided with the distribution.
+> + * 3. All advertising materials mentioning features or use of this software
+> + *    must display the following acknowledgement:
+> + *     This product includes software developed by the tyndur Project
+> + *     and its contributors.
+> + * 4. Neither the name of the tyndur Project nor the names of its
+> + *    contributors may be used to endorse or promote products derived
+> + *    from this software without specific prior written permission.
+> + *
+> + * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+> + * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+> + * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+> + * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
+> + * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+> + * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+> + * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+> + * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+> + * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+> + * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+> + * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+> + */
+> +
+> +#include <stdio.h>
+> +#include <string.h>
+> +#include <stdlib.h>
+> +#include <stdarg.h>
+> +#include <unistd.h>
+> +
+> +#include "build.h"
+> +
+> +#ifdef __LINUX__
+> +static const char* cflags = "-m32 -g -O0 -Wall -fno-stack-protector -nostdinc"
+> +    " -fno-leading-underscore -fno-omit-frame-pointer -fno-strict-aliasing"
+> +    " -fno-builtin -c";
+> +#else
+> +//static const char* cflags = "-c -combine";
+> +static const char* cflags = "-c";
+> +#endif
+> +
+> +static const char* fpcflags = "-n -Cn -CX -Tlost";
+> +static const char* nasmflags = "-felf -O99";
+> +static const char* gasflags = "-32";
+> +
+> +static int dry_run = 0;
+
+Hm hier wäre doch ein Parameter nicht verkehrt, oder?
+
+> +static char* root_path;
+> +
+> +extern int verbose;
+
+Vielleicht in die build.h?
+
+> +
+> +
+> +/**
+> + * Fuehrt einen Shellbefehl in einem gegebenen Arbeitsverzeichnis aus
+> + */
+> +static void do_command(const char* path, const char* binary,
+> +    const char* args_fmt, ...)
+> +{
+> +    char* buf;
+> +    char* buf2;
+> +    char* dirname;
+> +    va_list ap;
+> +
+> +    asprintf(&dirname, "%s/%s", root_path, path);
+> +    if (verbose) {
+> +        printf(">>> cd %s\n", dirname);
+> +    }
+> +    chdir(dirname);
+
+Den dirname gibst du absichlich nicht frei? ;-)
+
+> +
+> +    va_start(ap, args_fmt);
+> +    vasprintf(&buf, args_fmt, ap);
+> +    va_end(ap);
+> +
+> +    asprintf(&buf2, "%s %s", binary, buf);
+> +
+> +    if (verbose) {
+> +        printf(">>> %s\n", buf2);
+> +    }
+> +    if (!dry_run) {
+> +        system(buf2);
+> +    }
+> +
+> +    free(buf);
+> +    free(buf2);
+> +    chdir(root_path);
+> +}
+> +
+> +/**
+> + * Sammelt alle Objektdateien in einem gegebenen Pfad ein und gibt sie durch
+> + * Leerzeichen getrennt zurueck.
+> + *
+> + * FIXME Mit Leerzeichen im Dateinamen ist das offensichtlich kaputt
+> + */
+> +static char* get_obj_files(const char* path)
+> +{
+> +    struct build_dir* dir;
+> +    struct build_dir* subdir;
+> +    struct build_file* file;
+> +    char* tmp = NULL;
+> +    char* subdir_files;
+> +    char* file_list = strdup("");
+> +    int i;
+> +
+> +    dir = scan_directory(NULL, path);
+> +    for (i = 0; (file = list_get_element_at(dir->obj_files, i)); i++) {
+> +        tmp = file_list;
+> +        asprintf(&file_list, "%s %s/%s", tmp, dir->path, file->name);
+> +        free(tmp);
+> +    }
+> +
+> +    for (i = 0; (subdir = list_get_element_at(dir->subdirs, i)); i++) {
+> +        tmp = file_list;
+> +        subdir_files = get_obj_files(subdir->path);
+> +        asprintf(&file_list, "%s %s", tmp, subdir_files);
+> +        free(subdir_files);
+> +        free(tmp);
+> +    }
+
+dir freigeben
+
+> +
+> +    return file_list;
+> +}
+> +
+> +/**
+> + * Kompiliert eine Anzahl von Dateien
+> + *
+> + * @param path Arbeitsverzeichnis
+> + * @param files Liste von zu kompilierenden Dateinamen
+> + * @param compiler Dateiname des Compilers
+> + * @param flags Flags, die in den Aufruf eingebunden werden sollen
+> + * @param include Zusaezlicher String, der in den Aufruf eingebunden werden
+> + * soll; primaer fuer die Angabe von Includeverzeichnissen.
+> + */
+> +static void compile(const char* path, list_t* files, const char* compiler,
+> +    const char* flags, const char* include)
+> +{
+> +    struct build_file* file;
+> +    char* file_list = strdup("");
+> +    char* tmp;
+> +    int i;
+> +
+> +    for (i = 0; (file = list_get_element_at(files, i)); i++) {
+> +        tmp = file_list;
+> +        asprintf(&file_list, "%s %s", tmp, file->name);
+> +        free(tmp);
+> +    }
+> +
+> +    if (*file_list) {
+> +        do_command(path, compiler, "%s -I %s/%s %s %s",
+> +            flags, root_path, path, include, file_list);
+> +    }
+> +}
+> +
+> +/**
+> + * Baut ein Projektverzeichnis
+> + *
+> + * @param dir Verzeichnis, das gebaut werden soll
+> + * @param parent_include Includeverzeichnisse des Vaterverzeichnisses, die fuer
+> + * Quellcodedateien in diesem Verzeichnis zur Verfuegung stehen sollen
+> + * @param parent_lib lib-Verzeichnisse der Vaterverzeichnisse, deren
+> + * Bibliotheken in diesem Verzeichnis zur Verfuegung stehen sollen
+> + * @param depth Verschachtelungstiefe ausgehend vom Wurzelverzeichnis, in dem
+> + * gebaut wird (fuer Baumdarstellung)
+> + */
+> +static void do_build(struct build_dir* dir, const char* parent_include,
+> +    const char* parent_lib, int depth)
+> +{
+> +    char* include;
+> +    char* lib;
+> +    char* tmp = NULL;
+> +
+> +    char* objs;
+> +    struct build_dir* subdir;
+> +    struct build_file* file;
+> +    int i;
+> +
+> +    for (i = 0; i < depth; i++) {
+> +        printf("| ");
+> +    }
+> +    printf("+ %s\n", dir->path);
+> +
+> +    // Ggf. include-Verzeichnis anhaengen
+> +    if (dir->has_include) {
+> +        asprintf(&include, "%s -I %s/%s/include",
+> +            parent_include, root_path, dir->path);
+> +    } else {
+> +        include = strdup(parent_include);
+> +    }
+> +
+> +    if (dir->has_arch_include) {
+> +        tmp = include;
+> +        asprintf(&include, "%s -I %s/%s/include/arch/%s",
+> +            tmp, root_path, dir->path, arch);
+> +        free(tmp);
+> +    }
+> +
+> +    // Ggf. Lib-Verzeichnis anhaengen
+> +    if (dir->lib != NULL) {
+> +        asprintf(&lib, "%s %s/%s/lib/library.a",
+> +            parent_lib, root_path, dir->path);
+> +    } else {
+> +        lib = strdup(parent_lib);
+> +    }
+> +
+> +    // lib-Verzeichnis wird als erstes kompiliert
+> +    if (dir->lib) {
+> +        do_build(dir->lib, include, lib, depth + 1);
+> +        objs = get_obj_files(dir->lib->path);
+> +        do_command(".", "ar", "rs %s/library.a %s",
+
+Ist man da wirklich immer in root_dir? Auch wenn das lib-Verzeichnis in
+einem Unterverzeichnis war?
+
+> +            dir->lib->path, objs);
+> +        free(objs);
+> +    }
+> +
+> +    // Dann alle anderen Unterverzeichnisse
+> +    for (i = 0; (subdir = list_get_element_at(dir->subdirs, i)); i++) {
+> +        do_build(subdir, include, lib, depth + 1);
+> +    }
+> +
+> +    // Und schliesslich noch die einzelnen Dateien
+> +    // TODO Pruefen, ob sich Abhaengigkeiten veraendert haben
+> +    printf("%s: Kompilieren (C)...", dir->path);
+> +    fflush(stdout);
+> +    compile(dir->path, dir->src_files[LANG_C], "gcc", cflags, include);
+> +
+> +    printf("\r%s: Kompilieren (Pascal)...\033[K", dir->path);
+> +    fflush(stdout);
+> +    compile(dir->path, dir->src_files[LANG_PAS], "fpc", fpcflags, include);
+> +
+> +    printf("\r%s: Assemblieren (gas)...\033[K", dir->path);
+> +    fflush(stdout);
+> +    compile(dir->path, dir->src_files[LANG_ASM_GAS], "as", gasflags, include);
+> +
+> +    for (i = 0; (file = list_get_element_at(dir->src_files[LANG_ASM_NASM], i)); i++) {
+> +        do_command(dir->path, "nasm", "%s %s", nasmflags, file->name);
+> +    }
+> +
+> +    // Im Wurzelverzeichnis wird gelinkt (TODO einstellbar machen)
+> +    if (dir->parent == NULL) {
+> +        printf("\r%s: Linken...\033[K", dir->path);
+> +        fflush(stdout);
+> +
+> +        objs = get_obj_files(dir->path);
+> +        do_command(".", "gcc", "-o %s/run %s %s", dir->path, lib, objs);
+> +        free(objs);
+> +    }
+> +
+> +    printf("\r\033[K");
+> +    fflush(stdout);
+> +
+> +    free(include);
+> +    free(lib);
+> +}
+> +
+> +/**
+> + * Bauen!
+> + *
+> + * @param root Wurzelverzeichnis des Projekts
+> + */
+> +void build(struct build_dir* root)
+> +{
+> +    root_path = getcwd(NULL, 0);
+> +    do_build(root, "", "", 0);
+> +    printf("Fertig gebaut.\n");
+> +    free(root_path);
+> +}
+> diff --git a/src/modules/c/build/dir.c b/src/modules/c/build/dir.c
+> new file mode 100644
+> index 0000000..83d72e8
+> --- /dev/null
+> +++ b/src/modules/c/build/dir.c
+> @@ -0,0 +1,201 @@
+> +/*
+> + * Copyright (c) 2009 The tyndur Project. All rights reserved.
+> + *
+> + * This code is derived from software contributed to the tyndur Project
+> + * by Kevin Wolf.
+> + *
+> + * Redistribution and use in source and binary forms, with or without
+> + * modification, are permitted provided that the following conditions
+> + * are met:
+> + * 1. Redistributions of source code must retain the above copyright
+> + *    notice, this list of conditions and the following disclaimer.
+> + * 2. Redistributions in binary form must reproduce the above copyright
+> + *    notice, this list of conditions and the following disclaimer in the
+> + *    documentation and/or other materials provided with the distribution.
+> + * 3. All advertising materials mentioning features or use of this software
+> + *    must display the following acknowledgement:
+> + *     This product includes software developed by the tyndur Project
+> + *     and its contributors.
+> + * 4. Neither the name of the tyndur Project nor the names of its
+> + *    contributors may be used to endorse or promote products derived
+> + *    from this software without specific prior written permission.
+> + *
+> + * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+> + * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+> + * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+> + * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
+> + * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+> + * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+> + * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+> + * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+> + * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+> + * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+> + * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+> + */
+> +
+> +#include <dirent.h>
+> +#include <stdio.h>
+> +#include <string.h>
+> +#include <stdlib.h>
+> +#include <sys/stat.h>
+> +
+> +#include "build.h"
+> +
+> +/**
+> + * Durchsucht ein Verzeichnis und speichert alle fuer das Bauen noetige
+> + * Informationen in einer per malloc angelegten struct build_dir, die
+> + * zurueckgegeben wird und vom Aufrufer freigegeben werden muss.
+
+Hm nur die Struktur selbst freigeben führt aber noch immer zu leaks,
+oder? Vielleicht eine Funktion fürs saubere Freigeben?
+
+> + *
+> + * Das bedeutet:
+> + * - Alle Quellcodedateien sammeln (*.c, *.pas, ...)
+> + * - Includeverzeichnisse speichern
+> + * - lib-Verzeichnisse erfassen
+> + * - Bei arch/-Verzeichnissen nur die richtige Architektur beruecksichtigen
+> + * - .nobuild und .ignorenobuild beachten
+> + */
+> +struct build_dir* scan_directory(struct build_dir* parent, const char* path)
+> +{
+> +    DIR* dir = opendir(path);
+> +    struct dirent* ent;
+> +    char* suffix;
+> +    struct build_file* file;
+> +    enum filetype filetype;
+> +    struct stat stat_buf;
+> +    struct build_dir* build_dir;
+> +    struct build_dir* subdir;
+> +    char* file_path;
+> +    int i;
+> +
+> +    int nobuild = 0;
+> +    int ignorenobuild = 0;
+> +
+> +    if (dir == NULL) {
+> +        fprintf(stderr, "Verzeichnis %s kann nicht geoeffnet werden.\n",
+> +            path);
+> +        return NULL;
+> +    }
+> +
+> +    // Speicher fuer Verzeichnis-struct anlegen und initialiseren
+> +    build_dir = calloc(1, sizeof(*build_dir));
+> +    build_dir->path = strdup(path);
+> +    build_dir->parent = parent;
+> +    build_dir->subdirs = list_create();
+> +    build_dir->obj_files = list_create();
+> +    for (i = 0; i < MAX_LANG; i++) {
+> +        build_dir->src_files[i] = list_create();
+> +    }
+> +
+> +    // Dateien und Unterverzeichnisse einlesen
+> +    while ((ent = readdir(dir))) {
+> +
+> +        filetype = OTHER_FILE;
+> +        suffix = strrchr(ent->d_name, '.');
+> +
+> +        asprintf(&file_path, "%s/%s", path, ent->d_name);
+> +        stat(file_path, &stat_buf);
+> +
+> +        // Dateityp erkennen
+> +        if (!strcmp(ent->d_name, ".nobuild")) {
+> +            nobuild = 1;
+> +            goto next;
+> +        } else if (!strcmp(ent->d_name, ".ignorenobuild")) {
+> +            ignorenobuild = 1;
+> +            goto next;
+> +        } else if (*ent->d_name == '.') {
+> +            goto next;
+> +        } else if (S_ISDIR(stat_buf.st_mode)) {
+> +            filetype = SUBDIR;
+> +        } else if (suffix == NULL) {
+> +            filetype = OTHER_FILE;
+> +        } else if (!strcmp(suffix, ".o")) {
+> +            filetype = OBJ;
+> +        } else if (!strcmp(suffix, ".c")) {
+> +            filetype = LANG_C;
+> +        } else if (!strcmp(suffix, ".pas")) {
+> +            filetype = LANG_PAS;
+> +        } else if (!strcmp(suffix, ".asm")) {
+> +            filetype = LANG_ASM_NASM;
+> +        } else if (!strcmp(suffix, ".S")) {
+> +            filetype = LANG_ASM_GAS;
+> +        }
+> +
+> +        // Wenn bis hierher nichts verwertbares gefunden wurde, wird die Datei
+> +        // einfach ignoriert.
+> +        if (filetype == OTHER_FILE) {
+> +            goto next;
+> +        }
+> +
+> +        // Datei je nach Typ verarbeiten
+> +        file = calloc(1, sizeof(*file));
+> +        file->type = LANG_ASM_GAS;
+
+Wozu ist denn das gut?
+
+> +        file->name = strdup(ent->d_name);
+> +
+> +        switch (filetype) {
+> +            case SUBDIR:
+> +                // Unterverzeichnisse werden je nach Namen unterschiedlich
+> +                // erfasst:
+> +                //
+> +                // - include/ wird zu den Includepfaden hinzugefuegt, das
+> +                //   Verzeicnis wird nicht weiter durchsucht
+> +                // - In include/arch/ und arch/ wird nur das richtige
+> +                //   Unterverzeichnis weiterverfolgt
+> +                // - lib/ wird gesondert gespeichert, damit es vor allen
+> +                //   anderen Verzeichnissen gebaut werden kann
+> +                // - Alles andere wird einfach als Unterverzeichnis gemerkt
+> +                if (!strcmp(file->name, "include")) {
+> +                    DIR* arch_dir;
+> +                    char* tmp;
+> +
+> +                    build_dir->has_include = 1;
+> +
+> +                    asprintf(&tmp, "include/arch/%s", arch);
+> +                    arch_dir = opendir(tmp);
+> +                    free(tmp);
+> +
+> +                    if (arch_dir != NULL) {
+> +                        closedir(arch_dir);
+> +                        build_dir->has_arch_include = 1;
+> +                    }
+> +
+> +                } else if (!strcmp(file->name, "lib")) {
+> +                    build_dir->lib = scan_directory(build_dir, file_path);
+> +                } else if (!strcmp(file->name, "arch")) {
+> +                    char* tmp;
+> +                    asprintf(&tmp, "%s/%s", file_path, arch);
+> +                    subdir = scan_directory(build_dir, tmp);
+> +                    free(tmp);
+> +                    if (subdir != NULL) {
+> +                        list_push(build_dir->subdirs, subdir);
+> +                    }
+> +                } else {
+> +                    subdir = scan_directory(build_dir, file_path);
+> +                    if (subdir != NULL) {
+> +                        list_push(build_dir->subdirs, subdir);
+> +                    }
+> +                }
+> +                break;
+> +            case OBJ:
+> +                // Objektdateien haben ihre eigene Liste
+> +                list_push(build_dir->obj_files, file);
+> +                break;
+> +            default:
+> +                // Quellcodedateien werden nach Sprache getrennt gespeichert
+> +                list_push(build_dir->src_files[filetype], file);
+> +                break;
+> +        }
+> +
+> +    next:
+> +        free(file_path);
+> +    }
+> +
+> +    closedir(dir);
+> +
+> +    // Wenn das Verzeichnis gar nicht gebaut werden soll, besser nichts
+> +    // zurueckgeben
+> +    if (nobuild && !ignorenobuild) {
+> +        // TODO Freigeben
+
+Jo, das sollte man wirklich.... ;-)
+
+> +        return NULL;
+> +    }
+> +
+> +    return build_dir;
+> +}
+> diff --git a/src/modules/c/build/include/build.h b/src/modules/c/build/include/build.h
+> new file mode 100644
+> index 0000000..f4b8614
+> --- /dev/null
+> +++ b/src/modules/c/build/include/build.h
+> @@ -0,0 +1,76 @@
+> +/*
+> + * Copyright (c) 2009 The tyndur Project. All rights reserved.
+> + *
+> + * This code is derived from software contributed to the tyndur Project
+> + * by Kevin Wolf.
+> + *
+> + * Redistribution and use in source and binary forms, with or without
+> + * modification, are permitted provided that the following conditions
+> + * are met:
+> + * 1. Redistributions of source code must retain the above copyright
+> + *    notice, this list of conditions and the following disclaimer.
+> + * 2. Redistributions in binary form must reproduce the above copyright
+> + *    notice, this list of conditions and the following disclaimer in the
+> + *    documentation and/or other materials provided with the distribution.
+> + * 3. All advertising materials mentioning features or use of this software
+> + *    must display the following acknowledgement:
+> + *     This product includes software developed by the tyndur Project
+> + *     and its contributors.
+> + * 4. Neither the name of the tyndur Project nor the names of its
+> + *    contributors may be used to endorse or promote products derived
+> + *    from this software without specific prior written permission.
+> + *
+> + * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+> + * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+> + * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+> + * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
+> + * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+> + * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+> + * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+> + * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+> + * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+> + * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+> + * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+> + */
+> +
+> +#ifndef _BUILD_H_
+> +#define _BUILD_H_
+> +
+> +#include "collections.h"
+
+Haben wir uns hier nicht mal auf <> geeinigt? Oder habe ich das falsch
+in Erinnerung?
+
+> +
+> +enum filetype {
+> +    LANG_C,
+> +    LANG_PAS,
+> +    LANG_ASM_GAS,
+> +    LANG_ASM_NASM,
+> +
+> +#define MAX_LANG OTHER_FILE
+> +    OTHER_FILE,
+> +    SUBDIR,
+> +    OBJ,
+> +};
+> +
+> +
+> +extern char* filetype_str[];
+> +extern char* arch;
+> +
+> +struct build_dir {
+> +    int                 has_include;
+> +    int                 has_arch_include;
+> +    char*               path;
+> +    struct build_dir*   parent;
+> +    struct build_dir*   lib;
+> +    list_t*             src_files[MAX_LANG];
+> +    list_t*             obj_files;
+> +    list_t*             subdirs;
+> +};
+> +
+> +struct build_file {
+> +    enum filetype   type;
+> +    char*           name;
+> +};
+> +
+> +struct build_dir* scan_directory(struct build_dir* parent, const char* path);
+> +void build(struct build_dir* root);
+> +
+> +#endif
+
+Das ist was mir grad so auffällt.
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 197 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20090329/b025c00c/attachment.pgp>
+
+From kevin at tyndur.org  Sun Mar 29 22:17:25 2009
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 29 Mar 2009 22:17:25 +0200
+Subject: [tyndur-devel] [PATCH v3] build hinzugefuegt
+In-Reply-To: <20090329195411.GA7684@einstein.produktiv.lan>
+References: <20090329195411.GA7684@einstein.produktiv.lan>
+Message-ID: <1238357845-14454-1-git-send-email-kevin@tyndur.org>
+
++ build: Erster Commit des Buildtools fuer tyndur
+
+Compilegetestet ist diese neue Version sogar ;-)
+---
+ src/modules/c/build/Makefile.all    |    7 +
+ src/modules/c/build/build.c         |  272 +++++++++++++++++++++++++++++++++++
+ src/modules/c/build/dir.c           |  235 ++++++++++++++++++++++++++++++
+ src/modules/c/build/include/build.h |   80 ++++++++++
+ src/modules/c/build/main.c          |  121 ++++++++++++++++
+ 5 files changed, 715 insertions(+), 0 deletions(-)
+ create mode 100644 src/modules/c/build/Makefile.all
+ create mode 100644 src/modules/c/build/build.c
+ create mode 100644 src/modules/c/build/dir.c
+ create mode 100644 src/modules/c/build/include/build.h
+ create mode 100644 src/modules/c/build/main.c
+
+diff --git a/src/modules/c/build/Makefile.all b/src/modules/c/build/Makefile.all
+new file mode 100644
+index 0000000..8c9b17a
+--- /dev/null
++++ b/src/modules/c/build/Makefile.all
+@@ -0,0 +1,7 @@
++shopt -s extglob
++source $LOST_BUILDMK_ROOT/config.sh
++
++echo "LD   $1/apps/build"
++
++$LOST_TOOLS_LD -obuild -Ttext=0x40000000 *.o --start-group $2 --end-group
++$LOST_TOOLS_STRIP -s build -o $1/apps/build
+diff --git a/src/modules/c/build/build.c b/src/modules/c/build/build.c
+new file mode 100644
+index 0000000..e2962bb
+--- /dev/null
++++ b/src/modules/c/build/build.c
+@@ -0,0 +1,272 @@
++/*
++ * Copyright (c) 2009 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the tyndur Project
++ *     and its contributors.
++ * 4. Neither the name of the tyndur Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <stdio.h>
++#include <string.h>
++#include <stdlib.h>
++#include <stdarg.h>
++#include <unistd.h>
++
++#include "build.h"
++
++#ifdef __LINUX__
++static const char* cflags = "-m32 -g -O0 -Wall -fno-stack-protector -nostdinc"
++    " -fno-leading-underscore -fno-omit-frame-pointer -fno-strict-aliasing"
++    " -fno-builtin -c";
++#else
++//static const char* cflags = "-c -combine";
++static const char* cflags = "-c";
++#endif
++
++static const char* fpcflags = "-n -Cn -CX -Tlost";
++static const char* nasmflags = "-felf -O99";
++static const char* gasflags = "-32";
++
++static char* root_path;
++
++/**
++ * Fuehrt einen Shellbefehl in einem gegebenen Arbeitsverzeichnis aus
++ */
++static void do_command(const char* path, const char* binary,
++    const char* args_fmt, ...)
++{
++    char* buf;
++    char* buf2;
++    char* dirname;
++    va_list ap;
++
++    asprintf(&dirname, "%s/%s", root_path, path);
++    if (verbose) {
++        printf(">>> cd %s\n", dirname);
++    }
++    chdir(dirname);
++    free(dirname);
++
++    va_start(ap, args_fmt);
++    vasprintf(&buf, args_fmt, ap);
++    va_end(ap);
++
++    asprintf(&buf2, "%s %s", binary, buf);
++
++    if (verbose) {
++        printf(">>> %s\n", buf2);
++    }
++    if (!dry_run) {
++        system(buf2);
++    }
++
++    free(buf);
++    free(buf2);
++    chdir(root_path);
++}
++
++/**
++ * Sammelt alle Objektdateien in einem gegebenen Pfad ein und gibt sie durch
++ * Leerzeichen getrennt zurueck.
++ *
++ * FIXME Mit Leerzeichen im Dateinamen ist das offensichtlich kaputt
++ */
++static char* get_obj_files(const char* path)
++{
++    struct build_dir* dir;
++    struct build_dir* subdir;
++    struct build_file* file;
++    char* tmp = NULL;
++    char* subdir_files;
++    char* file_list = strdup("");
++    int i;
++
++    dir = scan_directory(NULL, path);
++    for (i = 0; (file = list_get_element_at(dir->obj_files, i)); i++) {
++        tmp = file_list;
++        asprintf(&file_list, "%s %s/%s", tmp, dir->path, file->name);
++        free(tmp);
++    }
++
++    for (i = 0; (subdir = list_get_element_at(dir->subdirs, i)); i++) {
++        tmp = file_list;
++        subdir_files = get_obj_files(subdir->path);
++        asprintf(&file_list, "%s %s", tmp, subdir_files);
++        free(subdir_files);
++        free(tmp);
++    }
++
++    free_directory(dir);
++
++    return file_list;
++}
++
++/**
++ * Kompiliert eine Anzahl von Dateien
++ *
++ * @param path Arbeitsverzeichnis
++ * @param files Liste von zu kompilierenden Dateinamen
++ * @param compiler Dateiname des Compilers
++ * @param flags Flags, die in den Aufruf eingebunden werden sollen
++ * @param include Zusaezlicher String, der in den Aufruf eingebunden werden
++ * soll; primaer fuer die Angabe von Includeverzeichnissen.
++ */
++static void compile(const char* path, list_t* files, const char* compiler,
++    const char* flags, const char* include)
++{
++    struct build_file* file;
++    char* file_list = strdup("");
++    char* tmp;
++    int i;
++
++    for (i = 0; (file = list_get_element_at(files, i)); i++) {
++        tmp = file_list;
++        asprintf(&file_list, "%s %s", tmp, file->name);
++        free(tmp);
++    }
++
++    if (*file_list) {
++        do_command(path, compiler, "%s -I %s/%s %s %s",
++            flags, root_path, path, include, file_list);
++    }
++}
++
++/**
++ * Baut ein Projektverzeichnis
++ *
++ * @param dir Verzeichnis, das gebaut werden soll
++ * @param parent_include Includeverzeichnisse des Vaterverzeichnisses, die fuer
++ * Quellcodedateien in diesem Verzeichnis zur Verfuegung stehen sollen
++ * @param parent_lib lib-Verzeichnisse der Vaterverzeichnisse, deren
++ * Bibliotheken in diesem Verzeichnis zur Verfuegung stehen sollen
++ * @param depth Verschachtelungstiefe ausgehend vom Wurzelverzeichnis, in dem
++ * gebaut wird (fuer Baumdarstellung)
++ */
++static void do_build(struct build_dir* dir, const char* parent_include,
++    const char* parent_lib, int depth)
++{
++    char* include;
++    char* lib;
++    char* tmp = NULL;
++
++    char* objs;
++    struct build_dir* subdir;
++    struct build_file* file;
++    int i;
++
++    for (i = 0; i < depth; i++) {
++        printf("| ");
++    }
++    printf("+ %s\n", dir->path);
++
++    // Ggf. include-Verzeichnis anhaengen
++    if (dir->has_include) {
++        asprintf(&include, "%s -I %s/%s/include",
++            parent_include, root_path, dir->path);
++    } else {
++        include = strdup(parent_include);
++    }
++
++    if (dir->has_arch_include) {
++        tmp = include;
++        asprintf(&include, "%s -I %s/%s/include/arch/%s",
++            tmp, root_path, dir->path, arch);
++        free(tmp);
++    }
++
++    // Ggf. Lib-Verzeichnis anhaengen
++    if (dir->lib != NULL) {
++        asprintf(&lib, "%s %s/%s/lib/library.a",
++            parent_lib, root_path, dir->path);
++    } else {
++        lib = strdup(parent_lib);
++    }
++
++    // lib-Verzeichnis wird als erstes kompiliert
++    if (dir->lib) {
++        do_build(dir->lib, include, lib, depth + 1);
++        objs = get_obj_files(dir->lib->path);
++        do_command(".", "ar", "rs %s/library.a %s",
++            dir->lib->path, objs);
++        free(objs);
++    }
++
++    // Dann alle anderen Unterverzeichnisse
++    for (i = 0; (subdir = list_get_element_at(dir->subdirs, i)); i++) {
++        do_build(subdir, include, lib, depth + 1);
++    }
++
++    // Und schliesslich noch die einzelnen Dateien
++    // TODO Pruefen, ob sich Abhaengigkeiten veraendert haben
++    printf("%s: Kompilieren (C)...", dir->path);
++    fflush(stdout);
++    compile(dir->path, dir->src_files[LANG_C], "gcc", cflags, include);
++
++    printf("\r%s: Kompilieren (Pascal)...\033[K", dir->path);
++    fflush(stdout);
++    compile(dir->path, dir->src_files[LANG_PAS], "fpc", fpcflags, include);
++
++    printf("\r%s: Assemblieren (gas)...\033[K", dir->path);
++    fflush(stdout);
++    compile(dir->path, dir->src_files[LANG_ASM_GAS], "as", gasflags, include);
++
++    for (i = 0; (file = list_get_element_at(dir->src_files[LANG_ASM_NASM], i)); i++) {
++        do_command(dir->path, "nasm", "%s %s", nasmflags, file->name);
++    }
++
++    // Im Wurzelverzeichnis wird gelinkt (TODO einstellbar machen)
++    if (dir->parent == NULL) {
++        printf("\r%s: Linken...\033[K", dir->path);
++        fflush(stdout);
++
++        objs = get_obj_files(dir->path);
++        do_command(".", "gcc", "-o %s/run %s %s", dir->path, lib, objs);
++        free(objs);
++    }
++
++    printf("\r\033[K");
++    fflush(stdout);
++
++    free(include);
++    free(lib);
++}
++
++/**
++ * Bauen!
++ *
++ * @param root Wurzelverzeichnis des Projekts
++ */
++void build(struct build_dir* root)
++{
++    root_path = getcwd(NULL, 0);
++    do_build(root, "", "", 0);
++    printf("Fertig gebaut.\n");
++    free(root_path);
++}
+diff --git a/src/modules/c/build/dir.c b/src/modules/c/build/dir.c
+new file mode 100644
+index 0000000..1919fb0
+--- /dev/null
++++ b/src/modules/c/build/dir.c
+@@ -0,0 +1,235 @@
++/*
++ * Copyright (c) 2009 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the tyndur Project
++ *     and its contributors.
++ * 4. Neither the name of the tyndur Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <dirent.h>
++#include <stdio.h>
++#include <string.h>
++#include <stdlib.h>
++#include <sys/stat.h>
++
++#include "build.h"
++
++/**
++ * Durchsucht ein Verzeichnis und speichert alle fuer das Bauen noetige
++ * Informationen in dynamisch allozierten Datenstrukturen, die vom Aufrufer
++ * mir free_directory() freigegeben werden muss.
++ *
++ * Das bedeutet:
++ * - Alle Quellcodedateien sammeln (*.c, *.pas, ...)
++ * - Includeverzeichnisse speichern
++ * - lib-Verzeichnisse erfassen
++ * - Bei arch/-Verzeichnissen nur die richtige Architektur beruecksichtigen
++ * - .nobuild und .ignorenobuild beachten
++ */
++struct build_dir* scan_directory(struct build_dir* parent, const char* path)
++{
++    DIR* dir = opendir(path);
++    struct dirent* ent;
++    char* suffix;
++    struct build_file* file;
++    enum filetype filetype;
++    struct stat stat_buf;
++    struct build_dir* build_dir;
++    struct build_dir* subdir;
++    char* file_path;
++    int i;
++
++    int nobuild = 0;
++    int ignorenobuild = 0;
++
++    if (dir == NULL) {
++        fprintf(stderr, "Verzeichnis %s kann nicht geoeffnet werden.\n",
++            path);
++        return NULL;
++    }
++
++    // Speicher fuer Verzeichnis-struct anlegen und initialiseren
++    build_dir = calloc(1, sizeof(*build_dir));
++    build_dir->path = strdup(path);
++    build_dir->parent = parent;
++    build_dir->subdirs = list_create();
++    build_dir->obj_files = list_create();
++    for (i = 0; i < MAX_LANG; i++) {
++        build_dir->src_files[i] = list_create();
++    }
++
++    // Dateien und Unterverzeichnisse einlesen
++    while ((ent = readdir(dir))) {
++
++        filetype = OTHER_FILE;
++        suffix = strrchr(ent->d_name, '.');
++
++        asprintf(&file_path, "%s/%s", path, ent->d_name);
++        stat(file_path, &stat_buf);
++
++        // Dateityp erkennen
++        if (!strcmp(ent->d_name, ".nobuild")) {
++            nobuild = 1;
++            goto next;
++        } else if (!strcmp(ent->d_name, ".ignorenobuild")) {
++            ignorenobuild = 1;
++            goto next;
++        } else if (*ent->d_name == '.') {
++            goto next;
++        } else if (S_ISDIR(stat_buf.st_mode)) {
++            filetype = SUBDIR;
++        } else if (suffix == NULL) {
++            filetype = OTHER_FILE;
++        } else if (!strcmp(suffix, ".o")) {
++            filetype = OBJ;
++        } else if (!strcmp(suffix, ".c")) {
++            filetype = LANG_C;
++        } else if (!strcmp(suffix, ".pas")) {
++            filetype = LANG_PAS;
++        } else if (!strcmp(suffix, ".asm")) {
++            filetype = LANG_ASM_NASM;
++        } else if (!strcmp(suffix, ".S")) {
++            filetype = LANG_ASM_GAS;
++        }
++
++        // Wenn bis hierher nichts verwertbares gefunden wurde, wird die Datei
++        // einfach ignoriert.
++        if (filetype == OTHER_FILE) {
++            goto next;
++        }
++
++        // Datei je nach Typ verarbeiten
++        file = calloc(1, sizeof(*file));
++        file->type = filetype;
++        file->name = strdup(ent->d_name);
++
++        switch (filetype) {
++            case SUBDIR:
++                // Unterverzeichnisse werden je nach Namen unterschiedlich
++                // erfasst:
++                //
++                // - include/ wird zu den Includepfaden hinzugefuegt, das
++                //   Verzeicnis wird nicht weiter durchsucht
++                // - In include/arch/ und arch/ wird nur das richtige
++                //   Unterverzeichnis weiterverfolgt
++                // - lib/ wird gesondert gespeichert, damit es vor allen
++                //   anderen Verzeichnissen gebaut werden kann
++                // - Alles andere wird einfach als Unterverzeichnis gemerkt
++                if (!strcmp(file->name, "include")) {
++                    DIR* arch_dir;
++                    char* tmp;
++
++                    build_dir->has_include = 1;
++
++                    asprintf(&tmp, "include/arch/%s", arch);
++                    arch_dir = opendir(tmp);
++                    free(tmp);
++
++                    if (arch_dir != NULL) {
++                        closedir(arch_dir);
++                        build_dir->has_arch_include = 1;
++                    }
++
++                } else if (!strcmp(file->name, "lib")) {
++                    build_dir->lib = scan_directory(build_dir, file_path);
++                } else if (!strcmp(file->name, "arch")) {
++                    char* tmp;
++                    asprintf(&tmp, "%s/%s", file_path, arch);
++                    subdir = scan_directory(build_dir, tmp);
++                    free(tmp);
++                    if (subdir != NULL) {
++                        list_push(build_dir->subdirs, subdir);
++                    }
++                } else {
++                    subdir = scan_directory(build_dir, file_path);
++                    if (subdir != NULL) {
++                        list_push(build_dir->subdirs, subdir);
++                    }
++                }
++                break;
++            case OBJ:
++                // Objektdateien haben ihre eigene Liste
++                list_push(build_dir->obj_files, file);
++                break;
++            default:
++                // Quellcodedateien werden nach Sprache getrennt gespeichert
++                list_push(build_dir->src_files[filetype], file);
++                break;
++        }
++
++    next:
++        free(file_path);
++    }
++
++    closedir(dir);
++
++    // Wenn das Verzeichnis gar nicht gebaut werden soll, besser nichts
++    // zurueckgeben
++    if (nobuild && !ignorenobuild) {
++        free_directory(build_dir);
++        return NULL;
++    }
++
++    return build_dir;
++}
++
++/**
++ * Gibt die Datenstrukturen fuer ein Verzeichnis wieder frei
++ */
++void free_directory(struct build_dir* dir)
++{
++    int i;
++    struct build_dir* subdir;
++    struct build_file* file;
++
++    if (dir == NULL) {
++        return;
++    }
++
++    while ((subdir = list_pop(dir->subdirs))) {
++        free_directory(subdir);
++    }
++
++    while ((file = list_pop(dir->obj_files))) {
++        free(file->name);
++        free(file);
++    }
++
++    for (i = 0; i < MAX_LANG; i++) {
++        while ((file = list_pop(dir->src_files[i]))) {
++            free(file->name);
++            free(file);
++        }
++    }
++
++    free_directory(dir->lib);
++    free(dir->path);
++    free(dir);
++}
+diff --git a/src/modules/c/build/include/build.h b/src/modules/c/build/include/build.h
+new file mode 100644
+index 0000000..c7ee608
+--- /dev/null
++++ b/src/modules/c/build/include/build.h
+@@ -0,0 +1,80 @@
++/*
++ * Copyright (c) 2009 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the tyndur Project
++ *     and its contributors.
++ * 4. Neither the name of the tyndur Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef _BUILD_H_
++#define _BUILD_H_
++
++#include <collections.h>
++
++enum filetype {
++    LANG_C,
++    LANG_PAS,
++    LANG_ASM_GAS,
++    LANG_ASM_NASM,
++
++#define MAX_LANG OTHER_FILE
++    OTHER_FILE,
++    SUBDIR,
++    OBJ,
++};
++
++
++extern char* filetype_str[];
++extern char* arch;
++
++struct build_dir {
++    int                 has_include;
++    int                 has_arch_include;
++    char*               path;
++    struct build_dir*   parent;
++    struct build_dir*   lib;
++    list_t*             src_files[MAX_LANG];
++    list_t*             obj_files;
++    list_t*             subdirs;
++};
++
++struct build_file {
++    enum filetype   type;
++    char*           name;
++};
++
++struct build_dir* scan_directory(struct build_dir* parent, const char* path);
++void free_directory(struct build_dir* dir);
++void build(struct build_dir* root);
++
++extern int dry_run;
++extern int verbose;
++
++#endif
+diff --git a/src/modules/c/build/main.c b/src/modules/c/build/main.c
+new file mode 100644
+index 0000000..0f725cc
+--- /dev/null
++++ b/src/modules/c/build/main.c
+@@ -0,0 +1,121 @@
++/*
++ * Copyright (c) 2009 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the tyndur Project
++ *     and its contributors.
++ * 4. Neither the name of the tyndur Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <stdio.h>
++#include <unistd.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "build.h"
++
++/**
++ * Legt Kuerzel fuer Dateitypen fest, die fuer die Anzeige benutzt werden
++ * koennen, waehrend die Datei verarbeitet wird
++ */
++char* filetype_str[] = {
++    [OTHER_FILE]    = " ? ",
++    [SUBDIR]        = "DIR",
++    [OBJ]           = "OBJ",
++    [LANG_C]        = " C ",
++    [LANG_PAS]      = "PAS",
++    [LANG_ASM_GAS]  = "ASM",
++    [LANG_ASM_NASM] = "ASM",
++};
++
++/**
++ * Legt die aktuelle Architektur fest.
++ *
++ * Wird benutzt, falls arch/-Verzeichnisse im Projekt existieren
++ */
++char* arch = "i386";
++
++/**
++ * Mit verbose != 0 wird die Kommandozeile aller aufgerufenen Tools angezeigt.
++ * Sonst wird nur eine kurze Statusmeldung ausgegeben.
++ */
++int verbose = 0;
++
++/// Nur Meldungen ausgeben, aber nichts wirklich aufrufen
++int dryrun= 0;
++
++
++static void usage(char* binary)
++{
++    fprintf(stderr, "Aufruf: %s [-v] [--dry-run] [<Wurzelverzeichnis>]\n",
++        binary);
++    exit(1);
++}
++
++int main(int argc, char** argv)
++{
++    struct build_dir* rootdir;
++    int i;
++    char* rootdir_path = NULL;
++
++    // Verarbeitung der Kommandozeilenparameter
++    for (i = 1; i < argc; i++) {
++        if (!strcmp(argv[i], "-v")) {
++            verbose = 1;
++        } else if (!strcmp(argv[i], "--dry-run")) {
++            dry_run = 1;
++        } else if (argv[i][0] == '-') {
++            usage(argv[0]);
++        } else if (rootdir_path) {
++            usage(argv[0]);
++        } else {
++            rootdir_path = argv[i];
++        }
++    }
++
++    // Ins Wurzelverzeichnis des Projekts wechseln
++    if (rootdir_path) {
++        if (chdir(argv[i])) {
++            fprintf(stderr, "Verzeichnis nicht gefunden\n");
++            return 1;
++        }
++    }
++
++    // Alle zu kompilierenden Dateien, Includeverzeichnisse usw. erfassen
++    rootdir = scan_directory(NULL, ".");
++    if (rootdir == NULL) {
++        fprintf(stderr, "Verzeichnis nicht gefunden\n");
++        return 1;
++    }
++
++    // Bauen!
++    build(rootdir);
++
++    return 0;
++}
+-- 
+1.5.6.5
+
+
+
+From kevin at tyndur.org  Mon Mar 30 22:11:04 2009
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Mon, 30 Mar 2009 22:11:04 +0200
+Subject: [tyndur-devel] [PATCH] kernel: SYSCALL_FASTRPC_WAIT
+Message-ID: <1238443864-6494-1-git-send-email-kevin@tyndur.org>
+
++ kernel: SYSCALL_FASTRPC_WAIT als Kombination von RPC und wait_for_rpc()
+* libc: Neuen Syscall fuer Sync-RPC benutzen
+---
+ src/include/syscallno.h        |    1 +
+ src/kernel/src/syscall.c       |   10 ++++++++++
+ src/modules/include/syscall.h  |    1 +
+ src/modules/lib/rpc/sync.c     |    2 +-
+ src/modules/lib/syscalls/rpc.c |   21 +++++++++++++++++----
+ 5 files changed, 30 insertions(+), 5 deletions(-)
+
+diff --git a/src/include/syscallno.h b/src/include/syscallno.h
+index b56ad45..16786f3 100644
+--- a/src/include/syscallno.h
++++ b/src/include/syscallno.h
+@@ -76,6 +76,7 @@
+ 
+ #define SYSCALL_FASTRPC 55
+ #define SYSCALL_FASTRPC_RET 56
++#define SYSCALL_FASTRPC_WAIT 58
+ 
+ #define SYSCALL_WAIT_FOR_RPC 57
+ 
+diff --git a/src/kernel/src/syscall.c b/src/kernel/src/syscall.c
+index 2ee793d..b2b11e0 100644
+--- a/src/kernel/src/syscall.c
++++ b/src/kernel/src/syscall.c
+@@ -657,6 +657,15 @@ void syscall(struct int_stack_frame ** esp)
+             break;
+         }
+ 
++        case SYSCALL_FASTRPC_WAIT:
++        {
++            dword callee_pid = *((dword*) isf->esp);
++
++            if (callee_pid != current_task->pid) {
++                current_task->status = TS_WAIT_FOR_RPC;
++            }
++        }
++            /* Fall-through */
+         case SYSCALL_FASTRPC:
+         {
+             dword metadata_size = *((dword*) (isf->esp + 4));
+@@ -693,6 +702,7 @@ void syscall(struct int_stack_frame ** esp)
+             )) {
+                 schedule_to_task(callee, (dword*) esp);
+             } else {
++                current_task->status = TS_RUNNING;
+                 isf->eax = -1;
+                 schedule((dword*)esp);
+             }
+diff --git a/src/modules/include/syscall.h b/src/modules/include/syscall.h
+index e22b0df..177b06c 100644
+--- a/src/modules/include/syscall.h
++++ b/src/modules/include/syscall.h
+@@ -73,6 +73,7 @@ void add_intr_handler(dword intr);
+ 
+ void rpc(pid_t pid);
+ void send_message(pid_t pid, dword function, dword correlation_id, dword len, char* data);
++void send_message_and_wait_for_rpc(pid_t pid, dword function, dword correlation_id, dword len, char* data);
+ void wait_for_rpc(void);
+ void v_and_wait_for_rpc(void);
+ 
+diff --git a/src/modules/lib/rpc/sync.c b/src/modules/lib/rpc/sync.c
+index 9c5bede..0f65fd7 100644
+--- a/src/modules/lib/rpc/sync.c
++++ b/src/modules/lib/rpc/sync.c
+@@ -174,7 +174,7 @@ static response_t* sync_rpc(pid_t pid, char* function_name, size_t data_length,
+     // Wï¿½hrend dem RPC selbst nicht blockieren, da es sonst bei Self-RPC dazu
+     // fï¿½hrt, daï¿½ Code geblockt ist, der dazu nicht vorgesehen ist.
+     v();
+-    send_message(pid, 512, correlation_id, data_length + RPC_FUNCTION_NAME_LENGTH, rpc_data);
++    send_message_and_wait_for_rpc(pid, 512, correlation_id, data_length + RPC_FUNCTION_NAME_LENGTH, rpc_data);
+     p();
+ 
+     response_t* response;
+diff --git a/src/modules/lib/syscalls/rpc.c b/src/modules/lib/syscalls/rpc.c
+index 72d4bbc..68cb394 100644
+--- a/src/modules/lib/syscalls/rpc.c
++++ b/src/modules/lib/syscalls/rpc.c
+@@ -16,8 +16,9 @@ void rpc(dword pid)
+     } while (result != 0);
+ }
+ 
+-void send_message
+-    (dword pid, dword function, dword correlation_id, dword len, char* data)
++static inline void do_send_message
++    (dword pid, dword function, dword correlation_id, dword len, char* data,
++    bool wait_for_rpc)
+ {
+     dword result = 0;
+ 
+@@ -38,10 +39,22 @@ void send_message
+             "mov %1, %%eax;"
+             "int $0x30;"
+             "add $0x14, %%esp;"
+-        : "=a" (result) 
+-        : "i" (SYSCALL_FASTRPC), "g" (pid), "i" (0x8), "g" (metadata), 
++        : "=a" (result)
++        : "i" (wait_for_rpc ? SYSCALL_FASTRPC_WAIT : SYSCALL_FASTRPC),
++            "g" (pid), "i" (0x8), "g" (metadata),
+             "g" (len), "g" (data), "0" (result));
+ 
+     } while (result != 0);
+ }
+ 
++void send_message
++    (dword pid, dword function, dword correlation_id, dword len, char* data)
++{
++    do_send_message(pid, function, correlation_id, len, data, FALSE);
++}
++
++void send_message_and_wait_for_rpc
++    (dword pid, dword function, dword correlation_id, dword len, char* data)
++{
++    do_send_message(pid, function, correlation_id, len, data, TRUE);
++}
+-- 
+1.5.6.5
+
+
+

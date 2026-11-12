@@ -1,0 +1,126 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] kernel2: Kernel-Interrupts moeglich machen
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20kernel2%3A%20Kernel-Interrupts%20moeglich%0A%20machen&In-Reply-To=%3C20100922192616.GD16506%40silvanus%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001826.html">
+   <LINK REL="Next"  HREF="001841.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] kernel2: Kernel-Interrupts moeglich machen</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20kernel2%3A%20Kernel-Interrupts%20moeglich%0A%20machen&In-Reply-To=%3C20100922192616.GD16506%40silvanus%3E"
+           TITLE="[tyndur-devel] [PATCH] kernel2: Kernel-Interrupts moeglich machen">kevin at tyndur.org
+                  </A><BR>
+    <I>Mi Sep 22 21:26:18 CEST 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001826.html">[tyndur-devel] [PATCH] kernel2: Kernel-Interrupts moeglich machen
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001841.html">[tyndur-devel] [PATCH] kernel2: Kernel-Interrupts moeglich machen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1836">[ Datum ]</a>
+              <a href="thread.html#1836">[ Thema ]</a>
+              <a href="subject.html#1836">[ Betreff (Subject) ]</a>
+              <a href="author.html#1836">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>On Tue, Sep 21, 2010 at 08:39:08PM +0200, Antoine Kaufmann wrote:
+&gt;<i> * kernel2: Anpassungen damit kernel-Interrupts nicht mehr den Stack
+</I>&gt;<i>            durcheinander bringen.
+</I>&gt;<i> * kernel2: Neues Feld user_isf eingefuehrt, damit im Kernel jederzeit
+</I>&gt;<i>            auf den ISF des Userspace-Interrupts zugegriffen werden
+</I>&gt;<i>            kann, auch nach einem Kernel-Interrupt.
+</I>&gt;<i> ! kernel2: Keine RPCs zu Tasks die in Kernel-Interrupts sind
+</I>&gt;<i> 
+</I>&gt;<i> Signed-off-by: Antoine Kaufmann &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">toni at tyndur.org</A>&gt;
+</I>&gt;<i> ---
+</I>&gt;<i>  src/kernel2/include/tasks.h      |    3 +++
+</I>&gt;<i>  src/kernel2/src/arch/i386/vm86.c |    2 +-
+</I>&gt;<i>  src/kernel2/src/interrupts/im.c  |   24 ++++++++++++++----------
+</I>&gt;<i>  src/kernel2/src/syscalls/rpc.c   |   12 ++++++++++--
+</I>&gt;<i>  src/kernel2/src/tasks/thread.c   |    1 +
+</I>&gt;<i>  5 files changed, 29 insertions(+), 13 deletions(-)
+</I>&gt;<i> 
+</I>&gt;<i> diff --git a/src/kernel2/include/tasks.h b/src/kernel2/include/tasks.h
+</I>&gt;<i> index dfd0ea5..d1b031c 100644
+</I>&gt;<i> --- a/src/kernel2/include/tasks.h
+</I>&gt;<i> +++ b/src/kernel2/include/tasks.h
+</I>&gt;<i> @@ -106,6 +106,9 @@ typedef struct {
+</I>&gt;<i>      /// Groesse des Kernelstacks
+</I>&gt;<i>      size_t kernel_stack_size;
+</I>&gt;<i>  
+</I>&gt;<i> +    /// Aktueller Stackframe des Userspace-Interrupts
+</I>&gt;<i> +    vaddr_t user_isf;
+</I>&gt;<i> +
+</I>&gt;<i>      /// Anfang des Usermode-Stacks
+</I>&gt;<i>      vaddr_t user_stack_bottom;
+</I>&gt;<i>  
+</I>&gt;<i> diff --git a/src/kernel2/src/arch/i386/vm86.c b/src/kernel2/src/arch/i386/vm86.c
+</I>&gt;<i> index cdee6f1..c5d1e05 100644
+</I>&gt;<i> --- a/src/kernel2/src/arch/i386/vm86.c
+</I>&gt;<i> +++ b/src/kernel2/src/arch/i386/vm86.c
+</I>&gt;<i> @@ -150,7 +150,7 @@ static int create_vm86_task(int intr, vm86_regs_t* regs, uintptr_t stack)
+</I>&gt;<i>      visf.es = regs-&gt;es;
+</I>&gt;<i>  
+</I>&gt;<i>      // Und das ganze auf den Stack
+</I>&gt;<i> -    task-&gt;kernel_stack = ((uint8_t*) task-&gt;kernel_stack)
+</I>&gt;<i> +    task-&gt;user_isf = task-&gt;kernel_stack = ((uint8_t*) task-&gt;kernel_stack)
+</I>&gt;<i>          + sizeof(*isf) - sizeof(visf);
+</I>
+Eine Anweisung pro Zeile? Ich weiß, Grenzfall...
+
+&gt;<i>      memcpy(task-&gt;kernel_stack, &amp;visf, sizeof(visf));
+</I>&gt;<i>  
+</I>&gt;<i> diff --git a/src/kernel2/src/interrupts/im.c b/src/kernel2/src/interrupts/im.c
+</I>&gt;<i> index 1930c0d..0379d30 100644
+</I>&gt;<i> --- a/src/kernel2/src/interrupts/im.c
+</I>&gt;<i> +++ b/src/kernel2/src/interrupts/im.c
+</I>&gt;<i> @@ -133,9 +133,14 @@ interrupt_stack_frame_t* im_handler(interrupt_stack_frame_t* isf)
+</I>&gt;<i>      // Pointer auf den aktuellen Thread holen    
+</I>&gt;<i>      pm_thread_t* thread = current_thread;
+</I>&gt;<i>      pm_thread_t* old_thread = thread;
+</I>&gt;<i> -    thread-&gt;kernel_stack = (vaddr_t) isf;
+</I>&gt;<i>      uint8_t int_num = isf-&gt;interrupt_number;
+</I>&gt;<i> -    
+</I>&gt;<i> +    interrupt_stack_frame_t* new_isf = isf;
+</I>&gt;<i> +
+</I>&gt;<i> +    // Wenn der Int aus dem Userspace kommt, legen wir den zugehoerigen ISF ab
+</I>&gt;<i> +    if (isf-&gt;cs != 0x8) {
+</I>&gt;<i> +        thread-&gt;user_isf = isf;
+</I>&gt;<i> +    }
+</I>
+Wäre (isf-&gt;cs &amp; 0x3) || (isf-&gt;eflags &amp; 0x20000) nicht korrekter? Nicht
+dass uns irgendwann noch irgendein BIOS (oder sonstiger VM86-Code)
+reinlegt...
+
+Ansonsten sehe ich keinen Fehler, was aber bei diesem Patch vermutlich
+nicht viel heißt. ;-)
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001826.html">[tyndur-devel] [PATCH] kernel2: Kernel-Interrupts moeglich machen
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001841.html">[tyndur-devel] [PATCH] kernel2: Kernel-Interrupts moeglich machen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1836">[ Datum ]</a>
+              <a href="thread.html#1836">[ Thema ]</a>
+              <a href="subject.html#1836">[ Betreff (Subject)]</a>
+              <a href="author.html#1836">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

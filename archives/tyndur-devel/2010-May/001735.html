@@ -1,0 +1,356 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 1/2] init: ELF-Loader aus der libc benutzen
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%201/2%5D%20init%3A%20ELF-Loader%20aus%20der%20libc%20benutzen&In-Reply-To=%3C1275146217-13020-2-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001734.html">
+   <LINK REL="Next"  HREF="001738.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 1/2] init: ELF-Loader aus der libc benutzen</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%201/2%5D%20init%3A%20ELF-Loader%20aus%20der%20libc%20benutzen&In-Reply-To=%3C1275146217-13020-2-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 1/2] init: ELF-Loader aus der libc benutzen">kevin at tyndur.org
+                  </A><BR>
+    <I>Sa Mai 29 17:16:56 CEST 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001734.html">[tyndur-devel] [PATCH 0/2] ELF-Loader-Umbauarbeiten
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001738.html">[tyndur-devel] [PATCH 1/2] init: ELF-Loader aus der libc benutzen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1735">[ Datum ]</a>
+              <a href="thread.html#1735">[ Thema ]</a>
+              <a href="subject.html#1735">[ Betreff (Subject) ]</a>
+              <a href="author.html#1735">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* init: ELF-Loader aus der libc benutzen statt eigener Implementierung.
+  Die Loader duerften momentan in etwa gleich kaputt sein.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/init/init.c   |  114 ++++---------------------------------------
+ src/modules/init/loader.c |  118 +++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 128 insertions(+), 104 deletions(-)
+ create mode 100644 src/modules/init/loader.c
+
+diff --git a/src/modules/init/init.c b/src/modules/init/init.c
+index 475d602..dace629 100644
+--- a/src/modules/init/init.c
++++ b/src/modules/init/init.c
+@@ -76,7 +76,8 @@ void rpc_loadelf(pid_t pid, dword correlation_id, size_t data_size, void* data);
+ void rpc_reopen_stdio(pid_t pid, dword cid, size_t size, void* data);
+ 
+ void load_modules(init_module_list_t* modules);
+-bool load_single_module(Elf32_Ehdr* elf_header, char* args, pid_t parent_pid);
++pid_t load_single_module(void* image, size_t image_size, char* args,
++    pid_t parent_pid) ;
+ bool start_program(char* path, char* args, pid_t parent_pid);
+ extern void init_sync_messages(void);
+ 
+@@ -351,109 +352,13 @@ void load_modules(init_module_list_t* modules)
+     for(i = 0; i &lt; modules-&gt;count; i++) 
+     { 
+         //printf(&quot;Modul %d: %s\n&quot;, i, modules-&gt;modules[i].cmdline);
+-        load_single_module((Elf32_Ehdr*) modules-&gt;modules[i].start, modules-&gt;modules[i].cmdline, 0); 
++        load_single_module((Elf32_Ehdr*) modules-&gt;modules[i].start,
++            modules-&gt;modules[i].size, modules-&gt;modules[i].cmdline, 0);
+         mem_free(modules-&gt;modules[i].start, modules-&gt;modules[i].size);
+         //msleep(50); // Damit die Meldungen nicht durcheinandergeraten
+     } 
+ }
+ 
+-/**
+- * Der ELF-Loader (noch Total Kaputt)
+- */
+-pid_t load_single_module(Elf32_Ehdr* elf_header, char* args, pid_t parent_pid) 
+-{
+-    Elf32_Phdr* program_header;
+-    dword i, j;
+-    pid_t pid;
+-    
+-    //Liste mit den Programm-Headern. Wird benutzt um auch programme laden zu koennen, die nicht
+-    list_t* pheader_list = list_create();
+-    
+-    pid = 0;
+-    if (elf_header-&gt;e_magic == ELF_MAGIC)
+-    {
+-        program_header = (Elf32_Phdr *) ((dword) elf_header + elf_header-&gt;e_phoff);
+-        //Zuerst den Bereich mit dem entry-point suchen
+-        for (j = 0; j &lt; 2; j++)
+-        {
+-            for (i = 0; i &lt; elf_header-&gt;e_phnum; i++)
+-            {
+-                // Im ersten durchgang alles ausser dem Bereich mit dem entry-Point pushe, damit er zu oberst ist
+-                if((j == 1) &amp;&amp; ((elf_header-&gt;e_entry &gt;= program_header[i].p_vaddr) &amp;&amp; (elf_header-&gt;e_entry &lt;= program_header[i].p_vaddr + program_header[i].p_memsz)))
+-                {
+-                    pheader_list = list_push(pheader_list, (void*)&amp;(program_header[i]));
+-                }
+-                else if((j == 0) &amp;&amp; !((elf_header-&gt;e_entry &gt;= program_header[i].p_vaddr) &amp;&amp; (elf_header-&gt;e_entry &lt;= program_header[i].p_vaddr + program_header[i].p_memsz)))
+-                {
+-                    pheader_list = list_push(pheader_list, (void*)&amp;(program_header[i]));
+-                }
+-            }
+-        }
+-
+-        while(list_is_empty(pheader_list) == FALSE)
+-        {
+-            //Den naechsten Bereich aus der Liste holen
+-            program_header = (Elf32_Phdr*) list_pop(pheader_list);
+-
+-            if (program_header-&gt;p_type == 1)
+-            {
+-                if ((elf_header-&gt;e_entry &gt;= program_header-&gt;p_vaddr) &amp;&amp; (elf_header-&gt;e_entry &lt;= program_header-&gt;p_vaddr + program_header-&gt;p_memsz))
+-                {
+-                    if(pid != 0)
+-                    {
+-                        unblock_process(pid);
+-                        pid = 0;
+-                    }
+-                    pid = create_process(elf_header-&gt;e_entry, 0, args, parent_pid);
+-                    //printf(&quot;[  INIT  ] Erstelle Prozess PID=%d  entry=0x%08x\n&quot;, pid, elf_header-&gt;e_entry);
+-                }
+-                else if (pid == 0)
+-                {
+-                    // FIXME
+-                    printf(&quot;Kein Task: phdr-&gt;vaddr = %x, ehdr-&gt;entry = %x\nDas Modul ist entweder beschaedigt oder wird von diesem Loader nicht unterstuetzt (Kein Entry Point wurde gefunden :-S)\n&quot;, program_header-&gt;p_vaddr, elf_header-&gt;e_entry);
+-                    continue;
+-                }
+-                
+-                dword page_offset = program_header-&gt;p_vaddr % 0x1000;
+-
+-                // Groesse des benoetigten Speicherblocks berechnen
+-                size_t mem_size = program_header-&gt;p_memsz;
+-                mem_size = PAGE_ALIGN_ROUND_UP(mem_size + page_offset);
+-                
+-                
+-                void* mem_image = mem_allocate(mem_size, 0);
+-                
+-                // FIXME: Hier koennte man noch ein Bisschen Zeit sparen indem
+-                // nur die letzten paar Bytes auf 0 gesetzt werden. Aber dann
+-                // kriege ich es garantiert hin, entweder zuwenig oder zuviel
+-                // zu nullen. ;-)
+-                memset(mem_image, 0, mem_size);
+-                
+-                // printf(&quot;    Kopiere 0x%08x Bytes nach 0x%08x\n&quot;, program_header-&gt;p_filesz, program_header-&gt;p_vaddr + page_offset);
+-                // Daten kopieren
+-                memcpy((void*) ((dword) mem_image + page_offset), (void*) ((dword) elf_header + program_header-&gt;p_offset), program_header-&gt;p_filesz);
+-                
+-                // Pages in den Prozess mappen
+-                init_child_page (pid, (void*) (program_header-&gt;p_vaddr), mem_image, mem_size);
+-            }
+-        }
+-      
+-    }
+-    else
+-    {
+-        printf(&quot;ELF-Magic ungueltig (0x%x)\n&quot;,elf_header-&gt;e_magic);
+-        return 0;
+-    }
+-
+-    
+-    if(pid != 0)
+-    {
+-        unblock_process(pid);
+-    }
+-
+-    return pid;
+-}
+-
+ size_t ainflate(void* src, size_t len, void** dest_ptr)
+ {
+     int ret = 0;
+@@ -537,6 +442,7 @@ pid_t start_program(char* path, char* args, pid_t parent_pid)
+     }
+ 
+     void* buffer = NULL;
++    size_t buffer_size = 0;
+     long size = 0;
+     
+     fseek(f, 0, SEEK_END);
+@@ -558,10 +464,9 @@ pid_t start_program(char* path, char* args, pid_t parent_pid)
+         byte* in_buffer = malloc(pages * 4096);
+         fread(in_buffer, 1, size, f);
+         
+-        size_t length = ainflate(in_buffer, size, &amp;buffer);
++        buffer_size = ainflate(in_buffer, size, &amp;buffer);
+         free(in_buffer);
+-        if(length == 0)
+-        {
++        if (buffer_size == 0) {
+             return FALSE;
+         }
+     }
+@@ -599,12 +504,13 @@ pid_t start_program(char* path, char* args, pid_t parent_pid)
+     }
+     else
+     {
+-        buffer = malloc(pages * 4096);
++        buffer_size = pages * 4096;
++        buffer = malloc(buffer_size);
+         fread(buffer, 1, size, f);
+     }
+     fclose(f);
+ 
+-    pid = load_single_module((Elf32_Ehdr*) buffer, args, parent_pid);
++    pid = load_single_module(buffer, buffer_size, args, parent_pid);
+     free(buffer);
+     return pid;
+ }
+diff --git a/src/modules/init/loader.c b/src/modules/init/loader.c
+new file mode 100644
+index 0000000..9e7d06a
+--- /dev/null
++++ b/src/modules/init/loader.c
+@@ -0,0 +1,118 @@
++/*
++ * Copyright (c) 2010 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the tyndur Project
++ *     and its contributors.
++ * 4. Neither the name of the tyndur Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include &lt;syscall.h&gt;
++#include &lt;loader.h&gt;
++#include &lt;lock.h&gt;
++
++static struct {
++    pid_t   pid;
++    char*   args;
++    pid_t   parent_pid;
++    lock_t  lock;
++} loader_state;
++
++/**
++ * Speicher allozieren um ihn spaeter in einen neuen Prozess zu mappen. Diese
++ * Funktion sollte nicht fuer &quot;normale&quot; Allokationen benutzt werden, da immer
++ * ganze Pages alloziert werden.
++ *
++ * @param size minimale Groesse des Bereichs
++ *
++ * @return Adresse, oder NULL falls ein Fehler aufgetreten ist
++ */
++vaddr_t loader_allocate_mem(size_t size)
++{
++    return mem_allocate(size, 0);
++}
++
++/**
++ * Ein Stueck Speicher in den Prozess mappen. Dieser darf dazu noch nicht
++ * gestartet sein. Der Speicher muss zuerst mit loader_allocate_mem alloziert
++ * worden sein, denn sonst kann nicht garantiert werden, dass der Speicher
++ * uebertragen werden kann.
++ *
++ * @param process PID des Prozesses
++ * @param dest_address Adresse an die der Speicher im Zielprozess soll
++ * @param src_address Adresse im aktuellen Kontext die uebetragen werden soll
++ * @param size Groesse des Speicherbereichs in Bytes
++ *
++ * @return TRUE, wenn der bereich gemappt wurde, FALSE sonst
++ */
++bool loader_assign_mem(pid_t process, vaddr_t dest_address,
++    vaddr_t src_address, size_t size)
++{
++    init_child_page(loader_state.pid, dest_address, src_address, size);
++    return TRUE;
++}
++
++
++/**
++ * Erstellt einen neuen Thread.
++ *
++ * @param process PID
++ * @param address Einsprungsadresse des Threads
++ *
++ * @return bool TRUE, wenn der Thread erstellt wurde, FALSE sonst
++ */
++bool loader_create_thread(pid_t process, vaddr_t address)
++{
++    loader_state.pid = create_process((uintptr_t) address, 0,
++        loader_state.args, loader_state.parent_pid);
++    return loader_state.pid != 0;
++}
++
++/**
++ * Erstellt einen neuen Prozess aus einer ELF-Datei
++ */
++pid_t load_single_module(void* image, size_t image_size, char* args,
++    pid_t parent_pid)
++{
++    p();
++    lock(&amp;loader_state.lock);
++
++    loader_state.args = args;
++    loader_state.parent_pid = parent_pid;
++    if (!loader_elf32_load_image(0, image, image_size)) {
++        loader_state.pid = 0;
++        goto fail;
++    }
++    unblock_process(loader_state.pid);
++
++fail:
++    unlock(&amp;loader_state.lock);
++    v();
++    return loader_state.pid;
++}
+-- 
+1.6.0.2
+
+</PRE>
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001734.html">[tyndur-devel] [PATCH 0/2] ELF-Loader-Umbauarbeiten
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001738.html">[tyndur-devel] [PATCH 1/2] init: ELF-Loader aus der libc benutzen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1735">[ Datum ]</a>
+              <a href="thread.html#1735">[ Thema ]</a>
+              <a href="subject.html#1735">[ Betreff (Subject)]</a>
+              <a href="author.html#1735">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

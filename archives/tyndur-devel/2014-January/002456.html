@@ -1,0 +1,312 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 10/11] init: Unterstützung für LIOv2-Pipequellen
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_10/11%3D5D_init%3D3A_Unterst%3DC3%3DBCt%3F%3D%0A%09%3D%3Futf-8%3Fq%3Fzung_f%3DC3%3DBCr_LIOv2-Pipequellen%3F%3D&In-Reply-To=%3C1388708813-23390-11-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002455.html">
+   <LINK REL="Next"  HREF="002457.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 10/11] init: Unterstützung für LIOv2-Pipequellen</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_10/11%3D5D_init%3D3A_Unterst%3DC3%3DBCt%3F%3D%0A%09%3D%3Futf-8%3Fq%3Fzung_f%3DC3%3DBCr_LIOv2-Pipequellen%3F%3D&In-Reply-To=%3C1388708813-23390-11-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 10/11] init: Unterstützung für LIOv2-Pipequellen">kevin at tyndur.org
+                  </A><BR>
+    <I>Fr Jan  3 01:26:52 CET 2014</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002455.html">[tyndur-devel] [PATCH 09/11] kernel2: LIOv2-Server im Userspace
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002457.html">[tyndur-devel] [PATCH 11/11] cdi/storage: Auf LIOv2 umstellen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2456">[ Datum ]</a>
+              <a href="thread.html#2456">[ Thema ]</a>
+              <a href="subject.html#2456">[ Betreff (Subject) ]</a>
+              <a href="author.html#2456">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ init: Wenn eine Datei in einem LIOv1-Service geöffnet wird, der eine
+  Pipe-Quelle hat, versucht init jetzt erst einmal die Quelle mit LIOv2
+  zu öffnen. Damit gehen LIOv1-Services auf LIOv2-Services (z.B. ext2
+  auf ata), aber nicht umgekehrt.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/include/syscallno.h           |    1 +
+ src/kernel2/include/syscall.h     |    3 ++
+ src/kernel2/src/syscall.c         |    1 +
+ src/kernel2/src/syscalls/lostio.c |   26 ++++++++++++++++++
+ src/modules/include/syscall.h     |   15 ++++++++++
+ src/modules/init/io.c             |   52 +++++++++++++++++++++++++++++++++++++
+ src/modules/lib/syscalls/lostio.c |   34 ++++++++++++++++++++++++
+ 7 files changed, 132 insertions(+), 0 deletions(-)
+
+diff --git a/src/include/syscallno.h b/src/include/syscallno.h
+index ad25dc3..47ab453 100644
+--- a/src/include/syscallno.h
++++ b/src/include/syscallno.h
+@@ -107,6 +107,7 @@
+ #define SYSCALL_LIO_TRUNCATE    97
+ #define SYSCALL_LIO_UNLINK      98
+ #define SYSCALL_LIO_SYNC_ALL    99
++#define SYSCALL_LIO_PASS_FD     100
+ 
+ #define SYSCALL_LIO_SRV_SERVICE_REGISTER            110
+ #define SYSCALL_LIO_SRV_TREE_SET_RING               111
+diff --git a/src/kernel2/include/syscall.h b/src/kernel2/include/syscall.h
+index 4ac87d0..9ff28f6 100644
+--- a/src/kernel2/include/syscall.h
++++ b/src/kernel2/include/syscall.h
+@@ -208,6 +208,9 @@ void syscall_lio_open(lio_usp_resource_t* resid, int flags,
+ /// Stream schließen
+ int syscall_lio_close(lio_usp_stream_t* stream_id);
+ 
++/// Stream an anderen Prozess weitergeben
++int syscall_lio_pass_fd(lio_usp_stream_t* stream_id, pid_t pid);
++
+ /// Aus Stream lesen
+ void syscall_lio_read(lio_usp_stream_t* stream_id, uint64_t* offset,
+     size_t bytes, void* buffer, int updatepos, ssize_t* result);
+diff --git a/src/kernel2/src/syscall.c b/src/kernel2/src/syscall.c
+index a5eda73..80fa605 100644
+--- a/src/kernel2/src/syscall.c
++++ b/src/kernel2/src/syscall.c
+@@ -123,6 +123,7 @@ void syscall_init()
+     syscall_register(SYSCALL_LIO_STAT, &amp;syscall_lio_stat, 2);
+     syscall_register(SYSCALL_LIO_UNLINK, &amp;syscall_lio_unlink, 3);
+     syscall_register(SYSCALL_LIO_SYNC_ALL, &amp;syscall_lio_sync_all, 0);
++    syscall_register(SYSCALL_LIO_PASS_FD, &amp;syscall_lio_pass_fd, 2);
+ 
+     syscall_register(SYSCALL_LIO_SRV_SERVICE_REGISTER,
+         &amp;syscall_lio_srv_service_register, 4);
+diff --git a/src/kernel2/src/syscalls/lostio.c b/src/kernel2/src/syscalls/lostio.c
+index 987d29c..1c978d4 100644
+--- a/src/kernel2/src/syscalls/lostio.c
++++ b/src/kernel2/src/syscalls/lostio.c
+@@ -129,6 +129,32 @@ int syscall_lio_close(lio_usp_stream_t* stream_id)
+     return ret;
+ }
+ 
++/// Stream an anderen Prozess weitergeben
++int syscall_lio_pass_fd(lio_usp_stream_t* stream_id, pid_t pid)
++{
++    struct lio_usp_stream* fd;
++    struct lio_stream* stream;
++    pm_process_t* process;
++
++    process = pm_get(pid);
++    if (process == NULL) {
++        return -EINVAL;
++    }
++
++    // TODO: is_userspace
++    fd = lio_usp_get_stream(current_process, *stream_id);
++    if (fd == NULL) {
++        return -EBADF;
++    }
++
++    stream = fd-&gt;stream;
++    lio_usp_remove_stream(current_process, fd);
++    fd = lio_usp_add_stream(process, stream);
++    *stream_id = fd-&gt;usp_id;
++
++    return 0;
++}
++
+ /// Aus Stream lesen
+ void syscall_lio_read(lio_usp_stream_t* stream_id, uint64_t* offset,
+     size_t bytes, void* buffer, int updatepos, ssize_t* result)
+diff --git a/src/modules/include/syscall.h b/src/modules/include/syscall.h
+index 298e737..33cd98e 100644
+--- a/src/modules/include/syscall.h
++++ b/src/modules/include/syscall.h
+@@ -169,6 +169,21 @@ int lio_stat(lio_resource_t resource, struct lio_stat* sbuf);
+ int lio_close(lio_stream_t s);
+ 
+ /**
++ * Gibt einen Stream an einen anderen Prozess ab. Der Stream wird in diesem
++ * Prozess dabei ungültig.
++ *
++ * @param s Der abzugebenden Stream
++ * @param pid Zielprozess, der den Stream erhalten soll
++ *
++ * @return Stream-ID im Zielprozess bei Erfolg, negativ im Fehlerfall.
++ * Insbesondere:
++ *
++ *      -EINVAL     Es gibt keinen Prozess mit der gegebenen PID
++ *      -EBADF      Die Stream-ID ist ungültig
++ */
++lio_stream_t lio_pass_fd(lio_stream_t s, pid_t pid);
++
++/**
+  * Liest aus dem Stream ab der aktuellen Position des Dateizeigers und bewegt
+  * den Dateizeiger hinter das letzte gelesene Byte.
+  *
+diff --git a/src/modules/init/io.c b/src/modules/init/io.c
+index 56df8b0..4ce8e76 100644
+--- a/src/modules/init/io.c
++++ b/src/modules/init/io.c
+@@ -34,6 +34,7 @@
+  */
+ #define MODULE_INIT
+ 
++#include &lt;stdint.h&gt;
+ #include &quot;types.h&quot;
+ #include &quot;syscall.h&quot;
+ #include &quot;string.h&quot;
+@@ -51,9 +52,49 @@ void io_init()
+     register_message_handler(&quot;IO_OPEN &quot;, &amp;rpc_io_open);
+ }
+ 
++io_resource_t* newio_open(const char* service_name, const char* path,
++    uint8_t attr, pid_t pid)
++{
++    char* p;
++    lio_resource_t r;
++    lio_stream_t s;
++    io_resource_t* result = NULL;
++
++    // Nur fuer Pipequellen
++    if (attr != (IO_OPEN_MODE_READ | IO_OPEN_MODE_WRITE)) {
++        return NULL;
++    }
++
++    asprintf(&amp;p, &quot;%s:%s&quot;, service_name, path);
++    r = lio_resource(p, 1);
++    if (r &lt; 0) {
++        goto out;
++    }
++
++    s = lio_open(r, LIO_READ | LIO_WRITE);
++    if (s &lt; 0) {
++        goto out;
++    }
++
++    result = malloc(sizeof(*result));
++    *result = (io_resource_t) {
++        .lio2_stream    =   s,
++        .lio2_res       =   r,
++        .flags          =   IO_RES_FLAG_READAHEAD,
++    };
++
++out:
++    free(p);
++    return result;
++}
++
+ 
+ io_resource_t* io_open_res(const char* service_name, const char* path, io_resource_t* pipe_source, uint8_t attr, pid_t pid)
+ {
++    io_resource_t* newres;
++    if ((newres = newio_open(service_name, path, attr, pid))) {
++        return newres;
++    }
+     struct service_s* dest_service = NULL;
+     dest_service = get_service_by_name(service_name);
+     //printf(&quot;\nopen resource: service='%s' path='%s' =&gt; %x\n&quot;, service_name, path, dest_service); 
+@@ -63,6 +104,15 @@ io_resource_t* io_open_res(const char* service_name, const char* path, io_resour
+         return NULL;
+     }
+     
++
++    // Pipequelle für den Service lesbar machen
++    if (pipe_source &amp;&amp; IS_LIO2(pipe_source)) {
++        pipe_source-&gt;lio2_stream =
++            lio_pass_fd(pipe_source-&gt;lio2_stream, dest_service-&gt;pid);
++        if (pipe_source-&gt;lio2_stream &lt; 0) {
++            return NULL;
++        }
++    }
+     
+     //Daten fuer den open-rpc an den Service zusammenflicken
+     size_t open_request_size = strlen(path) + sizeof(io_resource_t) + sizeof(pid_t) + 6;
+@@ -136,6 +186,8 @@ void rpc_io_open(pid_t pid, uint32_t correlation_id, size_t data_size, void* dat
+                 if((pipe_source != NULL) &amp;&amp; pipe_source-&gt;pid)
+                 {
+                     last_pid = pipe_source-&gt;pid;
++                } else if (pipe_source &amp;&amp; IS_LIO2(pipe_source)) {
++                    /* pipe_source bleibt gültig, aber es gibt keine PID */
+                 } else {
+                     pipe_source = NULL;
+                     break;
+diff --git a/src/modules/lib/syscalls/lostio.c b/src/modules/lib/syscalls/lostio.c
+index 1961243..6cf8dc1 100644
+--- a/src/modules/lib/syscalls/lostio.c
++++ b/src/modules/lib/syscalls/lostio.c
+@@ -135,6 +135,40 @@ int lio_close(lio_stream_t s)
+     return result;
+ }
+ 
++/**
++ * Gibt einen Stream an einen anderen Prozess ab. Der Stream wird in diesem
++ * Prozess dabei ungültig.
++ *
++ * @param s Der abzugebenden Stream
++ * @param pid Zielprozess, der den Stream erhalten soll
++ *
++ * @return Stream-ID im Zielprozess bei Erfolg, negativ im Fehlerfall.
++ * Insbesondere:
++ *
++ *      -EINVAL     Es gibt keinen Prozess mit der gegebenen PID
++ *      -EBADF      Die Stream-ID ist ungültig
++ */
++lio_stream_t lio_pass_fd(lio_stream_t s, pid_t pid)
++{
++    volatile lio_stream_t stream = s;
++    int result;
++
++    asm(
++        &quot;pushl %3;&quot;
++        &quot;pushl %2;&quot;
++        &quot;mov %1, %%eax;&quot;
++        &quot;int $0x30;&quot;
++        &quot;add $0x8, %%esp;&quot;
++    : &quot;=a&quot; (result) : &quot;i&quot; (SYSCALL_LIO_PASS_FD), &quot;r&quot; (&amp;stream), &quot;r&quot; (pid)
++    : &quot;memory&quot;);
++
++    if (result &lt; 0) {
++        return result;
++    } else {
++        return stream;
++    }
++}
++
+ static ssize_t read_syscall(lio_stream_t s, uint64_t offset, size_t bytes,
+     void* buf, int updatepos)
+ {
+-- 
+1.7.7
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002455.html">[tyndur-devel] [PATCH 09/11] kernel2: LIOv2-Server im Userspace
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002457.html">[tyndur-devel] [PATCH 11/11] cdi/storage: Auf LIOv2 umstellen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2456">[ Datum ]</a>
+              <a href="thread.html#2456">[ Thema ]</a>
+              <a href="subject.html#2456">[ Betreff (Subject)]</a>
+              <a href="author.html#2456">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

@@ -1,0 +1,521 @@
+Index: trunk/src/modules/tcpip/include/udp.h
+===================================================================
+--- /dev/null
++++ trunk/src/modules/tcpip/include/udp.h
+@@ -0,0 +1,192 @@
++/*
++ * Copyright (c) 2008 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Antoine Kaufmann
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef _UDP_H_
++#define _UDP_H_
++
++#include <stdint.h>
++
++#include "collections.h"
++
++/** Header eines UDP-Pakets */
++struct udp_header {
++    /** Quellport des Pakets. Wird nur benoetigt, wenn der Versender dieses
++     * Pakets eine Antwort erwartet. */
++    uint16_t    source_port;
++
++    /** Ziel-Port */
++    uint16_t    dest_port;
++
++    /** Laenge des Pakets (mit Header, min 8) */
++    uint16_t    length;
++
++    /** Pruefsumme oder 0 wenn diese nicht gepfrueft werden soll. */
++    uint16_t    checksum;
++} __attribute__ ((packed));
++
++
++/* TODO: Gehoert nach ip.h */
++/** IP-Pseudoheader (wird zur Berechnung der TCP- und UDP-Pruefsummen benutzt.*/
++struct udp_pseudo_header {
++    /** Quell-IP des Pakets */
++    uint32_t    source_ip;
++
++    /** Ziel-IP des Pakets */
++    uint32_t    dest_ip;
++
++    /** Protokoll (TCP: 6, UDP: 17) */
++    uint16_t    proto;
++
++    /** Laenge des TCP-/UDP-Pakets */
++    uint16_t    length;
++} __attribute__ ((packed));
++
++
++/** Geoeffneter UDP-Port (listening) */
++struct udp_port {
++    /** Adresse auf der gelauscht wird. Oder 0 fuer alle */
++    uint32_t    ip;
++
++    /** Portnummer */
++    uint16_t    port;
++
++    /** Puffer mit den Paketen die eingegangen sind. */
++    list_t* in_buffer;
++};
++
++
++/** UDP-Paket, wie es im In-Buffer liegt */
++struct udp_packet {
++    /** Quell-IP */
++    uint32_t    source_ip;
++
++    /** Quell-Port */
++    uint16_t    source_port;
++
++    /** Ziel-IP notwendig wenn auf 0.0.0.0 gelauscht wird. */
++    uint32_t    dest_ip;
++
++    /** Laenge der Daten */
++    size_t      data_len;
++
++    /** Pointer auf die Daten */
++    uint8_t     data[];
++};
++
++
++/**
++ * UDP-Code initialisieren
++ */
++void init_udp();
++
++/**
++ * Auf UDP-Port lauschen.
++ *
++ * @param ip    IP auf der gelauscht werden soll, oder 0 fuer alle
++ * @param port  Port
++ *
++ * @return Pointer auf ein Port-Handle
++ */
++struct udp_port* udp_listen(uint32_t ip, uint16_t port);
++
++/**
++ * Port wieder freigeben
++ *
++ * @param port Pointer auf ein Port-Handle
++ */
++void udp_port_release(struct udp_port* port);
++
++/**
++ * Warten bis ein Paket eintrifft, oder die Zeit abgelaufen ist.
++ *
++ * @param port      Port auf dem gewartet werden soll
++ * @param timeout   Zeit in Millisekunden nach der aufgegeben werden soll oder 0
++ *                  falls garnicht gewartet werden soll.
++ *
++ * @return Pointer auf einên udp_in_buffer oder NULL wenn kein Paket
++ *         eingetroffen ist.
++ */
++struct udp_packet* udp_port_wait(struct udp_port* port, uint64_t timeout);
++
++/**
++ * UDP-Paket senden
++ *
++ * @param dest_ip   IP an die das Paket gesendet werden soll.
++ * @param dest_port Zielport
++ * @param src_ip    IP von der aus das Paket gesendet werden soll
++ * @param src_port  Quellport
++ * @param data      Paket-Daten
++ * @param length    Laenge der Daten
++ */
++void udp_send(uint32_t dest_ip, uint16_t dest_port, uint32_t src_ip,
++    uint16_t src_port, void* data, size_t length);
++
++/**
++ * UDP-Paket direkt senden ohne Routing
++ *
++ * @param device    Karte ueber die das Paket gesendet wird
++ * @param dest_ip   IP an die das Paket gesendet werden soll.
++ * @param dest_port Zielport
++ * @param src_ip    IP von der aus das Paket gesendet werden soll
++ * @param src_port  Quellport
++ * @param data      Paket-Daten
++ * @param len       Laenge der Daten
++ */
++void udp_send_direct(struct device* device, uint32_t dest_ip,
++    uint16_t dest_port, uint32_t src_ip, uint16_t src_port, void* data,
++    size_t len);
++
++
++/**
++ * UDP-Paket empfangen. Wird vom IP-Empfangscode aufgerufen.
++ *
++ * @param source_ip Quell-IP
++ * @param dest_ip   Ziel-IP
++ * @param data      Empfangenes UDP-Paket
++ * @param len       Laenge des Pakets
++ */
++void udp_receive(uint32_t src_ip, uint32_t dest_ip, void* data, size_t len);
++
++/*word tcp_checksum
++    (struct tcp_header* header, struct tcp_pseudo_header* pseudo_header,
++    void* data, dword data_size);
++void tcp_update_checksum
++    (struct tcp_header* header, struct tcp_pseudo_header* pseudo_header,
++    void* data, dword data_size);
++
++void tcp_receive(dword source_ip, void* data, dword data_size);
++void tcp_send_ack(struct tcp_connection* conn); // TODO Ersetzen*/
++
++#endif
+Index: trunk/src/modules/tcpip/ip.c
+===================================================================
+--- trunk.orig/src/modules/tcpip/ip.c
++++ trunk/src/modules/tcpip/ip.c
+@@ -45,6 +45,7 @@
+ #include "arp.h"
+ #include "ethernet.h"
+ #include "tcp.h"
++#include "udp.h"
+ 
+ //Hier koennen die Debug-Nachrichten aktiviert werden
+ #define DEBUG 0
+@@ -276,6 +277,8 @@ void ip_receive(struct device *device, v
+ 
+         case IP_PROTO_UDP:
+             DEBUG_MSG("UDP-Paket eingegangen");
++            udp_receive(header->source_ip, header->dest_ip, packet,
++                packet_size);
+             break;
+ 
+         default:
+Index: trunk/src/modules/tcpip/udp.c
+===================================================================
+--- /dev/null
++++ trunk/src/modules/tcpip/udp.c
+@@ -0,0 +1,278 @@
++/*
++ * Copyright (c) 2008 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Antoine Kaufmann
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <stdlib.h>
++#include <stdio.h>
++#include <collections.h>
++#include <network.h>
++#include <syscall.h>
++#include <rpc.h>
++
++#include "ip.h"
++#include "udp.h"
++
++/** Liste mit den UPD-Ports auf denen gelauscht wird. */
++list_t* udp_ports;
++
++/**
++ * UDP-Code initialisieren
++ */
++void init_udp()
++{
++    udp_ports = list_create();
++}
++
++/**
++ * Auf UDP-Port lauschen.
++ *
++ * @param ip    IP auf der gelauscht werden soll, oder 0 fuer alle
++ * @param port  Port
++ *
++ * @return Pointer auf ein Port-Handle
++ */
++struct udp_port* udp_listen(uint32_t ip, uint16_t port)
++{
++    struct udp_port* p = malloc(sizeof(*p));
++
++    p->ip = ip;
++    p->port = port;
++    p->in_buffer = list_create();
++
++    list_push(udp_ports, p);
++    return p;
++}
++
++/**
++ * Port wieder freigeben
++ *
++ * @param port Pointer auf ein Port-Handle
++ */
++void udp_port_release(struct udp_port* port)
++{
++    int i;
++    struct udp_port* list_p;
++    struct udp_packet* ib;
++
++    // Wenn sich der Index zwischen list_get_element_at und list_remove
++    // verschiebt haben wir ein Problem
++    p();
++    for (i = 0; (list_p = list_get_element_at(udp_ports, i)); i++) {
++        if (list_p == port) {
++            list_remove(udp_ports, i);
++
++            for (i = 0; (ib = list_get_element_at(port->in_buffer, i)); i++) {
++                free(ib);
++            }
++
++            list_destroy(port->in_buffer);
++            free(port);
++            break;
++        }
++    }
++    v();
++}
++
++/**
++ * Timer Stub fuer udp_port_wait
++ */
++static void udp_timer_stub() {}
++
++/**
++ * Warten bis ein Paket eintrifft, oder die Zeit abgelaufen ist.
++ *
++ * @param port      Port auf dem gewartet werden soll
++ * @param timeout   Zeit in Mikrosekunden nach der aufgegeben werden soll oder 0
++ *                  falls garnicht gewartet werden soll.
++ *
++ * @return Pointer auf einên udp_in_buffer oder NULL wenn kein Paket
++ *         eingetroffen ist.
++ */
++struct udp_packet* udp_port_wait(struct udp_port* port, uint64_t timeout)
++{
++    struct udp_packet* ib;
++
++    if (timeout == 0) {
++        return list_pop(port->in_buffer);
++    } else {
++        // Timer einrichten, damit spaetestens beim Timeout ein RPC kommt
++        timer_register(udp_timer_stub, timeout);
++
++        // Warten bis ein Paket in der Liste ist
++        while (!(ib = list_pop(port->in_buffer)) &&
++            (timeout > get_tick_count()))
++        {
++            wait_for_rpc();
++        }
++
++        return ib;
++    }
++}
++
++/**
++ * Port suchen, der auf dieser IP und diesem Port lauscht.
++ *
++ * @param source_ip IP
++ * @paran port      Port
++ *
++ * @return Pointer auf den Port oder NULL wenn keine gefunden wurde
++ */
++static struct udp_port* get_port(uint32_t ip, uint16_t port)
++{
++    struct udp_port* p;
++    int i;
++
++    for (i = 0; (p = list_get_element_at(udp_ports, i)); i++) {
++        if ((p->port == port) && ((p->ip == ip) || !p->ip)) {
++            return p;
++        }
++    }
++
++    return NULL;
++}
++
++/**
++ * UDP-Paket zusammenbauen
++ *
++ * @param buffer    Puffer
++ * @param dest_port Zielport
++ * @param src_port  Quellport
++ * @param data      Paket-Daten
++ * @param len       Laenge der Daten
++ */
++static void udp_fill_packet(void* buffer, uint16_t dest_port, uint16_t src_port,
++    void* data, size_t len)
++{
++    struct udp_header* header = buffer;
++    void* packet_data = buffer + sizeof(struct udp_header);
++
++    // Header des Pakets befuellen
++    header->dest_port   = big_endian_word(dest_port);
++    header->source_port = big_endian_word(src_port);
++    header->length      = big_endian_word(len + sizeof(struct udp_header));
++    header->checksum    = 0; // TODO ;-)
++
++    // Daten ins Paket kopieren
++    memcpy(packet_data, data, len);
++}
++
++/**
++ * UDP-Paket senden
++ *
++ * @param dest_ip   IP an die das Paket gesendet werden soll.
++ * @param dest_port Zielport
++ * @param src_ip    IP von der aus das Paket gesendet werden soll
++ * @param src_port  Quellport
++ * @param data      Paket-Daten
++ * @param length    Laenge der Daten
++ */
++void udp_send(uint32_t dest_ip, uint16_t dest_port, uint32_t src_ip,
++    uint16_t src_port, void* data, size_t length)
++{
++    size_t packet_len = length + sizeof(struct udp_header);
++    uint8_t packet[packet_len];
++
++    udp_fill_packet(packet, dest_port, src_ip, data, length);
++
++    // Raus damit
++    ip_send(dest_ip, IP_PROTO_UDP, packet, packet_len);
++}
++
++/**
++ * UDP-Paket direkt senden ohne Routing
++ *
++ * @param device    Karte ueber die das Paket gesendet wird
++ * @param dest_ip   IP an die das Paket gesendet werden soll.
++ * @param dest_port Zielport
++ * @param src_ip    IP von der aus das Paket gesendet werden soll
++ * @param src_port  Quellport
++ * @param data      Paket-Daten
++ * @param len       Laenge der Daten
++ */
++void udp_send_direct(struct device* device, uint32_t dest_ip,
++    uint16_t dest_port, uint32_t src_ip, uint16_t src_port, void* data,
++    size_t len)
++{
++    size_t packet_len = len + sizeof(struct udp_header);
++    uint8_t packet[packet_len];
++
++    udp_fill_packet(packet, dest_port, src_ip, data, len);
++
++    // Raus damit
++    ip_send_direct(device, dest_ip, IP_PROTO_UDP, packet, packet_len);
++
++}
++
++/**
++ * UDP-Paket empfangen. Wird vom IP-Empfangscode aufgerufen.
++ *
++ * @param source_ip Quell-IP
++ * @param dest_ip   Ziel-IP
++ * @param data      Empfangenes UDP-Paket
++ * @param len       Laenge des Pakets
++ */
++void udp_receive(uint32_t src_ip, uint32_t dest_ip, void* data, size_t len)
++{
++    struct udp_header* header = data;
++    struct udp_port* port;
++    struct udp_packet* ib;
++    size_t data_len;
++
++    // Ein Kaputtes Paket
++    if (len < sizeof(struct udp_header)) {
++        return;
++    }
++
++    // Pfruefen ob auf diesem Port gelauscht wird
++    if (!(port = get_port(dest_ip, big_endian_word(header->dest_port)))) {
++        return;
++    }
++
++    // TODO: Pruefen der Pruefsumme falls gesetzt
++
++
++    // in_buffer vorbereiten um in die Liste zu haengen
++    data_len = big_endian_word(header->length) - sizeof(struct udp_header);
++    ib = malloc(sizeof(*ib) + data_len);
++
++    ib->source_ip = big_endian_dword(src_ip);
++    ib->dest_ip = big_endian_dword(dest_ip);
++    ib->source_port = big_endian_word(header->source_port);
++
++    ib->data_len = data_len;
++    memcpy(ib->data, data + sizeof(struct udp_header), data_len);
++
++    list_push(port->in_buffer, ib);
++}
++
+Index: trunk/src/modules/tcpip/main.c
+===================================================================
+--- trunk.orig/src/modules/tcpip/main.c
++++ trunk/src/modules/tcpip/main.c
+@@ -45,6 +45,7 @@
+ #include "arp.h"
+ #include "ip.h"
+ #include "tcp.h"
++#include "udp.h"
+ #include "lostio_if.h"
+ #include "dns.h"
+ #include "lostio.h"
+@@ -77,6 +78,7 @@ int main(int argc, char* argv[])
+     init_arp();
+     init_ip();
+     init_tcp();
++    init_udp();
+     init_lostio_interface();
+ 
+     register_message_handler(RPC_IP_REGISTER_DRIVER, rpc_register_driver);

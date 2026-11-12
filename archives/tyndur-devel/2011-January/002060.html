@@ -1,0 +1,1158 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 5/5] Sound: Nichtmixer (Nixer)
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%205/5%5D%20Sound%3A%20Nichtmixer%20%28Nixer%29&In-Reply-To=%3C1296304718-8845-6-git-send-email-max%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002059.html">
+   <LINK REL="Next"  HREF="002061.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 5/5] Sound: Nichtmixer (Nixer)</H1>
+    <B>max at tyndur.org</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%205/5%5D%20Sound%3A%20Nichtmixer%20%28Nixer%29&In-Reply-To=%3C1296304718-8845-6-git-send-email-max%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 5/5] Sound: Nichtmixer (Nixer)">max at tyndur.org
+                  </A><BR>
+    <I>Sa Jan 29 13:38:38 CET 2011</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002059.html">[tyndur-devel] [PATCH 4/5] CDI/audio: ac97
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002061.html">[tyndur-devel] [PATCH] Neue POSIX-Funktionen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2060">[ Datum ]</a>
+              <a href="thread.html#2060">[ Thema ]</a>
+              <a href="subject.html#2060">[ Betreff (Subject) ]</a>
+              <a href="author.html#2060">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>From: Max Reitz &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">max at tyndur.org</A>&gt;
+
++ Nixer implementiert, der von den Anwendungen aber wie ein normaler
+  Mixer angesprochen wird (das Interface wird sich also nicht verändern,
+  wenn der Nixer zum Mixer erweitert wird). Mit ihm werden die von den
+  Programmen ausgegebenen PCM-Daten so umgewandelt, wie sie der
+  Soundkartentreiber benötigt (Anpassung der Samplefrequenz fehlt
+  bislang).
+
+Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">max at tyndur.org</A>&gt;
+---
+ src/modules/c/mixer/Makefile.all  |    7 +
+ src/modules/c/mixer/Makefile.conf |    1 +
+ src/modules/c/mixer/adriver.c     |  163 +++++++++++++++++++++
+ src/modules/c/mixer/input.c       |  292 +++++++++++++++++++++++++++++++++++++
+ src/modules/c/mixer/input_queue.c |   91 ++++++++++++
+ src/modules/c/mixer/main.c        |  116 +++++++++++++++
+ src/modules/c/mixer/manage.c      |  184 +++++++++++++++++++++++
+ src/modules/c/mixer/nixer.h       |  154 +++++++++++++++++++
+ 8 files changed, 1008 insertions(+), 0 deletions(-)
+ create mode 100644 src/modules/c/mixer/Makefile.all
+ create mode 100644 src/modules/c/mixer/Makefile.conf
+ create mode 100644 src/modules/c/mixer/adriver.c
+ create mode 100644 src/modules/c/mixer/input.c
+ create mode 100644 src/modules/c/mixer/input_queue.c
+ create mode 100644 src/modules/c/mixer/main.c
+ create mode 100644 src/modules/c/mixer/manage.c
+ create mode 100644 src/modules/c/mixer/nixer.h
+
+diff --git a/src/modules/c/mixer/Makefile.all b/src/modules/c/mixer/Makefile.all
+new file mode 100644
+index 0000000..9075255
+--- /dev/null
++++ b/src/modules/c/mixer/Makefile.all
+@@ -0,0 +1,7 @@
++shopt -s extglob
++source $LOST_BUILDMK_ROOT/config.sh
++
++echo &quot;LD   $1/apps/mixer&quot;
++$LOST_TOOLS_LD -omixer $LDSCRIPT *.o --start-group $2 --end-group
++
++mv mixer $1/apps/
+diff --git a/src/modules/c/mixer/Makefile.conf b/src/modules/c/mixer/Makefile.conf
+new file mode 100644
+index 0000000..db49762
+--- /dev/null
++++ b/src/modules/c/mixer/Makefile.conf
+@@ -0,0 +1 @@
++CC_FLAGS_APPEND=&quot;-I../../cdi/include&quot;
+diff --git a/src/modules/c/mixer/adriver.c b/src/modules/c/mixer/adriver.c
+new file mode 100644
+index 0000000..7d36aae
+--- /dev/null
++++ b/src/modules/c/mixer/adriver.c
+@@ -0,0 +1,163 @@
++/******************************************************************************
++ * Copyright (c) 2010 Max Reitz                                               *
++ *                                                                            *
++ * Permission  is hereby granted,  free of charge,  to any person obtaining a *
++ * copy of this software and associated documentation files (the &quot;Software&quot;), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
++ * and/or  sell copies of  the Software,  and to permit  persons to  whom the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED,  INCLUDING BUT NOT LIMITED TO  THE WARRANTIES OF MERCHANTABILITY, *
++ * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF OR  IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#include &lt;init.h&gt;
++#include &lt;rpc.h&gt;
++#include &lt;stdbool.h&gt;
++#include &lt;stddef.h&gt;
++#include &lt;stdio.h&gt;
++#include &lt;stdlib.h&gt;
++#include &lt;sys/types.h&gt;
++
++#include &quot;nixer.h&quot;
++
++// struct sim_adriver.device_count
++static size_t sim_adriver_device_count(struct sim_adriver* drv)
++{
++    int dummy = 0;
++    return rpc_get_int(drv-&gt;pid, &quot;NUMODEV&quot;, sizeof(dummy), (char*) &amp;dummy);
++}
++
++// struct sim_adriver.is_playback
++static bool sim_adriver_is_playback(struct sim_adriver* drv, int index)
++{
++    return rpc_get_int(drv-&gt;pid, &quot;ISPLYBK&quot;, sizeof(index), (char*) &amp;index) == 1
++        ? true : false;
++}
++
++// struct sim_adriver.get_stream_information
++static bool sim_adriver_get_stream_information(struct sim_adriver* drv,
++    int card)
++{
++    int strnum[2] = { card, 0 };
++
++    response_t* resp = rpc_get_response(drv-&gt;pid, &quot;STRINFO&quot;, sizeof(strnum),
++        (char*) &amp;strnum);
++
++    if (resp-&gt;data_length != sizeof(*drv-&gt;str0)) {
++        free(resp-&gt;data);
++        free(resp);
++        return false;
++    }
++
++    free(drv-&gt;str0);
++    drv-&gt;str0 = resp-&gt;data;
++    free(resp);
++
++    return true;
++}
++
++// struct sim_adriver.transfer_data
++static bool sim_adriver_transfer_data(struct sim_adriver* drv, int card,
++    int stream, int buffer, size_t offset, uint32_t shm, size_t shm_size)
++{
++    struct tfrinfo tfrinfo = {
++        .card = card,
++        .stream = stream,
++        .buffer = buffer,
++        .offset = offset,
++        .shm_size = shm_size,
++        .shm = shm
++    };
++
++    return rpc_get_int(drv-&gt;pid, &quot;TFRDATA&quot;, sizeof(tfrinfo), (char*) &amp;tfrinfo) ?
++        true : false;
++}
++
++// struct sim_adriver.change_device_status
++static cdi_audio_status_t sim_adriver_change_device_status(
++    struct sim_adriver* drv, int card, cdi_audio_status_t status)
++{
++    int data[2] = { card, status };
++    return rpc_get_int(drv-&gt;pid, &quot;CHGSTAT&quot;, sizeof(data), (char*) &amp;data);
++}
++
++// struct sim_adriver.set_sample_rate
++static int sim_adriver_set_sample_rate(struct sim_adriver* drv, int card,
++    int stream, int rate)
++{
++    int ssr[3] = { card, stream, rate };
++
++    return rpc_get_int(drv-&gt;pid, &quot;SSPRATE&quot;, sizeof(ssr), (char*) &amp;ssr);
++}
++
++// struct sim_adriver.set_number_of_channels
++static int sim_adriver_set_number_of_channels(struct sim_adriver* drv, int card,
++    int channels)
++{
++    int snoc[2] = { card, channels };
++
++    return rpc_get_int(drv-&gt;pid, &quot;SETCHAN&quot;, sizeof(snoc), (char*) &amp;snoc);
++}
++
++// struct sim_adriver.get_current_frame
++static int sim_adriver_get_current_frame(struct sim_adriver* drv, int card,
++    int stream)
++{
++    int gcf[2] = { card, stream };
++
++    return rpc_get_int(drv-&gt;pid, &quot;GTFRAME&quot;, sizeof(gcf), (char*) &amp;gcf);
++}
++
++// struct sim_adriver.disconnect
++static void sim_adriver_disconnect(struct sim_adriver* drv)
++{
++    int tmp = 0;
++    rpc_get_int(drv-&gt;pid, &quot;REG&quot;, sizeof(tmp), (char*) &amp;tmp);
++    free(drv);
++}
++
++/**
++ * Sucht den Soundtreiber mit dem angegebenen Namen, wird er gefunden, dann
++ * meldet sich die Funktion beim Treiber an und gibt im Erfolgsfall eine
++ * Struktur zurück, die den Treiber repräsentiert.
++ */
++struct sim_adriver* find_driver(const char* name)
++{
++    pid_t pid = init_service_get((char*) name);
++    if (!pid) {
++        fprintf(stderr, &quot;No such service \&quot;%s\&quot;.\n&quot;, name);
++        return NULL;
++    }
++
++    int tmp = 1;
++    if (rpc_get_int(pid, &quot;REG&quot;, sizeof(tmp), (char*) &amp;tmp) != 1) {
++        fprintf(stderr, &quot;Could not register at \&quot;%s\&quot;.\n&quot;, name);
++        return NULL;
++    }
++
++    struct sim_adriver* ret = calloc(1, sizeof(*ret));
++
++    // Eintragen der PID und der Funktionszeiger
++    ret-&gt;pid = pid;
++    ret-&gt;device_count = &amp;sim_adriver_device_count;
++    ret-&gt;is_playback = &amp;sim_adriver_is_playback;
++    ret-&gt;get_stream_information = &amp;sim_adriver_get_stream_information;
++    ret-&gt;transfer_data = &amp;sim_adriver_transfer_data;
++    ret-&gt;change_device_status = &amp;sim_adriver_change_device_status;
++    ret-&gt;set_sample_rate = &amp;sim_adriver_set_sample_rate;
++    ret-&gt;set_number_of_channels = &amp;sim_adriver_set_number_of_channels;
++    ret-&gt;get_current_frame = &amp;sim_adriver_get_current_frame;
++    ret-&gt;disconnect = &amp;sim_adriver_disconnect;
++
++    return ret;
++}
+diff --git a/src/modules/c/mixer/input.c b/src/modules/c/mixer/input.c
+new file mode 100644
+index 0000000..2a0d800
+--- /dev/null
++++ b/src/modules/c/mixer/input.c
+@@ -0,0 +1,292 @@
++/******************************************************************************
++ * Copyright (c) 2010 Max Reitz                                               *
++ *                                                                            *
++ * Permission  is hereby granted,  free of charge,  to any person obtaining a *
++ * copy of this software and associated documentation files (the &quot;Software&quot;), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
++ * and/or  sell copies of  the Software,  and to permit  persons to  whom the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED,  INCLUDING BUT NOT LIMITED TO  THE WARRANTIES OF MERCHANTABILITY, *
++ * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF OR  IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#include &lt;rpc.h&gt;
++#include &lt;stdbool.h&gt;
++#include &lt;stddef.h&gt;
++#include &lt;stdint.h&gt;
++#include &lt;stdlib.h&gt;
++#include &lt;syscall.h&gt;
++
++#include &quot;nixer.h&quot;
++
++extern struct sim_adriver* adriver;
++extern struct input_queue* iq_start;
++
++extern int pbi;
++
++extern bool playing;
++extern int buffers_queued;
++
++extern size_t shm_size;
++
++// Anzahl der Ausgabechannels
++static int out_channel_count;
++
++// PID der aktuellen Quellanwendung
++static pid_t current_source;
++// Daten zum SHM in Richtung Anwendung
++static uint32_t current_input_shm_id;
++static size_t current_input_shm_size;
++static void* current_input_shm;
++
++// Anzahl der Eingabechannels
++static int input_channel_count;
++// Eingabeformat
++static cdi_audio_sample_format_t input_format;
++
++/**
++ * Wird von der Anwendung einerseits aufgerufen, um den Mixer zu konfigurieren
++ * und andererseits, um sich bei ihm anzumelden -- da dieser Mixer ein Nixer
++ * ist, kann immer nur eine Anwendung zu einem bestimmten Zeitpunkt bedient
++ * werden.
++ */
++RPC(mixer_config)
++{
++    struct mixer_config* mc = data;
++
++    if (length != sizeof(*mc)) {
++        rpc_int_resp(0);
++        return;
++    }
++
++    // Wenn schon eine Anwendung angemeldet ist, kann die Anfrage nicht
++    // akzeptiert werden
++    if (current_source &amp;&amp; (src != current_source)) {
++        rpc_int_resp(0);
++        return;
++    }
++
++    // Ist die Anzahl der Channels 0, dann meldet sich die Anwendung ab
++    if (current_source &amp;&amp; !mc-&gt;channel_count) {
++        current_source = 0;
++        current_input_shm_size = 0;
++        current_input_shm = NULL;
++        close_shared_memory(current_input_shm_id);
++
++        trash_sound(false);
++
++        rpc_int_resp(1);
++        return;
++    }
++
++    // Aktuelle Anwendung setzen
++    current_source = src;
++
++    // Aktuelles Eingabeformat speichern
++    input_format = mc-&gt;sample_format;
++    input_channel_count = mc-&gt;channel_count;
++
++    // TODO: Rückgabewert nutzen und bei Bedarf resamplen
++    adriver-&gt;set_sample_rate(adriver, pbi, 0, mc-&gt;sample_rate);
++
++    // Versuchen, die Anzahl der Ausgabechannel der Anzahl der Eingabechannel
++    // anzupassen
++    out_channel_count =
++        adriver-&gt;set_number_of_channels(adriver, pbi, mc-&gt;channel_count);
++
++    rpc_int_resp(1);
++}
++
++/**
++ * Wird von der Anwendung aufgerufen, um einen SHM zur Übertragung von Daten zum
++ * Nixer zu erhalten.
++ */
++RPC(get_shm)
++{
++    if ((length != sizeof(size_t)) || (src != current_source)) {
++        rpc_dword_resp(0);
++        return;
++    }
++
++    // Wenn es bereits einen SHM gibt, muss dieser zuerst geschlossen werden.
++    if (current_input_shm_id) {
++        current_input_shm = NULL;
++        close_shared_memory(current_input_shm_id);
++    }
++
++    current_input_shm_size = *((size_t*) data);
++
++    current_input_shm_id = create_shared_memory(current_input_shm_size);
++    if (current_input_shm_id) {
++        current_input_shm = open_shared_memory(current_input_shm_id);
++    }
++
++    // SHM-ID zurückgeben
++    rpc_dword_resp(current_input_shm_id);
++}
++
++/**
++ * Überträgt die Daten aus dem Eingangs-SHM in die Eingangsqueue und bereitet
++ * sie so auf das Abspielen durch den Soundtreiber vor.
++ */
++RPC(play_input)
++{
++    if ((src != current_source) || (length != sizeof(uint32_t))) {
++        rpc_int_resp(0);
++        return;
++    }
++
++    // Kleine Kontrolle
++    if (*((uint32_t*) data) != current_input_shm_id) {
++        rpc_int_resp(0);
++        return;
++    }
++
++    // Daten über das aktuell erstellte Eingangspaket
++    size_t current_size = 0, remaining = current_input_shm_size;
++    uint8_t* current_buffer;
++    struct input_queue* current_packet;
++
++    uint8_t* input_buffer = current_input_shm;
++
++    size_t input_size = sample_size[input_format];
++    size_t output_size = sample_size[adriver-&gt;str0-&gt;sample_format];
++
++    // Gibt an, ob ein neues Paket erstellt wurde
++    bool allocated;
++
++    // Nun werden die Daten vom Eingangsformat in das Ausgabeformat umgewandelt
++    while (remaining) {
++        if ((allocated = input_queue_complete())) {
++            // Letztes Paket vollständig, also erstellen wir ein neues
++            current_packet = malloc(sizeof(*current_packet));
++            current_buffer = malloc(shm_size);
++            current_packet-&gt;buffer = current_buffer;
++
++            current_size = shm_size;
++        } else {
++            // Letztes Paket unvollständig, also füllen wir das
++            current_packet = last_input_queue_packet();
++            current_size = current_packet-&gt;missing;
++
++            current_buffer = current_packet-&gt;buffer +
++                shm_size - current_packet-&gt;missing;
++        }
++
++        // TODO: Müsste man bei mehr Sampleformaten anpassen (außer Signed
++        // Integer mit Little Endian)
++        int_fast32_t samples[(out_channel_count &gt; input_channel_count) ?
++            out_channel_count : input_channel_count];
++        size_t in_frame_size = input_channel_count * input_size;
++        size_t out_frame_size = out_channel_count * output_size;
++
++        // Solange noch Eingabedaten vorhanden sind und der Ausgabepuffer nicht
++        // voll ist
++        // TODO: Das funktioniert, ist aber langsam. Mit MMX oder so kann man da
++        // bestimmt was machen.
++        while (current_size &amp;&amp; remaining) {
++            int_fast32_t val = 0;
++            int i, j;
++
++            // Eingabesamples einlesen
++            for (j = 0; j &lt; input_channel_count; j++) {
++                val = 0;
++                for (i = 0; i &lt; input_size; i++) {
++                    val |= *(input_buffer++) &lt;&lt; (i * 8);
++                }
++
++                // Für die Ausgabe zurechtshiften
++                val &lt;&lt;= 8 * (4 - input_size);
++                val &gt;&gt;= 8 * (4 - output_size);
++
++                samples[j] = val;
++            }
++
++            remaining -= in_frame_size;
++
++            // TODO: Das geht sicher besser
++            for (j = input_channel_count; j &lt; out_channel_count; j++) {
++                samples[j] = val;
++            }
++
++            // Ausgabesamples schreiben
++            for (j = 0; j &lt; out_channel_count; j++) {
++                for (i = 0; i &lt; output_size; i++) {
++                    *(current_buffer++) = samples[j] &amp; 0xFF;
++                    samples[j] &gt;&gt;= 8;
++                }
++            }
++
++            current_size -= out_frame_size;
++        }
++
++        current_packet-&gt;missing = current_size;
++        if (allocated) {
++            // Wurde das Paket neu erstellt, dann muss es noch an die
++            // Eingangsqueue angehangen werden
++            input_queue_push(current_packet);
++        }
++    }
++
++    // Abspielvorgang starten
++    play();
++
++    rpc_int_resp(1);
++}
++
++/**
++ * Gibt die Anzahl der im Puffer vorhandenen Bytes zurück
++ */
++RPC(get_position)
++{
++    if (!playing &amp;&amp; (iq_start == NULL)) {
++        rpc_int_resp(0);
++        return;
++    }
++
++    int queued = 0;
++
++    // FIXME: Warum auch immer, jedenfalls ist es schlecht, wenn diese Pakete
++    // mitgezählt werden und man mehr als einmal laut möchte
++    /*
++    // Berechnet, wie viele Bytes bei der Soundkarte warten
++    if (buffers_queued &gt; 1) {
++        queued = (buffers_queued - 1) * shm_size;
++    }
++    */
++
++    // Untersucht, wie viele Bytes in der Eingangsqueue warten
++    struct input_queue* iq = iq_start;
++
++    while (iq != NULL) {
++        queued += shm_size - iq-&gt;missing;
++        iq = iq-&gt;next;
++    }
++
++    // Fragt ab, wie viele Bytes im aktuell in der Soundkarte abgespielten
++    // Puffer noch warten
++    if (playing &amp;&amp; buffers_queued) {
++        queued += (adriver-&gt;str0-&gt;buffer_size -
++            adriver-&gt;get_current_frame(adriver, pbi, 0) * out_channel_count) *
++            sample_size[adriver-&gt;str0-&gt;sample_format];
++    }
++
++    // Die Größe des Ausgabe-SHMs abziehen, damit die Anwendung immer genügend
++    // Daten liefert, sodass der gefüllt werden kann.
++    queued -= shm_size;
++    if (queued &lt; 0) {
++        queued = 0;
++    }
++
++    rpc_int_resp(queued);
++}
+diff --git a/src/modules/c/mixer/input_queue.c b/src/modules/c/mixer/input_queue.c
+new file mode 100644
+index 0000000..e69205b
+--- /dev/null
++++ b/src/modules/c/mixer/input_queue.c
+@@ -0,0 +1,91 @@
++/******************************************************************************
++ * Copyright (c) 2010 Max Reitz                                               *
++ *                                                                            *
++ * Permission  is hereby granted,  free of charge,  to any person obtaining a *
++ * copy of this software and associated documentation files (the &quot;Software&quot;), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
++ * and/or  sell copies of  the Software,  and to permit  persons to  whom the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED,  INCLUDING BUT NOT LIMITED TO  THE WARRANTIES OF MERCHANTABILITY, *
++ * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF OR  IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#include &lt;stdbool.h&gt;
++#include &lt;stdint.h&gt;
++#include &lt;stdlib.h&gt;
++
++#include &quot;nixer.h&quot;
++
++// Anfang und Ende der Eingangsqueue
++struct input_queue* iq_start;
++struct input_queue** iq_end = &amp;iq_start;
++
++/**
++ * Fügt ein Paket an das Ende der Eingangsqueue an
++ */
++void input_queue_push(struct input_queue* packet)
++{
++    packet-&gt;next = NULL;
++
++    *iq_end = packet;
++    iq_end = &amp;packet-&gt;next;
++}
++
++/**
++ * Entfernt ein Paket vom Beginn der Eingangsqueue und gibt es zurück.
++ */
++struct input_queue* input_queue_pop(void)
++{
++    if (iq_start == NULL) {
++        return NULL;
++    }
++
++    struct input_queue* packet = iq_start;
++    iq_start = packet-&gt;next;
++
++    // Ende der Queue, somit wird iq_end ungültig und muss auf iq_start zeigen
++    if (packet-&gt;next == NULL) {
++        iq_end = &amp;iq_start;
++    }
++
++    return packet;
++}
++
++/**
++ * Gibt einen Zeiger auf das letzte Paket in der Eingangsqueue zurück.
++ */
++struct input_queue* last_input_queue_packet(void)
++{
++    // Keine Pakete in der Queue
++    if (iq_end == &amp;iq_start) {
++        return NULL;
++    }
++
++    // Da iq_end ein Zeiger auf das next-Feld des letzten Pakets ist, kann man
++    // daraus die Adresse dieses Paketes ermitteln.
++    return (void*) ((uintptr_t) iq_end - offsetof(struct input_queue, next));
++}
++
++/**
++ * Ist der letzte Puffer in der Eingangsqeue vollständig gefüllt, so wird true
++ * zurückgegeben, ebenso, wenn die Queue leer ist, sonst false.
++ */
++bool input_queue_complete(void)
++{
++    struct input_queue* last_packet = last_input_queue_packet();
++    if (last_packet == NULL) {
++        return true;
++    }
++
++    return !last_packet-&gt;missing;
++}
+diff --git a/src/modules/c/mixer/main.c b/src/modules/c/mixer/main.c
+new file mode 100644
+index 0000000..d900a71
+--- /dev/null
++++ b/src/modules/c/mixer/main.c
+@@ -0,0 +1,116 @@
++/******************************************************************************
++ * Copyright (c) 2010 Max Reitz                                               *
++ *                                                                            *
++ * Permission  is hereby granted,  free of charge,  to any person obtaining a *
++ * copy of this software and associated documentation files (the &quot;Software&quot;), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
++ * and/or  sell copies of  the Software,  and to permit  persons to  whom the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED,  INCLUDING BUT NOT LIMITED TO  THE WARRANTIES OF MERCHANTABILITY, *
++ * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF OR  IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#include &lt;init.h&gt;
++#include &lt;rpc.h&gt;
++#include &lt;stdbool.h&gt;
++#include &lt;stdint.h&gt;
++#include &lt;stdio.h&gt;
++#include &lt;stdlib.h&gt;
++#include &lt;syscall.h&gt;
++#include &lt;sys/types.h&gt;
++
++#include &quot;nixer.h&quot;
++
++// Daten zum SHM in Richtung Soundtreiber
++uint32_t shm_id;
++void* shm;
++size_t shm_size;
++
++// Index der Ausgabesoundkarte
++int pbi = -1;
++
++// Verwendeter Soundtreiber
++struct sim_adriver* adriver;
++
++int main(int argc, char* argv[])
++{
++    if (argc != 2) {
++        fprintf(stderr, &quot;Usage: mixer &lt;driver&gt;\n&quot;);
++        return 1;
++    }
++
++    if ((adriver = find_driver(argv[1])) == NULL) {
++        fprintf(stderr, &quot;No such service \&quot;%s\&quot;.\n&quot;, argv[1]);
++        return 1;
++    }
++
++    printf(&quot;Found service \&quot;%s\&quot; found and registered there.\n&quot;, argv[1]);
++
++    int devnum = adriver-&gt;device_count(adriver);
++
++    printf(&quot;Devices reported: %i\n&quot;, devnum);
++
++    int i;
++
++    for (i = 0; i &lt; devnum; i++) {
++        if (adriver-&gt;is_playback(adriver, i)) {
++            pbi = i;
++            break;
++        }
++    }
++
++    if (pbi == -1) {
++        adriver-&gt;disconnect(adriver);
++        fprintf(stderr, &quot;No playback devices found.\n&quot;);
++        return 1;
++    }
++
++    printf(&quot;Device %i is a playback device.\n&quot;, pbi);
++
++    if (adriver-&gt;get_stream_information(adriver, pbi) == false) {
++        adriver-&gt;disconnect(adriver);
++        fprintf(stderr, &quot;Invalid answer.\n&quot;);
++        return 1;
++    }
++
++    switch (adriver-&gt;str0-&gt;sample_format) {
++        case CDI_AUDIO_8SI:
++        case CDI_AUDIO_16SI:
++        case CDI_AUDIO_32SI:
++            shm_size = adriver-&gt;str0-&gt;buffer_size *
++                sample_size[adriver-&gt;str0-&gt;sample_format];
++            break;
++        default:
++            fprintf(stderr, &quot;Unknown sample format %i.\n&quot;,
++                (int) adriver-&gt;str0-&gt;sample_format);
++            adriver-&gt;disconnect(adriver);
++            return 1;
++    }
++
++    shm_id = create_shared_memory(shm_size);
++    shm = open_shared_memory(shm_id);
++
++    adriver-&gt;change_device_status(adriver, pbi, CDI_AUDIO_STOP);
++
++    init_service_register(&quot;mixer&quot;);
++
++    register_message_handler(&quot;BUFCOM&quot;, &amp;buffer_completed);
++    register_message_handler(&quot;MIXCONF&quot;, &amp;mixer_config);
++    register_message_handler(&quot;GETSHM&quot;, &amp;get_shm);
++    register_message_handler(&quot;PLAY&quot;, &amp;play_input);
++    register_message_handler(&quot;POS&quot;, &amp;get_position);
++
++    for (;;) {
++        wait_for_rpc();
++    }
++}
+diff --git a/src/modules/c/mixer/manage.c b/src/modules/c/mixer/manage.c
+new file mode 100644
+index 0000000..16ec93f
+--- /dev/null
++++ b/src/modules/c/mixer/manage.c
+@@ -0,0 +1,184 @@
++/******************************************************************************
++ * Copyright (c) 2010 Max Reitz                                               *
++ *                                                                            *
++ * Permission  is hereby granted,  free of charge,  to any person obtaining a *
++ * copy of this software and associated documentation files (the &quot;Software&quot;), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
++ * and/or  sell copies of  the Software,  and to permit  persons to  whom the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED,  INCLUDING BUT NOT LIMITED TO  THE WARRANTIES OF MERCHANTABILITY, *
++ * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF OR  IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#include &lt;stdbool.h&gt;
++#include &lt;stddef.h&gt;
++#include &lt;stdio.h&gt;
++#include &lt;stdlib.h&gt;
++#include &lt;string.h&gt;
++
++#include &lt;cdi/audio.h&gt;
++
++#include &quot;nixer.h&quot;
++
++extern struct input_queue* iq_start;
++extern struct input_queue** iq_end;
++extern struct sim_adriver* adriver;
++
++extern int pbi;
++
++extern uint32_t shm_id;
++extern void* shm;
++extern size_t shm_size;
++
++// true, wenn derzeit Daten abgespielt werden
++volatile bool playing;
++
++// Anzahl der bereits zum Soundkartentreiber geschickten Puffer (sollte
++// mindestens zwei sein, damit keine Lücken beim Abspielen entstehen)
++int buffers_queued;
++// Nächster zu sendender Puffer
++int current_buffer;
++
++/**
++ * Überträgt, wenn möglich, so viele Pakete aus der Eingangsqueue an den
++ * Treiber, bis dieser zwei Pakete zu bearbeiten hat (ein Paket wird
++ * aktuell bearbeitet, ein zweites dient als Puffer).
++ */
++void send_buffer(void)
++{
++    struct input_queue* ip;
++
++    // Klasse, Queue leer oder erstes Paket unvollständig...
++    if ((iq_start == NULL) || (iq_start-&gt;missing)) {
++        if (!buffers_queued) {
++            adriver-&gt;change_device_status(adriver, pbi, CDI_AUDIO_STOP);
++            playing = false;
++        }
++        return;
++    }
++
++    while (buffers_queued &lt; 2) {
++        ip = input_queue_pop();
++
++        if ((ip == NULL) || (ip-&gt;missing)) {
++            break;
++        }
++
++        // Die Daten im Paket besitzen bereits das Format, dass der Treiber
++        // erwartet
++        memcpy(shm, ip-&gt;buffer, shm_size);
++
++        // Paket freigeben
++        free(ip-&gt;buffer);
++        free(ip);
++
++        // Daten an den Treiber übergeben
++        if (!adriver-&gt;transfer_data(adriver, pbi, 0, current_buffer, 0, shm_id,
++            shm_size))
++        {
++            fprintf(stderr,
++                &quot;[nixer] Failed to transfer data (this is fatal).\n&quot;);
++            adriver-&gt;disconnect(adriver);
++            abort();
++        }
++
++        buffers_queued++;
++        current_buffer = (current_buffer + 1) % adriver-&gt;str0-&gt;num_buffers;
++    }
++}
++
++/**
++ * Startet den Abspielvorgang und überträgt die ersten Pakete an den Treiber.
++ */
++void play(void)
++{
++    bool has_played = playing;
++
++    playing = true;
++
++    send_buffer();
++
++    if (playing &amp;&amp; !has_played) {
++        // Wiedergabe im Erfolgsfall starten
++        adriver-&gt;change_device_status(adriver, pbi, CDI_AUDIO_PLAY);
++    }
++}
++
++/**
++ * Verwirft alle Eingabedaten und beendet den Abspielvorgang.
++ */
++void trash_sound(bool immediately)
++{
++    if (immediately) {
++        playing = false;
++        adriver-&gt;change_device_status(adriver, pbi, CDI_AUDIO_STOP);
++        buffers_queued = 0;
++
++        struct input_queue* ip = iq_start;
++        iq_end = &amp;iq_start;
++        iq_start = NULL;
++
++        while (ip != NULL) {
++            free(ip-&gt;buffer);
++
++            void* tmp = ip;
++            ip = ip-&gt;next;
++            free(tmp);
++        }
++    }
++
++    while (playing);
++
++    current_buffer = (current_buffer + 1) % adriver-&gt;str0-&gt;num_buffers;
++}
++
++/**
++ * Wird vom Treiber aufgerufen, wenn ein Puffer abgeschlossen wurde.
++ */
++RPC(buffer_completed)
++{
++    if (length != sizeof(size_t)) {
++        rpc_int_resp(0);
++        return;
++    }
++
++    // current_buffer sollte derzeit auf diesem Wert stehen
++    int expected =
++        (*(size_t*) data + buffers_queued) % adriver-&gt;str0-&gt;num_buffers;
++
++    buffers_queued--;
++
++    // Merkwürdigerweise wurden in diesem Fall mehr Puffer abgespielt, als
++    // eigentlich an die Karte übergeben wurden.
++    if (buffers_queued &lt; 0) {
++        fprintf(stderr, &quot;[nixer] Strange underrun; %i packets missing.\n&quot;,
++            -buffers_queued);
++
++        // Versuch, zu retten, was zu retten ist
++        current_buffer = (*(size_t*) data + 1) % adriver-&gt;str0-&gt;num_buffers;
++        buffers_queued = 0;
++    }
++
++    // current_buffer entspricht nicht dem Wert, den die Soundkarte erwartet
++    if (expected != current_buffer) {
++        fprintf(stderr, &quot;[nixer] Buffer index discrepancy; %i expected, but &quot;
++            &quot;should be %i\n&quot;, current_buffer, expected);
++
++        current_buffer = expected;
++    }
++
++    // Nächsten Puffer aus der Eingabequeue senden
++    send_buffer();
++
++    rpc_int_resp(0);
++}
+diff --git a/src/modules/c/mixer/nixer.h b/src/modules/c/mixer/nixer.h
+new file mode 100644
+index 0000000..291ad14
+--- /dev/null
++++ b/src/modules/c/mixer/nixer.h
+@@ -0,0 +1,154 @@
++/******************************************************************************
++ * Copyright (c) 2010 Max Reitz                                               *
++ *                                                                            *
++ * Permission  is hereby granted,  free of charge,  to any person obtaining a *
++ * copy of this software and associated documentation files (the &quot;Software&quot;), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
++ * and/or  sell copies of  the Software,  and to permit  persons to  whom the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED,  INCLUDING BUT NOT LIMITED TO  THE WARRANTIES OF MERCHANTABILITY, *
++ * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF OR  IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#ifndef NIXER_H
++#define NIXER_H
++
++#include &lt;rpc.h&gt;
++#include &lt;stdbool.h&gt;
++#include &lt;stddef.h&gt;
++#include &lt;stdint.h&gt;
++#include &lt;sys/types.h&gt;
++
++#include &lt;cdi/audio.h&gt;
++
++// Macros, damit man ein paar RPC-Sachen schneller schreiben kann
++#define RPC(name) \
++    void name(pid_t src, uint32_t corr_id, size_t length, void* data)
++
++#define rpc_int_resp(val)   rpc_send_int_response(src, corr_id, val)
++#define rpc_dword_resp(val) rpc_send_dword_response(src, corr_id, val)
++
++// Abstrahiert den aktuellen Ausgabetreiber
++struct sim_adriver {
++    // PID des Treibers
++    pid_t pid;
++
++    // Zu verwendender Stream (dieser Nichtmixer = Nixer unterstützt nur eine
++    // Quellanwendung, daher wäre die Verwendung mehrerer Ausgabestreams nicht
++    // sehr sinnvoll)
++    struct cdi_audio_stream* str0;
++
++    /**
++     * Gibt die Anzahl der vom Treiber verwalteten Geräte zurück.
++     */
++    size_t (*device_count)(struct sim_adriver* drv);
++    /**
++     * Gibt true zurück, wenn die Soundkarte mit dem angegebenen Index ein
++     * Ausgabegerät ist.
++     */
++    bool (*is_playback)(struct sim_adriver* drv, int index);
++    /**
++     * Füllt das str0-Feld mit Informationen über den ersten Stream der
++     * ausgewählten Karte.
++     */
++    bool (*get_stream_information)(struct sim_adriver* drv, int card);
++    /**
++     * Tauscht Daten mit dem Stream der angegebenen Karte aus (stream sollte
++     * normalerweise 0 sein), buffer ist der Index des zu verwendenden Puffers,
++     * offset der Zieloffset darin, shm die SHM-ID zum Datenaustausch und
++     * shm_size die Größe des SHMs.
++     * Bei Erfolg wird true zurückgegeben, sonst false.
++     */
++    bool (*transfer_data)(struct sim_adriver* drv, int card, int stream,
++        int buffer, size_t offset, uint32_t shm, size_t shm_size);
++    /**
++     * Verändert den Zustand einer Soundkarte (z. B. Abspielen oder Anhalten).
++     * Zurückgegeben wird der tatsächlich gesetzte Zustand.
++     */
++    cdi_audio_status_t (*change_device_status)(struct sim_adriver* drv,
++        int card, cdi_audio_status_t status);
++    /**
++     * Versucht, die Samplerate (in Hz) des angegebenen Streams zu verändern.
++     * Dies muss nicht immer gelingen, die tatsächlich eingestellte Samplerate
++     * wird zurückgegeben (z. B. könnte das Setzen der Samplerate 44101 Hz zu
++     * einer tatsächlichen Samplerate von 44100 Hz führen).
++     */
++    int (*set_sample_rate)(struct sim_adriver* drv, int card, int stream,
++        int rate);
++    /**
++     * Versucht, die Anzahl der Ausgabechannel der angegebenen Karte zu setzen.
++     * Zurückgegeben wird die tatsächliche Anzahl von Channeln (Versucht man,
++     * eine Stereokarte mit der Channelanzahl 6 in den 5.1-Modus zu setzen, dann
++     * wird wohl 2 zurückgegeben, weil nur zwei Channel unterstützt werden).
++     */
++    int (*set_number_of_channels)(struct sim_adriver* drv, int card,
++        int channels);
++    /**
++     * Gibt den Index des aktuell abgespielten Frames zurück.
++     */
++    int (*get_current_frame)(struct sim_adriver* drv, int card, int stream);
++    /**
++     * Löst die Verbindung zu einem Audiotreiber und gibt den Speicher der
++     * übergebenen Struktur frei.
++     */
++    void (*disconnect)(struct sim_adriver* drv);
++};
++
++// Struktur, die für transfer_data-RPC verwendet wird.
++struct tfrinfo {
++    int card, stream, buffer;
++    size_t offset, shm_size;
++    uint32_t shm;
++} __attribute__((packed));
++
++// Struktur, die von der Anwendung genutzt wird, um dem Mixer Informationen
++// zum Sampling mitzuteilen
++struct mixer_config {
++    int sample_rate, channel_count;
++    cdi_audio_sample_format_t sample_format;
++} __attribute__((packed));
++
++// Queue mit den eingehenden Daten
++struct input_queue {
++    struct input_queue* next;
++    // Puffer mit den an die Soundkarte zu schickenden Samples
++    void* buffer;
++    // Anzahl der noch fehlenden Bytes, bis der Puffer vollständig gefüllt ist
++    size_t missing;
++} __attribute__((packed));
++
++// Größe eines Samples in Abhängigkeit vom Sampleformat
++static const size_t sample_size[] = {
++    2, // CDI_AUDIO_16SI
++    1, // CDI_AUDIO_8SI
++    4  // CDI_AUDIO_32SI
++};
++
++void input_queue_push(struct input_queue* packet);
++struct input_queue* input_queue_pop(void);
++struct input_queue* last_input_queue_packet(void);
++bool input_queue_complete(void);
++
++struct sim_adriver* find_driver(const char* name);
++
++void send_buffer(void);
++void play(void);
++void trash_sound(bool immediately);
++
++RPC(buffer_completed);
++RPC(get_position);
++RPC(get_shm);
++RPC(mixer_config);
++RPC(play_input);
++
++#endif
+-- 
+1.7.1
+
+</PRE>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002059.html">[tyndur-devel] [PATCH 4/5] CDI/audio: ac97
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002061.html">[tyndur-devel] [PATCH] Neue POSIX-Funktionen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2060">[ Datum ]</a>
+              <a href="thread.html#2060">[ Thema ]</a>
+              <a href="subject.html#2060">[ Betreff (Subject)]</a>
+              <a href="author.html#2060">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

@@ -1,0 +1,154 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH v2 02/24] cdi/misc: Erlaube IRQ-Sharing
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%2002/24%5D%20cdi/misc%3A%20Erlaube%20IRQ-Sharing&In-Reply-To=%3C1449965469-16714-3-git-send-email-max%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002570.html">
+   <LINK REL="Next"  HREF="002546.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH v2 02/24] cdi/misc: Erlaube IRQ-Sharing</H1>
+    <B>Max Reitz</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%2002/24%5D%20cdi/misc%3A%20Erlaube%20IRQ-Sharing&In-Reply-To=%3C1449965469-16714-3-git-send-email-max%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH v2 02/24] cdi/misc: Erlaube IRQ-Sharing">max at tyndur.org
+                  </A><BR>
+    <I>So Dez 13 01:10:47 CET 2015</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002570.html">[tyndur-devel] [PATCH v2 01/24] cdi/pci: Ausrichtung von BARs an Pageframes
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002546.html">[tyndur-devel] [PATCH v2 03/24] cdi/vesa: Entferne &quot;inline&quot;
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2545">[ Datum ]</a>
+              <a href="thread.html#2545">[ Thema ]</a>
+              <a href="subject.html#2545">[ Betreff (Subject) ]</a>
+              <a href="author.html#2545">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* Dass Treiber mehrere Geräte verwalten, ist nicht selten. Dass mehrere
+  Geräte denselben IRQ verwenden, ebenfalls nicht (zumindest, wenn man
+  die IRQs nicht neu zuweist). Damit sollte die CDI-Bibliothek es auf
+  jeden Fall erlauben, dass mehrere Handler für denselben IRQ angelegt
+  werden.
+
+Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">max at tyndur.org</A>&gt;
+---
+ src/modules/cdi/lib/misc.c | 37 +++++++++++++++++++++++--------------
+ 1 file changed, 23 insertions(+), 14 deletions(-)
+
+diff --git a/src/modules/cdi/lib/misc.c b/src/modules/cdi/lib/misc.c
+index 11661b4..1b965af 100644
+--- a/src/modules/cdi/lib/misc.c
++++ b/src/modules/cdi/lib/misc.c
+@@ -9,6 +9,7 @@
+  */  
+ 
+ #include &lt;stdint.h&gt;
++#include &lt;stdlib.h&gt;
+ #include &lt;syscall.h&gt;
+ #include &lt;rpc.h&gt;
+ #include &lt;sleep.h&gt;
+@@ -22,10 +23,16 @@
+ /** Anzahl der verfuegbaren IRQs */
+ #define IRQ_COUNT           0x10
+ 
++struct irq_handler {
++    struct irq_handler* next;
++
++    void (*handler)(struct cdi_device* dev);
++    struct cdi_device* dev;
++};
++
+ /** Array mit allen IRQ-Handlern; Als index wird die Nummer benutzt */
+-static void (*driver_irq_handler[IRQ_COUNT])(struct cdi_device*) = { NULL };
+-/** Array mit den passenden Geraeten zu den registrierten IRQs */
+-static struct cdi_device* driver_irq_device[IRQ_COUNT] = { NULL };
++static struct irq_handler* driver_irq_handlers[IRQ_COUNT];
++
+ /**
+  * Array, das die jeweilige Anzahl an aufgerufenen Interrupts seit dem
+  * cdi_reset_wait_irq speichert.
+@@ -44,8 +51,8 @@ static void irq_handler(uint8_t irq)
+ 
+     irq -= TYNDUR_IRQ_OFFSET;
+     driver_irq_count[irq]++;
+-    if (driver_irq_handler[irq]) {
+-        driver_irq_handler[irq](driver_irq_device[irq]);
++    for (struct irq_handler* h = driver_irq_handlers[irq]; h; h = h-&gt;next) {
++        h-&gt;handler(h-&gt;dev);
+     }
+ }
+ 
+@@ -65,16 +72,18 @@ void cdi_register_irq(uint8_t irq, void (*handler)(struct cdi_device*),
+         return;
+     }
+ 
+-    // Der Interrupt wurde schon mal registriert
+-    if (driver_irq_handler[irq]) {
+-        fprintf(stderr, &quot;cdi: Versuch IRQ %d mehrfach zu registrieren\n&quot;, irq);
+-        return;
+-    }
++    struct irq_handler* h = malloc(sizeof(*h));
++    *h = (struct irq_handler){
++        .next    = driver_irq_handlers[irq],
++        .handler = handler,
++        .dev     = device
++    };
+ 
+-    driver_irq_handler[irq] = handler;
+-    driver_irq_device[irq] = device;
++    driver_irq_handlers[irq] = h;
+ 
+-    register_intr_handler(TYNDUR_IRQ_OFFSET + irq, irq_handler);
++    if (!h-&gt;next) {
++        register_intr_handler(TYNDUR_IRQ_OFFSET + irq, irq_handler);
++    }
+ }
+ 
+ /**
+@@ -118,7 +127,7 @@ int cdi_wait_irq(uint8_t irq, uint32_t timeout)
+         return -1;
+     }
+ 
+-    if (!driver_irq_handler[irq]) {
++    if (!driver_irq_handlers[irq]) {
+         return -2;
+     }
+ 
+-- 
+2.6.3
+
+</PRE>
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002570.html">[tyndur-devel] [PATCH v2 01/24] cdi/pci: Ausrichtung von BARs an Pageframes
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002546.html">[tyndur-devel] [PATCH v2 03/24] cdi/vesa: Entferne &quot;inline&quot;
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2545">[ Datum ]</a>
+              <a href="thread.html#2545">[ Thema ]</a>
+              <a href="subject.html#2545">[ Betreff (Subject)]</a>
+              <a href="author.html#2545">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

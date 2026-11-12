@@ -1,0 +1,133 @@
+Index: src/modules/pas/lpt/packages.pas
+===================================================================
+--- src/modules/pas/lpt/packages.pas	(Revision 922)
++++ src/modules/pas/lpt/packages.pas	(Arbeitskopie)
+@@ -14,6 +14,8 @@ type
+ 
+     TDependency = class(TCollectionItem)
+         public
++            procedure copyFrom(orig: TDependency);
++
+             pkgname:    String;
+             section:    String;
+     end;
+@@ -27,7 +29,7 @@ type
+             function add(name: String): TPackage;
+             procedure AddAll(pkgset: TPackageSet);
+             procedure AddVersion(ver: TPackageVersion);
+-            procedure AddDependencies;
++            procedure AddDependencies(src: TPackageSet);
+             function GetCurrentVersion
+                 (pkgname, sectname: String): TPackageVersion;
+ 
+@@ -65,11 +67,14 @@ type
+ 
+     TPackageVersion = class(TCollectionItem)
+         private
++            procedure copyDependenciesFrom(orig: TPackageVersion);
++
+             instDep: TCollection;
+             runDep: TCollection;
+ 
+         public
+             constructor create(parent: TCollection); override;
++            procedure copyFrom(orig: TPackageVersion);
+ 
+             procedure addDependency(typ: char; dep: String);
+ 
+@@ -264,15 +269,11 @@ begin
+         sect.section := ver.section.section;
+     end;
+ 
+-    // FIXME Abhaengigkeiten werden nciht mitkopiert
+     newVer := sect.add(ver.version);
+-    newVer.pkg := pkg;
+-    newVer.section := sect;
+-    newVer.repository := ver.repository;
+-    newVer.size := ver.size;    
++    newVer.copyFrom(ver);
+ end;
+             
+-procedure TPackageSet.AddDependencies;
++procedure TPackageSet.AddDependencies(src: TPackageSet);
+ var
+     pkg: TPackage;
+     sect: TPackageSection;
+@@ -283,7 +284,6 @@ var
+ 
+     i, j, k, l: integer;
+ begin
+-    
+     // TODO Tut das mit verschachtelten Abhaengigkeiten?
+     for i := 0 to packages.count - 1 do begin
+         pkg := TPackage(packages.items[i]);
+@@ -291,10 +291,9 @@ begin
+             sect := TPackageSection(pkg.sections.items[j]);
+             for k := 0 to sect.versions.count - 1 do begin
+                 ver := TPackageVersion(sect.versions.items[k]);
+-                
+                 for l := 0 to ver.runDependencies.count - 1 do begin
+                     dep := TDependency(ver.runDependencies.items[l]);
+-                    depPkg := GetCurrentVersion(dep.pkgname, dep.section);
++                    depPkg := src.GetCurrentVersion(dep.pkgname, dep.section);
+                     if depPkg <> nil then begin
+                         AddVersion(depPkg);
+                     end else begin
+@@ -375,6 +374,33 @@ begin
+     runDep := TCollection.create(TDependency);
+ end;
+ 
++procedure TPackageVersion.copyFrom(orig: TPackageVersion);
++begin
++    pkg := orig.pkg;
++    section := orig.section;
++    repository := orig.repository;
++    size := orig.size;
++    copyDependenciesFrom(orig);
++end;
++
++procedure TPackageVersion.copyDependenciesFrom(orig: TPackageVersion);
++var
++    i: integer;
++    dep, newdep: TDependency;
++begin
++    for i := 0 to orig.instDep.count - 1 do begin
++        dep := TDependency(orig.instDep.items[i]);
++        newdep := TDependency(instDep.add());
++        newdep.copyFrom(dep);
++    end;
++
++    for i := 0 to orig.runDep.count - 1 do begin
++        dep := TDependency(orig.runDep.items[i]);
++        newdep := TDependency(runDep.add());
++        newdep.copyFrom(dep);
++    end;
++end;
++
+ procedure TPackageVersion.addDependency(typ: char; dep: String);
+ var
+     depList: TCollection;
+@@ -404,4 +430,10 @@ begin
+     newDep.section := Copy(dep, i + 1, length(dep));
+ end;
+ 
++procedure TDependency.copyFrom(orig: TDependency);
++begin
++    pkgname := orig.pkgname;
++    section := orig.section;
++end;
++
+ end.
+Index: src/modules/pas/lpt/lpt.pas
+===================================================================
+--- src/modules/pas/lpt/lpt.pas	(Revision 922)
++++ src/modules/pas/lpt/lpt.pas	(Arbeitskopie)
+@@ -218,7 +218,7 @@ begin
+     
+     instset := TPackageSet.create();
+     instset.AddVersion(version);
+-    instset.AddDependencies;
++    instset.AddDependencies(pkgset);
+ 
+     for i := 0 to instset.packages.count - 1 do begin
+         pkg := TPackage(instset.packages.items[i]);

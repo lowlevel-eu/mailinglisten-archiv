@@ -1,0 +1,303 @@
+Index: lib/cdi.c
+===================================================================
+--- lib/cdi.c	(Revision 656)
++++ lib/cdi.c	(Arbeitskopie)
+@@ -12,6 +12,7 @@
+ #include <stdlib.h>
+ #include <syscall.h>
+ #include <collections.h> 
++#include <lostio.h>
+ 
+ #include "cdi.h"
+ 
+@@ -31,6 +32,9 @@
+ {
+     drivers = list_create();
+     atexit(cdi_destroy);
++
++    lostio_init();
++    lostio_type_directory_use();
+ }
+ 
+ /**
+@@ -59,6 +63,7 @@
+     int i, j;
+     for (i = 0; (driver = list_get_element_at(drivers, i)); i++) {
+         for (j = 0; (device = cdi_list_get(driver->devices, j)); j++) {
++            device->driver = driver;
+             driver->init_device(driver, device);
+         }
+     }
+@@ -93,6 +98,7 @@
+ void cdi_driver_register(struct cdi_driver* driver)
+ {
+     list_push(drivers, driver);
++    init_service_register((char*) driver->name);
+ }
+ 
+ 
+Index: lib/dma.c
+===================================================================
+--- lib/dma.c	(Revision 0)
++++ lib/dma.c	(Revision 0)
+@@ -0,0 +1,87 @@
++/*
++ * Copyright (c) 2007 Antoine Kaufmann
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it 
++ * and/or modify it under the terms of the Do What The Fuck You Want 
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * http://sam.zoy.org/projects/COPYING.WTFPL for more details.
++ */  
++
++#include <stdio.h>
++#include <stdlib.h>
++
++#include "cdi/dma.h"
++
++/**
++ * Initialisiert einen Transport per DMA
++ *
++ * @return 0 bei Erfolg, -1 im Fehlerfall
++ */
++int cdi_dma_open(struct cdi_dma_handle* handle, uint8_t channel, uint8_t mode,
++    size_t length, void* buffer)
++{
++    char* dma_path;
++    int result = 0;
++    // DMA-Path zusammensetzen
++    if (asprintf(&dma_path, "dma:/%d/%d/%d", channel, mode, length) < 0) {
++        return -1;
++    }
++    
++    // Handle oeffnen
++    handle->file = fopen(dma_path, "r+");
++    if (handle->file == NULL) {
++        result = -1;
++    }
++    
++    // Struktur befuellen
++    handle->length = length;
++    handle->channel = channel;
++    handle->mode = mode;
++    handle->buffer = buffer;
++
++    free(dma_path);
++    return result;
++}
++
++/**
++ * Liest Daten per DMA ein
++ *
++ * @return 0 bei Erfolg, -1 im Fehlerfall
++ */
++int cdi_dma_read(struct cdi_dma_handle* handle)
++{
++    // Daten einlesen
++    if (fread(handle->buffer, 1, handle->length, handle->file) == handle->
++        length) 
++    {
++        return 0;
++    }
++    return -1;
++}
++
++/**
++ * Schreibt Daten per DMA
++ *
++ * @return 0 bei Erfolg, -1 im Fehlerfall
++ */
++int cdi_dma_write(struct cdi_dma_handle* handle)
++{
++    // Daten schreiben
++    if (fwrite(handle->buffer, 1, handle->length, handle->file) == handle->
++        length) 
++    {
++        return 0;
++    }
++    return -1;
++}
++
++/**
++ * Schliesst das DMA-Handle wieder
++ *
++ * @return 0 bei Erfolg, -1 im Fehlerfall
++ */
++int cdi_dma_close(struct cdi_dma_handle* handle)
++{
++    return fclose(handle->file);
++}
+Index: lib/misc.c
+===================================================================
+--- lib/misc.c	(Revision 656)
++++ lib/misc.c	(Arbeitskopie)
+@@ -11,6 +11,7 @@
+ #include <stdint.h>
+ #include <syscall.h>
+ #include <rpc.h>
++#include <sleep.h>
+ 
+ #include "cdi.h"
+ #include "cdi/misc.h"
+@@ -50,3 +51,33 @@
+ {
+     return (uintptr_t) get_phys_addr(ptr);
+ }
++
++/**
++ * Reserviert IO-Ports
++ *
++ * @return 0 wenn die Ports erfolgreich reserviert wurden, -1 sonst.
++ */
++int cdi_ioports_alloc(uint16_t start, uint16_t count)
++{
++    return (request_ports(start, count) ? 0 : -1);
++}
++
++/**
++ * Gibt reservierte IO-Ports frei
++ *
++ * @return 0 wenn die Ports erfolgreich freigegeben wurden, -1 sonst.
++ */
++int cdi_ioports_free(uint16_t start, uint16_t count)
++{
++    return (release_ports(start, count) ? 0 : -1);
++}
++
++/**
++ * Unterbricht die Ausfuehrung fuer mehrere Millisekunden
++ */
++void cdi_sleep_ms(uint32_t ms)
++{
++    msleep(ms);
++}
++
++
+Index: include/cdi/misc.h
+===================================================================
+--- include/cdi/misc.h	(Revision 656)
++++ include/cdi/misc.h	(Arbeitskopie)
+@@ -30,5 +30,24 @@
+  */
+ uintptr_t cdi_get_phys_addr(void* ptr);
+ 
++/**
++ * Reserviert IO-Ports
++ *
++ * @return 0 wenn die Ports erfolgreich reserviert wurden, -1 sonst.
++ */
++int cdi_ioports_alloc(uint16_t start, uint16_t count);
++
++/**
++ * Gibt reservierte IO-Ports frei
++ *
++ * @return 0 wenn die Ports erfolgreich freigegeben wurden, -1 sonst.
++ */
++int cdi_ioports_free(uint16_t start, uint16_t count);
++
++/**
++ * Unterbricht die Ausfuehrung fuer mehrere Millisekunden
++ */
++void cdi_sleep_ms(uint32_t ms);
++
+ #endif
+ 
+Index: include/cdi/dma.h
+===================================================================
+--- include/cdi/dma.h	(Revision 0)
++++ include/cdi/dma.h	(Revision 0)
+@@ -0,0 +1,67 @@
++/*
++ * Copyright (c) 2007 Antoine Kaufmann
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it 
++ * and/or modify it under the terms of the Do What The Fuck You Want 
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * http://sam.zoy.org/projects/COPYING.WTFPL for more details.
++ */  
++
++#ifndef _CDI_DMA_H_
++#define _CDI_DMA_H_
++
++#include <stdint.h>
++#include <stdio.h>
++#include "cdi.h"
++
++struct cdi_dma_handle {
++    uint8_t     channel;
++    size_t      length;
++    uint8_t     mode;
++    void*       buffer;
++
++    // LOST-Implementation...
++    FILE*       file;
++};
++
++// Geraet => Speicher
++#define CDI_DMA_MODE_READ           (1 << 2)
++// Speicher => Geraet
++#define CDI_DMA_MODE_WRITE          (2 << 2)
++#define CDI_DMA_MODE_ON_DEMAND      (0 << 6)
++#define CDI_DMA_MODE_SINGLE         (1 << 6)
++#define CDI_DMA_MODE_BLOCK          (2 << 6)
++
++
++/**
++ * Initialisiert einen Transport per DMA
++ *
++ * @return 0 bei Erfolg, -1 im Fehlerfall
++ */
++int cdi_dma_open(struct cdi_dma_handle* handle, uint8_t channel, uint8_t mode,
++    size_t length, void* buffer);
++
++/**
++ * Liest Daten per DMA ein
++ *
++ * @return 0 bei Erfolg, -1 im Fehlerfall
++ */
++int cdi_dma_read(struct cdi_dma_handle* handle);
++
++/**
++ * Schreibt Daten per DMA
++ *
++ * @return 0 bei Erfolg, -1 im Fehlerfall
++ */
++int cdi_dma_write(struct cdi_dma_handle* handle);
++
++/**
++ * Schliesst das DMA-Handle wieder
++ *
++ * @return 0 bei Erfolg, -1 im Fehlerfall
++ */
++int cdi_dma_close(struct cdi_dma_handle* handle);
++
++#endif
++
+Index: include/cdi.h
+===================================================================
+--- include/cdi.h	(Revision 656)
++++ include/cdi.h	(Arbeitskopie)
+@@ -19,15 +19,20 @@
+ 
+ typedef enum {
+     CDI_UNKNOWN         = 0,
+-    CDI_NETWORK         = 1
++    CDI_NETWORK         = 1,
++    CDI_STORAGE         = 2
+ } cdi_device_type_t;
+ 
++struct cdi_driver;
+ struct cdi_device {
+     cdi_device_type_t   type;
++    const char*         name;
++    struct cdi_driver*  driver;
+ };
+ 
+ struct cdi_driver {
+     cdi_device_type_t   type;
++    const char*         name;
+     cdi_list_t*         devices;
+ 
+     void (*init_device)(struct cdi_driver* driver, struct cdi_device* device);

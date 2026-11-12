@@ -1,0 +1,184 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 07/11] cdi/fs: Implementierung für .fs_probe
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_07/11%3D5D_cdi/fs%3D3A_Implementier%3F%3D%0A%09%3D%3Futf-8%3Fb%3FdW5nIGbDvHIgLmZzX3Byb2Jl%3F%3D&In-Reply-To=%3C1449959291-24784-8-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002513.html">
+   <LINK REL="Next"  HREF="002515.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 07/11] cdi/fs: Implementierung für .fs_probe</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_07/11%3D5D_cdi/fs%3D3A_Implementier%3F%3D%0A%09%3D%3Futf-8%3Fb%3FdW5nIGbDvHIgLmZzX3Byb2Jl%3F%3D&In-Reply-To=%3C1449959291-24784-8-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 07/11] cdi/fs: Implementierung für .fs_probe">kevin at tyndur.org
+                  </A><BR>
+    <I>Sa Dez 12 23:28:07 CET 2015</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002513.html">[tyndur-devel] [PATCH 06/11] iso9660: Implement .fs_probe
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002515.html">[tyndur-devel] [PATCH 08/11] kernel2: dev:/-Dateisystem
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2514">[ Datum ]</a>
+              <a href="thread.html#2514">[ Thema ]</a>
+              <a href="subject.html#2514">[ Betreff (Subject) ]</a>
+              <a href="author.html#2514">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ cdi/fs: lio_probe_service() benutzt jetzt den .fs_probe-Callbacks von
+  Dateisystemtreibern, um tatsächlich ein nützliches Ergebnis zu liefern
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/cdi/include/cdi-osdep.h |  1 +
+ src/modules/cdi/lib/fs/fs.c         |  8 ++++++--
+ src/modules/cdi/lib/fs/lostio_if.c  | 33 +++++++++++++++++++++++++++++++++
+ 3 files changed, 40 insertions(+), 2 deletions(-)
+
+diff --git a/src/modules/cdi/include/cdi-osdep.h b/src/modules/cdi/include/cdi-osdep.h
+index 94eba73..96f3e05 100644
+--- a/src/modules/cdi/include/cdi-osdep.h
++++ b/src/modules/cdi/include/cdi-osdep.h
+@@ -91,6 +91,7 @@ typedef struct {
+  */
+ typedef struct {
+     struct lio_tree* tree;
++    lio_stream_t source;
+ } cdi_fs_osdep;
+ 
+ struct storage_drv_osdep {
+diff --git a/src/modules/cdi/lib/fs/fs.c b/src/modules/cdi/lib/fs/fs.c
+index aeca3ea..64a668b 100644
+--- a/src/modules/cdi/lib/fs/fs.c
++++ b/src/modules/cdi/lib/fs/fs.c
+@@ -40,6 +40,9 @@
+ 
+ #include &quot;cdi/fs.h&quot;
+ 
++int cdi_fs_lio_probe(struct lio_service* service,
++                     lio_stream_t source,
++                     struct lio_probe_service_result* probe_data);
+ struct lio_resource* cdi_fs_lio_load_root(struct lio_tree* tree);
+ int cdi_fs_lio_load_children(struct lio_resource* res);
+ int cdi_fs_lio_read(struct lio_resource* res, uint64_t offset,
+@@ -74,6 +77,7 @@ void cdi_fs_driver_register(struct cdi_fs_driver* driver)
+     service-&gt;name = driver-&gt;drv.name;
+     service-&gt;opaque = driver;
+     service-&gt;lio_ops = (struct lio_driver) {
++        .probe          = cdi_fs_lio_probe,
+         .load_root      = cdi_fs_lio_load_root,
+         .load_children  = cdi_fs_lio_load_children,
+         .read           = cdi_fs_lio_read,
+@@ -106,7 +110,7 @@ size_t cdi_fs_data_read(struct cdi_fs_filesystem* fs, uint64_t start,
+ {
+     ssize_t result;
+ 
+-    if ((result = lio_pread(fs-&gt;osdep.tree-&gt;source, start, size, buffer)) &lt; 0) {
++    if ((result = lio_pread(fs-&gt;osdep.source, start, size, buffer)) &lt; 0) {
+         // FIXME: Das ist irgendwie ein bescheiden
+         return 0;
+     }
+@@ -130,7 +134,7 @@ size_t cdi_fs_data_write(struct cdi_fs_filesystem* fs, uint64_t start,
+ {
+     ssize_t result;
+ 
+-    if ((result = lio_pwrite(fs-&gt;osdep.tree-&gt;source, start, size, buffer)) &lt; 0) {
++    if ((result = lio_pwrite(fs-&gt;osdep.source, start, size, buffer)) &lt; 0) {
+         // FIXME: Das ist irgendwie ein bescheiden
+         return 0;
+     }
+diff --git a/src/modules/cdi/lib/fs/lostio_if.c b/src/modules/cdi/lib/fs/lostio_if.c
+index 2823c5f..2adf696 100644
+--- a/src/modules/cdi/lib/fs/lostio_if.c
++++ b/src/modules/cdi/lib/fs/lostio_if.c
+@@ -41,6 +41,7 @@
+ #include &lt;stdlib.h&gt;
+ #include &lt;string.h&gt;
+ #include &lt;syscall.h&gt;
++#include &lt;errno.h&gt;
+ 
+ #include &quot;cdi/fs.h&quot;
+ 
+@@ -104,6 +105,37 @@ static struct lio_resource* create_liores(struct cdi_fs_filesystem* fs,
+     return liores;
+ }
+ 
++int cdi_fs_lio_probe(struct lio_service* service,
++                     lio_stream_t source,
++                     struct lio_probe_service_result* probe_data)
++{
++    struct cdi_fs_driver* driver = service-&gt;opaque;
++    struct cdi_fs_filesystem* fs;
++    char* volname = NULL;
++    int ret;
++
++    if (driver-&gt;fs_probe == NULL) {
++        return -EINVAL;
++    }
++
++    fs = calloc(1, sizeof(*fs));
++    fs-&gt;driver = driver;
++    fs-&gt;osdep.source = source;
++
++    ret = driver-&gt;fs_probe(fs, &amp;volname);
++    if (ret == 1) {
++        strlcpy(probe_data-&gt;volname, volname, sizeof(probe_data-&gt;volname));
++        ret = 0;
++    } else {
++        ret = -EINVAL;
++    }
++
++    free(volname);
++    free(fs);
++
++    return ret;
++}
++
+ struct lio_resource* cdi_fs_lio_load_root(struct lio_tree* tree)
+ {
+     struct cdi_fs_driver* driver = tree-&gt;service-&gt;opaque;
+@@ -116,6 +148,7 @@ struct lio_resource* cdi_fs_lio_load_root(struct lio_tree* tree)
+     fs = calloc(1, sizeof(*fs));
+     fs-&gt;driver = driver;
+     fs-&gt;osdep.tree = tree;
++    fs-&gt;osdep.source = tree-&gt;source;
+     tree-&gt;opaque = fs;
+ 
+     if (!driver-&gt;fs_init(fs)) {
+-- 
+2.1.4
+
+</PRE>
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002513.html">[tyndur-devel] [PATCH 06/11] iso9660: Implement .fs_probe
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002515.html">[tyndur-devel] [PATCH 08/11] kernel2: dev:/-Dateisystem
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2514">[ Datum ]</a>
+              <a href="thread.html#2514">[ Thema ]</a>
+              <a href="subject.html#2514">[ Betreff (Subject)]</a>
+              <a href="author.html#2514">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

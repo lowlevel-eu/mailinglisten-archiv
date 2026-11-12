@@ -1,0 +1,1154 @@
+From mail at kevin-wolf.de  Tue Jan  1 01:43:54 2008
+From: mail at kevin-wolf.de (Kevin Wolf)
+Date: Tue, 01 Jan 2008 01:43:54 +0100
+Subject: [Lost] =?iso-8859-1?q?=5BPatch=5D_Fixes_f=FCr_Syscallaufrufe_=28-?=
+	=?iso-8859-1?q?O1=29?=
+Message-ID: <47798CCA.20907@kevin-wolf.de>
+
+Dieser Patch behebt zwei Probleme in der Userspace-libc beim Aufruf von 
+Syscalls.
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : syscall-fixes.patch
+Dateityp    : text/x-patch
+Dateigröße  : 1856 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20080101/bb546252/attachment.bin>
+
+From toni at famkaufmann.info  Tue Jan  1 02:05:25 2008
+From: toni at famkaufmann.info (Antoine Kaufmann)
+Date: Tue, 1 Jan 2008 02:05:25 +0100
+Subject: [Lost]
+	=?utf-8?q?=5BPatch=5D_Fixes_f=C3=BCr_Syscallaufrufe_=28-O1?=
+	=?utf-8?q?=29?=
+In-Reply-To: <47798CCA.20907@kevin-wolf.de>
+References: <47798CCA.20907@kevin-wolf.de>
+Message-ID: <200801010205.25721.toni@famkaufmann.info>
+
+Am Dienstag, 1. Januar 2008 01.43:54 schrieb Kevin Wolf:
+> Dieser Patch behebt zwei Probleme in der Userspace-libc beim Aufruf von
+> Syscalls.
+
+Sieht gut aus. Zumindest scheint er nichts kpautt zu machen, und ein Stück 
+weiter kommt er damit auch, bei mir. ;-)
+
+
+From mail at kevin-wolf.de  Sat Jan 12 18:17:48 2008
+From: mail at kevin-wolf.de (Kevin Wolf)
+Date: Sat, 12 Jan 2008 18:17:48 +0100
+Subject: [Lost] [Patch] Compilerwarnungen
+In-Reply-To: <200712281606.47495.toni@famkaufmann.info>
+References: <200712281606.47495.toni@famkaufmann.info>
+Message-ID: <4788F63C.3000802@kevin-wolf.de>
+
+Antoine Kaufmann schrieb:
+> Dieser Patch räumt mal wieder ein bisschen auf und behebt Compilerwarnungen.
+> 
+> 
+> ------------------------------------------------------------------------
+> 
+> Index: src/kernel/src/init.c
+> ===================================================================
+> --- src/kernel/src/init.c	(Revision 675)
+> +++ src/kernel/src/init.c	(Arbeitskopie)
+> @@ -56,6 +56,7 @@
+>  #include "io.h"
+>  #include "timer.h"
+>  #include "shm.h"
+> +#include "vm86.h"
+>  
+>  struct multiboot_info multiboot_info;
+>  
+> Index: src/kernel/src/syscall.c
+> ===================================================================
+> --- src/kernel/src/syscall.c	(Revision 675)
+> +++ src/kernel/src/syscall.c	(Arbeitskopie)
+> @@ -283,7 +283,7 @@
+>          {
+>              vaddr_t address = *((vaddr_t*) isf->esp);
+>              if (is_userspace(address, 1)) {
+> -                isf->eax = resolve_vaddr(current_task->cr3, address);
+> +                isf->eax = (dword) resolve_vaddr(current_task->cr3, address);
+>              } else {
+>                  isf->eax = 0;
+>              }
+> @@ -434,7 +434,6 @@
+>              // Das PD-des neuen tasks mappen
+>              page_directory_t new_task_pd = new_task->cr3;
+>              
+> -            dword written = 0;
+>              // Speicher wird kopiert, nicht gemappt.
+>              while(num--) {
+>                  if (!resolve_vaddr(new_task_pd, dest)) {
+> @@ -752,7 +751,7 @@
+>          case SYSCALL_DEBUG_STACKTRACE:
+>          {
+>              pid_t pid = *((dword*) (isf->esp));
+> -            struct task* task = get_task(*((dword*) (isf->esp)));
+> +            struct task* task = get_task(pid);
+>  
+>              // FIXME: Was bei einem Fehler
+>              if (task != NULL) {
+> Index: src/kernel/src/vm86.c
+> ===================================================================
+> --- src/kernel/src/vm86.c	(Revision 675)
+> +++ src/kernel/src/vm86.c	(Arbeitskopie)
+> @@ -294,7 +297,7 @@
+>                  }
+>                  // Register speichern
+>                  dword *phys_regs = resolve_vaddr(task->parent_task->cr3, (dword*)((dword)info->regs & ~0xFFF));
+> -                dword regs = find_contiguous_kernel_pages(1);
+> +                dword regs = (dword) find_contiguous_kernel_pages(1);
+>                  map_page(kernel_page_directory, (dword*)regs, phys_regs, PTE_P | PTE_W);
+
+Das hier klingt mir sowieso eher nach einem Fall für map_phys_addr()
+
+>                  vm86_regs_t * vm86_regs = (vm86_regs_t *)(regs + ((dword)info->regs & 0xFFF));
+>                  vm86_regs->ax = isf->eax;
+> @@ -321,7 +324,7 @@
+>                  }
+>                  // Task beenden
+>                  if (!unblock_task(task->parent_task, task->pid)) {
+> -                    puts("VM86: Konnte aufrufenden Task nicht wecken!\n");
+> +                    kprintf("VM86: Konnte aufrufenden Task nicht wecken!\n");
+
+Ich würde hier eher einen panic ansetzen. Einfach so ein kprintf machen 
+wir eigentlich sonst auch nirgends, oder?
+
+> Index: src/include/strings.h
+> ===================================================================
+> --- src/include/strings.h	(Revision 675)
+> +++ src/include/strings.h	(Arbeitskopie)
+> @@ -37,9 +37,11 @@
+>  #define _STRINGS_H_
+>  
+>  #include <types.h>
+> +#include <string.h>
+>  
+> +/*
+>  int strcasecmp(const char* s1, const char* s2);
+> -int strncasecmp(const char* s1, const char* s2, size_t n);
+> +int strncasecmp(const char* s1, const char* s2, size_t n);*/
+
+Wieso sollen die auskommentiert werden? Laut man strings.h gehören die 
+dort rein.
+
+>  
+>  #endif // ifndef _STRINGS_H_
+>  
+> Index: src/include/string.h
+> ===================================================================
+> --- src/include/string.h	(Revision 675)
+> +++ src/include/string.h	(Arbeitskopie)
+> @@ -18,9 +18,9 @@
+>  int strcmp(const char* s1, const char* s2);
+>  int strncmp(const char* s1, const char* s2, size_t n);
+>  
+> -/* => strings.h
+> +/* => strings.h*/
+>  int strcasecmp(const char *s1, const char *s2);
+> -int strncasecmp(const char *s1, const char *s2, size_t n);*/
+> +int strncasecmp(const char *s1, const char *s2, size_t n);
+
+Und dafür sollte man hier den Kommentar voll ganz löschen.
+
+> Index: src/modules/kbc/keyboard.c
+> ===================================================================
+> --- src/modules/kbc/keyboard.c	(Revision 675)
+> +++ src/modules/kbc/keyboard.c	(Arbeitskopie)
+> @@ -23,7 +23,7 @@
+>      {27,             27},         // 0x01
+>      {'1',           '|'},         // 0x02
+>      {'2',           '"'},         // 0x03 F5
+> -    {'3',           '§'},         // 0x04 F3
+> +    {'3',             0},         // 0x04 F3
+
+Hm? Was war jetzt daran falsch?
+
+> Index: src/modules/cdi/lib/cdi.c
+> ===================================================================
+> --- src/modules/cdi/lib/cdi.c	(Revision 675)
+> +++ src/modules/cdi/lib/cdi.c	(Arbeitskopie)
+> @@ -23,6 +23,9 @@
+>  
+>  static void cdi_destroy(void);
+>  
+> +// FIXME
+> +int atexit(void (*function)(void));
+> +
+
+Der korrekte Fix ist folgender:
+
+Index: include/stdlib.h
+===================================================================
+--- include/stdlib.h    (Revision 685)
++++ include/stdlib.h    (Arbeitskopie)
+@@ -61,4 +61,6 @@
+
+  char* mktemp(char* template);
+
++int atexit(void (*function)(void));
++
+  #endif
+
+> Index: src/modules/lib/stdlibc/jprintf.c
+> ===================================================================
+> --- src/modules/lib/stdlibc/jprintf.c	(Revision 675)
+> +++ src/modules/lib/stdlibc/jprintf.c	(Arbeitskopie)
+> @@ -55,8 +55,9 @@
+>   */
+>  unsigned long long divmod(unsigned long long dividend, unsigned int divisor, unsigned int * remainder)
+>  {
+> -    unsigned int highword = dividend >> 32;
+> -    unsigned int lowword = dividend & 0xffffffff;
+> +    /*unsigned int highword = dividend >> 32;
+> +    unsigned int lowword = dividend & 0xffffffff;
+> +*/
+
+Wenn die Variablen unnötig sind, bitte löschen, nicht nur auskommentieren.
+
+> Index: src/modules/lib/gui/gui.c
+> ===================================================================
+> --- src/modules/lib/gui/gui.c	(Revision 675)
+> +++ src/modules/lib/gui/gui.c	(Arbeitskopie)
+> @@ -284,12 +285,12 @@
+>  
+>  int render_char(bitmap_t bitmap, font_t *font, unsigned char c, int x, int y)
+>  {
+> -    int glyph_index = ((int*)font->data)[c];
+> +    //int glyph_index = ((int*)font->data)[c];
+>      //printf("Index: %d\n", glyph_index);
+>      int offset = ((int*)font->data)[257 + c];
+>      //printf("Offset: %d\n", offset);
+>      int *glyph_data = (int*)(((char*)font->data) + offset);
+> -    int width = glyph_data[0];
+> +    //int width = glyph_data[0];
+
+Hier nochmal zwei davon.
+
+> Index: src/modules/lib/envvars.c
+> ===================================================================
+> --- src/modules/lib/envvars.c	(Revision 675)
+> +++ src/modules/lib/envvars.c	(Arbeitskopie)
+> @@ -37,6 +37,7 @@
+>  #include "syscall.h"
+>  #include "stdlib.h"
+>  #include "string.h"
+> +#include <stdio.h>
+
+io.h ist es, die man braucht (der Fix ist doch für io_get_absolute_path, 
+oder?)
+
+> Index: src/modules/lib/video/bitmap.c
+> ===================================================================
+> --- src/modules/lib/video/bitmap.c	(Revision 675)
+> +++ src/modules/lib/video/bitmap.c	(Arbeitskopie)
+> @@ -475,7 +475,8 @@
+>          height = bitmap.height - y - offsety;
+>      }
+>      //Bitmap zeichnen
+> -    int ix, iy;
+> +    int iy;
+> +    // int ix
+
+wtf? Bis jetzt dachte ich, du machst das Auskommentieren aus 
+Bequemlichkeit, aber das kann es hier ja nicht gewesen sein... ;-)
+
+
+From toni at famkaufmann.info  Sat Jan 12 23:05:01 2008
+From: toni at famkaufmann.info (Antoine Kaufmann)
+Date: Sat, 12 Jan 2008 23:05:01 +0100
+Subject: [Lost] [Patch] Compilerwarnungen
+In-Reply-To: <4788F63C.3000802@kevin-wolf.de>
+References: <200712281606.47495.toni@famkaufmann.info>
+	<4788F63C.3000802@kevin-wolf.de>
+Message-ID: <200801122305.01904.toni@famkaufmann.info>
+
+Am Samstag, 12. Januar 2008 18.17:48 schrieb Kevin Wolf:
+> >                  vm86_regs_t * vm86_regs = (vm86_regs_t *)(regs +
+> > ((dword)info->regs & 0xFFF)); vm86_regs->ax = isf->eax;
+> > @@ -321,7 +324,7 @@
+> >                  }
+> >                  // Task beenden
+> >                  if (!unblock_task(task->parent_task, task->pid)) {
+> > -                    puts("VM86: Konnte aufrufenden Task nicht
+> > wecken!\n"); +                    kprintf("VM86: Konnte aufrufenden Task
+> > nicht wecken!\n");
+>
+> Ich würde hier eher einen panic ansetzen. Einfach so ein kprintf machen
+> wir eigentlich sonst auch nirgends, oder?
+
+Jo stimmt, macht mehr Sinn.
+
+> > Index: src/include/strings.h
+> > ===================================================================
+> > --- src/include/strings.h	(Revision 675)
+> > +++ src/include/strings.h	(Arbeitskopie)
+> > @@ -37,9 +37,11 @@
+> >  #define _STRINGS_H_
+> >
+> >  #include <types.h>
+> > +#include <string.h>
+> >
+> > +/*
+> >  int strcasecmp(const char* s1, const char* s2);
+> > -int strncasecmp(const char* s1, const char* s2, size_t n);
+> > +int strncasecmp(const char* s1, const char* s2, size_t n);*/
+>
+> Wieso sollen die auskommentiert werden? Laut man strings.h gehören die
+> dort rein.
+
+Das ist eine gute Frage.... ;-)
+
+> > Index: src/modules/kbc/keyboard.c
+> > ===================================================================
+> > --- src/modules/kbc/keyboard.c	(Revision 675)
+> > +++ src/modules/kbc/keyboard.c	(Arbeitskopie)
+> > @@ -23,7 +23,7 @@
+> >      {27,             27},         // 0x01
+> >      {'1',           '|'},         // 0x02
+> >      {'2',           '"'},         // 0x03 F5
+> > -    {'3',           '§'},         // 0x04 F3
+> > +    {'3',             0},         // 0x04 F3
+>
+> Hm? Was war jetzt daran falsch?
+
+GCC mag dort keine Multibyte-Zeichen ;-)
+
+> > Index: src/modules/cdi/lib/cdi.c
+> > ===================================================================
+> > --- src/modules/cdi/lib/cdi.c	(Revision 675)
+> > +++ src/modules/cdi/lib/cdi.c	(Arbeitskopie)
+> > @@ -23,6 +23,9 @@
+> >
+> >  static void cdi_destroy(void);
+> >
+> > +// FIXME
+> > +int atexit(void (*function)(void));
+> > +
+>
+> Der korrekte Fix ist folgender:
+>
+> Index: include/stdlib.h
+> ===================================================================
+> --- include/stdlib.h    (Revision 685)
+> +++ include/stdlib.h    (Arbeitskopie)
+> @@ -61,4 +61,6 @@
+>
+>   char* mktemp(char* template);
+>
+> +int atexit(void (*function)(void));
+> +
+>   #endif
+>
+
+Aber noch korrekter ist es, wenn man gleich ein atexit implementiert. ;-)
+
+> > Index: src/modules/lib/envvars.c
+> > ===================================================================
+> > --- src/modules/lib/envvars.c	(Revision 675)
+> > +++ src/modules/lib/envvars.c	(Arbeitskopie)
+> > @@ -37,6 +37,7 @@
+> >  #include "syscall.h"
+> >  #include "stdlib.h"
+> >  #include "string.h"
+> > +#include <stdio.h>
+>
+> io.h ist es, die man braucht (der Fix ist doch für io_get_absolute_path,
+> oder?)
+
+Ja, stimmt.
+
+> > Index: src/modules/lib/video/bitmap.c
+> > ===================================================================
+> > --- src/modules/lib/video/bitmap.c	(Revision 675)
+> > +++ src/modules/lib/video/bitmap.c	(Arbeitskopie)
+> > @@ -475,7 +475,8 @@
+> >          height = bitmap.height - y - offsety;
+> >      }
+> >      //Bitmap zeichnen
+> > -    int ix, iy;
+> > +    int iy;
+> > +    // int ix
+>
+> wtf? Bis jetzt dachte ich, du machst das Auskommentieren aus
+> Bequemlichkeit, aber das kann es hier ja nicht gewesen sein... ;-)
+
+*hust* ;-)
+
+
+Hier also die korrigierte Version.
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : warnungen2.patch
+Dateityp    : text/x-diff
+Dateigröße  : 14918 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20080112/fede687a/attachment.patch>
+
+From mail at kevin-wolf.de  Sat Jan 12 23:11:34 2008
+From: mail at kevin-wolf.de (Kevin Wolf)
+Date: Sat, 12 Jan 2008 23:11:34 +0100
+Subject: [Lost] [Patch] Compilerwarnungen
+In-Reply-To: <200801122305.01904.toni@famkaufmann.info>
+References: <200712281606.47495.toni@famkaufmann.info>	<4788F63C.3000802@kevin-wolf.de>
+	<200801122305.01904.toni@famkaufmann.info>
+Message-ID: <47893B16.7060404@kevin-wolf.de>
+
+Ich seh keine offensichtlichen Fehler. Wenn gcc das auch so sieht, 
+kannst du einchecken. ;-)
+
+
+From toni at famkaufmann.info  Sun Jan 13 00:21:20 2008
+From: toni at famkaufmann.info (Antoine Kaufmann)
+Date: Sun, 13 Jan 2008 00:21:20 +0100
+Subject: [Lost] [Patch] Typen an Spezifikationen angepasst
+Message-ID: <200801130021.20773.toni@famkaufmann.info>
+
+Während dem Portieren von Binutils und gcc bin ich auf ein paar typen 
+gestossen, die als unsigned deklariert waren, es aber laut Spezifikation oder 
+der Art, wie sie benutzt werden, nicht sein dürften.
+Dieser Patch passt diese Typen an.
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : typen.patch
+Dateityp    : text/x-diff
+Dateigröße  : 981 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20080113/774b106b/attachment.patch>
+
+From mail at kevin-wolf.de  Sun Jan 13 00:32:46 2008
+From: mail at kevin-wolf.de (Kevin Wolf)
+Date: Sun, 13 Jan 2008 00:32:46 +0100
+Subject: [Lost] [Patch] Typen an Spezifikationen angepasst
+In-Reply-To: <200801130021.20773.toni@famkaufmann.info>
+References: <200801130021.20773.toni@famkaufmann.info>
+Message-ID: <47894E1E.9050405@kevin-wolf.de>
+
+Antoine Kaufmann schrieb:
+> Während dem Portieren von Binutils und gcc bin ich auf ein paar typen 
+> gestossen, die als unsigned deklariert waren, es aber laut Spezifikation oder 
+> der Art, wie sie benutzt werden, nicht sein dürften.
+> Dieser Patch passt diese Typen an.
+
+Sollte hinhauen.
+
+
+From toni at famkaufmann.info  Sun Jan 13 00:43:03 2008
+From: toni at famkaufmann.info (Antoine Kaufmann)
+Date: Sun, 13 Jan 2008 00:43:03 +0100
+Subject: [Lost] [Patch] Ein paar neue Libc-Funktionen
+Message-ID: <200801130043.04187.toni@famkaufmann.info>
+
+Dieser Patch erweitert unsere Libc um ein paar Funktionen.
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : libc.patch
+Dateityp    : text/x-diff
+Dateigröße  : 14238 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20080113/67ccf16a/attachment.patch>
+
+From mail at kevin-wolf.de  Sun Jan 13 01:01:00 2008
+From: mail at kevin-wolf.de (Kevin Wolf)
+Date: Sun, 13 Jan 2008 01:01:00 +0100
+Subject: [Lost] [Patch] Ein paar neue Libc-Funktionen
+In-Reply-To: <200801130043.04187.toni@famkaufmann.info>
+References: <200801130043.04187.toni@famkaufmann.info>
+Message-ID: <478954BC.7090408@kevin-wolf.de>
+
+Antoine Kaufmann schrieb:
+> +double atof(const char* str)
+> +{
+> +    // TODO
+> +    return 0;
+> +}
+
+Das macht mir wie gesagt noch Bauchschmerzen, weil das schwer zu 
+findende Bugs verursachen könnte.
+
+=> #define LIBC_STUBS in config.h und standardmäßig deaktiviert.
+
+> Index: src/include/ctype.h
+> ===================================================================
+> --- src/include/ctype.h	(Revision 688)
+> +++ src/include/ctype.h	(Arbeitskopie)
+> @@ -43,6 +43,7 @@
+>  #define isxdigit(c) (isdigit(c) || ((c) >= 'a' && (c) <= 'f') || ((c) >= 'A' && (c) <= 'F'))
+>  #define isupper(c) ((c) >= 'A' && (c) <= 'Z')
+>  #define islower(c) ((c) >= 'a' && (c) <= 'z')
+> +#define ispunct(c) ((!isspace(c)) && (!isalpha(c)))
+
+#define ispunct(c) (isprint(c) && (!isspace(c)) && (!isalpha(c)))
+
+> +double fabs(double x)
+> +{
+> +    return ((x < 0) ? -x : x);
+> +}
+
+Auch wieder in #ifdef
+
+> +// Kuenstliche Begrenzung fuer Programme die sie benutzen wollen
+> +#define MAXPATHLEN 4096
+> +
+> +#endif //ifndef _SYS_PARA;_H_
+
+Tippfehler im Kommentar. ;-)
+
+> +/**
+> + * Prueft ob die Annahme stimmt. Falls sie das nicht tut, wird mit einer
+> + * Fehlermeldung abgebrochen.
+> + */
+> +void _assert(const char* assertation, int expression)
+> +{
+> +    if (!expression) {
+> +        fprintf(stderr, "Annahme fehlgeschlagen: %s\n", assertation);
+> +    }
+> +}
+> +
+
+Das Wort heißt assertion und auf Deutsch Zusicherung. Außerdem muß das 
+Programm nach Ausgabe der Fehlermeldung durch den Aufruf von abort() 
+abgebrochen werden.
+
+
+From janosch.graef at gmx.net  Mon Jan 14 20:19:55 2008
+From: janosch.graef at gmx.net (=?ISO-8859-15?Q?Janosch_Gr=E4f?=)
+Date: Mon, 14 Jan 2008 20:19:55 +0100
+Subject: [Lost] cdi.fs
+Message-ID: <478BB5DB.8050905@gmx.net>
+
+Hi,
+
+Erstmal ein Vorentwurf von cdi.fs
+Wäre ganz nett, wenn ihr (besonderst jemand der einen Dateisystemtreiber
+geschrieben hat) Vorschläge machen könntet. Ich hoffe es stört euch
+nicht zu sehr, dass ich nicht ganz den LOST-Code-Layout folge.
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : fs.h
+Dateityp    : text/x-chdr
+Dateigröße  : 2346 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20080114/4328ef33/attachment.h>
+
+From toni at famkaufmann.info  Sat Jan 19 10:02:32 2008
+From: toni at famkaufmann.info (Antoine Kaufmann)
+Date: Sat, 19 Jan 2008 10:02:32 +0100
+Subject: [Lost] [Patch] Ein paar neue Libc-Funktionen
+In-Reply-To: <478954BC.7090408@kevin-wolf.de>
+References: <200801130043.04187.toni@famkaufmann.info>
+	<478954BC.7090408@kevin-wolf.de>
+Message-ID: <200801191002.32506.toni@famkaufmann.info>
+
+Am Sonntag, 13. Januar 2008 01.01:00 schrieb Kevin Wolf:
+> Antoine Kaufmann schrieb:
+> > +double atof(const char* str)
+> > +{
+> > +    // TODO
+> > +    return 0;
+> > +}
+>
+> Das macht mir wie gesagt noch Bauchschmerzen, weil das schwer zu
+> findende Bugs verursachen könnte.
+>
+> => #define LIBC_STUBS in config.h und standardmäßig deaktiviert.
+>
+> > Index: src/include/ctype.h
+> > ===================================================================
+> > --- src/include/ctype.h	(Revision 688)
+> > +++ src/include/ctype.h	(Arbeitskopie)
+> > @@ -43,6 +43,7 @@
+> >  #define isxdigit(c) (isdigit(c) || ((c) >= 'a' && (c) <= 'f') || ((c) >=
+> > 'A' && (c) <= 'F')) #define isupper(c) ((c) >= 'A' && (c) <= 'Z')
+> >  #define islower(c) ((c) >= 'a' && (c) <= 'z')
+> > +#define ispunct(c) ((!isspace(c)) && (!isalpha(c)))
+>
+> #define ispunct(c) (isprint(c) && (!isspace(c)) && (!isalpha(c)))
+>
+> > +double fabs(double x)
+> > +{
+> > +    return ((x < 0) ? -x : x);
+> > +}
+>
+> Auch wieder in #ifdef
+>
+> > +// Kuenstliche Begrenzung fuer Programme die sie benutzen wollen
+> > +#define MAXPATHLEN 4096
+> > +
+> > +#endif //ifndef _SYS_PARA;_H_
+>
+> Tippfehler im Kommentar. ;-)
+>
+> > +/**
+> > + * Prueft ob die Annahme stimmt. Falls sie das nicht tut, wird mit einer
+> > + * Fehlermeldung abgebrochen.
+> > + */
+> > +void _assert(const char* assertation, int expression)
+> > +{
+> > +    if (!expression) {
+> > +        fprintf(stderr, "Annahme fehlgeschlagen: %s\n", assertation);
+> > +    }
+> > +}
+> > +
+>
+> Das Wort heißt assertion und auf Deutsch Zusicherung. Außerdem muß das
+> Programm nach Ausgabe der Fehlermeldung durch den Aufruf von abort()
+> abgebrochen werden.
+
+
+Hier eine überarbeitete Version des Patchs.
+
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : libc2.patch
+Dateityp    : text/x-diff
+Dateigröße  : 13275 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20080119/2208c268/attachment.patch>
+
+From mail at kevin-wolf.de  Sat Jan 19 16:18:02 2008
+From: mail at kevin-wolf.de (Kevin Wolf)
+Date: Sat, 19 Jan 2008 16:18:02 +0100
+Subject: [Lost] [Patch] Ein paar neue Libc-Funktionen
+In-Reply-To: <200801191002.32506.toni@famkaufmann.info>
+References: <200801130043.04187.toni@famkaufmann.info>	<478954BC.7090408@kevin-wolf.de>
+	<200801191002.32506.toni@famkaufmann.info>
+Message-ID: <479214AA.5050800@kevin-wolf.de>
+
+Antoine Kaufmann schrieb:
+> Index: src/modules/include/assert.h
+> ===================================================================
+> --- src/modules/include/assert.h	(Revision 688)
+> +++ src/modules/include/assert.h	(Arbeitskopie)
+> @@ -36,7 +36,15 @@
+>  #ifndef _ASSERT_H_
+>  #define _ASSERT_H_
+>  
+> -//FIXME
+> +#ifdef NDEBUG
+>  #define assert(x)
+> +#else
+> +void _assert(const char* assertation, const char* file, int line,
+> +    int expression);
+
+Das Wort heißt immer noch "assertion".
+
+> +        fprintf(stderr, "Annahme fehlgeschlagen: '%s' in '%d' auf Zeile %d\n",
+> +            assertation, file, line);
+
+Und auf deutsch "Zusicherung".
+
+Außerdem fehlt mindestens die Änderung der config.h in diesem Patch.
+
+
+From toni at famkaufmann.info  Sat Jan 19 22:09:38 2008
+From: toni at famkaufmann.info (Antoine Kaufmann)
+Date: Sat, 19 Jan 2008 22:09:38 +0100
+Subject: [Lost] [Patch] Ein paar neue Libc-Funktionen
+In-Reply-To: <479214AA.5050800@kevin-wolf.de>
+References: <200801130043.04187.toni@famkaufmann.info>
+	<200801191002.32506.toni@famkaufmann.info>
+	<479214AA.5050800@kevin-wolf.de>
+Message-ID: <200801192209.38940.toni@famkaufmann.info>
+
+Am Samstag, 19. Januar 2008 16.18:02 schrieb Kevin Wolf:
+> Antoine Kaufmann schrieb:
+> > Index: src/modules/include/assert.h
+> > ===================================================================
+> > --- src/modules/include/assert.h	(Revision 688)
+> > +++ src/modules/include/assert.h	(Arbeitskopie)
+> > @@ -36,7 +36,15 @@
+> >  #ifndef _ASSERT_H_
+> >  #define _ASSERT_H_
+> >
+> > -//FIXME
+> > +#ifdef NDEBUG
+> >  #define assert(x)
+> > +#else
+> > +void _assert(const char* assertation, const char* file, int line,
+> > +    int expression);
+>
+> Das Wort heißt immer noch "assertion".
+>
+> > +        fprintf(stderr, "Annahme fehlgeschlagen: '%s' in '%d' auf Zeile
+> > %d\n", +            assertation, file, line);
+>
+> Und auf deutsch "Zusicherung".
+>
+> Außerdem fehlt mindestens die Änderung der config.h in diesem Patch.
+
+Das war heute Morgen eindeutig zu früh. ;-)
+Hier der hoffentlich letzte Versuch.
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : libc3.patch
+Dateityp    : text/x-diff
+Dateigröße  : 13640 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20080119/ce07bc24/attachment.patch>
+
+From mail at kevin-wolf.de  Sat Jan 19 23:02:07 2008
+From: mail at kevin-wolf.de (Kevin Wolf)
+Date: Sat, 19 Jan 2008 23:02:07 +0100
+Subject: [Lost] [Patch] Ein paar neue Libc-Funktionen
+In-Reply-To: <200801192209.38940.toni@famkaufmann.info>
+References: <200801130043.04187.toni@famkaufmann.info>	<200801191002.32506.toni@famkaufmann.info>	<479214AA.5050800@kevin-wolf.de>
+	<200801192209.38940.toni@famkaufmann.info>
+Message-ID: <4792735F.9020908@kevin-wolf.de>
+
+Sieht im großen und ganzen okay aus, auch wenn assert wie im IRC 
+angemerkt nicht ganz standardkonform ist. Kann aber erstmal so rein.
+
+
+From toni at famkaufmann.info  Sun Jan 20 12:28:41 2008
+From: toni at famkaufmann.info (Antoine Kaufmann)
+Date: Sun, 20 Jan 2008 12:28:41 +0100
+Subject: [Lost] =?utf-8?q?=5BPatch=5D_Stubs_f=C3=BCr_die_wichtigsten_Zeitf?=
+	=?utf-8?q?unktionen?=
+Message-ID: <200801201228.41565.toni@famkaufmann.info>
+
+Hier ein paar Stubs für die Zeitfunktionen, die von gcc benutzt werden.
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : libc_time.patch
+Dateityp    : text/x-diff
+Dateigröße  : 6765 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20080120/49bde0bf/attachment.patch>
+
+From toni at famkaufmann.info  Sun Jan 20 12:36:41 2008
+From: toni at famkaufmann.info (Antoine Kaufmann)
+Date: Sun, 20 Jan 2008 12:36:41 +0100
+Subject: [Lost] =?utf-8?q?=5BPatch=5D_Anpassungen_und_erweiterungen_f?=
+	=?utf-8?q?=C3=BCr_den_IO-Kram_in_der_Libc?=
+Message-ID: <200801201236.41897.toni@famkaufmann.info>
+
+Dieser Patch ändert ein paar I/O-Funktionen ab und erweitert unsere LibC um 
+ein paar Neue.
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : libc_io.patch
+Dateityp    : text/x-diff
+Dateigröße  : 18504 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20080120/80ef4dba/attachment.patch>
+
+From mail at kevin-wolf.de  Sun Jan 20 13:04:21 2008
+From: mail at kevin-wolf.de (Kevin Wolf)
+Date: Sun, 20 Jan 2008 13:04:21 +0100
+Subject: [Lost]
+ =?iso-8859-1?q?=5BPatch=5D_Stubs_f=FCr_die_wichtigsten_Zei?=
+ =?iso-8859-1?q?tfunktionen?=
+In-Reply-To: <200801201228.41565.toni@famkaufmann.info>
+References: <200801201228.41565.toni@famkaufmann.info>
+Message-ID: <479338C5.1090309@kevin-wolf.de>
+
+Antoine Kaufmann schrieb:
+>  
+>  time_t time();
+
+Wird zwar nicht von diesem Patch geändert, aber das sollte doch time_t 
+time(time_t *tloc) sein?
+
+> Index: src/modules/lib/stdlibc/localtime.c
+> ===================================================================
+> --- src/modules/lib/stdlibc/localtime.c	(Revision 0)
+> +++ src/modules/lib/stdlibc/localtime.c	(Revision 0)
+
+Werden die Funktionen, wenn sie implementiert sind, wirklich so 
+umfangreich, daß man sie auf verschiedene Dateien aufteilen muß? 
+Ansonsten würde ich eine time.c bevorzugen.
+
+> +#include <sys/types.h>
+> +#include <time.h>
+> +#include <errno.h>
+> +#include <config.h>
+> +
+> +
+> +#ifndef CONFIG_LIBC_NO_STUBS
+> +struct tm tm;
+
+static und am besten mit auffälligen Werten initialisiert.
+
+> +#ifndef CONFIG_LIBC_NO_STUBS
+> +char* asctime_buf = "Wed Jun 30 21:49:08 1993\n";
+
+Hier dasselbe. Dein Defaultwert ist alles andere als gut. Nimm besser 
+einen 31. Februar 9999 oder so, wenn ein wirklich guter String wie 
+"[asctime() nicht implementiert]" Programme verwirren würde (würde es?)
+
+> Index: src/modules/lib/stdlibc/gmtime.c
+> ===================================================================
+> --- src/modules/lib/stdlibc/gmtime.c	(Revision 692)
+> +++ src/modules/lib/stdlibc/gmtime.c	(Arbeitskopie)
+> @@ -36,7 +36,9 @@
+>  #include <sys/types.h>
+>  #include <time.h>
+>  #include <string.h>
+> +#include <config.h>
+>  
+> +#ifndef CONFIG_LIBC_NO_STUBS
+>  struct tm tm;
+
+static
+
+> Index: src/modules/lib/stdlibc/ctime.c
+> ===================================================================
+> --- src/modules/lib/stdlibc/ctime.c	(Revision 692)
+> +++ src/modules/lib/stdlibc/ctime.c	(Arbeitskopie)
+> @@ -35,7 +35,10 @@
+>  
+>  #include <sys/types.h>
+>  #include <time.h>
+> +#include <config.h>
+>  
+> +#ifndef CONFIG_LIBC_NO_STUBS
+> +
+>  char* ctime_string = "Wed Jun 42 13:37:42 1337\n";
+
+Na also, geht doch. *g*
+
+Aber auch der sollte static sein.
+
+
+From mail at kevin-wolf.de  Sun Jan 20 13:48:46 2008
+From: mail at kevin-wolf.de (Kevin Wolf)
+Date: Sun, 20 Jan 2008 13:48:46 +0100
+Subject: [Lost]
+ =?iso-8859-1?q?=5BPatch=5D_Anpassungen_und_erweiterungen_f?=
+ =?iso-8859-1?q?=FCr_den_IO-Kram_in_der_Libc?=
+In-Reply-To: <200801201236.41897.toni@famkaufmann.info>
+References: <200801201236.41897.toni@famkaufmann.info>
+Message-ID: <4793432E.6030904@kevin-wolf.de>
+
+Antoine Kaufmann schrieb:
+> Index: src/modules/include/unistd.h
+> ===================================================================
+> --- src/modules/include/unistd.h	(Revision 692)
+> +++ src/modules/include/unistd.h	(Arbeitskopie)
+> @@ -68,6 +73,10 @@
+>  /// Eigentuemer einer Datei aendern
+>  int chown(const char* path, uid_t owner, gid_t group);
+>  
+> +#ifndef CONFIG_LIBC_NO_STUBS
+> +/// Datei verschieben
+> +int rename(const char *oldpath, const char *newpath);
+> +#endif
+
+Gehört nach stdio.h
+
+>   *
+>   * @return Dateideskriptor bei Erfolg, -1 im Fehlerfall
+>   */
+> -int open(const char* filename, int flags, mode_t mode)
+> +int open(const char* filename, int flags, ...)
+>  {
+>      char* fopen_flags = "   ";
+>      size_t flags_size = 0;
+> @@ -144,12 +153,17 @@
+>      // Open-Flags auf fopen-Kompatible uebersetzen
+>      if ((flags & O_RDONLY) == O_RDONLY) {
+>          fopen_flags[flags_size++] = 'r';
+> +    } else if (((flags & O_WRONLY) == O_WRONLY) && (((flags & O_TRUNC) ==
+> +        O_TRUNC)))
+
+Nicht immer ist ausführlicher auch lesbarer, besonders wenn dadurch ein 
+Zeilenumbruch reinkommt. (flags & O_WRONLY) && (flags & O_TRUNC) würde 
+es auch tun. Oder meinetwegen noch (flags & (O_WRONLY | O_TRUNC)) == 
+(O_WRONLY | O_TRUNC), aber das finde ich auch nicht so schön.
+
+> @@ -189,7 +203,6 @@
+>  ssize_t read(int fd, void* buffer, size_t size)
+>  {
+>      FILE* file = fd_to_file(fd);
+> -
+>      // Bei einem ungueltigen Deskriptor wird abgebrochen
+
+Also ich mag die Leerzeile. ;-)
+
+
+From toni at famkaufmann.info  Sun Jan 20 14:41:54 2008
+From: toni at famkaufmann.info (Antoine Kaufmann)
+Date: Sun, 20 Jan 2008 14:41:54 +0100
+Subject: [Lost]
+	=?iso-8859-1?q?=5BPatch=5D_Anpassungen_und_erweiterungen_f?=
+	=?iso-8859-1?q?=FCr_den_IO-Kram_in_der_Libc?=
+In-Reply-To: <4793432E.6030904@kevin-wolf.de>
+References: <200801201236.41897.toni@famkaufmann.info>
+	<4793432E.6030904@kevin-wolf.de>
+Message-ID: <200801201441.54117.toni@famkaufmann.info>
+
+Am Sonntag, 20. Januar 2008 13.48:46 schrieb Kevin Wolf:
+> > @@ -189,7 +203,6 @@
+> >  ssize_t read(int fd, void* buffer, size_t size)
+> >  {
+> >      FILE* file = fd_to_file(fd);
+> > -
+> >      // Bei einem ungueltigen Deskriptor wird abgebrochen
+>
+> Also ich mag die Leerzeile. ;-)
+Wenn wir doch schon kein Assembler benutzen, müssen wir halt sonst wo platz 
+sparen. *g*
+
+Hier ein neuer Versuch.
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : libc_io2.patch
+Dateityp    : text/x-diff
+Dateigröße  : 18541 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20080120/09c087e6/attachment.patch>
+
+From toni at famkaufmann.info  Sun Jan 20 14:49:00 2008
+From: toni at famkaufmann.info (Antoine Kaufmann)
+Date: Sun, 20 Jan 2008 14:49:00 +0100
+Subject: [Lost]
+	=?iso-8859-1?q?=5BPatch=5D_Stubs_f=FCr_die_wichtigsten_Zei?=
+	=?iso-8859-1?q?tfunktionen?=
+In-Reply-To: <479338C5.1090309@kevin-wolf.de>
+References: <200801201228.41565.toni@famkaufmann.info>
+	<479338C5.1090309@kevin-wolf.de>
+Message-ID: <200801201449.00281.toni@famkaufmann.info>
+
+Am Sonntag, 20. Januar 2008 13.04:21 schrieb Kevin Wolf:
+> Antoine Kaufmann schrieb:
+> >  time_t time();
+>
+> Wird zwar nicht von diesem Patch geändert, aber das sollte doch time_t
+> time(time_t *tloc) sein?
+>
+> > Index: src/modules/lib/stdlibc/localtime.c
+> > ===================================================================
+> > --- src/modules/lib/stdlibc/localtime.c	(Revision 0)
+> > +++ src/modules/lib/stdlibc/localtime.c	(Revision 0)
+>
+> Werden die Funktionen, wenn sie implementiert sind, wirklich so
+> umfangreich, daß man sie auf verschiedene Dateien aufteilen muß?
+> Ansonsten würde ich eine time.c bevorzugen.
+>
+> > +#include <sys/types.h>
+> > +#include <time.h>
+> > +#include <errno.h>
+> > +#include <config.h>
+> > +
+> > +
+> > +#ifndef CONFIG_LIBC_NO_STUBS
+> > +struct tm tm;
+>
+> static und am besten mit auffälligen Werten initialisiert.
+>
+> > +#ifndef CONFIG_LIBC_NO_STUBS
+> > +char* asctime_buf = "Wed Jun 30 21:49:08 1993\n";
+>
+> Hier dasselbe. Dein Defaultwert ist alles andere als gut. Nimm besser
+> einen 31. Februar 9999 oder so, wenn ein wirklich guter String wie
+> "[asctime() nicht implementiert]" Programme verwirren würde (würde es?)
+>
+> > Index: src/modules/lib/stdlibc/gmtime.c
+> > ===================================================================
+> > --- src/modules/lib/stdlibc/gmtime.c	(Revision 692)
+> > +++ src/modules/lib/stdlibc/gmtime.c	(Arbeitskopie)
+> > @@ -36,7 +36,9 @@
+> >  #include <sys/types.h>
+> >  #include <time.h>
+> >  #include <string.h>
+> > +#include <config.h>
+> >
+> > +#ifndef CONFIG_LIBC_NO_STUBS
+> >  struct tm tm;
+>
+> static
+>
+> > Index: src/modules/lib/stdlibc/ctime.c
+> > ===================================================================
+> > --- src/modules/lib/stdlibc/ctime.c	(Revision 692)
+> > +++ src/modules/lib/stdlibc/ctime.c	(Arbeitskopie)
+> > @@ -35,7 +35,10 @@
+> >
+> >  #include <sys/types.h>
+> >  #include <time.h>
+> > +#include <config.h>
+> >
+> > +#ifndef CONFIG_LIBC_NO_STUBS
+> > +
+> >  char* ctime_string = "Wed Jun 42 13:37:42 1337\n";
+>
+> Na also, geht doch. *g*
+>
+> Aber auch der sollte static sein.
+
+Ich habe die Funktionen jetzt in die time.c übernommen, und die anderen 
+vorgeschlagenen Änderungen durchgeführt.
+
+
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : libc_time2.patch
+Dateityp    : text/x-diff
+Dateigröße  : 7967 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20080120/fee65a65/attachment.patch>
+
+From mail at kevin-wolf.de  Sun Jan 20 15:04:23 2008
+From: mail at kevin-wolf.de (Kevin Wolf)
+Date: Sun, 20 Jan 2008 15:04:23 +0100
+Subject: [Lost]
+ =?iso-8859-1?q?=5BPatch=5D_Stubs_f=FCr_die_wichtigsten_Zei?=
+ =?iso-8859-1?q?tfunktionen?=
+In-Reply-To: <200801201449.00281.toni@famkaufmann.info>
+References: <200801201228.41565.toni@famkaufmann.info>	<479338C5.1090309@kevin-wolf.de>
+	<200801201449.00281.toni@famkaufmann.info>
+Message-ID: <479354E7.7060805@kevin-wolf.de>
+
+Sieht gut aus. (So gut Stubs halt aussehen können... *g*)
+
+
+From mail at kevin-wolf.de  Sun Jan 20 15:08:55 2008
+From: mail at kevin-wolf.de (Kevin Wolf)
+Date: Sun, 20 Jan 2008 15:08:55 +0100
+Subject: [Lost]
+ =?iso-8859-1?q?=5BPatch=5D_Anpassungen_und_erweiterungen_f?=
+ =?iso-8859-1?q?=FCr_den_IO-Kram_in_der_Libc?=
+In-Reply-To: <4793432E.6030904@kevin-wolf.de>
+References: <200801201236.41897.toni@famkaufmann.info>
+	<4793432E.6030904@kevin-wolf.de>
+Message-ID: <479355F7.4080601@kevin-wolf.de>
+
+Dürfte passen.
+
+
+From toni at famkaufmann.info  Sun Jan 20 15:35:53 2008
+From: toni at famkaufmann.info (Antoine Kaufmann)
+Date: Sun, 20 Jan 2008 15:35:53 +0100
+Subject: [Lost] [Patch] rtl8139 Fix
+Message-ID: <200801201535.53753.toni@famkaufmann.info>
+
+In rtl8139 werden die Ports etwas gar optimistisch reserviert. ;-)
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : rtl8139.patch
+Dateityp    : text/x-diff
+Dateigröße  : 626 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20080120/b0c20f97/attachment.patch>
+
+From mail at kevin-wolf.de  Sun Jan 20 15:54:09 2008
+From: mail at kevin-wolf.de (Kevin Wolf)
+Date: Sun, 20 Jan 2008 15:54:09 +0100
+Subject: [Lost] [Patch] rtl8139 Fix
+In-Reply-To: <200801201535.53753.toni@famkaufmann.info>
+References: <200801201535.53753.toni@famkaufmann.info>
+Message-ID: <47936091.9010607@kevin-wolf.de>
+
+Antoine Kaufmann schrieb:
+> Index: src/modules/rtl8139/rtl8139.c
+> ===================================================================
+> --- src/modules/rtl8139/rtl8139.c	(Revision 692)
+> +++ src/modules/rtl8139/rtl8139.c	(Arbeitskopie)
+> @@ -118,7 +118,10 @@
+>  {
+>      DEBUG_MSG("Interrupthandler und Ports registrieren");
+>      register_intr_handler(0x20 + netcard->irq, irq_handler);
+> -    request_ports(netcard->port_base, 0x100);
+> +    if (request_ports(netcard->port_base, 0x100) == FALSE) {
+> +        printf("ports koennen nicht registriert werden!!!\n");
+
+"Multiple exclamation marks", he went on, shaking his head, "are a sure 
+sign of a diseased mind." ;-)
+
+fprintf(stderr, "rtl8139: IO-Ports konnten nicht registriert werden\n");
+
+
+From toni at famkaufmann.info  Sun Jan 20 16:00:05 2008
+From: toni at famkaufmann.info (Antoine Kaufmann)
+Date: Sun, 20 Jan 2008 16:00:05 +0100
+Subject: [Lost] [Patch] rtl8139 Fix
+In-Reply-To: <47936091.9010607@kevin-wolf.de>
+References: <200801201535.53753.toni@famkaufmann.info>
+	<47936091.9010607@kevin-wolf.de>
+Message-ID: <200801201600.05440.toni@famkaufmann.info>
+
+Am Sonntag, 20. Januar 2008 15.54:09 schrieb Kevin Wolf:
+> Antoine Kaufmann schrieb:
+> > Index: src/modules/rtl8139/rtl8139.c
+> > ===================================================================
+> > --- src/modules/rtl8139/rtl8139.c     (Revision 692)
+> > +++ src/modules/rtl8139/rtl8139.c     (Arbeitskopie)
+> > @@ -118,7 +118,10 @@
+> >  {
+> >      DEBUG_MSG("Interrupthandler und Ports registrieren");
+> >      register_intr_handler(0x20 + netcard->irq, irq_handler);
+> > -    request_ports(netcard->port_base, 0x100);
+> > +    if (request_ports(netcard->port_base, 0x100) == FALSE) {
+> > +        printf("ports koennen nicht registriert werden!!!\n");
+>
+> "Multiple exclamation marks", he went on, shaking his head, "are a sure
+> sign of a diseased mind." ;-)
+>
+> fprintf(stderr, "rtl8139: IO-Ports konnten nicht registriert werden\n");
+
+Hm ich hätte vielleicht noch kurz über den Patch schauen sollen, bevor ich ihn 
+geschickt habe.. ;-)
+
+Aber diesen Patch schicke ich dir jetzt nicht auch noch. ;-)
+
+
+From toni at famkaufmann.info  Mon Jan 21 17:56:02 2008
+From: toni at famkaufmann.info (Antoine Kaufmann)
+Date: Mon, 21 Jan 2008 17:56:02 +0100
+Subject: [Lost] [Patch] Anpassungen buildmk.sh
+Message-ID: <200801211756.03312.toni@famkaufmann.info>
+
+Dieser Patch führt eine neue Variable LOST_TOOLS_PPC in config.sh ein, um dort 
+den Pascal-Compiler einzutragen, da der nicht überall fpc heisst (besonders 
+bei mir nicht ;-)).
+
+Ferner ändert dieser Patch die Variable mit den Verzeichnissen für die 
+Bibliotheken ab, sodass diese absolute Pfade enthält. Das sorgt dafür, dass 
+man in den Makefile.all auch mal ein cd machen kann und dann dort linken, 
+ohne, dass das Probleme macht.
+
+Beim zusammensetzen der CC-Variable wird noch eine CC_FLAGS_APPEND eingeführt, 
+die dazu gedacht ist, in den Makefile.con auch Include-Pfade hinter die von 
+buildmk.sh gesetzten anzuhängen.
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : buildmk.patch
+Dateityp    : text/x-diff
+Dateigröße  : 1522 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20080121/55203ea5/attachment.patch>
+
+From janosch.graef at gmx.net  Wed Jan 23 19:39:09 2008
+From: janosch.graef at gmx.net (=?ISO-8859-15?Q?Janosch_Gr=E4f?=)
+Date: Wed, 23 Jan 2008 19:39:09 +0100
+Subject: [Lost] cdi.fs Wie kommt der FS-Treiber an das Speichermedium
+Message-ID: <479789CD.9090104@gmx.net>
+
+Hi,
+
+Habe nochmal den Code etwas verändert (im Anhang). Ich stelle mir nur
+gerade die Frage, wie der FS-Treiber an die Daten eines Gerätes
+rankommt, und wie ihm gesagt wird, welches Gerät er benutzen soll.
+Außerdem muss man noch festlegen, wie viele Dateisysteme ein FS-Treiber
+auf einmal verwaltet.
+
+Vorschlag:
+cdi.fs stellt einfach die Funktionen cdi_fs_read_data(buffer,count) und
+cdi_fs_write_data(buffer,count) zu Verfügung. Damit kann der FS-Treiber
+von den Speichermedium lesen, ohne zu wissen, was für ein Gerät es ist.
+Außerdem wäre meiner Meinung nach sinnvoll jeweils einen Treiber für ein
+FS zu laden, so dass ein FS-Treiber nicht mehrere Dateisysteme handhaben
+muss.
+
+Mfg,
+Janosch Gräf
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : fs.h
+Dateityp    : text/x-chdr
+Dateigröße  : 3577 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20080123/f62d8deb/attachment.h>
+

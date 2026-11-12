@@ -1,0 +1,2050 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH libext2 5/8] testlib: CDI-Cache aktualisiert
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20libext2%205/8%5D%20testlib%3A%20CDI-Cache%20aktualisiert&In-Reply-To=%3C1388274569-12096-6-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002430.html">
+   <LINK REL="Next"  HREF="002432.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH libext2 5/8] testlib: CDI-Cache aktualisiert</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20libext2%205/8%5D%20testlib%3A%20CDI-Cache%20aktualisiert&In-Reply-To=%3C1388274569-12096-6-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH libext2 5/8] testlib: CDI-Cache aktualisiert">kevin at tyndur.org
+                  </A><BR>
+    <I>So Dez 29 00:49:26 CET 2013</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002430.html">[tyndur-devel] [PATCH libext2 4/8] Makefile: Ausgabe für kompilierte Dateien
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002432.html">[tyndur-devel] [PATCH libext2 6/8] libext2: Bootloader nicht zerstören
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2431">[ Datum ]</a>
+              <a href="thread.html#2431">[ Thema ]</a>
+              <a href="subject.html#2431">[ Betreff (Subject) ]</a>
+              <a href="author.html#2431">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>Aktuelle Version aus tyndur zurückkopiert.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ testlib/cache.c     |   2 +-
+ testlib/cdi_cache.c | 836 ++++++++++++----------------------------------------
+ testlib/cdi_cache.h | 100 +------
+ testlib/tree.c      | 599 +++++++++++++++++++++++++++++++++++++
+ testlib/tree.h      | 165 +++++++++++
+ 5 files changed, 967 insertions(+), 735 deletions(-)
+ create mode 100644 testlib/tree.c
+ create mode 100644 testlib/tree.h
+
+diff --git a/testlib/cache.c b/testlib/cache.c
+index 0f172c5..f22cc8e 100644
+--- a/testlib/cache.c
++++ b/testlib/cache.c
+@@ -116,7 +116,7 @@ ext2_cache_block_t* cache_block(void* handle, uint64_t block, int noread)
+     struct cdi_cache_block* cdi_b;
+     ext2_cache_block_t* b;
+ 
+-    if (!(cdi_b = cdi_cache_block_get(c, block))) {
++    if (!(cdi_b = cdi_cache_block_get(c, block, noread))) {
+         return NULL;
+     }
+ 
+diff --git a/testlib/cdi_cache.c b/testlib/cdi_cache.c
+index 2b9361b..919cf61 100644
+--- a/testlib/cdi_cache.c
++++ b/testlib/cdi_cache.c
+@@ -12,38 +12,27 @@
+ #include &lt;stdlib.h&gt;
+ #include &lt;string.h&gt;
+ 
+-#define __LOST__
++//#define __LOST__
+ #undef __LOST__
+ 
+ #ifdef __LOST__
+     #include &quot;cdi.h&quot;
+     #include &quot;cdi/misc.h&quot;
+-    #include &quot;cdi/cache.h&quot;
++    #include &lt;collections.h&gt;
+ #else
+-    #include &quot;cdi_cache.h&quot;
++    #include &quot;tree.h&quot;
+ #endif
+-
++#include &quot;cdi_cache.h&quot;
+ 
+ #define INVBLKNUM (~0L)
+ #define READBUF_SZ 128
++#define HINTCNT 8
+ 
+-static uint64_t cache_time = 0;
+ #ifdef __LOST__
+     static cdi_list_t cache_list = NULL;
+ #endif
+ 
+ /**
+- * Hints fuer die Suche im Cache
+- */
+-struct hint {
+-    /** Index */
+-    size_t      index;
+-
+-    /** Block der dort gefunden werden kann */
+-    uint64_t    block;
+-};
+-
+-/**
+  * Block im Cache
+  */
+ struct block {
+@@ -56,8 +45,15 @@ struct block {
+     /** Wird auf 1 gesetzt, wenn die Daten veraendert wurden */
+     uint16_t                dirty;
+ 
+-    /** Zeit der letzten Benutzung */
+-    uint64_t                access_time;
++    /** Zeiger auf das naechste Element in der nach der letzten Benutzung
++        sortierten Liste. */
++    struct block*           lru_next;
++
++    /** Zeiger auf das naechste Element in der nach der letzten Benutzung
++        sortierten Liste. */
++    struct block*           lru_prev;
++
++    struct tree_item        tree_item;
+ };
+ 
+ /**
+@@ -67,18 +63,15 @@ struct cache {
+     /** Eigentliches Cache-Handle */
+     struct cdi_cache    cache;
+ 
++    /** Groesse der Privaten Daten pro Block */
++    size_t              private_len;
++
+     /** Anzahl der Blocks */
+     size_t              block_count;
+ 
+     /** Anzahl der benutzten Blocks */
+     size_t              blocks_used;
+ 
+-    /** Blockliste sortiert nach offset */
+-    struct block**      blocks_ordered;
+-
+-    /** Blockliste */
+-    struct block*       blocks;
+-
+ 
+     /** Callback zum Lesen eines Blocks */
+     cdi_cache_read_block_t* read_block;
+@@ -90,48 +83,36 @@ struct cache {
+     void*               prv_data;
+ 
+ 
+-    /** Lesepuffer */
+-    uint8_t*            read_buffer;
++    /** Baum mit den Blocks */
++    tree_t*             tree;
+ 
+-    /** Erster Block im Lesepuffer oder INVBLKNUM wenn keiner */
+-    uint64_t            read_buffer_block;
+ 
+-    /** Anzahl Blocks die im Puffer sind */
+-    size_t              read_buffer_cnt;
++    /** Der am laengsten nicht mehr benutzte Block */
++    struct block*       lru_first;
+ 
++    /** Der zuletzt benutzte Block */
++    struct block*       lru_last;
+ 
+-    /** Hints fuer Positionen */
+-    struct hint         hints[8];
+ 
+-    /** Zuletzt geschriebener hint-index */
+-    uint16_t            prev_hint;
+-};
+ 
+-/**
+- * Cache-eintrag
+- */
+-struct entry {
+-    /** Eigentlicher CDI-Cache-Eintrag */
+-    struct cdi_cache_entry  entry;
++    /** Lesepuffer */
++    uint8_t*            read_buffer;
+ 
+-    /** Offset */
+-    uint64_t                offset;
++    /** Erster Block im Lesepuffer oder INVBLKNUM wenn keiner */
++    uint64_t            read_buffer_block;
+ 
+-    /** Groesse des Bereichs */
+-    size_t                  size;
++    /** Anzahl Blocks die im Puffer sind */
++    size_t              read_buffer_cnt;
+ 
+-    /** Anzahl der Blocks */
+-    size_t                  block_count;
+ 
+-    /** Pointer auf ein Array mit Blockpointern */
+-    struct block**          blocks;
++    /** Hints */
++    struct block*        hints[HINTCNT];
+ 
+-    /** Gesperrt */
+-    int                     locked;
++    /** Letzter abgefragter Hint */
++    uint8_t             prev_hint;
+ };
+ 
+ 
+-
+ /**
+  * Cache erstellen
+  *
+@@ -153,7 +134,7 @@ struct cdi_cache* cdi_cache_create(size_t block_size, size_t blkpriv_len,
+     void* prv_data)
+ {
+     struct cache* cache = malloc(sizeof(*cache));
+-    size_t i;
++    int i;
+ 
+     cache-&gt;read_block = read_block;
+     cache-&gt;write_block = write_block;
+@@ -161,34 +142,28 @@ struct cdi_cache* cdi_cache_create(size_t block_size, size_t blkpriv_len,
+ 
+     // FIXME
+     cache-&gt;cache.block_size = block_size;
+-    cache-&gt;block_count = 1 * 1024 * 1024 / cache-&gt;cache.block_size;
++    cache-&gt;block_count = 256;
+     cache-&gt;blocks_used = 0;
++    cache-&gt;private_len = blkpriv_len;
+ 
+     cache-&gt;read_buffer = malloc(cache-&gt;cache.block_size * READBUF_SZ);
+     cache-&gt;read_buffer_block = INVBLKNUM;
+     cache-&gt;read_buffer_cnt = 0;
+ 
+-    memset(cache-&gt;hints, 0, sizeof(cache-&gt;hints));
+-    cache-&gt;prev_hint = 0;
+-
++    cache-&gt;lru_first = NULL;
++    cache-&gt;lru_last = NULL;
+ 
+-    cache-&gt;blocks = malloc(sizeof(struct block) * cache-&gt;block_count);
+-    cache-&gt;blocks_ordered = malloc(sizeof(struct block*) * cache-&gt;block_count);
+-    for (i = 0; i &lt; cache-&gt;block_count; i++) {
+-        struct block* block = cache-&gt;blocks + i;
+-        cache-&gt;blocks_ordered[i] = block;
++    cache-&gt;tree = tree_create(struct block, tree_item, cdi.number);
+ 
+-        block-&gt;cdi.number = INVBLKNUM;
+-        block-&gt;cdi.data = malloc(cache-&gt;cache.block_size);
+-        block-&gt;cdi.private = malloc(blkpriv_len);
+-
+-        block-&gt;ref_count = 0;
+-        block-&gt;dirty = 0;
++    // Hints initialisieren
++    cache-&gt;prev_hint = 0;
++    for (i = 0; i &lt; HINTCNT; i++) {
++        cache-&gt;hints[i] = NULL;
+     }
+ 
+-    // Cache in die Liste eintragen damit er Synchronisiert wird
+ #ifdef __LOST__
+-    if (cache_list == NULL) {
++    // Cache in Liste eintragen damit er gesynct wird
++    if (!cache_list) {
+         cache_list = cdi_list_create();
+     }
+     cdi_list_push(cache_list, cache);
+@@ -203,21 +178,20 @@ struct cdi_cache* cdi_cache_create(size_t block_size, size_t blkpriv_len,
+ void cdi_cache_destroy(struct cdi_cache* cache)
+ {
+     struct cache* c = (struct cache*) cache;
+-    struct block* b;
+-    int i;
++    struct block* b = NULL;
+ 
+     if (!cdi_cache_sync(cache)) {
+         puts(&quot;cdi_cache: Sync fehlgeschlagen vor dem Zerstoeren!&quot;);
+     }
+ 
+     // Einzelne Blocks freigeben
+-    for (i = 0; i &lt; c-&gt;block_count; i++) {
+-        b = c-&gt;blocks + i;
++    while ((b = tree_next(c-&gt;tree, NULL))) {
+ 
++        tree_remove(c-&gt;tree, b);
+         if (b-&gt;ref_count) {
+             printf(&quot;cdi_cache: Beim Zerstoeren des Caches wurde ein Block &quot;
+-                &quot;gefunden, der einen Referenzzaehler != 0 hat (%lld)\n&quot;,
+-                (unsigned long long) b-&gt;cdi.number);
++                &quot;gefunden, der einen Referenzzaehler != 0 hat (%lld  %d)\n&quot;,
++                (unsigned long long) b-&gt;cdi.number, b-&gt;ref_count);
+         }
+ 
+         if (b-&gt;dirty) {
+@@ -228,11 +202,9 @@ void cdi_cache_destroy(struct cdi_cache* cache)
+ 
+         free(b-&gt;cdi.data);
+         free(b-&gt;cdi.private);
++        free(b);
+     }
+ 
+-    free(c-&gt;blocks);
+-    free(c-&gt;blocks_ordered);
+-    free(c-&gt;read_buffer);
+     free(c);
+ }
+ 
+@@ -284,18 +256,9 @@ static inline int cache_sync_block(struct cache* c, struct block* b)
+ int cdi_cache_sync(struct cdi_cache* cache)
+ {
+     struct cache* c = (struct cache*) cache;;
+-    struct block* b;
+-    size_t i;
+-
+-    for (i = 0; i &lt; c-&gt;block_count; i++) {
+-        b = c-&gt;blocks_ordered[i];
+-
+-        // Sobald ein Eintrag mit INVBLKNUM erreicht wird, ist das Durchsuchen
+-        // beendet
+-        if (b-&gt;cdi.number == INVBLKNUM) {
+-            return 1;
+-        }
++    struct block* b = NULL;
+ 
++    while ((b = tree_prev(c-&gt;tree, b))) {
+         cache_sync_block(c, b);
+     }
+ 
+@@ -306,7 +269,7 @@ int cdi_cache_sync(struct cdi_cache* cache)
+ /**
+  * Caches Synchronisieren
+  */
+-void caches_sync_all()
++void caches_sync_all(void)
+ {
+     size_t i;
+     struct cache* c;
+@@ -323,63 +286,27 @@ void caches_sync_all()
+ }
+ #endif
+ 
++
+ /**
+- * Sucht das Element mit dem Enstprechenden Index, oder falls keines mit
+- * diesem Index existiert, wird die Stelle angegeben an der es stehen muesste
+- *
+- * @param block Blocknummer des gesuchten Elements
+- * @param dest  Pointer auf die Variable, in der der gefundene Index abgelegt
+- *              werden soll.
+- *
+- * @return 1 bei Erfolg, 0 sonst
++ * Block finden der ersetzt werden kann. Dieser wird dabei aus der LRU-Liste
++ * geloescht.
+  */
+-static size_t search_position(struct cache* cache, uint64_t block,
+-    size_t* dest)
++static struct block* find_replaceable(struct cache* c)
+ {
+-    size_t top = cache-&gt;blocks_used - 1;
+-    size_t bottom = 0;
+-    size_t pos;
++    struct block* b;
+ 
+-    // Pruefen ob offset ueberhaupt im Array enthalten ist
+-    if (block &lt; cache-&gt;blocks_ordered[0]-&gt;cdi.number) {
+-        *dest = 0;
+-        return 0;
+-    } else if (block &gt; cache-&gt;blocks_ordered[top]-&gt;cdi.number) {
+-        // Wenn noch freie Blocks im Cache existieren wird der Index auf den
+-        // naechst freien gelegt
+-        if (top &lt; cache-&gt;block_count - 1) {
+-            top++;
+-        }
+-        *dest = top;
+-        return 0;
++    // Unbenutzten Block finden
++    b = c-&gt;lru_first;
++    while (b &amp;&amp; (b-&gt;ref_count)) {
++        b = b-&gt;lru_prev;
+     }
+ 
+-    // Binaere Suche nach dem Element
+-    do {
+-        pos = bottom + (top - bottom) / 2;
+-
+-        if (cache-&gt;blocks_ordered[pos]-&gt;cdi.number == block) {
+-            break;
+-        } else if (cache-&gt;blocks_ordered[pos]-&gt;cdi.number &gt; block) {
+-            top = pos - 1;
+-        } else {
+-            bottom = pos + 1;
+-            // Falls hier gleich abgebrochen wird, muss pos auf ein Element
+-            // zeigen, das nicht groesser ist, als das Gesuchte
+-            pos = bottom;
+-        }
+-    } while (top &gt;= bottom);
+-
+-    if (pos &gt;= cache-&gt;block_count) {
+-        pos = cache-&gt;block_count - 1;
++    if (b &amp;&amp; b-&gt;dirty) {
++        cdi_cache_sync((struct cdi_cache*) c);
+     }
+-
+-    *dest = pos;
+-
+-    return (cache-&gt;blocks_ordered[pos]-&gt;cdi.number == block);
++    return b;
+ }
+ 
+-
+ /**
+  * Hint suchen fuer eine Blocknummer
+  *
+@@ -387,17 +314,17 @@ static size_t search_position(struct cache* cache, uint64_t block,
+  *
+  * @return Index oder (size_t) -1 im Fehlerfall
+  */
+-static inline size_t get_hint(struct cache* cache, uint64_t block)
++static inline struct block* get_hint(struct cache* cache, uint64_t block)
+ {
+     int i;
+ 
+-    for (i = 0; i &lt; sizeof(cache-&gt;hints) / sizeof(struct hint); i++) {
+-        if (cache-&gt;hints[i].block == block) {
+-            return cache-&gt;hints[i].index;
++    for (i = 0; i &lt; HINTCNT; i++) {
++        if (cache-&gt;hints[i] &amp;&amp; (cache-&gt;hints[i]-&gt;cdi.number == block)) {
++            return cache-&gt;hints[i];
+         }
+     }
+ 
+-    return -1;
++    return NULL;
+ }
+ 
+ /**
+@@ -406,290 +333,168 @@ static inline size_t get_hint(struct cache* cache, uint64_t block)
+  * @param block Blocknummer
+  * @param index Index an dem der Block gefunden werden kann
+  */
+-static inline void put_hint(struct cache* cache, uint64_t block, size_t index)
++static inline void put_hint(struct cache* cache, struct block* block)
+ {
+     cache-&gt;prev_hint++;
+-    cache-&gt;prev_hint %= sizeof(cache-&gt;hints) / sizeof(struct hint);
+-    cache-&gt;hints[cache-&gt;prev_hint].block = block;
+-    cache-&gt;hints[cache-&gt;prev_hint].index = index;
+-}
+-
+-/**
+- * Block in der Liste finden
+- *
+- * @param cache Handle
+- * @param block Blocknummer
+- *
+- * @return Pointer auf den Block oder NULL wenn er nicht in der Liste ist
+- */
+-static inline struct block* block_find(struct cache* cache, uint64_t block)
+-{
+-    size_t i;
+-
+-    i = get_hint(cache, block);
+-    if ((i != -1) &amp;&amp; (cache-&gt;blocks_ordered[i]-&gt;cdi.number == block)) {
+-        return cache-&gt;blocks_ordered[i];
+-    }
+-
+-    if (!search_position(cache, block, &amp;i)) {
+-        return NULL;
+-    }
+-
+-    put_hint(cache, block, i);
+-    return cache-&gt;blocks_ordered[i];
++    cache-&gt;prev_hint %= HINTCNT;
++    cache-&gt;hints[cache-&gt;prev_hint] = block;
+ }
+ 
+-
+ /**
+- * Cache-Element zum ersetzen finden
+- *
+- * @param blocknum Blocknummer des neuen Elements
+- *
+- * @return Array-Index des Elements das erstezt werden kann oder block_count
+- * wenn keines gefunden wurde.
++ * Block von der Platte laden.
+  */
+-static inline size_t find_replaceable(struct cache* cache, uint64_t blocknum)
++static int load_block(struct cache* c, struct block* b)
+ {
+-    struct block* b = NULL;
+-    size_t i;
+-    size_t la_index = cache-&gt;block_count;
+-
+-    // Wenn noch unbenzte Blocks existieren, dann gehoert der letzte sicher dazu
+-    if (cache-&gt;blocks_ordered[cache-&gt;block_count - 1]-&gt;cdi.number == INVBLKNUM)
++    size_t block_size = c-&gt;cache.block_size;
++    uint64_t rbbnum = c-&gt;read_buffer_block;
++    uint64_t block = b-&gt;cdi.number;
++
++    // Wenn der zu lesende Block nicht im Puffer ist, wird er in den Puffer
++    // eingelesen
++    if ((rbbnum == INVBLKNUM) || (rbbnum &gt; block) || (block &gt;= rbbnum +
++        c-&gt;read_buffer_cnt))
+     {
+-        return cache-&gt;block_count - 1;
+-    }
++        size_t sync_size = READBUF_SZ;
++        size_t recyclable = 0;
+ 
+-    for (i = 0; i &lt; cache-&gt;blocks_used; i++) {
+-        b = cache-&gt;blocks_ordered[i];
++        // Wenn der Block nur kurz vor dem Cache liegt, kann man auch einen
++        // Teil des Caches wiederverwenden
++        if ((block &lt; rbbnum) &amp;&amp; (block &gt; rbbnum - READBUF_SZ)) {
++            sync_size = rbbnum - block;
++            recyclable = READBUF_SZ - sync_size;
+ 
+-        // Solte nicht passieren
+-        if (b-&gt;cdi.number == INVBLKNUM) {
+-            puts(&quot;cdi_cache: Hier ist ein Element mit ungueltiger Blocknummer &quot;
+-                &quot;mitten im Array!&quot;);
+-            printf(&quot;%u\n&quot;, (unsigned int) i);
+-            continue;
+-        }
+-
+-        // Pruefen ob das Element prinzipiell ersetzt werden darf, wenn nicht,
+-        // wird zum naechsten gesprungen
+-        if (b-&gt;ref_count) {
+-            continue;
++            memmove((uint8_t*) c-&gt;read_buffer + sync_size * block_size,
++                c-&gt;read_buffer, recyclable * block_size);
+         }
+ 
+-        // Wenn bis jetzt noch kein passendes Element gefunden wurde, dann muss
+-        // es genommen werden. Andernfalls wird geprueft ob das element aelter
+-        // ist
+-        if ((la_index == cache-&gt;block_count) || (b-&gt;access_time &lt;
+-            cache-&gt;blocks_ordered[la_index]-&gt;access_time))
+-        {
+-            la_index = i;
+-        }
+-    }
+-
+-    // Falls das Element dirty ist, muss es gespeichert werden
+-    if ((la_index != cache-&gt;block_count) &amp;&amp;
+-        (cache-&gt;blocks_ordered[la_index]-&gt;dirty))
+-    {
+-        cache_sync_block(cache, cache-&gt;blocks_ordered[la_index]);
+-    }
+-    return la_index;
+-}
+-
+-/**
+- * Block im Cache allozieren und initialisieren
+- *
+- * @param cache     Handle
+- * @param blocknum  Blocknummer des neuen Blocks
+- * @param index     Pointer auf Speicherstelle, an der der Listenindex
+- *                  abgespeichert werden soll.
+- *
+- * @return 1 wenn ein Element gefunden wurde, 0 sonst
+- */
+-static inline size_t block_allocate(struct cache* cache, uint64_t blocknum,
+-    size_t* index)
+-{
+-    struct block* b;
+-    //void* data;
+-    //void* private;
+-
+-    // Index an dem der neue Block spaeter im Array liegt
+-    size_t dest;
+-
+-    // Index des Blocks, der ersetzt werden soll
+-    size_t i;
++        c-&gt;read_buffer_block = rbbnum = block;
+ 
++        c-&gt;read_buffer_cnt = c-&gt;read_block(
++            (struct cdi_cache*) c, block, sync_size,
++            c-&gt;read_buffer, c-&gt;prv_data);
+ 
+-    // Position suchen an der der neue Block spaeter im Array liegen soll
+-    if (search_position(cache, blocknum, &amp;dest)) {
+-        puts(&quot;cdi_cache: Warnung: Block, der bereits im Cache ist, soll&quot;
+-           &quot; alloziert werden.&quot;);
+-        *index = dest;
+-        return 1;
+-    }
+-
+-    // Element finden, das ersetzt werden soll
+-    i = find_replaceable(cache, blocknum);
+-    //printf(&quot;Replaceable: %d&quot;, i);
+-    if (i == cache-&gt;block_count) {
+-        return 0;
+-    }
+-
+-    // Wenn der Block bisher nicht benutzt wurde, muss used Blocks erhoeht
+-    // werden
+-    if (cache-&gt;blocks_ordered[i]-&gt;cdi.number == INVBLKNUM) {
+-        cache-&gt;blocks_used++;
+-    }
+-
+-    // Pointer auf daten des zu ersetzenden Blocks speichern, da die
+-    // ueberschrieben werden, beim memmove
+-    /*data = cache-&gt;blocks[i].cdi.data;
+-    private = cache-&gt;blocks[i].cdi.private;*/
+-    b = cache-&gt;blocks_ordered[i];
+-
+-    // Jetzt muessen die Array-Elemente so verschoben werden, dass die stelle an
+-    // mit dem index dest frei wird und dafuer die mit index i ueberschrieben
+-    // wird
+-    if (i &lt; dest) {
+-        // Wenn wir die Elemente nach unten verschieben, muss das zielelement
+-        // kleiner sein, als das aktuelle
+-        if ((cache-&gt;blocks[dest].cdi.number &gt; blocknum) &amp;&amp; (dest &gt; 0)) {
+-            dest--;
++        if (recyclable &amp;&amp; (c-&gt;read_buffer_cnt &lt; sync_size)) {
++            // Cache jetzt komplett einlesen, weil Lücken doof sind.
++            c-&gt;read_buffer_cnt = c-&gt;read_block(
++                (struct cdi_cache*) c, block, READBUF_SZ,
++                c-&gt;read_buffer, c-&gt;prv_data);
++        } else if (recyclable) {
++            c-&gt;read_buffer_cnt += recyclable;
+         }
+ 
+-        memmove(cache-&gt;blocks_ordered + i, cache-&gt;blocks_ordered + i + 1,
+-            (dest - i) * sizeof(struct block*));
+-    } else if (i &gt; dest) {
+-        // Wenn wird die Elemente nach oben verschieben, muss das zielelement
+-        // groesser sein, als das aktuelle
+-        if ((cache-&gt;blocks_ordered[dest]-&gt;cdi.number &lt; blocknum) &amp;&amp;
+-            (dest &lt; cache-&gt;block_count - 1))
+-        {
+-            dest++;
++        if (c-&gt;read_buffer_cnt == 0) {
++            puts(&quot;cdi_cache Panic: Einlesen der Daten fehlgeschlagen&quot;);
++            return 0;
+         }
+-
+-        memmove(cache-&gt;blocks_ordered + dest + 1, cache-&gt;blocks_ordered + dest,
+-            (i - dest) * sizeof(struct block*));
+     }
++    memcpy(b-&gt;cdi.data, c-&gt;read_buffer + (block - rbbnum) * block_size,
++        block_size);
+ 
+-    cache-&gt;blocks_ordered[dest] = b;
+-    // b-&gt;cdi.data = data;
+-    b-&gt;cdi.number = blocknum;
+-    // b-&gt;cdi.private = private;
+-    b-&gt;access_time = ++cache_time;
+-    b-&gt;dirty = 0;
+-    b-&gt;ref_count = 0;
+-    *index = dest;
+     return 1;
+ }
+ 
+ /**
+- * Neuen block laden, der noch nicht in der Liste ist
++ * Cache-Block holen. Dabei wird intern ein Referenzzaehler erhoeht, sodass der
++ * Block nicht freigegeben wird, solange er benutzt wird. Das heisst aber auch,
++ * dass der Block nach der Benutzung wieder freigegeben werden muss, da sonst
++ * die freien Blocks ausgehen.
+  *
+- * @param cache Handle
+- * @param block Blocknummer
+- * @param read  Wenn 1 dann muss der Block eingelesen werden, bei 0 wird nur
+- *              ein freier Block herausgesucht (Wenn er eh ganz ueberschrieben
+- *              wird)
++ * @param cache     Cache-Handle
++ * @param blocknum  Blocknummer
++ * @param noread    Wenn != 0 wird der Block nicht eingelesen falls er noch
++ *                  nicht im Speicher ist. Kann benutzt werden, wenn der Block
++ *                  vollstaendig ueberschrieben werden soll.
+  *
+- * @return Pointer auf den Block
++ * @return Pointer auf das Block-Handle oder NULL im Fehlerfall
+  */
+-static inline struct block* block_load(struct cache* cache, uint64_t block,
+-    int read)
++struct cdi_cache_block* cdi_cache_block_get(struct cdi_cache* cache,
++    uint64_t blocknum, int noread)
+ {
+-    size_t index;
+-    struct block* b;
+-    size_t block_size = cache-&gt;cache.block_size;
++    struct cache* c = (struct cache*) cache;
++    struct block* b = get_hint(c, blocknum);
+ 
+-    if (!block_allocate(cache, block, &amp;index)) {
+-        puts(&quot;cdi_cache Panic: Kein Unbenutztes Element gefunden&quot;);
+-        return NULL;
++    // Wenn das mit dem Hint nichts war muss jetzt der Baum durchsucht werden
++    if (!b) {
++        b = tree_search(c-&gt;tree, blocknum);
+     }
+ 
+-    b = cache-&gt;blocks_ordered[index];
+-
+-    if (read) {
+-        uint64_t bnum = cache-&gt;read_buffer_block;
+-
+-        // Wenn der zu lesende Block nicht im Puffer ist, wird er in den Puffer
+-        // eingelesen
+-        if ((bnum == INVBLKNUM) || (bnum &gt; block) || (block &gt;= bnum +
+-            cache-&gt;read_buffer_cnt))
+-        {
+-            cache-&gt;read_buffer_block = bnum = block;
+-
+-            cache-&gt;read_buffer_cnt = cache-&gt;read_block(
+-                (struct cdi_cache*) cache, block, READBUF_SZ,
+-                cache-&gt;read_buffer, cache-&gt;prv_data);
+-
+-            if (cache-&gt;read_buffer_cnt == 0) {
+-                puts(&quot;cdi_cache Panic: Einlesen der Daten fehlgeschlagen&quot;);
++    if (!b) {
++        int in_tree = 0;
++        if (c-&gt;blocks_used &lt; c-&gt;block_count) {
++            // Wir duerfen noch mehr neue Blocks in den Cache legen
++            b = malloc(sizeof(*b));
++            memset(b, 0, sizeof(*b));
++            b-&gt;cdi.number = blocknum;
++            b-&gt;cdi.data = malloc(c-&gt;cache.block_size);
++            b-&gt;cdi.private = malloc(c-&gt;private_len);
++
++            tree_insert(c-&gt;tree, b);
++            c-&gt;blocks_used++;
++        } else {
++            // Wir muessen einen Block zum ersetzen suchen
++            b = find_replaceable(c);
++            if (!b) {
+                 return NULL;
+             }
+-            //puts(&quot;nomatch&quot;);
+-        } else {
+-            //puts(&quot;match&quot;);
++            in_tree = 1;
++            tree_remove(c-&gt;tree, b);
++            b-&gt;cdi.number = blocknum;
++            tree_insert(c-&gt;tree, b);
+         }
+ 
+-        memcpy(b-&gt;cdi.data, cache-&gt;read_buffer + (block - bnum) * block_size,
+-            block_size);
+-    }
++        // Block einlesen
++        if (!noread &amp;&amp; !load_block(c, b)) {
++            puts(&quot;cdi_cache: Einlesen des Blocks fehlgeschlagen.&quot;);
++
++            // Wenn der Knoten bis jetzt im Baum war, muss er rausgeworfen
++            // werden
++            if (in_tree) {
++                tree_remove(c-&gt;tree, b);
++
++                // Auch aus der LRU-Liste muss der Block ggf. entfernt werden
++                if (b-&gt;lru_next) {
++                    b-&gt;lru_next-&gt;lru_prev = b-&gt;lru_prev;
++                }
++                if (b-&gt;lru_prev) {
++                    b-&gt;lru_prev-&gt;lru_next = b-&gt;lru_next;
++                }
++            }
++            c-&gt;blocks_used--;
+ 
+-    return b;
+-}
++            free(b-&gt;cdi.data);
++            free(b-&gt;cdi.private);
++            free(b);
++            return NULL;
++        }
++    }
++    put_hint(c, b);
+ 
+-/**
+- * Block holen; Falls er noch nicht in der Liste ist, wird er geladen
+- *
+- * @param cache Handle
+- * @param block Blocknummer
+- * @param read  Wenn 1 dann muss der Block eingelesen werden, bei 0 wird nur
+- *              ein freier Block herausgesucht (Wenn er eh ganz ueberschrieben
+- *              wird)
+- *
+- *
+- * @return Pointer auf den Block
+- */
+-static inline struct block* get_block(struct cache* cache, uint64_t block,
+-    int read)
+-{
+-    struct block* b;
++    b-&gt;ref_count++;
+ 
+-    if (!(b = block_find(cache, block))) {
+-        b = block_load(cache, block, read);
++    // Wenn wir eh schon den juengsten Block in der Liste erwischt haben,
++    // muessen wir auch an der LRU-Liste nichts mehr aendern.
++    if (b == c-&gt;lru_last) {
++        return (struct cdi_cache_block*) b;
+     }
+ 
+-    if (b) {
+-        b-&gt;access_time = ++cache_time;
++    // LRU-Liste aktualisieren
++    if (b-&gt;lru_next) {
++        b-&gt;lru_next-&gt;lru_prev = b-&gt;lru_prev;
+     }
+-
+-
+-    return b;
+-}
+-
+-
+-
+-/**
+- * Cache-Block holen. Dabei wird intern ein Referenzzaehler erhoeht, sodass der
+- * Block nicht freigegeben wird, solange er benutzt wird. Das heisst aber auch,
+- * dass der Block nach der Benutzung wieder freigegeben werden muss, da sonst
+- * die freien Blocks ausgehen.
+- *
+- * @param cache     Cache-Handle
+- * @param blocknum  Blocknummer
+- *
+- * @return Pointer auf das Block-Handle oder NULL im Fehlerfall
+- */
+-struct cdi_cache_block* cdi_cache_block_get(struct cdi_cache* cache,
+-    uint64_t blocknum)
+-{
+-    struct block* b = get_block((struct cache*) cache, blocknum, 1);
+-
+-    if (!b) {
+-        return NULL;
++    if (b-&gt;lru_prev) {
++        b-&gt;lru_prev-&gt;lru_next = b-&gt;lru_next;
+     }
+-
+-    b-&gt;ref_count++;
++    if (c-&gt;lru_first == b) {
++        c-&gt;lru_first = b-&gt;lru_prev;
++    }
++    b-&gt;lru_next = c-&gt;lru_last;
++    b-&gt;lru_prev = NULL;
++    if (c-&gt;lru_last) {
++        c-&gt;lru_last-&gt;lru_prev = b;
++    } else {
++        c-&gt;lru_first = b;
++    }
++    c-&gt;lru_last = b;
+ 
+     return (struct cdi_cache_block*) b;
+ }
+@@ -722,260 +527,3 @@ void cdi_cache_block_dirty(struct cdi_cache* cache,
+ }
+ 
+ 
+-
+-
+-/**
+- * Cache-Eintrag erstellen
+- *
+- * @param offset    Position auf dem Datentraeger
+- * @param size      Groesse des Bereichs
+- *
+- * @return Handle
+- */
+-struct cdi_cache_entry* cdi_cache_entry_new(struct cdi_cache* cache,
+-    uint64_t offset, size_t size)
+-{
+-    struct entry* entry = malloc(sizeof(struct entry));
+-    size_t block_size = cache-&gt;block_size;
+-    uint64_t start_block = offset / block_size;
+-    uint64_t end_block = (offset + size - 1) / block_size;
+-
+-    entry-&gt;entry.cache = cache;
+-    entry-&gt;locked = 0;
+-    entry-&gt;offset = offset;
+-    entry-&gt;size = size;
+-    entry-&gt;block_count = end_block - start_block + 1;
+-    entry-&gt;blocks = calloc(sizeof(struct block*) * entry-&gt;block_count, 1);
+-
+-    return (struct cdi_cache_entry*) entry;
+-}
+-
+-/**
+- * Cache-Eintrag freigeben
+- *
+- * @param entry Handle
+- */
+-void    cdi_cache_entry_release(struct cdi_cache_entry* entry)
+-{
+-    struct entry* e = (struct entry*) entry;
+-    size_t i;
+-
+-    if (e-&gt;locked) {
+-        cdi_cache_entry_unlock(entry);
+-    }
+-
+-    for (i = 0; i &lt; e-&gt;block_count; i++) {
+-        struct block* block = e-&gt;blocks[i];
+-        if (block) {
+-            block-&gt;ref_count--;
+-        }
+-    }
+-
+-    free(e);
+-}
+-
+-/**
+- * Cache-Eintrag sperren
+- *
+- * @param entry Handle
+- */
+-void    cdi_cache_entry_lock(struct cdi_cache_entry* entry)
+-{
+-    struct entry* e = (struct entry*) entry;
+-    e-&gt;locked = 1;
+-}
+-
+-/**
+- * Cache-Eintrag entsperren
+- *
+- * @param entry Handle
+- */
+-void    cdi_cache_entry_unlock(struct cdi_cache_entry* entry)
+-{
+-    struct entry* e = (struct entry*) entry;
+-    e-&gt;locked = 0;
+-}
+-
+-/**
+- * Cache-Eintrag als veraendert markieren
+- *
+- * @param entry Handle
+- */
+-void    cdi_cache_entry_dirty(struct cdi_cache_entry* entry)
+-{
+-    struct entry* e = (struct entry*) entry;
+-    size_t i;
+-
+-    for (i = 0; i &lt; e-&gt;block_count; i++) {
+-        struct block* block = e-&gt;blocks[i];
+-        block-&gt;dirty = 1;
+-    }
+-}
+-
+-
+-
+-/**
+- * Pointer auf einen Block im Cache-Eintrag holen
+- *
+- * @param entry Handle
+- * @param block Blocknummer relativ zum Eintrag (der Offset innerhalb des
+- *              Eintrags wird nicht beruecksichtigt)
+- *
+- * @return Pointer auf den Block
+- */
+-void*   cdi_cache_entry_block(struct cdi_cache_entry* entry, size_t block)
+-{
+-    struct entry* e = (struct entry*) entry;
+-    size_t block_size = entry-&gt;cache-&gt;block_size;
+-    uint64_t dev_start_block = (e-&gt;offset) / block_size;
+-
+-    if (block &gt;= e-&gt;block_count) {
+-        return NULL;
+-    }
+-
+-    if (e-&gt;blocks[block] == NULL) {
+-        e-&gt;blocks[block] = get_block((struct cache*) entry-&gt;cache,
+-            dev_start_block + block, 1);
+-        e-&gt;blocks[block]-&gt;ref_count++;
+-    }
+-
+-
+-    return e-&gt;blocks[block]-&gt;cdi.data;
+-}
+-
+-/**
+- * Daten aus dem Cache-Eintrag lesen
+- *
+- * @param entry     Handle
+- * @param offset    Offset relativ zum Cache-Eintrag
+- * @param size      Groesse des zu lesenden Bereichs
+- * @param buffer    Puffer in dem die Daten abgelegt werden sollen
+- */
+-int     cdi_cache_entry_read(struct cdi_cache_entry* entry, size_t offset,
+-            size_t size, void* buffer)
+-{
+-    struct entry* e = (struct entry*) entry;
+-    size_t block_size = entry-&gt;cache-&gt;block_size;
+-    uint64_t dev_start_block = (e-&gt;offset + offset) / block_size;
+-    size_t start_block = (e-&gt;offset + offset) / block_size - e-&gt;offset /
+-        block_size;
+-    size_t end_block = (e-&gt;offset + offset + size -1) / block_size - e-&gt;offset /
+-        block_size;
+-    size_t block_count = end_block - start_block + 1;
+-    size_t i;
+-    size_t bytes_done = 0;
+-
+-    // Nicht ueber den Eintragsrand hinauslesen
+-    if ((offset + size) &gt; e-&gt;size) {
+-        return 0;
+-    }
+-
+-    // Offset vom Block-Anfang im Cacheeintrag beruecksichtigen, falls vorhanden
+-    offset += e-&gt;offset % block_size;
+-
+-    for (i = 0; i &lt; block_count; i++) {
+-        void* block;
+-        size_t bytes = block_size;
+-        size_t off = 0;
+-
+-        if (e-&gt;blocks[start_block + i] == NULL) {
+-            e-&gt;blocks[start_block + i] = get_block((struct cache*) entry-&gt;cache,
+-                dev_start_block + i, 1);
+-            e-&gt;blocks[start_block + i]-&gt;ref_count++;
+-        }
+-
+-        block = e-&gt;blocks[start_block + i]-&gt;cdi.data;
+-        e-&gt;blocks[start_block + i]-&gt;access_time = ++cache_time;
+-
+-        // Beim ersten Durchlauf muss der Anfangsoffset beruecksichtigt werden
+-        if (i == 0) {
+-            off = offset % block_size;
+-            bytes = block_size - off;
+-        }
+-
+-        // Beim letzten Durchlauf muss unter umstaenden nicht mehr ein ganzer
+-        // Block gelesen werden.
+-        if (i == block_count - 1) {
+-            bytes = size - bytes_done;
+-        }
+-
+-        memcpy((void*) ((uintptr_t) buffer + bytes_done), (void*)
+-            ((uintptr_t) block + off), bytes);
+-        bytes_done += bytes;
+-    }
+-
+-    return 1;
+-}
+-
+-/**
+- * Daten in den Cache-Eintrag schreiben
+- *
+- * @param entry     Handle
+- * @param offset    Offset relativ zum Cache-Eintrag
+- * @param size      Groesse des zu schreibenden Bereichs
+- * @param buffer    Puffer aus dem die Daten gelesen werden
+- */
+-int     cdi_cache_entry_write(struct cdi_cache_entry* entry, size_t offset,
+-            size_t size, const void* buffer)
+-{
+-    struct entry* e = (struct entry*) entry;
+-    size_t block_size = entry-&gt;cache-&gt;block_size;
+-    uint64_t dev_start_block = (e-&gt;offset + offset) / block_size;
+-    size_t start_block = (e-&gt;offset + offset) / block_size - e-&gt;offset /
+-        block_size;
+-    size_t end_block = (e-&gt;offset + offset + size - 1) / block_size - e-&gt;offset /
+-        block_size;
+-    size_t block_count = end_block - start_block + 1;
+-    size_t i;
+-    size_t bytes_done = 0;
+-
+-    // Nicht ueber den Eintragsrand hinausschreiben
+-    if ((offset + size) &gt; e-&gt;size) {
+-        return 0;
+-    }
+-
+-    // Offset vom Block-Anfang im Cacheeintrag beruecksichtigen, falls vorhanden
+-    offset += e-&gt;offset % block_size;
+-
+-    for (i = 0; i &lt; block_count; i++) {
+-        void* block;
+-        size_t bytes = block_size;
+-        size_t off = 0;
+-
+-        // Beim ersten Durchlauf muss der Anfangsoffset beruecksichtigt werden
+-        if (i == 0) {
+-            off = offset % block_size;
+-            bytes = block_size - off;
+-        }
+-
+-        if (i == block_count - 1) {
+-            bytes = size - bytes_done;
+-        }
+-
+-
+-        if (e-&gt;blocks[start_block + i] == NULL) {
+-            int read = 1;
+-
+-            if ((off == 0) &amp;&amp; (bytes == block_size)) {
+-                read = 0;
+-            }
+-
+-            e-&gt;blocks[start_block + i] = get_block((struct cache*) entry-&gt;cache,
+-                dev_start_block + i, read);
+-            e-&gt;blocks[start_block + i]-&gt;ref_count++;
+-        }
+-
+-        block = e-&gt;blocks[start_block + i]-&gt;cdi.data;
+-        e-&gt;blocks[start_block + i]-&gt;access_time = ++cache_time;
+-        e-&gt;blocks[start_block + i]-&gt;dirty = 1;
+-
+-
+-        memcpy((void*) ((uintptr_t) block + off), (void*) ((uintptr_t) buffer +
+-            bytes_done), bytes);
+-        bytes_done += bytes;
+-    }
+-
+-    return 1;
+-}
+-
+-
+diff --git a/testlib/cdi_cache.h b/testlib/cdi_cache.h
+index fd43bca..d378599 100644
+--- a/testlib/cdi_cache.h
++++ b/testlib/cdi_cache.h
+@@ -32,13 +32,6 @@ struct cdi_cache_block {
+     void*       private;
+ };
+ 
+-/** Cache-Bereiche fuer komfortablen, dafuer etwas langsameren, Zugriff */
+-struct cdi_cache_entry {
+-    struct cdi_cache* cache;
+-
+-    /* OS-Spezifische Daten folgen... */
+-};
+-
+ /** Typ fuer Cache-Callback zum einlesen eines Blocks. */
+ typedef int (cdi_cache_read_block_t)(struct cdi_cache* cache, uint64_t block,
+     size_t count, void* dest, void* prv);
+@@ -47,6 +40,9 @@ typedef int (cdi_cache_read_block_t)(struct cdi_cache* cache, uint64_t block,
+ typedef int (cdi_cache_write_block_t)(struct cdi_cache* cache, uint64_t block,
+     size_t count, const void* src, void* prv);
+ 
++#ifdef __cplusplus
++extern &quot;C&quot; {
++#endif
+ 
+ /**
+  * Cache erstellen
+@@ -88,11 +84,14 @@ int cdi_cache_sync(struct cdi_cache* cache);
+  *
+  * @param cache     Cache-Handle
+  * @param blocknum  Blocknummer
++ * @param noread    Wenn != 0 wird der Block nicht eingelesen falls er noch
++ *                  nicht im Speicher ist. Kann benutzt werden, wenn der Block
++ *                  vollstaendig ueberschrieben werden soll.
+  *
+  * @return Pointer auf das Block-Handle oder NULL im Fehlerfall
+  */
+ struct cdi_cache_block* cdi_cache_block_get(struct cdi_cache* cache,
+-    uint64_t blocknum);
++    uint64_t blocknum, int noread);
+ 
+ /**
+  * Cache-Block freigeben
+@@ -112,87 +111,8 @@ void cdi_cache_block_release(struct cdi_cache* cache,
+ void cdi_cache_block_dirty(struct cdi_cache* cache,
+     struct cdi_cache_block* block);
+ 
+-/**
+- * Cache-Eintrag erstellen
+- *
+- * @param offset    Position auf dem Datentraeger
+- * @param size      Groesse des Bereichs
+- *
+- * @return Handle
+- */
+-struct cdi_cache_entry* cdi_cache_entry_new(struct cdi_cache* cache,
+-    uint64_t offset, size_t size);
+-
+-/**
+- * Cache-Eintrag freigeben
+- *
+- * @param entry Handle
+- */
+-void    cdi_cache_entry_release(struct cdi_cache_entry* entry);
+-
+-/**
+- * Cache-Eintrag sperren
+- *
+- * @param entry Handle
+- */
+-void    cdi_cache_entry_lock(struct cdi_cache_entry* entry);
+-
+-/**
+- * Cache-Eintrag entsperren
+- *
+- * @param entry Handle
+- */
+-void    cdi_cache_entry_unlock(struct cdi_cache_entry* entry);
+-
+-/**
+- * Cache-Eintrag als veraendert markieren
+- *
+- * @param entry Handle
+- */
+-void    cdi_cache_entry_dirty(struct cdi_cache_entry* entry);
+-
+-/**
+- * Einzelnen Block im Cache-Eintrag als veraendert markieren
+- *
+- * @param entry Handle
+- * @param block Blocknummer (von 0 an)
+- */
+-void    cdi_cache_entry_blkdirty(struct cdi_cache_entry* entry, uint64_t block);
+-
+-
+-
+-/**
+- * Pointer auf einen Block im Cache-Eintrag holen
+- *
+- * @param entry Handle
+- * @param block Blocknummer relativ zum Eintrag (der Offset innerhalb des
+- *              Eintrags wird nicht beruecksichtigt)
+- *
+- * @return Pointer auf den Block
+- */
+-void*   cdi_cache_entry_block(struct cdi_cache_entry* entry, size_t block);
+-
+-/**
+- * Daten aus dem Cache-Eintrag lesen
+- *
+- * @param entry     Handle
+- * @param offset    Offset relativ zum Cache-Eintrag
+- * @param size      Groesse des zu lesenden Bereichs
+- * @param buffer    Puffer in dem die Daten abgelegt werden sollen
+- */
+-int     cdi_cache_entry_read(struct cdi_cache_entry* entry, size_t offset,
+-            size_t size, void* buffer);
+-
+-/**
+- * Daten in den Cache-Eintrag schreiben
+- *
+- * @param entry     Handle
+- * @param offset    Offset relativ zum Cache-Eintrag
+- * @param size      Groesse des zu schreibenden Bereichs
+- * @param buffer    Puffer aus dem die Daten gelesen werden
+- */
+-int     cdi_cache_entry_write(struct cdi_cache_entry* entry, size_t offset,
+-            size_t size, const void* buffer);
+-
++#ifdef __cplusplus
++}; // extern &quot;C&quot;
++#endif
+ 
+ #endif
+diff --git a/testlib/tree.c b/testlib/tree.c
+new file mode 100644
+index 0000000..46460db
+--- /dev/null
++++ b/testlib/tree.c
+@@ -0,0 +1,599 @@
++/*
++ * Copyright (c) 2008 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include &quot;tree.h&quot;
++#include &lt;stdlib.h&gt;
++#include &lt;string.h&gt;
++
++#ifdef DEBUG_TREE
++#include &lt;stdio.h&gt;
++
++void tree_dump(tree_t* tree);
++#endif
++
++/**
++ * Gibt das Objekt zu einem tree_item zurueck
++ */
++static inline void* to_node(tree_t* tree, struct tree_item* item) {
++    return ((char*) item - tree-&gt;tree_item_offset);
++}
++
++/**
++ * Gibt das tree_item zu einem Objekt zurueck
++ */
++static inline struct tree_item* to_tree_item(tree_t* tree, void* node) {
++    return (struct tree_item*) ((char*) node + tree-&gt;tree_item_offset);
++}
++
++/**
++ * Gibt den Schluessel eines Objekts zurueck
++ */
++static inline uint64_t get_key(tree_t* tree, struct tree_item* item) {
++    uint64_t res;
++
++    res = *(uint64_t*)((char*) to_node(tree, item) + tree-&gt;sort_key_offset);
++    return res &amp; tree-&gt;key_mask;
++}
++
++/**
++ * Initilaisiert einen neuen AVL-Baum. Nicht direkt verwenden, tree_create ist
++ * das Mittel der Wahl.
++ */
++void tree_do_init(tree_t* tree,
++    size_t tree_item_offset, size_t sort_key_offset)
++{
++    memset(tree, 0, sizeof(*tree));
++    tree-&gt;tree_item_offset = tree_item_offset;
++    tree-&gt;sort_key_offset = sort_key_offset;
++    tree-&gt;key_mask = (uint64_t) -1;
++}
++
++/**
++ * Erzeugt einen neuen AVL-Baum. Nicht direkt verwenden, tree_create ist das
++ * Mittel der Wahl.
++ */
++tree_t* tree_do_create(size_t tree_item_offset, size_t sort_key_offset)
++{
++    tree_t* tree = malloc(sizeof(*tree));
++    tree_do_init(tree, tree_item_offset, sort_key_offset);
++    return tree;
++}
++
++/**
++ * Gibt einen AVL-Baum frei. Zu beachten ist, dass keiner seiner Knoten
++ * freigegeben wird, da ein Knoten immer noch ueber eine andere Datenstruktur
++ * erreichbar sein koennte.
++ */
++void tree_destroy(tree_t* tree)
++{
++    free(tree);
++}
++
++/**
++ * Sucht das Objekt mit dem gegebenen Schluessel im Baum.
++ *
++ * @param tree Baum, in dem das Objekt gesucht werden soll
++ * @param key Schluessel, nach dem gesucht wird
++ * @param node Enthaelt das tree_item des gesuchten Objekts, wenn der
++ * Schluessel gefunden wird. Wenn nicht, enthaelt es das tree_item des Blatts,
++ * an das ein neuer Knoten mit dem gesuchten Schluessel angefuegt werden
++ * muesste.
++ *
++ * @return 0 wenn das Objekt nicht gefunden wurde, nicht 0 sonst
++ */
++static int do_search(tree_t* tree, uint64_t key, struct tree_item** node)
++{
++    struct tree_item* res = NULL;
++    struct tree_item* current = tree-&gt;root;
++    uint64_t current_key = key - 1;
++
++    while (current != NULL) {
++        res = current;
++        current_key = get_key(tree, current);
++        if (key == current_key) {
++            break;
++        } else if (key &lt; current_key) {
++            current = current-&gt;left;
++        } else {
++            current = current-&gt;right;
++        }
++    }
++
++    *node = res;
++    return (key == current_key);
++}
++
++/**
++ * Sucht nach dem Objekt mit einem gegebenen Schluessel in einem AVL-Baum
++ *
++ * @return Objekt mit dem gesuchten Schluessel oder NULL, wenn kein Objekt mit
++ * dem gesuchten Schluessel im Baum enthalten ist.
++ */
++void* tree_search(tree_t* tree, uint64_t key)
++{
++    struct tree_item* ret;
++
++    if (do_search(tree, key, &amp;ret)) {
++        return to_node(tree, ret);
++    } else {
++        return NULL;
++    }
++}
++
++/**
++ * Aendert die Balance eines Knotens und passt die Balance aller Knoten auf dem
++ * Weg zur Wurzel des Baums entsprechend an.
++ *
++ * @param item tree_item, dessen Balance geaendert werden soll
++ * @param value Wert, um den die Balance geaendert werden soll
++ */
++static inline void adjust_balance(struct tree_item* item, int value)
++{
++    int stop = 0;
++
++    while (item-&gt;parent &amp;&amp; !stop) {
++        if (item-&gt;parent-&gt;left == item) {
++            // Wenn an einem rechtslastigen Knoten links etwas geaendert wird,
++            // aendert sich zwar seine eigenen Balance, aber nicht mehr die des
++            // Vaterknotens.
++            if (item-&gt;parent-&gt;balance &gt; 0) {
++                stop = 1;
++            }
++            item-&gt;parent-&gt;balance -= value;
++            if (item-&gt;parent-&gt;balance &gt; 0) {
++                stop = 1;
++            }
++        } else {
++            // Dasselbe gilt fuer die rechte Seite eines linkslastigen Knotens.
++            if (item-&gt;parent-&gt;balance &lt; 0) {
++                stop = 1;
++            }
++            item-&gt;parent-&gt;balance += value;
++            if (item-&gt;parent-&gt;balance &lt; 0) {
++                stop = 1;
++            }
++        }
++        item = item-&gt;parent;
++    }
++}
++
++/**
++ * Fuehrt eine Linksrotation durch. Balanceaenderungen werden nicht
++ * vorgenommen.
++ */
++static void rotate_left(struct tree_item** root)
++{
++    struct tree_item* item = *root;
++    struct tree_item* tmp = item-&gt;right;
++
++    tmp-&gt;parent = item-&gt;parent;
++    item-&gt;parent = tmp;
++    if (tmp-&gt;left) {
++        tmp-&gt;left-&gt;parent = item;
++    }
++
++    item-&gt;right = tmp-&gt;left;
++    tmp-&gt;left = item;
++    *root = tmp;
++}
++
++/**
++ * Fuehrt eine Rechsrotation durch. Balanceaenderungen werden nicht
++ * vorgenommen.
++ */
++static void rotate_right(struct tree_item** root)
++{
++    struct tree_item* item = *root;
++    struct tree_item* tmp = item-&gt;left;
++
++    tmp-&gt;parent = item-&gt;parent;
++    item-&gt;parent = tmp;
++    if (tmp-&gt;right) {
++        tmp-&gt;right-&gt;parent = item;
++    }
++
++    item-&gt;left = tmp-&gt;right;
++    tmp-&gt;right = item;
++    *root = tmp;
++}
++
++
++/**
++ * Gibt einen Zeiger auf den Zeiger des Vaterknotens auf den aktuellen Knoten
++ * zurueck. Dieser Zeiger kann genutzt werden, um den gegebenen Knoten durch
++ * einen anderen Knoten zu ersetzen.
++ *
++ * Im Fall, dass der gegebene Knoten die Wurzel ist, wird &amp;tree-&gt;root
++ * zurueckgegeben, so dass in diesem Fall eine neue Wurzel gesetzt wird.
++ */
++static struct tree_item** link_from_parent(tree_t* tree,
++    struct tree_item* item)
++{
++    if (item-&gt;parent == NULL) {
++        return &amp;tree-&gt;root;
++    } else if (item-&gt;parent-&gt;left == item) {
++        return &amp;item-&gt;parent-&gt;left;
++    } else {
++        return &amp;item-&gt;parent-&gt;right;
++    }
++}
++
++/**
++ * Fuehrt eine AVL-Rebalancierung durch, nachdem der Baum veraendert wurde.
++ */
++static void rebalance(tree_t* tree, struct tree_item* item)
++{
++    struct tree_item** pitem;
++    struct tree_item* tmp;
++
++    while (item) {
++
++        pitem = link_from_parent(tree, item);
++
++        if (item-&gt;balance &gt;= 2) {
++
++            // Rechtslastiger Baum
++            tmp = item-&gt;right;
++
++            if (item-&gt;right-&gt;balance &gt; 0) {
++                // Einfache Rotation
++                rotate_left(pitem);
++                item-&gt;balance = 0;
++                tmp-&gt;balance = 0;
++                adjust_balance(*pitem, -1);
++            } else if (item-&gt;right-&gt;balance == 0) {
++                // Einfache Rotation
++                rotate_left(pitem);
++                item-&gt;balance = 1;
++                tmp-&gt;balance = -1;
++            } else {
++                // Doppelrotation
++                rotate_right(&amp;item-&gt;right);
++                rotate_left(pitem);
++                item-&gt;balance = ((*pitem)-&gt;balance ==  1 ? -1 : 0);
++                tmp-&gt;balance  = ((*pitem)-&gt;balance == -1 ?  1 : 0);
++                (*pitem)-&gt;balance = 0;
++                adjust_balance(*pitem, -1);
++            }
++
++
++        } else if (item-&gt;balance &lt;= -2) {
++
++            // Linkslastiger Baum
++            tmp = item-&gt;left;
++
++            if (item-&gt;left-&gt;balance &lt; 0) {
++                // Einfache Rotation
++                rotate_right(pitem);
++                item-&gt;balance = 0;
++                tmp-&gt;balance = 0;
++                adjust_balance(*pitem, -1);
++            } else if (item-&gt;left-&gt;balance == 0) {
++                // Einfache Rotation
++                rotate_right(pitem);
++                item-&gt;balance = -1;
++                tmp-&gt;balance = 1;
++            } else {
++                // Doppelrotation
++                rotate_left(&amp;item-&gt;left);
++                rotate_right(pitem);
++                item-&gt;balance = ((*pitem)-&gt;balance == -1 ?  1 : 0);
++                tmp-&gt;balance  = ((*pitem)-&gt;balance ==  1 ? -1 : 0);
++                (*pitem)-&gt;balance = 0;
++                adjust_balance(*pitem, -1);
++            }
++        }
++
++        // Weiter Richtung Wurzel gehen
++        item = item-&gt;parent;
++
++    }
++}
++
++/**
++ * Fuegt ein neues Objekt in den AVL-Baum ein.
++ *
++ * @param node Einzufuegendes Objekt. Muss den in tree_create angegebenen
++ * Datentyp haben, ansonsten ist das Ergebnis undefiniert.
++ */
++tree_t* tree_insert(tree_t* tree, void* node)
++{
++    struct tree_item* new = to_tree_item(tree, node);
++    struct tree_item* parent;
++    uint64_t new_key = get_key(tree, new);
++
++    new-&gt;left = NULL;
++    new-&gt;right = NULL;
++    new-&gt;balance = 0;
++
++    // Wenn es noch keine Wurzel gibt, ist die Sache trivial
++    if (tree-&gt;root == NULL) {
++        new-&gt;parent = NULL;
++        tree-&gt;root = new;
++        return tree;
++    }
++
++    // Ansonsten erstmal einen nahegelegenen Knoten finden, an dem man den
++    // neuen Knoten einhaengen kann. Wenn ein Knoten mit derselben ID schon
++    // drin ist, machen wir gar nichts.
++    if (!do_search(tree, new_key, &amp;parent)) {
++        new-&gt;parent = parent;
++
++        if (new_key &lt; get_key(tree, parent)) {
++            parent-&gt;left = new;
++        } else {
++            parent-&gt;right = new;
++        }
++        adjust_balance(new, 1);
++        rebalance(tree, new);
++    }
++
++    return tree;
++}
++
++/**
++ * Entfernt ein Objekt aus dem AVL-Baum. Das uebergebene Objekt muss im Baum
++ * enthalten sein.
++ *
++ * @return Das zu entfernende Objekt
++ */
++void* tree_remove(tree_t* tree, void* node)
++{
++    struct tree_item* item = to_tree_item(tree, node);
++    struct tree_item** pitem = link_from_parent(tree, item);
++
++    // Wenn es ein Blatt war, einfach rausnehmen
++
++    if (!item-&gt;left &amp;&amp; !item-&gt;right) {
++        adjust_balance(item, -1);
++        *pitem = NULL;
++        rebalance(tree, item-&gt;parent);
++        return node;
++    }
++
++    // Ansonsten muessen wir die Kinder irgendwo anders aufhaengen. Wenn nur
++    // eine Seite besetzt ist, uebernimmt einfach das Kind dort den Platz.
++
++    if (item-&gt;left &amp;&amp; !item-&gt;right) {
++        adjust_balance(item, -1);
++        *pitem = item-&gt;left;
++        item-&gt;left-&gt;parent = item-&gt;parent;
++        rebalance(tree, item-&gt;parent);
++        return node;
++    }
++
++    if (!item-&gt;left &amp;&amp; item-&gt;right) {
++        adjust_balance(item, -1);
++        *pitem = item-&gt;right;
++        item-&gt;right-&gt;parent = item-&gt;parent;
++        rebalance(tree, item-&gt;parent);
++        return node;
++    }
++
++    // Bleibt schliesslich noch der komplizierteste Fall, naemlich, dass beide
++    // Seiten besetzt sind. Dann nehmen wir einen vom Index her nahegelegenen
++    // Knoten als Ersatz fuer den geloeschten. Ein guter Kandidat dafuer ist
++    // der am weitesten rechts gelegene Knoten des linken Teilbaums.
++
++    struct tree_item* subst;
++    struct tree_item** psubst;
++
++    subst = item-&gt;left;
++    while (subst-&gt;right) {
++        subst = subst-&gt;right;
++    }
++
++    psubst = link_from_parent(tree, subst);
++
++    // Wir sind ganz nach rechts gegangen, aber moeglicherweise ist noch ein
++    // linker Teilbaum uebrig. Dieser wird dann vom bisherigen Elternknoten
++    // des Ersatzes geerbt.
++
++    struct tree_item* old_left = subst-&gt;left;
++    struct tree_item* old_parent = subst-&gt;parent;
++
++    subst-&gt;parent   = item-&gt;parent;
++    subst-&gt;right    = item-&gt;right;
++    subst-&gt;left     = item-&gt;left;
++    subst-&gt;balance  = item-&gt;balance;
++
++    if (subst-&gt;left == subst) {
++        subst-&gt;left = NULL;
++    }
++
++    if (subst-&gt;left) {
++        subst-&gt;left-&gt;parent = subst;
++    }
++    if (subst-&gt;right) {
++        subst-&gt;right-&gt;parent = subst;
++    }
++
++    *psubst = old_left;
++    *pitem = subst;
++
++    if (old_parent == item) {
++        subst-&gt;balance++;
++        subst-&gt;left = old_left;
++        if (subst-&gt;balance &lt;= 0) {
++            adjust_balance(subst, -1);
++        }
++        rebalance(tree, subst);
++    } else {
++        if (old_left) {
++            old_left-&gt;parent = old_parent;
++        }
++
++        old_parent-&gt;balance--;
++        if (old_parent-&gt;balance &gt;= 0) {
++            adjust_balance(old_parent, -1);
++        }
++        rebalance(tree, old_parent);
++    }
++
++    return node;
++}
++
++/**
++ * Sucht zu einem gegebenen Objekt den Vorgaenger.
++ *
++ * Der Vorgaenger ist das Objekt mit dem naechstkleineren Schluessel. Der
++ * Vorgaenger von NULL ist das Objekt mit dem groessten Schluessel.
++ *
++ * @return Das Vorgaengerobjekt oder NULL, wenn das uebergebene Objekt das
++ * Objekt mit dem kleinsten Schluessel war.
++ */
++void* tree_prev(tree_t* tree, void* node)
++{
++    struct tree_item* current = to_tree_item(tree, node);
++    struct tree_item* old;
++
++    if (node == NULL) {
++        current = tree-&gt;root;
++        if (current == NULL) {
++            return NULL;
++        }
++    } else {
++
++        // Irgendwo mitten im Baum ist es einfach, den Vorgaenger zu finden:
++        // Einmal nach links und dann so weit wie moeglich nach rechts.
++        //
++        // Wenn der Knoten keinen linken Kindknoten hat, muessen wir ein Stueck
++        // Richtung Wurzel zurueckgehen, und zwar so lange bis wir von der
++        // rechten Seite an einen Knoten kommen.
++
++        if (current-&gt;left == NULL) {
++            do {
++                old = current;
++                current = current-&gt;parent;
++            } while (current &amp;&amp; (current-&gt;left == old));
++
++            return current ? to_node(tree, current) : NULL;
++        }
++
++        current = current-&gt;left;
++    }
++
++    while (current-&gt;right) {
++        current = current-&gt;right;
++    }
++
++    return to_node(tree, current);
++}
++
++/**
++ * Sucht zu einem gegebenen Objekt den Nachfolger
++ *
++ * Der Nachfolger ist das Objekt mit dem naechstgroesseren Schluessel. Der
++ * Nachfolger von NULL ist das Objekt mit dem kleinsten Schluessel.
++ *
++ * @return Das Nachfolgerobjekt oder NULL, wenn das uebergebene Objekt das
++ * Objekt mit dem groessten Schluessel war.
++ */
++void* tree_next(tree_t* tree, void* node)
++{
++    struct tree_item* current = to_tree_item(tree, node);
++    struct tree_item* old;
++
++    if (node == NULL) {
++        current = tree-&gt;root;
++        if (current == NULL) {
++            return NULL;
++        }
++    } else {
++        // Das ist im Prinzip ein tree_prev mit links und rechts vertauscht
++
++        if (current-&gt;right == NULL) {
++            do {
++                old = current;
++                current = current-&gt;parent;
++            } while (current &amp;&amp; (current-&gt;right == old));
++
++            return current ? to_node(tree, current) : NULL;
++        }
++
++        current = current-&gt;right;
++    }
++
++    while (current-&gt;left) {
++        current = current-&gt;left;
++    }
++
++    return to_node(tree, current);
++}
++
++
++#ifdef DEBUG_TREE
++static void do_check(tree_t* tree, struct tree_item* item, struct tree_item* parent)
++{
++    if (item-&gt;parent != parent) {
++        printf(&quot;Oops, elternlink  stimmt nicht: %lld\n&quot;, (unsigned long long)
++            get_key(tree, item));
++    }
++
++    if (item-&gt;left) {
++        do_check(tree, item-&gt;left, item);
++    }
++    if (item-&gt;right) {
++        do_check(tree, item-&gt;right, item);
++    }
++}
++
++void tree_check(tree_t* tree)
++{
++    if (tree-&gt;root) {
++        do_check(tree, tree-&gt;root, NULL);
++    }
++}
++
++/**
++ * Gibt ein Element und alle Kindelemente aus
++ */
++static void do_dump(tree_t* tree, struct tree_item* current)
++{
++    if (!current) {
++        printf(&quot;-&quot;);
++    } else if (!current-&gt;left &amp;&amp; !current-&gt;right) {
++        printf(&quot;%ld&quot;, get_key(tree, current));
++    } else {
++        printf(&quot;[%d] %ld (&quot;, current-&gt;balance, get_key(tree, current));
++        do_dump(tree, current-&gt;left),
++        printf(&quot; &quot;);
++        do_dump(tree, current-&gt;right);
++        printf(&quot;)&quot;);
++    }
++}
++
++/**
++ * Gibt einen Dump eines Baums auf stdout aus
++ */
++void tree_dump(tree_t* tree)
++{
++    do_dump(tree, tree-&gt;root);
++    puts(&quot;&quot;);
++}
++#endif
+diff --git a/testlib/tree.h b/testlib/tree.h
+new file mode 100644
+index 0000000..d88d041
+--- /dev/null
++++ b/testlib/tree.h
+@@ -0,0 +1,165 @@
++/*
++ * Copyright (c) 2006-2008 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef COLLECTIONS_H
++#define COLLECTIONS_H
++
++#include &lt;stdint.h&gt;
++#include &lt;stdbool.h&gt;
++#include &lt;stddef.h&gt;
++
++/**
++ * Repraesentiert einen Knoten und bestimmt seine Position im Baum.
++ *
++ * Diese Struktur muss in jedem Typ, der in Baeumen verwendet werden soll,
++ * als Teil enthalten sein. Durch den Offset, den das tree_item in dem
++ * jeweiligen Typ hat, kann ein Pointer auf den Anfang des Objekts berechnet
++ * werden.
++ */
++struct tree_item {
++    struct tree_item* parent;
++    struct tree_item* left;
++    struct tree_item* right;
++    int balance;
++};
++
++/**
++ * Repraesentiert den Baum und erlaubt den Zugriff auf seine Elemente.
++ *
++ * Ein Baum besteht aus Objekten eines einheitlichen Datentyps. Die Objekte
++ * enthalten jeweils mindestens ein tree_item, das Vater und Kinder sowie den
++ * AVL-Balancewert ihres Knotens beschreibt und einen Schluessel, nach dem der
++ * Baum sortiert wird. Der Schluessel muss vom Typ uint64_t sein.
++ */
++typedef struct {
++    struct tree_item*   root;
++    size_t              tree_item_offset;
++    size_t              sort_key_offset;
++
++    /**
++     * AND-Maske, die alle Bits des Schluessels auswaehlt, die zur
++     * Identifikation und Sortierung von Objekten benutzt werden sollen. Diese
++     * Maske darf nicht mehr veraendert werden, sobald der Baum Elemente
++     * enthaelt, da er ansonsten nicht mehr sortiert ist und falsche Ergebnisse
++     * liefert.
++     *
++     * Direkt nach dem Erzeugen eines Baums sind alle Bits gesetzt.
++     */
++    uint64_t            key_mask;
++} tree_t;
++
++/**
++ * Erzeugt einen neuen AVL-Baum
++ *
++ * @param type Datentyp der Objekte im Baum
++ * @param tree_item Name des tree_item-Felds in der Struktur der Objekte
++ * @param sort_key Name des Schluessels in der Struktur der Objekte
++ */
++#define tree_create(type, tree_item, sort_key) \
++    tree_do_create(offsetof(type, tree_item), offsetof(type, sort_key))
++
++/**
++ * Erzeugt einen neuen AVL-Baum. Nicht direkt verwenden, tree_create ist das
++ * Mittel der Wahl.
++ */
++tree_t* tree_do_create(size_t tree_item_offset, size_t sort_key_offset);
++
++/**
++ * Initialisiert einen neuen AVL-Baum. Dies ist eine Alternative zu
++ * tree_create, wenn der Baum nicht dynamisch alloziert werden soll, sondern
++ * z.B. fest in einer Struktur eingebettet ist.
++ *
++ * @param tree Baum, der initialisiert werden soll
++ * @param type Datentyp der Objekte im Baum
++ * @param tree_item Name des tree_item-Felds in der Struktur der Objekte
++ * @param sort_key Name des Schluessels in der Struktur der Objekte
++ */
++#define tree_init(tree, type, tree_item, sort_key) \
++    tree_do_init(tree, offsetof(type, tree_item), offsetof(type, sort_key))
++
++/**
++ * Initialisiert einen AVL-Baum. Nicht direkt verwenden, tree_init ist das
++ * Mittel der Wahl.
++ */
++void tree_do_init(tree_t* tree,
++    size_t tree_item_offset, size_t sort_key_offset);
++
++/**
++ * Gibt einen AVL-Baum frei. Zu beachten ist, dass keiner seiner Knoten
++ * freigegeben wird, da ein Knoten immer noch ueber eine andere Datenstruktur
++ * erreichbar sein koennte.
++ */
++void tree_destroy(tree_t* tree);
++
++/**
++ * Sucht nach dem Objekt mit einem gegebenen Schluessel in einem AVL-Baum
++ *
++ * @return Objekt mit dem gesuchten Schluessel oder NULL, wenn kein Objekt mit
++ * dem gesuchten Schluessel im Baum enthalten ist.
++ */
++void* tree_search(tree_t* tree, uint64_t key);
++
++/**
++ * Fuegt ein neues Objekt in den AVL-Baum ein.
++ *
++ * @param node Einzufuegendes Objekt. Muss den in tree_create angegebenen
++ * Datentyp haben, ansonsten ist das Ergebnis undefiniert.
++ */
++tree_t* tree_insert(tree_t* tree, void* node);
++
++/**
++ * Entfernt ein Objekt aus dem AVL-Baum. Das uebergebene Objekt muss im Baum
++ * enthalten sein.
++ *
++ * @return Das zu entfernende Objekt
++ */
++void* tree_remove(tree_t* tree, void* node);
++
++/**
++ * Sucht zu einem gegebenen Objekt den Vorgaenger.
++ *
++ * Der Vorgaenger ist das Objekt mit dem naechstkleineren Schluessel. Der
++ * Vorgaenger von NULL ist das Objekt mit dem groessten Schluessel.
++ *
++ * @return Das Vorgaengerobjekt oder NULL, wenn das uebergebene Objekt das
++ * Objekt mit dem kleinsten Schluessel war.
++ */
++void* tree_prev(tree_t* tree, void* node);
++
++/**
++ * Sucht zu einem gegebenen Objekt den Nachfolger
++ *
++ * Der Nachfolger ist das Objekt mit dem naechstgroesseren Schluessel. Der
++ * Nachfolger von NULL ist das Objekt mit dem kleinsten Schluessel.
++ *
++ * @return Das Nachfolgerobjekt oder NULL, wenn das uebergebene Objekt das
++ * Objekt mit dem groessten Schluessel war.
++ */
++void* tree_next(tree_t* tree, void* node);
++
++#endif
+-- 
+1.8.1.4
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002430.html">[tyndur-devel] [PATCH libext2 4/8] Makefile: Ausgabe für kompilierte Dateien
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002432.html">[tyndur-devel] [PATCH libext2 6/8] libext2: Bootloader nicht zerstören
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2431">[ Datum ]</a>
+              <a href="thread.html#2431">[ Thema ]</a>
+              <a href="subject.html#2431">[ Betreff (Subject)]</a>
+              <a href="author.html#2431">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

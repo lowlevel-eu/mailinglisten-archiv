@@ -1,0 +1,145 @@
+From kevin at tyndur.org  Thu Jan  2 14:22:21 2014
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Thu,  2 Jan 2014 14:22:21 +0100
+Subject: [cdi-devel] =?utf-8?q?=5BPATCH=5D_libext2=3A_Don=27t_destroy_boot?=
+	=?utf-8?q?_loader?=
+Message-ID: <1388668941-12894-1-git-send-email-kevin@tyndur.org>
+
+The first 1024 bytes on the disk must be left alone. If they are part of
+the first block, they need to be included in the write request of each
+superblock update because the cache works only at the granularity of
+filesystem blocks.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+
+Imported from libext2.git, translated commit message for cdi.git
+
+ ext2/libext2/fs.c           |   21 +++++++++++++++++----
+ ext2/libext2/include/ext2.h |    3 +++
+ ext2/libext2/superblock.c   |   14 ++++++++++++--
+ 3 files changed, 32 insertions(+), 6 deletions(-)
+
+diff --git a/ext2/libext2/fs.c b/ext2/libext2/fs.c
+index 33b033f..e5c5482 100644
+--- a/ext2/libext2/fs.c
++++ b/ext2/libext2/fs.c
+@@ -66,11 +66,18 @@ static int fs_check_fast(ext2_fs_t* fs)
+ int ext2_fs_mount(ext2_fs_t* fs)
+ {
+     fs->sb = malloc(sizeof(ext2_superblock_t));
++    fs->boot_sectors = malloc(1024);
++
++    if (!fs->sb || !fs->boot_sectors) {
++        goto fail;
++    }
+ 
+     if (!ext2_sb_read(fs, fs->sb)) {
+-        free(fs->sb);
+-        fs->sb = NULL;
+-        return 0;
++        goto fail;
++    }
++
++    if (!fs->dev_read(0, 1024, fs->boot_sectors, fs->dev_private)) {
++        goto fail;
+     }
+ 
+     fs->cache_handle = fs->cache_create(fs, ext2_sb_blocksize(fs->sb));
+@@ -88,6 +95,12 @@ int ext2_fs_mount(ext2_fs_t* fs)
+     }
+ #endif
+     return 1;
++
++fail:
++    free(fs->boot_sectors);
++    free(fs->sb);
++    fs->sb = NULL;
++    return 0;
+ }
+ 
+ int ext2_fs_unmount(ext2_fs_t* fs)
+@@ -97,6 +110,7 @@ int ext2_fs_unmount(ext2_fs_t* fs)
+         return 0;
+     }
+ 
++    free(fs->boot_sectors);
+     free(fs->sb);
+     fs->cache_destroy(fs->cache_handle);
+     fs->sb = fs->cache_handle = NULL;
+@@ -107,4 +121,3 @@ void ext2_fs_sync(ext2_fs_t* fs)
+ {
+     fs->cache_sync(fs->cache_handle);
+ }
+-
+diff --git a/ext2/libext2/include/ext2.h b/ext2/libext2/include/ext2.h
+index cde8b41..6dc0ab0 100644
+--- a/ext2/libext2/include/ext2.h
++++ b/ext2/libext2/include/ext2.h
+@@ -158,6 +158,9 @@ typedef struct ext2_fs {
+ 
+     /// Letzte allozierte Blocknummer
+     uint64_t block_prev_alloc;
++
++    /// Der Inhalt der ersten 1024 Bytes auf dem Ger?t
++    void* boot_sectors;
+ } ext2_fs_t;
+ 
+ /**
+diff --git a/ext2/libext2/superblock.c b/ext2/libext2/superblock.c
+index 973b26e..5e9e3d5 100644
+--- a/ext2/libext2/superblock.c
++++ b/ext2/libext2/superblock.c
+@@ -130,8 +130,18 @@ int ext2_sb_update(ext2_fs_t* fs, ext2_superblock_t* sb)
+             blocks_per_group) * block_size;
+ 
+         block = fs->cache_block(fs->cache_handle, start / block_size, 1);
+-        memcpy(block->data + (start % block_size), sb,
+-            sizeof(ext2_superblock_t));
++        if (i == 0 && block_size > 1024) {
++            memcpy(block->data, fs->boot_sectors, 1024);
++            memcpy(block->data + 1024, sb, sizeof(ext2_superblock_t));
++            memset(block->data + 1024 + sizeof(ext2_superblock_t), 0,
++                   block_size - 1024 - sizeof(ext2_superblock_t));
++        } else if (i == 0) {
++            memcpy(block->data, sb, sizeof(ext2_superblock_t));
++        } else {
++            memcpy(block->data, sb, sizeof(ext2_superblock_t));
++            memset(block->data + sizeof(ext2_superblock_t), 0,
++                   block_size - sizeof(ext2_superblock_t));
++        }
+         fs->cache_block_free(block, 1);
+     }
+ 
+-- 
+1.7.7
+
+
+From kevin at tyndur.org  Fri Jan 17 23:37:13 2014
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Fri, 17 Jan 2014 23:37:13 +0100
+Subject: [cdi-devel] [PATCH] libext2: Don't destroy boot loader
+In-Reply-To: <1388668941-12894-1-git-send-email-kevin@tyndur.org>
+References: <1388668941-12894-1-git-send-email-kevin@tyndur.org>
+Message-ID: <20140117223713.GA5569@silvanus>
+
+On Thu, Jan 02, 2014 at 02:22:21PM +0100, Kevin Wolf wrote:
+> The first 1024 bytes on the disk must be left alone. If they are part of
+> the first block, they need to be included in the write request of each
+> superblock update because the cache works only at the granularity of
+> filesystem blocks.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+> ---
+> 
+> Imported from libext2.git, translated commit message for cdi.git
+> 
+>  ext2/libext2/fs.c           |   21 +++++++++++++++++----
+>  ext2/libext2/include/ext2.h |    3 +++
+>  ext2/libext2/superblock.c   |   14 ++++++++++++--
+>  3 files changed, 32 insertions(+), 6 deletions(-)
+
+Apparently there are no objections, so I pushed this fix now.
+
+Kevin
+

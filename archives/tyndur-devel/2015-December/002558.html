@@ -1,0 +1,166 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH v2 15/24] servmgr: Workaround für zyklische Abhängigkeiten
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_v2_15/24%3D5D_servmgr%3D3A_Workarou%3F%3D%0A%09%3D%3Futf-8%3Fq%3Fnd_f%3DC3%3DBCr_zyklische_Abh%3DC3%3DA4ngigkeiten%3F%3D&In-Reply-To=%3C1449965469-16714-16-git-send-email-max%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002557.html">
+   <LINK REL="Next"  HREF="002574.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH v2 15/24] servmgr: Workaround für zyklische Abhängigkeiten</H1>
+    <B>Max Reitz</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_v2_15/24%3D5D_servmgr%3D3A_Workarou%3F%3D%0A%09%3D%3Futf-8%3Fq%3Fnd_f%3DC3%3DBCr_zyklische_Abh%3DC3%3DA4ngigkeiten%3F%3D&In-Reply-To=%3C1449965469-16714-16-git-send-email-max%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH v2 15/24] servmgr: Workaround für zyklische Abhängigkeiten">max at tyndur.org
+                  </A><BR>
+    <I>So Dez 13 01:11:00 CET 2015</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002557.html">[tyndur-devel] [PATCH v2 14/24] lock.h: locked_decrement()
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002574.html">[tyndur-devel] [PATCH v2 15/24] servmgr: Workaround für zyklische Abhängigkeiten
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2558">[ Datum ]</a>
+              <a href="thread.html#2558">[ Thema ]</a>
+              <a href="subject.html#2558">[ Betreff (Subject) ]</a>
+              <a href="author.html#2558">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>! Es kann passieren, dass Service A auf B wartet, der auf C wartet. Dann
+  melden sich diese beide beim servmgr, der dann für B darauf warten
+  soll, dass B gestartet ist, und für A, dass B fertig ist. Da týndur
+  leider keine Popupthreads für IPC benutzt, existiert aber nur ein
+  wartender Thread. Wenn A später als B angefragt hat, wird also A ewig
+  auf B warten, da B nie weiterlaufen kann, auch wenn C fertig ist.
+  Ein einfacher Workaround ist es, zu einem Zeitpunkt immer nur einem
+  anfragenden Service/Prozess das Privileg zu gestatten, den servmgr
+  selbst zu benutzen, um zu warten. Alle anderen bekommen ein EAGAIN,
+  wenn der Zielservice noch nicht angemeldet ist, und müssen das Warten
+  selber übernehmen (hier als wiederholte Anfragen bei servmgr
+  implementiert).
+
+Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">max at tyndur.org</A>&gt;
+---
+ src/modules/lib/servmgr.c   | 11 +++++++++--
+ src/modules/servmgr/rpcif.c | 22 ++++++++++++++++++++--
+ 2 files changed, 29 insertions(+), 4 deletions(-)
+
+diff --git a/src/modules/lib/servmgr.c b/src/modules/lib/servmgr.c
+index 3909350..429be73 100644
+--- a/src/modules/lib/servmgr.c
++++ b/src/modules/lib/servmgr.c
+@@ -26,6 +26,7 @@
+  * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
++#include &lt;errno.h&gt;
+ #include &lt;string.h&gt;
+ #include &lt;init.h&gt;
+ #include &lt;rpc.h&gt;
+@@ -36,8 +37,14 @@ static pid_t servmgr_pid(void);
+ 
+ bool servmgr_need(const char* service_name)
+ {
+-    return rpc_get_dword(servmgr_pid(), &quot;NEEDSERV&quot;, strlen(service_name) + 1,
+-        (char*) service_name);
++    int result;
++
++    do {
++        result = rpc_get_int(servmgr_pid(), &quot;NEEDSERV&quot;,
++                             strlen(service_name) + 1, (char*) service_name);
++    } while (result == -EAGAIN);
++
++    return result == 1;
+ }
+ 
+ /**
+diff --git a/src/modules/servmgr/rpcif.c b/src/modules/servmgr/rpcif.c
+index 6bbce79..645c8c5 100644
+--- a/src/modules/servmgr/rpcif.c
++++ b/src/modules/servmgr/rpcif.c
+@@ -40,6 +40,8 @@
+ #include &lt;string.h&gt;
+ #include &lt;stdio.h&gt;
+ #include &lt;init.h&gt;
++#include &lt;errno.h&gt;
++#include &lt;lock.h&gt;
+ #include &quot;servmgr.h&quot;
+ 
+ static void rpc_needserv(pid_t pid, uint32_t cid, size_t data_size, void* data);
+@@ -64,7 +66,7 @@ static void rpc_needserv(pid_t pid, uint32_t cid, size_t data_size, void* data)
+ 
+     // Pruefen ob der Name nullterminiert ist
+     if (!data_size || (name[data_size - 1] != 0)) {
+-        rpc_send_dword_response(pid, cid, 0);
++        rpc_send_int_response(pid, cid, 0);
+         return;
+     }
+ 
+@@ -73,10 +75,26 @@ static void rpc_needserv(pid_t pid, uint32_t cid, size_t data_size, void* data)
+     } else {
+         // Noch nicht konfiguriert. Jetzt bleibt nur hoffen, dass der Dienst
+         // schon geladen wurde, sich aber noch nicht registriert hat.
++
++        static volatile uint32_t semaphore;
++        if (locked_increment(&amp;semaphore) &gt; 0) {
++            locked_decrement(&amp;semaphore);
++            // Wir können nicht mehrere gleichzeitig warten lassen, weil das sonst
++            // zyklische Abhängigkeiten geben könnte
++            if (service_running(name)) {
++                rpc_send_int_response(pid, cid, true);
++            } else {
++                rpc_send_int_response(pid, cid, -EAGAIN);
++            }
++            return;
++        }
++
+         result = service_wait(name, 10000);
++
++        locked_decrement(&amp;semaphore);
+     }
+ 
+-    rpc_send_dword_response(pid, cid, result);
++    rpc_send_int_response(pid, cid, result);
+ }
+ 
+ /**
+-- 
+2.6.3
+
+</PRE>
+
+
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002557.html">[tyndur-devel] [PATCH v2 14/24] lock.h: locked_decrement()
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002574.html">[tyndur-devel] [PATCH v2 15/24] servmgr: Workaround für zyklische Abhängigkeiten
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2558">[ Datum ]</a>
+              <a href="thread.html#2558">[ Thema ]</a>
+              <a href="subject.html#2558">[ Betreff (Subject)]</a>
+              <a href="author.html#2558">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

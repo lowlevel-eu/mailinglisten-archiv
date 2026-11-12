@@ -1,0 +1,158 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 1/4] cdi/cache: Fehlerpfad gefixt
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%201/4%5D%20cdi/cache%3A%20Fehlerpfad%20gefixt&In-Reply-To=%3C1420986222-23055-2-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002476.html">
+   <LINK REL="Next"  HREF="002478.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 1/4] cdi/cache: Fehlerpfad gefixt</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%201/4%5D%20cdi/cache%3A%20Fehlerpfad%20gefixt&In-Reply-To=%3C1420986222-23055-2-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 1/4] cdi/cache: Fehlerpfad gefixt">kevin at tyndur.org
+                  </A><BR>
+    <I>So Jan 11 15:23:39 CET 2015</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002476.html">[tyndur-devel] [PATCH 4/4] atapi: Fix CDI_SCSI_WRITE
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002478.html">[tyndur-devel] [PATCH 0/6] vterm: Nach LostIOv2 konvertieren
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2472">[ Datum ]</a>
+              <a href="thread.html#2472">[ Thema ]</a>
+              <a href="subject.html#2472">[ Betreff (Subject) ]</a>
+              <a href="author.html#2472">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>! cdi/cache: Wenn das Laden eines Cacheblocks fehlgeschlagen ist, gibt
+  unsere CDI-Implementierung ihn wieder frei. Das ist schön, aber
+  dann sollte man auch darauf achten, dass keine Dangling Pointers
+  übrigbleiben.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/cdi/lib/cache.c | 46 +++++++++++++++++++++++++++++++--------------
+ 1 file changed, 32 insertions(+), 14 deletions(-)
+
+diff --git a/src/modules/cdi/lib/cache.c b/src/modules/cdi/lib/cache.c
+index 17b88c9..af8ed4e 100644
+--- a/src/modules/cdi/lib/cache.c
++++ b/src/modules/cdi/lib/cache.c
+@@ -328,6 +328,22 @@ static inline struct block* get_hint(struct cache* cache, uint64_t block)
+ }
+ 
+ /**
++ * Hint entfernen
++ *
++ * @param b Block-Struktur, die für die alte Blocknummer ungültig wurde
++ */
++static inline void invalidate_hint(struct cache* cache, struct block* b)
++{
++    int i;
++
++    for (i = 0; i &lt; HINTCNT; i++) {
++        if (cache-&gt;hints[i] == b) {
++            cache-&gt;hints[i] = NULL;
++        }
++    }
++}
++
++/**
+  * Hint setzen
+  *
+  * @param block Blocknummer
+@@ -419,7 +435,6 @@ struct cdi_cache_block* cdi_cache_block_get(struct cdi_cache* cache,
+     }
+ 
+     if (!b) {
+-        int in_tree = 0;
+         if (c-&gt;blocks_used &lt; c-&gt;block_count) {
+             // Wir duerfen noch mehr neue Blocks in den Cache legen
+             b = malloc(sizeof(*b));
+@@ -436,8 +451,8 @@ struct cdi_cache_block* cdi_cache_block_get(struct cdi_cache* cache,
+             if (!b) {
+                 return NULL;
+             }
+-            in_tree = 1;
+             tree_remove(c-&gt;tree, b);
++            invalidate_hint(c, b);
+             b-&gt;cdi.number = blocknum;
+             tree_insert(c-&gt;tree, b);
+         }
+@@ -446,19 +461,22 @@ struct cdi_cache_block* cdi_cache_block_get(struct cdi_cache* cache,
+         if (!noread &amp;&amp; !load_block(c, b)) {
+             puts(&quot;cdi_cache: Einlesen des Blocks fehlgeschlagen.&quot;);
+ 
+-            // Wenn der Knoten bis jetzt im Baum war, muss er rausgeworfen
+-            // werden
+-            if (in_tree) {
+-                tree_remove(c-&gt;tree, b);
+-
+-                // Auch aus der LRU-Liste muss der Block ggf. entfernt werden
+-                if (b-&gt;lru_next) {
+-                    b-&gt;lru_next-&gt;lru_prev = b-&gt;lru_prev;
+-                }
+-                if (b-&gt;lru_prev) {
+-                    b-&gt;lru_prev-&gt;lru_next = b-&gt;lru_next;
+-                }
++            tree_remove(c-&gt;tree, b);
++
++            if (b-&gt;lru_next) {
++                b-&gt;lru_next-&gt;lru_prev = b-&gt;lru_prev;
+             }
++            if (b-&gt;lru_prev) {
++                b-&gt;lru_prev-&gt;lru_next = b-&gt;lru_next;
++            }
++            if (c-&gt;lru_first == b) {
++                c-&gt;lru_first = b-&gt;lru_prev;
++            }
++            if (c-&gt;lru_last == b) {
++                c-&gt;lru_last = b-&gt;lru_next;
++            }
++            invalidate_hint(c, b);
++
+             c-&gt;blocks_used--;
+ 
+             free(b-&gt;cdi.data);
+-- 
+2.1.2
+
+</PRE>
+
+
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002476.html">[tyndur-devel] [PATCH 4/4] atapi: Fix CDI_SCSI_WRITE
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002478.html">[tyndur-devel] [PATCH 0/6] vterm: Nach LostIOv2 konvertieren
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2472">[ Datum ]</a>
+              <a href="thread.html#2472">[ Thema ]</a>
+              <a href="subject.html#2472">[ Betreff (Subject)]</a>
+              <a href="author.html#2472">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

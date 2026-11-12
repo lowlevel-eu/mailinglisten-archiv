@@ -1,0 +1,221 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] Verbesserte echo Funktion für LOSH ... mit bunt
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH%3D5D_Verbesserte_echo_Funktion_f%3F%3D%0A%09%3D%3Futf-8%3Fb%3Fw7xyIExPU0ggLi4uIG1pdCBidW50%3F%3D&In-Reply-To=%3C1280353675-5519-1-git-send-email-tyndur%40xmine.ath.cx%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001772.html">
+   
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] Verbesserte echo Funktion für LOSH ... mit bunt</H1>
+    <B>Stefan M</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH%3D5D_Verbesserte_echo_Funktion_f%3F%3D%0A%09%3D%3Futf-8%3Fb%3Fw7xyIExPU0ggLi4uIG1pdCBidW50%3F%3D&In-Reply-To=%3C1280353675-5519-1-git-send-email-tyndur%40xmine.ath.cx%3E"
+           TITLE="[tyndur-devel] [PATCH] Verbesserte echo Funktion für LOSH ... mit bunt">tyndur at xmine.ath.cx
+                  </A><BR>
+    <I>Mi Jul 28 23:47:55 CEST 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001772.html">[tyndur-devel] [PATCH 0/3] USB-Fixes
+</A></li>
+        
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1773">[ Datum ]</a>
+              <a href="thread.html#1773">[ Thema ]</a>
+              <a href="subject.html#1773">[ Betreff (Subject) ]</a>
+              <a href="author.html#1773">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>From: Stefan Merettig &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">papierkorb at doseneintopf.</A>(none)&gt;
+
+* echo kennt nun Flags (-n und -e) und kann mit Steuerzeichen umgehen (\\n, \\t, ..., \\0NNN, \\x42)
+---
+ src/modules/c/shell/cmds/echo.c |  137 ++++++++++++++++++++++++++++++++++++++-
+ 1 files changed, 134 insertions(+), 3 deletions(-)
+
+diff --git a/src/modules/c/shell/cmds/echo.c b/src/modules/c/shell/cmds/echo.c
+index fdb42b7..8d07893 100644
+--- a/src/modules/c/shell/cmds/echo.c
++++ b/src/modules/c/shell/cmds/echo.c
+@@ -36,20 +36,151 @@
+ #include &quot;types.h&quot;
+ #include &quot;stdio.h&quot;
+ #include &quot;stdlib.h&quot;
++#include &quot;stdbool.h&quot;
++#include &quot;string.h&quot;
+ #include &lt;lost/config.h&gt;
+ 
++#define is_numeric(c) ((c) &gt;= '0' &amp;&amp; (c) &lt;= '9')
++
+ #ifdef CONFIG_SHELL_BUILTIN_ONLY
+     int shell_command_echo(int argc, char* argv[], const char* args)
+ #else
+     int main(int argc, char* argv[])
+ #endif
+ {
+-    int i;
++    int i, j, len;
++    bool trailing_newline = true;
++    bool backslash_escapes = false;
++    bool process_flags = true;
++    char* input_str = NULL;
++    char* output_str = NULL;
++    char num_tmp[4];
++    char append = 0x0;
++    int out_len = 0;
++    int pos = 0; // Position im Ausgabestring
+ 
+     for (i = 1; i &lt; argc; i++) {
+-        printf(&quot;%s &quot;, argv[i]);
++        if (process_flags &amp;&amp; argv[i][0] == '-') {
++            input_str = argv[i];
++            for (j=1; input_str[j]; j++) {
++                switch (input_str[j]) {
++                    case 'n':
++                        trailing_newline = false;
++                        break;
++                    case 'e':
++                        backslash_escapes = true;
++                        break;
++                    default:
++                       j = 0xFFFFFFF; // weitere Flags überspringen
++                       i++;
++                       break;
++                }
++            }
++        } else {
++            process_flags = false;
++
++            input_str = argv[i];
++            len = strlen (input_str);
++            out_len += len+1;
++            output_str = realloc (output_str, out_len+2);
++
++            while (len) {
++                if (backslash_escapes &amp;&amp; input_str[0] == '\\' &amp;&amp;
++                    input_str[1] == '\\') {
++                    len -= 2;
++                    input_str += 2;
++                    if (!input_str[0]) {
++                        break;
++                    }
++                    switch (input_str[0]) {
++                        case '0':
++                            input_str++;
++                            len--;
++                            memset (num_tmp, 0x0, 4);
++                            for (j = 0; input_str[j] // Zahl kopieren
++                                &amp;&amp; is_numeric (input_str[j]) &amp;&amp; j &lt; 3; j++) {
++                                num_tmp[j] = input_str[j];
++                            }
++                            input_str += j - 1;
++                            len -= j - 1;
++                            append = (char)(strtol (num_tmp, NULL, 8));
++                            break;
++                        case 'x':
++                            input_str++;
++                            len--;
++                            memset (num_tmp, 0x0, 4);
++                            for (j = 0; input_str[j] // Zahl kopieren
++                                &amp;&amp; is_numeric (input_str[j]) &amp;&amp; j &lt; 2; j++) {
++                                num_tmp[j] = input_str[j];
++                            }
++                            input_str += j - 1;
++                            len -= j - 1;
++                            append = (char)(strtol (num_tmp, NULL, 16));
++                            break;
++                        case 'a':
++                            append = '\a';
++                            break;
++                        case 'b':
++                            append = '\b';
++                            break;
++                        case 'c':
++                            append = 0x0;
++                            break;
++                        case 'f':
++                            append = '\f';
++                            break;
++                        case 'n':
++                            append = '\n';
++                            break;
++                        case 'r':
++                            append = '\r';
++                            break;
++                        case 't':
++                            append = '\t';
++                            break;
++                        case 'v':
++                            append = '\v';
++                            break;
++                        default:
++                            append = '\\';
++                            len++; // Nicht das nächste Zeichen überspringen
++                            input_str--;
++                            break;
++                    }
++                    input_str++;
++                    len--;
++                } else {
++                    append = input_str[0];
++                    input_str++;
++                    len--;
++                }
++
++                output_str[pos] = append;
++                pos++;
++                output_str[pos] = 0x0;
++
++                if (!append) {
++                    goto output_string;
++                }
++                if (!input_str[0]) {
++                        break;
++                }
++            }
++            if (i &lt; argc-1) { // Kein Leerzeichen hinter dem letzten Parameter
++                output_str[pos] = ' ';
++                pos++;
++                output_str[pos] = 0x0;
++            }
++        }
++    }
++
++    output_string:
++    printf (&quot;%s&quot;, output_str);
++    free (output_str);
++
++    if (trailing_newline) {
++        putchar('\n');
+     }
+-    putchar('\n');
+ 
+     return EXIT_SUCCESS;
+ }
+-- 
+1.7.0.4
+
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001772.html">[tyndur-devel] [PATCH 0/3] USB-Fixes
+</A></li>
+	
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1773">[ Datum ]</a>
+              <a href="thread.html#1773">[ Thema ]</a>
+              <a href="subject.html#1773">[ Betreff (Subject)]</a>
+              <a href="author.html#1773">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

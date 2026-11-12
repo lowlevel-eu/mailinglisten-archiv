@@ -1,0 +1,263 @@
+Index: src/kernel/src/init.c
+===================================================================
+--- src/kernel/src/init.c	(Revision 675)
++++ src/kernel/src/init.c	(Arbeitskopie)
+@@ -56,6 +56,7 @@
+ #include "io.h"
+ #include "timer.h"
+ #include "shm.h"
++#include "vm86.h"
+ 
+ struct multiboot_info multiboot_info;
+ 
+Index: src/kernel/src/syscall.c
+===================================================================
+--- src/kernel/src/syscall.c	(Revision 675)
++++ src/kernel/src/syscall.c	(Arbeitskopie)
+@@ -283,7 +283,7 @@
+         {
+             vaddr_t address = *((vaddr_t*) isf->esp);
+             if (is_userspace(address, 1)) {
+-                isf->eax = resolve_vaddr(current_task->cr3, address);
++                isf->eax = (dword) resolve_vaddr(current_task->cr3, address);
+             } else {
+                 isf->eax = 0;
+             }
+@@ -434,7 +434,6 @@
+             // Das PD-des neuen tasks mappen
+             page_directory_t new_task_pd = new_task->cr3;
+             
+-            dword written = 0;
+             // Speicher wird kopiert, nicht gemappt.
+             while(num--) {
+                 if (!resolve_vaddr(new_task_pd, dest)) {
+@@ -752,7 +751,7 @@
+         case SYSCALL_DEBUG_STACKTRACE:
+         {
+             pid_t pid = *((dword*) (isf->esp));
+-            struct task* task = get_task(*((dword*) (isf->esp)));
++            struct task* task = get_task(pid);
+ 
+             // FIXME: Was bei einem Fehler
+             if (task != NULL) {
+Index: src/kernel/src/vm86.c
+===================================================================
+--- src/kernel/src/vm86.c	(Revision 675)
++++ src/kernel/src/vm86.c	(Arbeitskopie)
+@@ -40,6 +40,9 @@
+ #include "paging.h"
+ #include "intr.h"
+ #include "kprintf.h"
++#include "kmm.h"
++#include "kernel.h"
++#include <ports.h>
+ 
+ extern int num_tasks;
+ 
+@@ -252,7 +255,7 @@
+     //puts("vm86 Exception.\n");
+     if (isf->interrupt_number == 13) {
+         // GPF, wurde vermutlich durch einen nicht erlaubten Befehl verursacht
+-        byte *ops = (char*)(isf->eip + (isf->cs << 4));
++        byte *ops = (byte*)(isf->eip + (isf->cs << 4));
+         if (ops[0] == 0xCD) { // int
+             //kprintf("VM86: int 0x%x\n", ops[1]);
+             // Derzeitige Adresse auf den Stack pushen und neue Codeadresse setzen
+@@ -294,7 +297,7 @@
+                 }
+                 // Register speichern
+                 dword *phys_regs = resolve_vaddr(task->parent_task->cr3, (dword*)((dword)info->regs & ~0xFFF));
+-                dword regs = find_contiguous_kernel_pages(1);
++                dword regs = (dword) find_contiguous_kernel_pages(1);
+                 map_page(kernel_page_directory, (dword*)regs, phys_regs, PTE_P | PTE_W);
+                 vm86_regs_t * vm86_regs = (vm86_regs_t *)(regs + ((dword)info->regs & 0xFFF));
+                 vm86_regs->ax = isf->eax;
+@@ -321,7 +324,7 @@
+                 }
+                 // Task beenden
+                 if (!unblock_task(task->parent_task, task->pid)) {
+-                    puts("VM86: Konnte aufrufenden Task nicht wecken!\n");
++                    kprintf("VM86: Konnte aufrufenden Task nicht wecken!\n");
+                 }
+                 schedule(esp);
+                 destroy_task(task);
+Index: src/kernel/include/tasks.h
+===================================================================
+--- src/kernel/include/tasks.h	(Revision 675)
++++ src/kernel/include/tasks.h	(Arbeitskopie)
+@@ -63,6 +63,8 @@
+ void schedule_to_task(struct task* target_task, dword* esp);
+ void set_io_bitmap();
+ 
++// TODO: Nur wegen vm86.c hier
++pid_t generate_pid();
+ struct task * create_task(void * entry, const char* cmdline, pid_t parent);
+ void destroy_task(struct task* task);
+ struct task * get_task(pid_t pid);
+Index: src/include/strings.h
+===================================================================
+--- src/include/strings.h	(Revision 675)
++++ src/include/strings.h	(Arbeitskopie)
+@@ -37,9 +37,11 @@
+ #define _STRINGS_H_
+ 
+ #include <types.h>
++#include <string.h>
+ 
++/*
+ int strcasecmp(const char* s1, const char* s2);
+-int strncasecmp(const char* s1, const char* s2, size_t n);
++int strncasecmp(const char* s1, const char* s2, size_t n);*/
+ 
+ #endif // ifndef _STRINGS_H_
+ 
+Index: src/include/string.h
+===================================================================
+--- src/include/string.h	(Revision 675)
++++ src/include/string.h	(Arbeitskopie)
+@@ -18,9 +18,9 @@
+ int strcmp(const char* s1, const char* s2);
+ int strncmp(const char* s1, const char* s2, size_t n);
+ 
+-/* => strings.h
++/* => strings.h*/
+ int strcasecmp(const char *s1, const char *s2);
+-int strncasecmp(const char *s1, const char *s2, size_t n);*/
++int strncasecmp(const char *s1, const char *s2, size_t n);
+ 
+ size_t strlen(const char* s);
+ size_t strnlen(const char* s, size_t maxlen);
+Index: src/modules/kbc/keyboard.c
+===================================================================
+--- src/modules/kbc/keyboard.c	(Revision 675)
++++ src/modules/kbc/keyboard.c	(Arbeitskopie)
+@@ -23,7 +23,7 @@
+     {27,             27},         // 0x01
+     {'1',           '|'},         // 0x02
+     {'2',           '"'},         // 0x03 F5
+-    {'3',           '§'},         // 0x04 F3
++    {'3',             0},         // 0x04 F3
+     {'4',           '$'},         // 0x05 F1
+     {'5',           '%'},         // 0x06 F2
+     {'6',           '&'},         // 0x07 F12
+Index: src/modules/cdi/lib/cdi.c
+===================================================================
+--- src/modules/cdi/lib/cdi.c	(Revision 675)
++++ src/modules/cdi/lib/cdi.c	(Arbeitskopie)
+@@ -23,6 +23,9 @@
+ 
+ static void cdi_destroy(void);
+ 
++// FIXME
++int atexit(void (*function)(void));
++
+ /**
+  * Muss vor dem ersten Aufruf einer anderen CDI-Funktion aufgerufen werden.
+  * Initialisiert interne Datenstruktur der Implementierung fuer das jeweilige
+Index: src/modules/lib/stdlibc/gmtime.c
+===================================================================
+--- src/modules/lib/stdlibc/gmtime.c	(Revision 675)
++++ src/modules/lib/stdlibc/gmtime.c	(Arbeitskopie)
+@@ -35,6 +35,7 @@
+ 
+ #include <sys/types.h>
+ #include <time.h>
++#include <string.h>
+ 
+ struct tm tm;
+ 
+Index: src/modules/lib/stdlibc/jprintf.c
+===================================================================
+--- src/modules/lib/stdlibc/jprintf.c	(Revision 675)
++++ src/modules/lib/stdlibc/jprintf.c	(Arbeitskopie)
+@@ -55,8 +55,9 @@
+  */
+ unsigned long long divmod(unsigned long long dividend, unsigned int divisor, unsigned int * remainder)
+ {
+-    unsigned int highword = dividend >> 32;
+-    unsigned int lowword = dividend & 0xffffffff;
++    /*unsigned int highword = dividend >> 32;
++    unsigned int lowword = dividend & 0xffffffff;+*/
+     unsigned long long quotient;
+     unsigned int rem;
+ 
+Index: src/modules/lib/gui/gui.c
+===================================================================
+--- src/modules/lib/gui/gui.c	(Revision 675)
++++ src/modules/lib/gui/gui.c	(Arbeitskopie)
+@@ -37,6 +37,7 @@
+ #include "gui/commands.h"
+ #include "gui/widgets.h"
+ #include "video/bitmap.h"
++#include "video/color.h"
+ 
+ #include "types.h"
+ #include "stdio.h"
+@@ -284,12 +285,12 @@
+ 
+ int render_char(bitmap_t bitmap, font_t *font, unsigned char c, int x, int y)
+ {
+-    int glyph_index = ((int*)font->data)[c];
++    //int glyph_index = ((int*)font->data)[c];
+     //printf("Index: %d\n", glyph_index);
+     int offset = ((int*)font->data)[257 + c];
+     //printf("Offset: %d\n", offset);
+     int *glyph_data = (int*)(((char*)font->data) + offset);
+-    int width = glyph_data[0];
++    //int width = glyph_data[0];
+     int bearing_x = glyph_data[2];
+     int bearing_y = glyph_data[3];
+     int advance = glyph_data[4];
+Index: src/modules/lib/gui/widgets.c
+===================================================================
+--- src/modules/lib/gui/widgets.c	(Revision 675)
++++ src/modules/lib/gui/widgets.c	(Arbeitskopie)
+@@ -129,7 +129,7 @@
+                         ((char*)widget->data) + 4 + widget->data[0],
+                         strlen((char*)(widget->data + 1)) + 1 - widget->data[0]);
+                     free(widget->data);
+-                    widget->data = widgetdata;
++                    widget->data = (dword*) widgetdata;
+                     gui_repaint_window(window);
+                     widget->data[0]++;
+                 }
+Index: src/modules/lib/posix/stat.c
+===================================================================
+--- src/modules/lib/posix/stat.c	(Revision 675)
++++ src/modules/lib/posix/stat.c	(Arbeitskopie)
+@@ -35,8 +35,8 @@
+ 
+ #include <sys/stat.h>
+ #include <stdio.h>
++#include <dir.h>
+ 
+-
+ /**
+  * Modus einer Datei Aendern. Der Modus entscheidet unter anderem ueber
+  * Zugriffsberechtigungen.
+Index: src/modules/lib/envvars.c
+===================================================================
+--- src/modules/lib/envvars.c	(Revision 675)
++++ src/modules/lib/envvars.c	(Arbeitskopie)
+@@ -37,6 +37,7 @@
+ #include "syscall.h"
+ #include "stdlib.h"
+ #include "string.h"
++#include <stdio.h>
+ #include "collections.h"
+ 
+ typedef struct {
+Index: src/modules/lib/video/bitmap.c
+===================================================================
+--- src/modules/lib/video/bitmap.c	(Revision 675)
++++ src/modules/lib/video/bitmap.c	(Arbeitskopie)
+@@ -475,7 +475,8 @@
+         height = bitmap.height - y - offsety;
+     }
+     //Bitmap zeichnen
+-    int ix, iy;
++    int iy;
++    // int ix
+     switch (bitmap.bpp)
+     {
+         case 1:

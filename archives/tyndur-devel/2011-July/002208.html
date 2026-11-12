@@ -1,0 +1,226 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 4/5] tcpip: UDP-Paket über vorgegebene Route verschicken
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_4/5%3D5D_tcpip%3D3A_UDP-Paket_%3F%3D%0A%09%3D%3Futf-8%3Fq%3F%3DC3%3DBCber_vorgegebene_Route_verschicken%3F%3D&In-Reply-To=%3C1311536861-12812-5-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002207.html">
+   <LINK REL="Next"  HREF="002209.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 4/5] tcpip: UDP-Paket über vorgegebene Route verschicken</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_4/5%3D5D_tcpip%3D3A_UDP-Paket_%3F%3D%0A%09%3D%3Futf-8%3Fq%3F%3DC3%3DBCber_vorgegebene_Route_verschicken%3F%3D&In-Reply-To=%3C1311536861-12812-5-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 4/5] tcpip: UDP-Paket über vorgegebene Route verschicken">kevin at tyndur.org
+                  </A><BR>
+    <I>So Jul 24 21:47:40 CEST 2011</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002207.html">[tyndur-devel] [PATCH 3/5] tcpip: Include-Guard gefixt
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002209.html">[tyndur-devel] [PATCH 5/5] tcpip: Erster Teil der DHCP-Unterstützung
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2208">[ Datum ]</a>
+              <a href="thread.html#2208">[ Thema ]</a>
+              <a href="subject.html#2208">[ Betreff (Subject) ]</a>
+              <a href="author.html#2208">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ tcpip: Möglichkeit, IP- und UDP-Pakete mit einer vorgebenen Route
+  zu verschicken anstatt die Routentabelle zu benutzen. Damit kann DHCP
+  dann einen Broadcast auf die gewünschte Netzwerkkarte machen.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/tcpip/include/ip.h  |    5 +++++
+ src/modules/tcpip/include/udp.h |   12 ++++++++++++
+ src/modules/tcpip/ip.c          |   27 ++++++++++++++++++++-------
+ src/modules/tcpip/udp.c         |   25 ++++++++++++++++++++++++-
+ 4 files changed, 61 insertions(+), 8 deletions(-)
+
+diff --git a/src/modules/tcpip/include/ip.h b/src/modules/tcpip/include/ip.h
+index f7169c2..73d40b5 100644
+--- a/src/modules/tcpip/include/ip.h
++++ b/src/modules/tcpip/include/ip.h
+@@ -81,7 +81,12 @@ struct routing_entry* enum_routing_entry(size_t i);
+ size_t routing_get_entry_count(void);
+ 
+ bool ip_send(uint32_t dest_ip, uint8_t proto, void* data, size_t data_size);
++bool ip_send_route(uint32_t dest_ip, uint8_t proto, void* data,
++    size_t data_size, struct routing_entry* route);
++
+ bool ip_send_packet(struct ip_header* header, void* data, uint32_t size);
++bool ip_send_packet_route(struct ip_header* header, void* data, uint32_t size,
++    struct routing_entry* route);
+ 
+ /**
+  * IP-Paket versenden. Dabei wird das Routing umgangen und direkt die angegebene
+diff --git a/src/modules/tcpip/include/udp.h b/src/modules/tcpip/include/udp.h
+index f51d163..c02d17a 100644
+--- a/src/modules/tcpip/include/udp.h
++++ b/src/modules/tcpip/include/udp.h
+@@ -29,6 +29,8 @@
+ #ifndef UDP_H
+ #define UDP_H
+ 
++#include &quot;ip.h&quot;
++
+ #include &lt;stdint.h&gt;
+ #include &lt;stddef.h&gt;
+ 
+@@ -58,6 +60,16 @@ struct udp_pseudo_header {
+ struct udp_socket* udp_open(uint16_t sport, uint32_t daddr, uint16_t dport);
+ 
+ /**
++ * Öffnet einen UDP-Clientsocket über eine gegebene Route (ignoriert die
++ * Routentabelle)
++ *
++ * @param route Route, die benutzt werden soll
++ * @see udp_open
++ */
++struct udp_socket* udp_open_route(uint16_t sport, uint32_t daddr,
++    uint16_t dport, struct routing_entry* route);
++
++/**
+  * Liest ein einzelnes UDP-Paket aus
+  */
+ size_t udp_read(struct udp_socket* s, void* buf, size_t len);
+diff --git a/src/modules/tcpip/ip.c b/src/modules/tcpip/ip.c
+index 705b8e7..7fcb253 100644
+--- a/src/modules/tcpip/ip.c
++++ b/src/modules/tcpip/ip.c
+@@ -158,15 +158,17 @@ static bool ip_send_packet_direct(struct device* device, uint32_t dest_ip,
+ }
+ 
+ 
+-bool ip_send_packet(struct ip_header* header, void* data, uint32_t size)
++bool ip_send_packet_route(struct ip_header* header, void* data, uint32_t size,
++    struct routing_entry* route)
+ {
+     uint32_t dest_ip;
+-    struct routing_entry* route;
+ 
+     // Passende Route suchen
+-    route = get_routing_entry(header-&gt;dest_ip);
+-    if (!(route = get_routing_entry(header-&gt;dest_ip))) {
+-        return false;
++    if (route == NULL) {
++        route = get_routing_entry(header-&gt;dest_ip);
++        if (!(route = get_routing_entry(header-&gt;dest_ip))) {
++            return false;
++        }
+     }
+ 
+     // Wenn ein Router eingetragen ist, darueber versenden
+@@ -175,6 +177,11 @@ bool ip_send_packet(struct ip_header* header, void* data, uint32_t size)
+     return ip_send_packet_direct(route-&gt;device, dest_ip, header, data, size);
+ }
+ 
++bool ip_send_packet(struct ip_header* header, void* data, uint32_t size)
++{
++    return ip_send_packet_route(header, data, size, NULL);
++}
++
+ /**
+  * IP-Header befuellen
+  *
+@@ -199,11 +206,17 @@ static void ip_fill_header(struct ip_header* header, uint32_t dest_ip,
+     header-&gt;dest_ip         = dest_ip;
+ }
+ 
+-bool ip_send(uint32_t dest_ip, uint8_t proto, void* data, size_t data_size)
++bool ip_send_route(uint32_t dest_ip, uint8_t proto, void* data,
++    size_t data_size, struct routing_entry* route)
+ {
+     struct ip_header ip_header;
+     ip_fill_header(&amp;ip_header, dest_ip, proto, data_size);
+-    return ip_send_packet(&amp;ip_header, data, data_size);
++    return ip_send_packet_route(&amp;ip_header, data, data_size, route);
++}
++
++bool ip_send(uint32_t dest_ip, uint8_t proto, void* data, size_t data_size)
++{
++    return ip_send_route(dest_ip, proto, data, data_size, NULL);
+ }
+ 
+ /**
+diff --git a/src/modules/tcpip/udp.c b/src/modules/tcpip/udp.c
+index 49853eb..b093137 100644
+--- a/src/modules/tcpip/udp.c
++++ b/src/modules/tcpip/udp.c
+@@ -47,6 +47,7 @@ struct udp_socket {
+     uint32_t remote_ip;
+ 
+     list_t* incoming_packets;
++    struct routing_entry* route;
+ };
+ 
+ struct udp_packet {
+@@ -208,6 +209,27 @@ struct udp_socket* udp_open(uint16_t sport, uint32_t daddr, uint16_t dport)
+ }
+ 
+ /**
++ * Öffnet einen UDP-Clientsocket über eine gegebene Route (ignoriert die
++ * Routentabelle)
++ *
++ * @param route Route, die benutzt werden soll
++ * @see udp_open
++ */
++struct udp_socket* udp_open_route(uint16_t sport, uint32_t daddr,
++    uint16_t dport, struct routing_entry* route)
++{
++    struct udp_socket* s;
++
++    s = udp_open(sport, daddr, dport);
++    if (s == NULL) {
++        return NULL;
++    }
++
++    s-&gt;route = route;
++    return s;
++}
++
++/**
+  * LostIO-Wrapper für udp_read
+  */
+ static size_t lio_udp_read(lostio_filehandle_t* fh, void* buf,
+@@ -336,7 +358,8 @@ size_t udp_write(struct udp_socket* s, void* buf, size_t len)
+     udp_update_checksum(hdr, &amp;phdr,
+         udp_packet + sizeof(struct udp_header), len);
+ 
+-    ip_send(s-&gt;remote_ip, IP_PROTO_UDP, udp_packet, udp_packet_size);
++    ip_send_route(s-&gt;remote_ip, IP_PROTO_UDP, udp_packet, udp_packet_size,
++        s-&gt;route);
+ 
+     return len;
+ }
+-- 
+1.6.0.2
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002207.html">[tyndur-devel] [PATCH 3/5] tcpip: Include-Guard gefixt
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002209.html">[tyndur-devel] [PATCH 5/5] tcpip: Erster Teil der DHCP-Unterstützung
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2208">[ Datum ]</a>
+              <a href="thread.html#2208">[ Thema ]</a>
+              <a href="subject.html#2208">[ Betreff (Subject)]</a>
+              <a href="author.html#2208">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

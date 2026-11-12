@@ -1,0 +1,342 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH v2 4/8] Pascal-RTL: lio_compat_* statt	stdio.h-Funktionen benutzen
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%204/8%5D%20Pascal-RTL%3A%20lio_compat_%2A%20statt%0A%09stdio.h-Funktionen%20benutzen&In-Reply-To=%3C1437432317-27705-5-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002498.html">
+   <LINK REL="Next"  HREF="002501.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH v2 4/8] Pascal-RTL: lio_compat_* statt	stdio.h-Funktionen benutzen</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%204/8%5D%20Pascal-RTL%3A%20lio_compat_%2A%20statt%0A%09stdio.h-Funktionen%20benutzen&In-Reply-To=%3C1437432317-27705-5-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH v2 4/8] Pascal-RTL: lio_compat_* statt	stdio.h-Funktionen benutzen">kevin at tyndur.org
+                  </A><BR>
+    <I>Di Jul 21 00:45:13 CEST 2015</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002498.html">[tyndur-devel] [PATCH v2 3/8] libc: LIOv2 in lio_compat_eof()	abfangen
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002501.html">[tyndur-devel] [PATCH v2 5/8] kernel2: LIO-Read-Syscall nimmt jetzt	Flags
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2500">[ Datum ]</a>
+              <a href="thread.html#2500">[ Thema ]</a>
+              <a href="subject.html#2500">[ Betreff (Subject) ]</a>
+              <a href="author.html#2500">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* Pascal-RTL: Benutzt jetzt direkt lio_compat_*. Doppelt Puffern ist
+  Blödsinn und sobald fread() blockiert wie es sollte, ist es vollends
+  unbrauchbar für unsere Zwecke.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/pas/lib/rtl/sysfile.inc | 130 +++++++++++++++++++++++-------------
+ src/modules/pas/lib/rtl/system.pas  |  15 +++--
+ 2 files changed, 91 insertions(+), 54 deletions(-)
+
+diff --git a/src/modules/pas/lib/rtl/sysfile.inc b/src/modules/pas/lib/rtl/sysfile.inc
+index b0cd787..7d731a1 100644
+--- a/src/modules/pas/lib/rtl/sysfile.inc
++++ b/src/modules/pas/lib/rtl/sysfile.inc
+@@ -3,25 +3,34 @@ const
+     SEEK_CUR = 1;
+     SEEK_END = 2;
+ 
+-function c_fopen(filename, mode: PChar): THandle; cdecl; external name 'fopen';
+-function c_fclose(f: THandle): integer; cdecl; external name 'fclose';
+-
+-function c_fwrite(src: Pointer; blocksize, blockcount: TSize; f: THandle): TSize; cdecl; external name 'fwrite';
+-function c_fread(dest: Pointer; blocksize, blockcount: TSize; f: THandle): TSize; cdecl; external name 'fread';
+-function c_fseek(f: THandle; offset, whence: longint): longint; cdecl; external name 'fseek';
+-function c_ftell(f: THandle): TSize; cdecl; external name 'ftell';
++const
++    IO_OPEN_MODE_READ = 1;
++    IO_OPEN_MODE_WRITE = 2;
++    IO_OPEN_MODE_APPEND = 4;
++    IO_OPEN_MODE_TRUNC = 8;
++    IO_OPEN_MODE_DIRECTORY = 16;
++    IO_OPEN_MODE_CREATE = 32;
++    IO_OPEN_MODE_LINK = 64;
++    IO_OPEN_MODE_SYNC = 128;
+ 
+-function c_feof(f: THandle): boolean; cdecl; external name 'feof';
++const
++    EAGAIN = 18;
+ 
+-function c_setvbuf(f: THandle; buf: Pointer; mode: integer; size: TSize):
+-    integer; cdecl; external name 'setvbuf';
++function lio_compat_open(filename: PChar; mode: byte): THandle; cdecl; external name 'lio_compat_open';
++function lio_compat_close(io_res: THandle): integer; cdecl; external name 'lio_compat_close';
+ 
++function lio_compat_read(dest: Pointer; blocksize, blockcount: TSize; io_res: THandle): TSSize; cdecl; external name 'lio_compat_read';
++function lio_compat_readahead(dest: Pointer; size: TSize; io_res: THandle): TSSize; cdecl; external name 'lio_compat_readahead';
++function lio_compat_write(src: Pointer; blocksize, blockcount: TSize; io_res: THandle): TSSize; cdecl; external name 'lio_compat_write';
++function lio_compat_eof(io_res: THandle): integer; cdecl; external name 'lio_compat_eof';
++function lio_compat_seek(io_res: THandle; offset: qword; origin: integer): boolean; cdecl; external name 'lio_compat_seek';
++function lio_compat_tell(io_res: THandle): int64; cdecl; external name 'lio_compat_tell';
+ 
+ { TODO errno setzen nicht vergessen }
+ 
+ Procedure Do_Close(f: THandle);
+ begin
+-    c_fclose(f);
++    lio_compat_close(f);
+ end;
+ 
+ Procedure Do_Erase(p:pchar);
+@@ -37,49 +46,70 @@ begin { TODO } end;
+ 
+ Function Do_Write(f: THandle; src: Pointer; len: TSize): TSize;
+ var
+-    ret: TSize;
++    ret: TSSize;
+ begin
+-    InOutRes := 0;
+-
+-    Do_Write := 0;
+-    while len &gt; 0 do begin
+-        ret := c_fwrite(src, 1, len, f);
+-        if (ret = 0) or (ret &gt; len) then begin
+-            InOutRes := 101;
+-            exit(0);
+-        end;
+-
+-        Inc(Do_Write, ret);
+-        Inc(src, ret);
+-        Dec(len, ret);
++    ret := lio_compat_write(src, 1, len, f);
++    if ret &lt; 0 then begin
++        InOutRes := 101;
++        Do_Write := 0;
++    end else begin
++        InOutRes := 0;
++        Do_Write := ret;
+     end;
+ end;
+ 
+ Function Do_Read(f: THandle; dest: Pointer; len: TSize): TSize;
++var
++    ret: TSSize;
+ begin
+     InOutRes := 0;
+ 
+-    repeat
+-        Do_Read := c_fread(dest, 1, len, f);
+-    until (Do_Read &lt;&gt; 0) or (c_feof(f));
++    ret := lio_compat_read(dest, 1, len, f);
++    if ret &lt; 0 then begin
++        InOutRes := 101;
++        exit(0);
++    end else begin
++        Do_Read := ret;
++    end;
+ end;
+ 
+ function Do_FilePos(f: THandle): TSize;
++var
++    ret: int64;
+ begin
+     InOutRes := 0;
+-    Do_FilePos := c_ftell(f);
++    ret := lio_compat_tell(f);
++    if ret &lt; 0 then begin
++        InOutRes := 101;
++        exit(0);
++    end else begin
++        exit(ret);
++    end;
+ end;
+ 
+ Procedure Do_Seek(f: THandle; position: TSize);
++var
++    ret: boolean;
+ begin
+     InOutRes := 0;
+-    c_fseek(f, position, SEEK_SET);
++    ret := lio_compat_seek(f, position, SEEK_SET);
++    if not ret then begin
++        InOutRes := 101;
++    end;
+ end;
+ 
+ Function Do_SeekEnd(f: THandle): TSize;
++var
++    ret: boolean;
+ begin
+     InOutRes := 0;
+-    Do_SeekEnd := c_fseek(f, 0, SEEK_END);
++    ret := lio_compat_seek(f, 0, SEEK_END);
++    if not ret then begin
++        InOutRes := 101;
++        exit(0);
++    end else begin
++        exit(Do_FilePos(f));
++    end;
+ end;
+ 
+ Function Do_FileSize(f: THandle): Longint;
+@@ -95,7 +125,8 @@ end;
+ 
+ Procedure Do_Open(var f; name: PChar; flags: longint);
+ var
+-    c_mode: string[3];
++    c_mode: byte;
++    autoclose: boolean;
+     append: boolean;
+     trunc: boolean;
+     frec: ^FileRec;
+@@ -103,50 +134,55 @@ begin
+     InOutRes := 0;
+     frec := @FileRec(f);
+ 
++    append := (flags and $100 &lt;&gt; 0);
++    trunc := (flags and $1000 &lt;&gt; 0);
++    autoclose := (flags and $10000 &lt;&gt; 0);
++
+     // Wenn eine Datei noch geoeffnet ist, muss sie zuerst
+     // geschlossen werden.
+-    if (frec^.mode = fminput) or (frec^.mode = fmoutput) or (frec^.mode = fminout) then begin
++    if autoclose
++       and ((frec^.mode = fminput) or (frec^.mode = fmoutput) or (frec^.mode = fminout))
++       and (frec^.handle &lt;&gt; 0)
++    then begin
+         Do_Close(frec^.handle);
+     end;
+-    
+-    append := (flags and $100 &lt;&gt; 0);
+-    trunc := (flags and $1000 &lt;&gt; 0);
+ 
+     if name &lt;&gt; '' then begin
+ 
+         // Eine normale Datei
+         case flags and 3 of
+             0:  begin
+-                    c_mode := 'r'#0;
++                    c_mode := IO_OPEN_MODE_READ;
+                     frec^.mode := fmInput;
+                 end;
+ 
+             1:  begin
++                    c_mode := IO_OPEN_MODE_WRITE;
+                     if append then begin
+-                        c_mode := 'a'#0 
+-                    end else begin 
+-                        c_mode := 'w'#0;
++                        c_mode := c_mode or IO_OPEN_MODE_APPEND;
++                    end else if trunc then begin
++                        c_mode := c_mode or IO_OPEN_MODE_CREATE or IO_OPEN_MODE_TRUNC;
+                     end;
+                     frec^.mode := fmOutput;
+                 end;
+-            2:  begin 
++            2:  begin
+                     if append then begin
+-                        c_mode := 'a+'#0 
++                        c_mode := IO_OPEN_MODE_READ or IO_OPEN_MODE_WRITE
++                               or IO_OPEN_MODE_CREATE or IO_OPEN_MODE_APPEND;
+                     end else if trunc then begin
+-                        c_mode := 'w+'#0 
++                        c_mode := IO_OPEN_MODE_READ or IO_OPEN_MODE_WRITE
++                               or IO_OPEN_MODE_CREATE or IO_OPEN_MODE_TRUNC;
+                     end else begin
+-                        c_mode := 'r+'#0;
++                        c_mode := IO_OPEN_MODE_READ or IO_OPEN_MODE_WRITE;
+                     end;
+                     frec^.mode := fmInOut;
+                 end;
+         end;
+ 
+-        frec^.handle := c_fopen(name, @c_mode[1]);
++        frec^.handle := lio_compat_open(name, c_mode);
+ 
+         if frec^.handle = 0 then begin
+             InOutRes := 2;
+-        end else begin
+-            c_setvbuf(frec^.handle, nil, 1, 0);
+         end;
+ 
+     end else begin
+diff --git a/src/modules/pas/lib/rtl/system.pas b/src/modules/pas/lib/rtl/system.pas
+index a658a37..14661a3 100644
+--- a/src/modules/pas/lib/rtl/system.pas
++++ b/src/modules/pas/lib/rtl/system.pas
+@@ -12,6 +12,7 @@ interface
+ 
+ type
+     TSize = dword;
++    TSSize = longint;
+ 
+ const
+  LineEnding = #10;
+@@ -48,7 +49,7 @@ const
+   DefaultTextLineBreakStyle : TTextLineBreakStyle = tlbsLF;
+ 
+ var
+-    argc: dword;
++    argc: integer;
+     argv: PPChar;
+     commandline: PChar;
+ 
+@@ -168,9 +169,9 @@ function c_setvbuf(f: Pointer; buf: Pointer; mode: integer; size: TSize):
+     integer; cdecl; external name 'setvbuf';
+ 
+ var
+-    c_stdin:  dword; external name 'stdin';
+-    c_stdout: dword; external name 'stdout';
+-    c_stderr: dword; external name 'stderr';
++    c_stdin:  ^dword; external name 'stdin';
++    c_stdout: ^dword; external name 'stdout';
++    c_stderr: ^dword; external name 'stderr';
+ 
+ procedure SysInitStdIO;
+ (*
+@@ -200,9 +201,9 @@ begin
+ 
+     c_stdio_init();
+ 
+-    StdInputHandle  := c_stdin;
+-    StdOutputHandle := c_stdout;
+-    StdErrorHandle  := c_stderr;
++    StdInputHandle  := c_stdin^;
++    StdOutputHandle := c_stdout^;
++    StdErrorHandle  := c_stderr^;
+ 
+     c_setvbuf(c_stdout, nil, 1, 0);
+ 
+-- 
+2.1.4
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002498.html">[tyndur-devel] [PATCH v2 3/8] libc: LIOv2 in lio_compat_eof()	abfangen
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002501.html">[tyndur-devel] [PATCH v2 5/8] kernel2: LIO-Read-Syscall nimmt jetzt	Flags
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2500">[ Datum ]</a>
+              <a href="thread.html#2500">[ Thema ]</a>
+              <a href="subject.html#2500">[ Betreff (Subject)]</a>
+              <a href="author.html#2500">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

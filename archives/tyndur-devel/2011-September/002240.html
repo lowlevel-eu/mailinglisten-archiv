@@ -1,0 +1,309 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 2/5] libc: lio_compat_open()
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%202/5%5D%20libc%3A%20lio_compat_open%28%29&In-Reply-To=%3C20110918154543.GB3113%40neo.geekcave.lan%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002235.html">
+   <LINK REL="Next"  HREF="002236.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 2/5] libc: lio_compat_open()</H1>
+    <B>Antoine Kaufmann</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%202/5%5D%20libc%3A%20lio_compat_open%28%29&In-Reply-To=%3C20110918154543.GB3113%40neo.geekcave.lan%3E"
+           TITLE="[tyndur-devel] [PATCH 2/5] libc: lio_compat_open()">toni at tyndur.org
+                  </A><BR>
+    <I>So Sep 18 17:45:44 CEST 2011</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002235.html">[tyndur-devel] [PATCH 2/5] libc: lio_compat_open()
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002236.html">[tyndur-devel] [PATCH 3/5] libc: lio_compat_write/close()
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2240">[ Datum ]</a>
+              <a href="thread.html#2240">[ Thema ]</a>
+              <a href="subject.html#2240">[ Betreff (Subject) ]</a>
+              <a href="author.html#2240">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>On Sun, Sep 18 14:41, Kevin Wolf wrote:
+&gt;<i> + libc: lio_compat_open() öffnet einen io_resource_t und wird von
+</I>&gt;<i>   fopen() benutzt um ein FILE zu öffnen. Die Idee ist, dass
+</I>&gt;<i>   lio_compat_*() die Weiche zwischen LIOv1 und LIOv2 eingebaut
+</I>&gt;<i>   bekommen und stdio von den Unterschieden isoliert bleibt.
+</I>&gt;<i> 
+</I>&gt;<i> Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+</I>&gt;<i> ---
+</I>&gt;<i>  src/modules/include/io_struct.h      |    1 -
+</I>&gt;<i>  src/modules/include/lostio.h         |    2 +
+</I>&gt;<i>  src/modules/lib/lostio/client/file.c |   64 +++++++++++++++++++++++++++++
+</I>&gt;<i>  src/modules/lib/stdlibc/file.c       |   73 ++++++++++++----------------------
+</I>&gt;<i>  4 files changed, 91 insertions(+), 49 deletions(-)
+</I>&gt;<i>  create mode 100644 src/modules/lib/lostio/client/file.c
+</I>&gt;<i> 
+</I>&gt;<i> diff --git a/src/modules/include/io_struct.h b/src/modules/include/io_struct.h
+</I>&gt;<i> index 813fa5d..b769b09 100644
+</I>&gt;<i> --- a/src/modules/include/io_struct.h
+</I>&gt;<i> +++ b/src/modules/include/io_struct.h
+</I>&gt;<i> @@ -48,7 +48,6 @@ typedef uint8_t io_direntry_type_t;
+</I>&gt;<i>  typedef struct
+</I>&gt;<i>  {
+</I>&gt;<i>      io_resource_id_t    id;
+</I>&gt;<i> -    char*               path;
+</I>
+Was für ein schönes Relikt. Ich glaube das war mal irgned ein Hack für
+fstat() oder sowas. ;-)
+
+&gt;<i>      pid_t               pid;
+</I>&gt;<i>      io_resource_id_t    resid;
+</I>&gt;<i>  
+</I>&gt;<i> diff --git a/src/modules/include/lostio.h b/src/modules/include/lostio.h
+</I>&gt;<i> index 3579bf4..f8d3a57 100644
+</I>&gt;<i> --- a/src/modules/include/lostio.h
+</I>&gt;<i> +++ b/src/modules/include/lostio.h
+</I>&gt;<i> @@ -189,6 +189,8 @@ void lostio_type_directory_use(void);
+</I>&gt;<i>  void lostio_type_directory_use_as(typeid_t id);
+</I>&gt;<i>  
+</I>&gt;<i>  
+</I>&gt;<i> +/// Stream oeffnen
+</I>&gt;<i> +io_resource_t* lio_compat_open(const char* filename, uint8_t attr);
+</I>&gt;<i>  
+</I>&gt;<i>  /// Stream-Position setzen
+</I>&gt;<i>  bool lio_seek(struct lostio_internal_file* io_res, uint64_t offset, int origin);
+</I>&gt;<i> diff --git a/src/modules/lib/lostio/client/file.c b/src/modules/lib/lostio/client/file.c
+</I>&gt;<i> new file mode 100644
+</I>&gt;<i> index 0000000..3e048bb
+</I>&gt;<i> --- /dev/null
+</I>&gt;<i> +++ b/src/modules/lib/lostio/client/file.c
+</I>&gt;<i> @@ -0,0 +1,64 @@
+</I>&gt;<i> +/*
+</I>&gt;<i> + * Copyright (c) 2006 The tyndur Project. All rights reserved.
+</I>&gt;<i> + *
+</I>&gt;<i> + * This code is derived from software contributed to the tyndur Project
+</I>&gt;<i> + * by Antoine Kaufmann.
+</I>&gt;<i> + *
+</I>&gt;<i> + * Redistribution and use in source and binary forms, with or without
+</I>&gt;<i> + * modification, are permitted provided that the following conditions
+</I>&gt;<i> + * are met:
+</I>&gt;<i> + * 1. Redistributions of source code must retain the above copyright
+</I>&gt;<i> + *    notice, this list of conditions and the following disclaimer.
+</I>&gt;<i> + * 2. Redistributions in binary form must reproduce the above copyright
+</I>&gt;<i> + *    notice, this list of conditions and the following disclaimer in the
+</I>&gt;<i> + *    documentation and/or other materials provided with the distribution.
+</I>&gt;<i> + *
+</I>&gt;<i> + * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+</I>&gt;<i> + * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+</I>&gt;<i> + * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+</I>&gt;<i> + * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
+</I>&gt;<i> + * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+</I>&gt;<i> + * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+</I>&gt;<i> + * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+</I>&gt;<i> + * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+</I>&gt;<i> + * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+</I>&gt;<i> + * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+</I>&gt;<i> + * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+</I>&gt;<i> + */
+</I>&gt;<i> +
+</I>&gt;<i> +#include &lt;lostio.h&gt;
+</I>&gt;<i> +#include &lt;stdint.h&gt;
+</I>&gt;<i> +#include &lt;string.h&gt;
+</I>&gt;<i> +#include &lt;stdlib.h&gt;
+</I>&gt;<i> +#include &lt;rpc.h&gt;
+</I>&gt;<i> +
+</I>&gt;<i> +io_resource_t* lio_compat_open(const char* filename, uint8_t attr)
+</I>&gt;<i> +{
+</I>&gt;<i> +    char* full_path = io_get_absolute_path(filename);
+</I>&gt;<i> +    io_resource_t* result;
+</I>&gt;<i> +
+</I>&gt;<i> +    if (!full_path) {
+</I>&gt;<i> +        return NULL;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    // RPC-Daten zusammenstellen
+</I>&gt;<i> +    char msg[strlen(full_path) + 2];
+</I>&gt;<i> +    msg[0] = attr;
+</I>&gt;<i> +    memcpy(msg + 1, full_path, strlen(full_path) + 1);
+</I>&gt;<i> +
+</I>&gt;<i> +    response_t* resp = rpc_get_response(1, &quot;IO_OPEN &quot;, strlen(full_path) + 2,
+</I>&gt;<i> +        (char*) msg);
+</I>&gt;<i> +    if (resp == NULL || resp-&gt;data_length == 0) {
+</I>
+Memory-Leak, full_path wurde nicht freigegeben, hier hilft es wohl 
+
+&gt;<i> +        return NULL;
+</I>&gt;<i> +    };
+</I>&gt;<i> +
+</I>&gt;<i> +    result = resp-&gt;data;
+</I>&gt;<i> +    if (result-&gt;pid == 0) {
+</I>
+dito für full_path, plus resp wird hier geleakt
+
+&gt;<i> +        return NULL;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    free(full_path);
+</I>&gt;<i> +    free(resp);
+</I>&gt;<i> +
+</I>&gt;<i> +    return result;
+</I>&gt;<i> +}
+</I>&gt;<i> diff --git a/src/modules/lib/stdlibc/file.c b/src/modules/lib/stdlibc/file.c
+</I>&gt;<i> index fa20680..522eba6 100644
+</I>&gt;<i> --- a/src/modules/lib/stdlibc/file.c
+</I>&gt;<i> +++ b/src/modules/lib/stdlibc/file.c
+</I>&gt;<i> @@ -73,91 +73,68 @@ static void* get_shm(size_t size)
+</I>&gt;<i>   */
+</I>&gt;<i>  FILE* fopen (const char* filename, const char* mode)
+</I>&gt;<i>  {
+</I>&gt;<i> -    char* full_path = io_get_absolute_path(filename);
+</I>&gt;<i> -    if (!full_path) {
+</I>&gt;<i> -        return NULL;
+</I>&gt;<i> -    }
+</I>&gt;<i> +    uint8_t attr;
+</I>&gt;<i>  
+</I>&gt;<i> -    //RPC-Daten zusammenstellen
+</I>&gt;<i> -    char msg[strlen(full_path) + 2];
+</I>&gt;<i> -    uint8_t* attr = (uint8_t*) msg;
+</I>&gt;<i> -    
+</I>&gt;<i>      //Attribute aus dem mode-String parsen
+</I>&gt;<i> -    *attr = 0;
+</I>&gt;<i> +    attr = 0;
+</I>&gt;<i>      int i;
+</I>&gt;<i>      for (i = 0; i &lt; strlen(mode); i++) {
+</I>&gt;<i>          switch (mode[i]) {
+</I>&gt;<i>              case 'r':
+</I>&gt;<i> -                *attr |= IO_OPEN_MODE_READ;
+</I>&gt;<i> +                attr |= IO_OPEN_MODE_READ;
+</I>&gt;<i>                  if (mode[i + 1] == '+') {
+</I>&gt;<i> -                    *attr |= IO_OPEN_MODE_WRITE;
+</I>&gt;<i> +                    attr |= IO_OPEN_MODE_WRITE;
+</I>&gt;<i>                  }
+</I>&gt;<i>                  break;
+</I>&gt;<i>  
+</I>&gt;<i>              case 'w':
+</I>&gt;<i> -                *attr |= IO_OPEN_MODE_WRITE | IO_OPEN_MODE_CREATE |
+</I>&gt;<i> +                attr |= IO_OPEN_MODE_WRITE | IO_OPEN_MODE_CREATE |
+</I>&gt;<i>                      IO_OPEN_MODE_TRUNC;
+</I>&gt;<i>  
+</I>&gt;<i>                  // Bei w+ muss Lesen auch aktiviert werden.
+</I>&gt;<i>                  if (mode[i + 1] == '+') {
+</I>&gt;<i> -                    *attr |= IO_OPEN_MODE_READ;
+</I>&gt;<i> +                    attr |= IO_OPEN_MODE_READ;
+</I>&gt;<i>                  }
+</I>&gt;<i>                  break;
+</I>&gt;<i>  
+</I>&gt;<i>              case 'a':
+</I>&gt;<i> -                *attr |= IO_OPEN_MODE_WRITE | IO_OPEN_MODE_CREATE 
+</I>&gt;<i> +                attr |= IO_OPEN_MODE_WRITE | IO_OPEN_MODE_CREATE
+</I>&gt;<i>                      | IO_OPEN_MODE_APPEND;
+</I>&gt;<i>                  break;
+</I>&gt;<i>  
+</I>&gt;<i>              case 'd':
+</I>&gt;<i> -                *attr |= IO_OPEN_MODE_DIRECTORY;
+</I>&gt;<i> +                attr |= IO_OPEN_MODE_DIRECTORY;
+</I>&gt;<i>                  break;
+</I>&gt;<i>  
+</I>&gt;<i>              case 'l':
+</I>&gt;<i> -                *attr |= IO_OPEN_MODE_LINK;
+</I>&gt;<i> +                attr |= IO_OPEN_MODE_LINK;
+</I>&gt;<i>                  break;
+</I>&gt;<i>  
+</I>&gt;<i>          }
+</I>&gt;<i>      }
+</I>&gt;<i>  
+</I>&gt;<i> -    //Dateiname inkl Null-Byte kopieren
+</I>&gt;<i> -    memcpy((void*) ((uint32_t)msg + 1), full_path, strlen(full_path) + 1);
+</I>&gt;<i> -
+</I>&gt;<i> -    response_t* resp = rpc_get_response(1, &quot;IO_OPEN &quot;, strlen(full_path) + 2, 
+</I>&gt;<i> -        (char*) msg);
+</I>&gt;<i> -
+</I>&gt;<i> -    //Da der Pfad vorhin allokiert wurde, muss er hier wieder freigegeben
+</I>&gt;<i> -    //weren.
+</I>&gt;<i> -    free(full_path);
+</I>&gt;<i> +    // Datei oeffnen
+</I>&gt;<i> +    io_resource_t* io_res = lio_compat_open(filename, attr);
+</I>&gt;<i> +    if (io_res == NULL) {
+</I>&gt;<i> +        return NULL;
+</I>&gt;<i> +    }
+</I>&gt;<i>  
+</I>&gt;<i> +    // FILE-Struktur anlegen
+</I>&gt;<i>      FILE* int_res;
+</I>&gt;<i> -    io_resource_t* io_res = (io_resource_t*) resp-&gt;data;
+</I>&gt;<i>  
+</I>&gt;<i> -    //Wenn ein Fehler beim oeffnen aufgetreten ist, wird NULL zurueck gegeben.
+</I>&gt;<i> -    if ((io_res == NULL) || (io_res-&gt;pid == 0) || (resp-&gt;data_length == 0)) {
+</I>&gt;<i> -        int_res = NULL;
+</I>&gt;<i> -    } else {
+</I>&gt;<i> -
+</I>&gt;<i> -        // Pfad im Handle hinterlegen
+</I>&gt;<i> -        io_res-&gt;path = malloc(strlen(filename) + 1);
+</I>&gt;<i> -        strcpy(io_res-&gt;path, filename);
+</I>&gt;<i> +    int_res = calloc(1, sizeof(*int_res));
+</I>&gt;<i> +    int_res-&gt;res = *io_res;
+</I>&gt;<i>  
+</I>&gt;<i> +    int_res-&gt;buffer_mode = IO_BUFFER_MODE_NONE;
+</I>&gt;<i> +    int_res-&gt;buffer_ptr = NULL;
+</I>&gt;<i> +    int_res-&gt;buffer_size = 0;
+</I>&gt;<i> +    int_res-&gt;buffer_pos = 0;
+</I>&gt;<i> +    int_res-&gt;free_buffer = false;
+</I>&gt;<i> +    setvbuf(int_res, malloc(BUFSIZ), _IOFBF, BUFSIZ);
+</I>&gt;<i> +    int_res-&gt;free_buffer = true;
+</I>&gt;<i>  
+</I>&gt;<i> -        int_res = calloc(1, sizeof(*int_res));
+</I>&gt;<i> -        int_res-&gt;res = *io_res;
+</I>&gt;<i> -
+</I>&gt;<i> -        int_res-&gt;buffer_mode = IO_BUFFER_MODE_NONE;
+</I>&gt;<i> -        int_res-&gt;buffer_ptr = NULL;
+</I>&gt;<i> -        int_res-&gt;buffer_size = 0;
+</I>&gt;<i> -        int_res-&gt;buffer_pos = 0;
+</I>&gt;<i> -        int_res-&gt;free_buffer = false;
+</I>&gt;<i> -        setvbuf(int_res, malloc(BUFSIZ), _IOFBF, BUFSIZ);
+</I>&gt;<i> -        int_res-&gt;free_buffer = true;
+</I>&gt;<i> +    free(io_res);
+</I>&gt;<i>  
+</I>&gt;<i> -        free(io_res);
+</I>&gt;<i> -    }
+</I>&gt;<i> -    free(resp);
+</I>&gt;<i> -    
+</I>&gt;<i>      return int_res;
+</I>&gt;<i>  }
+</I>
+Wenn du die beiden Leaks abgedichtet hast, kannst du das pushen.
+
+Acked-by: Antoine Kaufmann &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">toni at tyndur.org</A>&gt;
+
+-- 
+Antoine Kaufmann
+&lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">toni at famkaufmann.info</A>&gt;
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: Digital signature
+URL         : &lt;<A HREF="http://list.tyndur.org/pipermail/tyndur-devel/attachments/20110918/87528868/attachment.pgp">http://list.tyndur.org/pipermail/tyndur-devel/attachments/20110918/87528868/attachment.pgp</A>&gt;
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002235.html">[tyndur-devel] [PATCH 2/5] libc: lio_compat_open()
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002236.html">[tyndur-devel] [PATCH 3/5] libc: lio_compat_write/close()
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2240">[ Datum ]</a>
+              <a href="thread.html#2240">[ Thema ]</a>
+              <a href="subject.html#2240">[ Betreff (Subject)]</a>
+              <a href="author.html#2240">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

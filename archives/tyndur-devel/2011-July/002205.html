@@ -1,0 +1,688 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 1/5] tcpip: UDP-Unterstützung
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_1/5%3D5D_tcpip%3D3A_UDP-Unterst%3F%3D%0A%09%3D%3Futf-8%3Fq%3F%3DC3%3DBCtzung%3F%3D&In-Reply-To=%3C1311536861-12812-2-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002204.html">
+   <LINK REL="Next"  HREF="002206.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 1/5] tcpip: UDP-Unterstützung</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_1/5%3D5D_tcpip%3D3A_UDP-Unterst%3F%3D%0A%09%3D%3Futf-8%3Fq%3F%3DC3%3DBCtzung%3F%3D&In-Reply-To=%3C1311536861-12812-2-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 1/5] tcpip: UDP-Unterstützung">kevin at tyndur.org
+                  </A><BR>
+    <I>So Jul 24 21:47:37 CEST 2011</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002204.html">[tyndur-devel] [PATCH 0/5] tcp: UDP, ein bisschen DHCP und Fixes
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002206.html">[tyndur-devel] [PATCH 2/5] tcpip: Unterstützung für Broadcasts
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2205">[ Datum ]</a>
+              <a href="thread.html#2205">[ Thema ]</a>
+              <a href="subject.html#2205">[ Betreff (Subject) ]</a>
+              <a href="author.html#2205">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ tcpip: UDP-Client-Unterstützung. tcpip:/udp/&lt;sport&gt;:&lt;host&gt;:&lt;port&gt;
+  öffnet einen UDP-&quot;Socket&quot;.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/tcpip/checksum.c          |   31 +++-
+ src/modules/tcpip/include/lostio_if.h |    2 +
+ src/modules/tcpip/include/udp.h       |   85 +++++++
+ src/modules/tcpip/ip.c                |    2 +
+ src/modules/tcpip/lostio_if.c         |    2 +
+ src/modules/tcpip/udp.c               |  412 +++++++++++++++++++++++++++++++++
+ 6 files changed, 533 insertions(+), 1 deletions(-)
+ create mode 100644 src/modules/tcpip/include/udp.h
+ create mode 100644 src/modules/tcpip/udp.c
+
+diff --git a/src/modules/tcpip/checksum.c b/src/modules/tcpip/checksum.c
+index 80db51e..36fbdb7 100644
+--- a/src/modules/tcpip/checksum.c
++++ b/src/modules/tcpip/checksum.c
+@@ -44,6 +44,7 @@
+ 
+ #include &quot;ip.h&quot;
+ #include &quot;tcp.h&quot;
++#include &quot;udp.h&quot;
+ 
+ bool debug_checksum = false;
+ 
+@@ -87,7 +88,6 @@ uint16_t tcp_checksum
+     (struct tcp_header* header, struct tcp_pseudo_header* pseudo_header,
+     void* data, uint32_t data_size)
+ {
+-    //printf(&quot;data_size = %d\n&quot;, data_size);
+     char buffer[sizeof(struct tcp_header) + sizeof(struct tcp_pseudo_header) 
+         + data_size];
+ 
+@@ -110,3 +110,32 @@ void tcp_update_checksum
+     header-&gt;checksum = 0;
+     header-&gt;checksum = tcp_checksum(header, pseudo_header, data, data_size);
+ }
++
++uint16_t udp_checksum
++    (struct udp_header* header, struct udp_pseudo_header* pseudo_header,
++    void* data, uint32_t data_size)
++{
++    uint16_t sum;
++    char buffer[sizeof(struct udp_header) + sizeof(struct udp_pseudo_header)
++        + data_size];
++
++    memcpy(buffer, pseudo_header, sizeof(struct udp_pseudo_header));
++    memcpy(buffer + sizeof(struct udp_pseudo_header), header,
++        sizeof(struct udp_header));
++    memcpy(buffer + sizeof(struct udp_pseudo_header) + sizeof(struct udp_header),
++        data, data_size);
++
++    sum = ip_checksum(buffer,
++        sizeof(struct udp_pseudo_header) + sizeof(struct udp_header) +
++        data_size);
++
++    return sum ? sum : 0xffff;
++}
++
++void udp_update_checksum
++    (struct udp_header* header, struct udp_pseudo_header* pseudo_header,
++    void* data, uint32_t data_size)
++{
++    header-&gt;checksum = 0;
++    header-&gt;checksum = udp_checksum(header, pseudo_header, data, data_size);
++}
+diff --git a/src/modules/tcpip/include/lostio_if.h b/src/modules/tcpip/include/lostio_if.h
+index 658035b..854de9e 100644
+--- a/src/modules/tcpip/include/lostio_if.h
++++ b/src/modules/tcpip/include/lostio_if.h
+@@ -48,6 +48,8 @@
+ #define LOSTIO_TYPES_SERVER  251
+ #define LOSTIO_TYPES_SERVER_DIR  250
+ #define LOSTIO_TYPES_SERVER_CONN 249
++#define LOSTIO_TYPES_UDP_DIR 248
++#define LOSTIO_TYPES_UDP 247
+ 
+ 
+ void init_lostio_interface(void);
+diff --git a/src/modules/tcpip/include/udp.h b/src/modules/tcpip/include/udp.h
+new file mode 100644
+index 0000000..f51d163
+--- /dev/null
++++ b/src/modules/tcpip/include/udp.h
+@@ -0,0 +1,85 @@
++/*
++ * Copyright (c) 2011 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef UDP_H
++#define UDP_H
++
++#include &lt;stdint.h&gt;
++#include &lt;stddef.h&gt;
++
++struct udp_header {
++    uint16_t    src_port;
++    uint16_t    dest_port;
++    uint16_t    length;
++    uint16_t    checksum;
++} __attribute__ ((packed));
++
++struct udp_pseudo_header {
++    uint32_t    source_ip;
++    uint32_t    dest_ip;
++    uint16_t    proto;
++    uint16_t    length;
++} __attribute__ ((packed));
++
++/**
++ * Öffnet einen UDP-Clientsocket
++ *
++ * @param sport Lokale Portnummer
++ * @param daddr IP-Adresse des Remote-Hosts
++ * @param dport Portnummer des Remote-Hosts
++ *
++ * @return Der geöffnete Socket oder NULL bei Fehlern
++ */
++struct udp_socket* udp_open(uint16_t sport, uint32_t daddr, uint16_t dport);
++
++/**
++ * Liest ein einzelnes UDP-Paket aus
++ */
++size_t udp_read(struct udp_socket* s, void* buf, size_t len);
++
++/**
++ * Schreibt ein einzelnes UDP-Paket
++ */
++size_t udp_write(struct udp_socket* s, void* buf, size_t len);
++
++/**
++ * Beendet eine UDP-Verbindung
++ */
++void udp_close(struct udp_socket *s);
++
++void udp_register_lostio(void);
++void udp_receive(uint32_t source_ip, void* data, uint32_t data_size);
++
++uint16_t udp_checksum
++    (struct udp_header* header, struct udp_pseudo_header* pseudo_header,
++    void* data, uint32_t data_size);
++void udp_update_checksum
++    (struct udp_header* header, struct udp_pseudo_header* pseudo_header,
++    void* data, uint32_t data_size);
++
++#endif
+diff --git a/src/modules/tcpip/ip.c b/src/modules/tcpip/ip.c
+index 49f9e10..d3c9d14 100644
+--- a/src/modules/tcpip/ip.c
++++ b/src/modules/tcpip/ip.c
+@@ -47,6 +47,7 @@
+ #include &quot;arp.h&quot;
+ #include &quot;ethernet.h&quot;
+ #include &quot;tcp.h&quot;
++#include &quot;udp.h&quot;
+ 
+ //Hier koennen die Debug-Nachrichten aktiviert werden
+ #define DEBUG 0
+@@ -278,6 +279,7 @@ void ip_receive(struct device *device, void *data, size_t data_size)
+ 
+         case IP_PROTO_UDP:
+             DEBUG_MSG(&quot;UDP-Paket eingegangen&quot;);
++            udp_receive(header-&gt;source_ip, packet, packet_size);
+             break;
+ 
+         default:
+diff --git a/src/modules/tcpip/lostio_if.c b/src/modules/tcpip/lostio_if.c
+index cf7d27c..e37c305 100644
+--- a/src/modules/tcpip/lostio_if.c
++++ b/src/modules/tcpip/lostio_if.c
+@@ -47,6 +47,7 @@
+ #include &quot;network.h&quot;
+ #include &quot;ip.h&quot;
+ #include &quot;tcp.h&quot;
++#include &quot;udp.h&quot;
+ #include &quot;lostio_if.h&quot;
+ #include &quot;dns.h&quot;
+ 
+@@ -129,6 +130,7 @@ void init_lostio_interface(void)
+ 
+     // Weitere Typen
+     tcp_server_register_lostio();
++    udp_register_lostio();
+ 
+     // Dateien/Verzeichnisse anlegen
+     vfstree_create_node(&quot;/dns&quot;, LOSTIO_TYPES_DNS, 0, NULL, 
+diff --git a/src/modules/tcpip/udp.c b/src/modules/tcpip/udp.c
+new file mode 100644
+index 0000000..9a472d9
+--- /dev/null
++++ b/src/modules/tcpip/udp.c
+@@ -0,0 +1,412 @@
++/*
++ * Copyright (c) 2011 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include &quot;udp.h&quot;
++#include &quot;ip.h&quot;
++#include &quot;dns.h&quot;
++#include &quot;lostio_if.h&quot;
++
++#include &lt;string.h&gt;
++#include &lt;stdio.h&gt;
++#include &lt;stdlib.h&gt;
++#include &lt;errno.h&gt;
++#include &lt;syscall.h&gt;
++#include &lt;stdint.h&gt;
++
++#define MIN(a,b) ((a) &lt; (b) ? (a) : (b))
++
++struct udp_socket {
++    uint16_t local_port;
++    uint16_t remote_port;
++    uint32_t local_ip;
++    uint32_t remote_ip;
++
++    list_t* incoming_packets;
++};
++
++struct udp_packet {
++    size_t length;
++    char data[];
++};
++
++static list_t* udp_sockets;
++
++/**
++ * Parst einen gegebenen String, der eine Verbindung im Format
++ * &lt;Lokaler Port&gt;:&lt;Remote-Hostname&gt;:&lt;Remote-Port&gt; beschreibt.
++ *
++ * Rückgabe:
++ *       0: Erfolg
++ * -EINVAL: Falsches Format
++ * -ENOENT: Der DNS-Name konnte nicht aufgelöst werden
++ */
++static int parse_connection(const char* filename, int* sport,
++    uint32_t* daddr, int* dport)
++{
++    int ret, tmp_sport, tmp_dport;
++    uint32_t tmp_daddr;
++    char hostname[64];
++
++    /* Verzeichnisname abschneiden */
++    if (strncmp(filename, &quot;/udp/&quot;, strlen(&quot;/udp/&quot;))) {
++        return -EINVAL;
++    }
++
++    filename = filename + strlen(&quot;/udp/&quot;);
++
++    /* Wenn der Aufrufer das Ergebnis nicht braucht, lokale Variablen nehmen */
++    if (sport == NULL || daddr == NULL || dport == NULL) {
++        sport = &amp;tmp_sport;
++        daddr = &amp;tmp_daddr;
++        dport = &amp;tmp_dport;
++    }
++
++    /* Dateiname auseinandernehmen */
++    ret = sscanf(filename, &quot;%d:%63[^:]:%d&quot;, sport, hostname, dport);
++    if (ret != 3) {
++        return -EINVAL;
++    }
++
++    /* Servername auflösen, wenn es keine IP-Adresse war */
++    uint32_t ip = string_to_ip(hostname);
++    if (!ip) {
++        struct dns_request_result* result = dns_request(hostname);
++        if (result &amp;&amp; (result-&gt;ip_count &gt; 0)) {
++            ip = result-&gt;ip_address[0];
++        }
++    }
++
++    if (!ip) {
++        return -ENOENT;
++    }
++
++    *daddr = ip;
++    return 0;
++}
++
++/**
++ * Legt Knoten im Verzeichnisbaum an, die noch nicht existieren, wenn auf sie
++ * zugegriffen werden soll
++ */
++static bool lio_udp_dir_not_found(char** path, uint8_t flags, pid_t pid,
++    io_resource_t* ps)
++{
++    int ret;
++
++    ret = parse_connection(*path, NULL, NULL, NULL);
++    if (ret &lt; 0) {
++        return false;
++    }
++
++    return vfstree_create_node(*path, LOSTIO_TYPES_UDP, 0, NULL,
++        LOSTIO_FLAG_NOAUTOEOF);
++}
++
++/**
++ * Das Oeffnen einer Datei in tcpip:/tcp-listen registriert einen TCP-Server.
++ * Wenn ein Client verbindet, wird in der geoeffneten Datei der Dateiname zum
++ * Oeffnen der Verbindung ausgegeben
++ */
++static bool lio_udp_pre_open(char** path, uint8_t flags, pid_t pid,
++    io_resource_t* ps)
++{
++    struct udp_socket* s;
++    vfstree_node_t* node;
++    int ret, sport, dport;
++    uint32_t daddr;
++
++    /* Knoten raussuchen */
++    node = vfstree_get_node_by_path(*path);
++    if (node == NULL) {
++        return false;
++    }
++
++    /* Pfad auseinandernehmen */
++    ret = parse_connection(*path, &amp;sport, &amp;daddr, &amp;dport);
++    if (ret &lt; 0) {
++        return false;
++    }
++
++    /* UDP-Verbindung oeffnen */
++    s = udp_open(sport, daddr, dport);
++    if (s == NULL) {
++        return false;
++    }
++
++    node-&gt;data = s;
++    return true;
++}
++
++
++/**
++ * Öffnet einen UDP-Clientsocket
++ *
++ * @param sport Lokale Portnummer
++ * @param daddr IP-Adresse des Remote-Hosts
++ * @param dport Portnummer des Remote-Hosts
++ *
++ * @return Der geöffnete Socket oder NULL bei Fehlern
++ */
++struct udp_socket* udp_open(uint16_t sport, uint32_t daddr, uint16_t dport)
++{
++    struct udp_socket* s;
++    struct routing_entry* route;
++    int i;
++
++    p();
++    route = get_routing_entry(daddr);
++    if (route == NULL || route-&gt;device == NULL) {
++        v();
++        return false;
++    }
++
++    /* Pruefen, ob der Port nicht schon belegt ist */
++    for (i = 0; (s = list_get_element_at(udp_sockets, i)); i++) {
++        if (s-&gt;local_port == sport) {
++            v();
++            return false;
++        }
++    }
++
++    /* Neuen Socket anlegen und der Ressource zuordnen */
++    s = calloc(1, sizeof(*s));
++    s-&gt;local_port = sport;
++    s-&gt;local_ip = route-&gt;device-&gt;ip;
++    s-&gt;remote_port = dport;
++    s-&gt;remote_ip = daddr;
++    s-&gt;incoming_packets = list_create();
++
++    list_push(udp_sockets, s);
++    v();
++
++    return s;
++}
++
++/**
++ * LostIO-Wrapper für udp_read
++ */
++static size_t lio_udp_read(lostio_filehandle_t* fh, void* buf,
++    size_t blocksize, size_t count)
++{
++    struct udp_socket* s = fh-&gt;node-&gt;data;
++
++    return udp_read(s, buf, blocksize * count);
++}
++
++/**
++ * Liest ein einzelnes UDP-Paket aus
++ */
++size_t udp_read(struct udp_socket* s, void* buf, size_t len)
++{
++    struct udp_packet* p;
++
++    p = list_pop(s-&gt;incoming_packets);
++    if (p == NULL) {
++        return 0;
++    }
++
++    len = MIN(len, p-&gt;length);
++    memcpy(buf, p-&gt;data, len);
++    free(p);
++
++    return len;
++}
++
++/**
++ * Empfängt ein eingehendes UDP-Paket
++ */
++void udp_receive(uint32_t source_ip, void* data, uint32_t data_size)
++{
++    struct udp_header* hdr = data;
++    struct udp_packet* p;
++    struct udp_socket* s;
++    void* payload;
++    size_t payload_size;
++    size_t pktlen;
++    int i;
++
++    if (data_size &lt; sizeof(*hdr)) {
++        return;
++    }
++
++    p();
++    for (i = 0; (s = list_get_element_at(udp_sockets, i)); i++) {
++        if (   s-&gt;remote_ip   == source_ip
++            &amp;&amp; s-&gt;remote_port == big_endian_word(hdr-&gt;src_port)
++            &amp;&amp; s-&gt;local_port  == big_endian_word(hdr-&gt;dest_port))
++        {
++            goto found;
++        }
++    }
++    goto out;
++
++found:
++    pktlen = big_endian_word(hdr-&gt;length);
++    if (pktlen &gt; data_size) {
++        goto out;
++    }
++
++    payload = hdr + 1;
++    payload_size = pktlen - sizeof(struct udp_header);
++
++    struct udp_pseudo_header phdr = {
++        .source_ip  = s-&gt;remote_ip,
++        .dest_ip    = s-&gt;local_ip,
++        .proto      = big_endian_word(IP_PROTO_UDP),
++        .length     = big_endian_word(data_size),
++    };
++
++    if (udp_checksum(hdr, &amp;phdr, payload, payload_size) != 0xffff) {
++        printf(&quot;\033[1;31mUDP-Checksumme ungueltig\n\033[0;37m\n\n&quot;);
++        goto out;
++    }
++
++    p = malloc(sizeof(*p) + payload_size);
++    p-&gt;length = payload_size;
++    memcpy(p-&gt;data, payload, payload_size);
++
++    list_insert(s-&gt;incoming_packets, list_size(s-&gt;incoming_packets), p);
++
++out:
++    v();
++}
++
++/**
++ * LostIO-Wrapper für udp_write
++ */
++static size_t lio_udp_write(lostio_filehandle_t* fh, size_t blocksize,
++    size_t count, void* buf)
++{
++    struct udp_socket* s = fh-&gt;node-&gt;data;
++
++    return udp_write(s, buf, blocksize * count);
++}
++
++/**
++ * Schreibt ein einzelnes UDP-Paket
++ */
++size_t udp_write(struct udp_socket* s, void* buf, size_t len)
++{
++    size_t udp_packet_size = len + sizeof(struct udp_header);
++    uint8_t udp_packet[udp_packet_size];
++
++    struct udp_header* hdr = (struct udp_header*) udp_packet;
++    struct udp_pseudo_header phdr;
++
++    phdr = (struct udp_pseudo_header) {
++        .source_ip  = s-&gt;local_ip,
++        .dest_ip    = s-&gt;remote_ip,
++        .proto      = big_endian_word(IP_PROTO_UDP),
++        .length     = big_endian_word(udp_packet_size),
++    };
++
++    *hdr = (struct udp_header) {
++        .src_port   = big_endian_word(s-&gt;local_port),
++        .dest_port  = big_endian_word(s-&gt;remote_port),
++        .length     = big_endian_word(udp_packet_size),
++        .checksum   = 0,
++    };
++
++    memcpy(udp_packet + sizeof(struct udp_header), buf, len);
++    udp_update_checksum(hdr, &amp;phdr,
++        udp_packet + sizeof(struct udp_header), len);
++
++    ip_send(s-&gt;remote_ip, IP_PROTO_UDP, udp_packet, udp_packet_size);
++
++    return len;
++}
++
++/**
++ * LostIO-Wrapper für udp_close
++ */
++static int lio_udp_close(lostio_filehandle_t* fh)
++{
++    struct udp_socket* s = fh-&gt;node-&gt;data;
++
++
++    udp_close(s);
++    fh-&gt;node-&gt;data = NULL;
++    vfstree_delete_child(fh-&gt;node-&gt;parent, fh-&gt;node-&gt;name);
++
++    return 0;
++}
++
++/**
++ * Beendet eine UDP-Verbindung
++ */
++void udp_close(struct udp_socket *s)
++{
++    struct udp_socket* cur;
++    struct udp_packet* p;
++    int i;
++
++    /* Aus der Liste der UDP-Sockets entfernen */
++    p();
++    for (i = 0; (cur = list_get_element_at(udp_sockets, i)); i++) {
++        if (s == cur) {
++            list_remove(udp_sockets, i);
++            break;
++        }
++    }
++    v();
++
++    /* Übrige Pakete wegwerfen */
++    while ((p = list_pop(s-&gt;incoming_packets))) {
++        free(p);
++    }
++    list_destroy(s-&gt;incoming_packets);
++    free(s);
++}
++
++/** Typ fuer einen UDP-Socket */
++static typehandle_t lio_type_udp = {
++    .id          = LOSTIO_TYPES_UDP,
++    .pre_open    = &amp;lio_udp_pre_open,
++    .read        = &amp;lio_udp_read,
++    .write       = &amp;lio_udp_write,
++    .close       = &amp;lio_udp_close,
++};
++
++/**
++ * Registriert die LostIO-Typehandles, die fuer UDP benoetigt werden
++ */
++void udp_register_lostio(void)
++{
++    udp_sockets = list_create();
++
++    /* Typ fuer das Verzeichnis udp */
++    lostio_type_directory_use_as(LOSTIO_TYPES_UDP_DIR);
++    get_typehandle(LOSTIO_TYPES_UDP_DIR)-&gt;not_found = &amp;lio_udp_dir_not_found;
++
++    /* Typen fuer einen TCP-Server und seine Verbindungen */
++    lostio_register_typehandle(&amp;lio_type_udp);
++
++    /* Knoten erstellen */
++    vfstree_create_node(&quot;/udp&quot;, LOSTIO_TYPES_UDP_DIR, 0, NULL,
++        LOSTIO_FLAG_BROWSABLE);
++}
+-- 
+1.6.0.2
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002204.html">[tyndur-devel] [PATCH 0/5] tcp: UDP, ein bisschen DHCP und Fixes
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002206.html">[tyndur-devel] [PATCH 2/5] tcpip: Unterstützung für Broadcasts
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2205">[ Datum ]</a>
+              <a href="thread.html#2205">[ Thema ]</a>
+              <a href="subject.html#2205">[ Betreff (Subject)]</a>
+              <a href="author.html#2205">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

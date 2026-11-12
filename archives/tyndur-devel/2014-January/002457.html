@@ -1,0 +1,517 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 11/11] cdi/storage: Auf LIOv2 umstellen
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%2011/11%5D%20cdi/storage%3A%20Auf%20LIOv2%20umstellen&In-Reply-To=%3C1388708813-23390-12-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002456.html">
+   <LINK REL="Next"  HREF="002458.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 11/11] cdi/storage: Auf LIOv2 umstellen</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%2011/11%5D%20cdi/storage%3A%20Auf%20LIOv2%20umstellen&In-Reply-To=%3C1388708813-23390-12-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 11/11] cdi/storage: Auf LIOv2 umstellen">kevin at tyndur.org
+                  </A><BR>
+    <I>Fr Jan  3 01:26:53 CET 2014</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002456.html">[tyndur-devel] [PATCH 10/11] init: Unterstützung für LIOv2-Pipequellen
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002458.html">[tyndur-devel] [PATCH] lutils: tar.xz entpacken
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2457">[ Datum ]</a>
+              <a href="thread.html#2457">[ Thema ]</a>
+              <a href="subject.html#2457">[ Betreff (Subject) ]</a>
+              <a href="author.html#2457">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* cdi/storage: Das alte RPC-Interface durch einen LIOv2-Userspace-
+  Service ersetzt.
+
+  FIXME: CD-ROM ist jetzt kaputt.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/cdi/ata/device.c          |    1 +
+ src/modules/cdi/floppy/device.c       |    1 +
+ src/modules/cdi/include/cdi-osdep.h   |    5 +
+ src/modules/cdi/include/cdi/storage.h |    7 +
+ src/modules/cdi/lib/cdi.c             |    9 ++-
+ src/modules/cdi/lib/scsi/disk.c       |   13 ++
+ src/modules/cdi/lib/storage.c         |  225 ++++++++++++++++-----------------
+ 7 files changed, 144 insertions(+), 117 deletions(-)
+
+diff --git a/src/modules/cdi/ata/device.c b/src/modules/cdi/ata/device.c
+index 9afa102..baedd72 100644
+--- a/src/modules/cdi/ata/device.c
++++ b/src/modules/cdi/ata/device.c
+@@ -234,6 +234,7 @@ void ata_init_controller(struct ata_controller* controller)
+             if (dev-&gt;atapi == 0) {
+ #endif
+                 dev-&gt;dev.storage.block_size = ATA_SECTOR_SIZE;
++                dev-&gt;dev.storage.optimal_count = 128;
+ 
+                 // Handler setzen
+                 dev-&gt;read_sectors = ata_drv_read_sectors;
+diff --git a/src/modules/cdi/floppy/device.c b/src/modules/cdi/floppy/device.c
+index c5c75a5..5c17a38 100755
+--- a/src/modules/cdi/floppy/device.c
++++ b/src/modules/cdi/floppy/device.c
+@@ -801,6 +801,7 @@ void floppy_init_device(struct cdi_device* device)
+ 
+     dev-&gt;dev.block_size = FLOPPY_SECTOR_SIZE(dev);
+     dev-&gt;dev.block_count = FLOPPY_SECTOR_COUNT(dev);
++    dev-&gt;dev.optimal_count = 1;
+ 
+     cdi_storage_device_init(&amp;dev-&gt;dev);
+ }
+diff --git a/src/modules/cdi/include/cdi-osdep.h b/src/modules/cdi/include/cdi-osdep.h
+index 5bb3827..ed8cc5d 100644
+--- a/src/modules/cdi/include/cdi-osdep.h
++++ b/src/modules/cdi/include/cdi-osdep.h
+@@ -12,6 +12,7 @@
+ #define _CDI_OSDEP_H_
+ 
+ #include &lt;stdio.h&gt;
++#include &lt;lostio.h&gt;
+ 
+ #define CDI_STANDALONE
+ #define TYNDUR
+@@ -92,4 +93,8 @@ typedef struct {
+     FILE* device;
+ } cdi_fs_osdep;
+ 
++struct storage_drv_osdep {
++    struct lio_resource* root;
++};
++
+ #endif
+diff --git a/src/modules/cdi/include/cdi/storage.h b/src/modules/cdi/include/cdi/storage.h
+index c60e43c..46f2355 100644
+--- a/src/modules/cdi/include/cdi/storage.h
++++ b/src/modules/cdi/include/cdi/storage.h
+@@ -77,6 +77,11 @@ struct cdi_storage_device {
+      * \endenglish
+      */
+     uint64_t            block_count;
++
++    /**
++     * Beste Request-Groesse beim Lesen und Schreiben (Anzahl Blocks).
++     */
++    size_t              optimal_count;
+ };
+ 
+ /**
+@@ -140,6 +145,8 @@ struct cdi_storage_driver {
+      */
+     int (*write_blocks)(struct cdi_storage_device* device, uint64_t start,
+         uint64_t count, void* buffer);
++
++    struct storage_drv_osdep osdep;
+ };
+ 
+ #ifdef __cplusplus
+diff --git a/src/modules/cdi/lib/cdi.c b/src/modules/cdi/lib/cdi.c
+index dd6e144..42a5ef0 100644
+--- a/src/modules/cdi/lib/cdi.c
++++ b/src/modules/cdi/lib/cdi.c
+@@ -185,7 +185,8 @@ static void cdi_tyndur_run_drivers(void)
+ 
+     // Warten auf Ereignisse
+     while (1) {
+-        wait_for_rpc();
++        lio_dispatch();
++        lio_srv_wait();
+     }
+ }
+ 
+@@ -232,6 +233,12 @@ void cdi_driver_register(struct cdi_driver* driver)
+     }
+ }
+ 
++/** Gibt eine Liste aller Treiber zurueck */
++list_t* cdi_tyndur_get_drivers(void)
++{
++    return drivers;
++}
++
+ /**
+  * Wenn main nicht von einem Treiber ueberschrieben wird, ist hier der
+  * Einsprungspunkt. Die Standardfunktion ruft nur cdi_init() auf. Treiber, die
+diff --git a/src/modules/cdi/lib/scsi/disk.c b/src/modules/cdi/lib/scsi/disk.c
+index e0eca2e..0e2534e 100644
+--- a/src/modules/cdi/lib/scsi/disk.c
++++ b/src/modules/cdi/lib/scsi/disk.c
+@@ -42,6 +42,7 @@ static int cdi_scsi_disk_write(struct cdi_storage_device* device,
+ 
+ struct cdi_storage_driver cdi_scsi_disk_driver = {
+     .drv = {
++        .name       = &quot;scsidisk&quot;,
+         .type       = CDI_STORAGE,
+     },
+     .read_blocks    = cdi_scsi_disk_read,
+@@ -226,11 +227,23 @@ static int cdi_scsi_disk_write(struct cdi_storage_device* device,
+     return -1;
+ }
+ 
++static void driver_init(void)
++{
++    static int initialised = 0;
++
++    if (!initialised) {
++        cdi_driver_register(&amp;cdi_scsi_disk_driver.drv);
++        cdi_storage_driver_init(&amp;cdi_scsi_disk_driver);
++    }
++}
++
+ int cdi_scsi_disk_init(struct cdi_scsi_device* device)
+ {
+     struct cdi_storage_device* frontdev;
+     uint32_t num_sectors = 0, sector_size = 0;
+ 
++    driver_init();
++
+     if (cdrom_init(device)) {
+         return -1;
+     }
+diff --git a/src/modules/cdi/lib/storage.c b/src/modules/cdi/lib/storage.c
+index fbf2edc..15d51d3 100644
+--- a/src/modules/cdi/lib/storage.c
++++ b/src/modules/cdi/lib/storage.c
+@@ -17,37 +17,45 @@
+ #include &quot;cdi/storage.h&quot;
+ #include &quot;libpartition.h&quot;
+ 
+-static void lostio_mst_if_init(void);
+ int lostio_mst_if_newdev(struct partition* part);
+ 
+-static size_t lostio_mst_read_handler(lostio_filehandle_t* fh,
+-    void* buf, size_t blocksize, size_t blockcount);
+-static size_t lostio_mst_write_handler(lostio_filehandle_t* fh,
+-    size_t blocksize, size_t blockcount, void* data);
+-static int lostio_mst_seek_handler(lostio_filehandle_t* fh, uint64_t offset,
+-    int origin);
+-
+-#define CDI_LOSTIO_TYPE_MST 255
+-static typehandle_t lostio_mst_typehandle = {
+-    .id = CDI_LOSTIO_TYPE_MST,
+-
+-    .pre_open = NULL,
+-    .post_open = NULL,
+-    .not_found = NULL,
+-    .close = NULL,
+-
+-    .read = lostio_mst_read_handler,
+-    .write = lostio_mst_write_handler,
+-    .seek = lostio_mst_seek_handler
+-};
++static int read(struct lio_resource* res, uint64_t offset,
++    size_t size, void* buf);
++static int write(struct lio_resource* res, uint64_t offset,
++    size_t size, void* buf);
++static struct lio_resource* load_root(struct lio_tree* tree);
++static int load_children(struct lio_resource* res);
++int cdi_storage_read(struct cdi_storage_device* device, uint64_t pos,
++    size_t size, void* dest);
+ 
+ /**
+  * Initialisiert die Datenstrukturen fuer einen Massenspeichertreiber
+  */
+ void cdi_storage_driver_init(struct cdi_storage_driver* driver)
+ {
++    struct lio_resource* res;
++    struct lio_service* service;
++
+     driver-&gt;drv.type = CDI_STORAGE;
+     cdi_driver_init((struct cdi_driver*) driver);
++
++    res = lio_resource_create(NULL);
++    res-&gt;browsable = 1;
++    res-&gt;blocksize = 1024;
++    driver-&gt;osdep.root = res;
++
++    service = malloc(sizeof(*service));
++    *service = (struct lio_service) {
++        .name               = driver-&gt;drv.name,
++        .lio_ops = {
++            .load_root      = load_root,
++            .load_children  = load_children,
++            .read           = read,
++            .write          = write,
++        },
++    };
++
++    lio_add_service(service);
+ }
+ 
+ /**
+@@ -63,12 +71,6 @@ void cdi_storage_driver_destroy(struct cdi_storage_driver* driver)
+  */
+ void cdi_storage_driver_register(struct cdi_storage_driver* driver)
+ {
+-    static int initialized = 0;
+-
+-    if (initialized == 0) {
+-        lostio_mst_if_init();
+-        initialized = 1;
+-    }
+ }
+ 
+ /**
+@@ -212,140 +214,131 @@ int cdi_storage_write(struct cdi_storage_device* device, uint64_t pos,
+     return 0;
+ }
+ 
+-
+-/**
+- * Initialisiert die Massenspeichernschnittstelle fuer LostIO
+- */
+-static void lostio_mst_if_init()
+-{
+-    lostio_register_typehandle(&amp;lostio_mst_typehandle);
+-}
+-
+ /**
+  * Erstellt den Dateisystemknoten fuer ein Geraet.
+  */
+ int lostio_mst_if_newdev(struct partition* part)
+ {
+-    static int has_cdrom = 0;
++//    static int has_cdrom = 0;
+     struct cdi_storage_device* device = part-&gt;dev;
++    struct cdi_storage_driver* driver = (void*) device-&gt;dev.driver;
++    struct lio_resource* res;
+ 
+-    // Slash vor Pfad anhaengen
++    // Dateinamen erzeugen
+     char* path;
+     if (part-&gt;number == (uint16_t) -1) {
+-        asprintf(&amp;path, &quot;/%s&quot;, device-&gt;dev.name);
++        asprintf(&amp;path, &quot;%s&quot;, device-&gt;dev.name);
+     } else {
+-        asprintf(&amp;path, &quot;/%s_p%d&quot;, device-&gt;dev.name, part-&gt;number);
++        asprintf(&amp;path, &quot;%s_p%d&quot;, device-&gt;dev.name, part-&gt;number);
+     }
+ 
+-    if (vfstree_create_node(path, CDI_LOSTIO_TYPE_MST, device-&gt;block_size *
+-        device-&gt;block_count, (void*) part, 0) == false)
+-    {
+-        free(path);
+-        return -1;
+-    }
++    // Neue Ressource anlegen
++    res = lio_resource_create(NULL);
++    res-&gt;readable = 1;
++    res-&gt;writable = 1;
++    res-&gt;seekable = 1;
++    res-&gt;blocksize = device-&gt;block_size;
++    res-&gt;size = part-&gt;size;
++    res-&gt;opaque = part;
+ 
++    lio_node_create(driver-&gt;osdep.root, res, path);
++    free(path);
++
++#if 0
++    // TODO
+     if (!has_cdrom &amp;&amp; !strncmp(device-&gt;dev.name, &quot;atapi&quot;, strlen(&quot;atapi&quot;))) {
+         has_cdrom = 1;
+         vfstree_create_node(&quot;/cdrom&quot;, CDI_LOSTIO_TYPE_MST, device-&gt;block_size *
+             device-&gt;block_count, (void*) part, 0);
+     }
++#endif
+ 
+-    free(path);
+     return 0;
+ }
+ 
+-/**
+- * Lesehandler fuer LostIO
+- */
+-static size_t lostio_mst_read_handler(lostio_filehandle_t* fh,
+-    void* buf, size_t blocksize, size_t blockcount)
++
++extern list_t* cdi_tyndur_get_drivers(void);
++static struct lio_resource* load_root(struct lio_tree* tree)
+ {
+-    struct partition* part = (struct partition*) fh-&gt;node-&gt;data;
+-    struct cdi_storage_device* device = part-&gt;dev;
+-    size_t size = blocksize * blockcount;
++    list_t* drivers = cdi_tyndur_get_drivers();
++    struct cdi_driver* drv;
++    int i;
+ 
+-    // Groesse anpassen, wenn ueber das Medium hinaus gelesen werden soll
+-    if (size &gt; (part-&gt;size - fh-&gt;pos)) {
+-        size = part-&gt;size - fh-&gt;pos;
+-        if (size == 0) {
+-            fh-&gt;flags |= LOSTIO_FLAG_EOF;
+-            return 0;
+-        }
++    if (tree-&gt;source != -1) {
++        return NULL;
+     }
+ 
+-    // In den uebergebenen Buffer einlesen
+-    if (cdi_storage_read(device, fh-&gt;pos + part-&gt;start, size, buf) != 0) {
+-        return 0;
++    for (i = 0; (drv = list_get_element_at(drivers, i)); i++) {
++        if (drv-&gt;type == CDI_STORAGE) {
++            struct cdi_storage_driver* sdrv = (void*) drv;
++            if (!strcmp(tree-&gt;service-&gt;name, drv-&gt;name)) {
++                struct lio_resource* root = sdrv-&gt;osdep.root;
++                root-&gt;tree = tree;
++                lio_resource_modified(root);
++                return root;
++            }
++        }
+     }
+ 
+-    fh-&gt;pos += size;
++    return NULL;
++}
++
++static int load_children(struct lio_resource* root)
++{
++    struct lio_node* it;
++    int j;
++
++    for (j = 0; (it = list_get_element_at(root-&gt;children, j)); j++)
++    {
++        it-&gt;res-&gt;tree = root-&gt;tree;
++        lio_resource_modified(it-&gt;res);
++        lio_srv_node_add(root-&gt;server.id, it-&gt;res-&gt;server.id,
++            it-&gt;name);
++    }
+ 
+-    return size;
++    return 0;
+ }
+ 
++#define NUM_BLOCKS(x) (((x) + res-&gt;blocksize - 1) / res-&gt;blocksize)
++
+ /**
+- * Schreibhandler fuer LostIO
++ * Lesehandler fuer LostIO
+  */
+-static size_t lostio_mst_write_handler(lostio_filehandle_t* fh,
+-    size_t blocksize, size_t blockcount, void* data)
++static int read(struct lio_resource* res, uint64_t offset,
++    size_t size, void* buf)
+ {
+-    struct partition* part = (struct partition*) fh-&gt;node-&gt;data;
++    struct partition* part = res-&gt;opaque;
+     struct cdi_storage_device* device = part-&gt;dev;
+-    size_t size = blocksize * blockcount;
+-    size_t result = size;
++    int result;
+ 
+-    // Groesse anpassen, wenn ueber das Medium hinaus geschrieben werden soll
+-    if (size &gt; (part-&gt;size - fh-&gt;pos)) {
+-        size = part-&gt;size - fh-&gt;pos;
++    // Groesse anpassen, wenn ueber das Medium hinaus gelesen werden soll
++    if (size &gt; (part-&gt;size - offset)) {
++        size = part-&gt;size - offset;
+     }
+ 
+-    // Daten schreiben
+-    if (cdi_storage_write(device, fh-&gt;pos + part-&gt;start, size, data) != 0) {
+-        result = 0;
+-    } else {
+-        fh-&gt;pos += size;
+-    }
++    // In den uebergebenen Buffer einlesen
++    result = cdi_storage_read(device, offset + part-&gt;start, size, buf);
+ 
+-    return result;
++    return (result ? -1 : 0);
+ }
+ 
+ /**
+- * Seek-Handler fuer LostIO
++ * Schreibhandler fuer LostIO
+  */
+-static int lostio_mst_seek_handler(lostio_filehandle_t* fh, uint64_t offset,
+-    int origin)
++static int write(struct lio_resource* res, uint64_t offset,
++    size_t size, void* buf)
+ {
+-    struct partition* part = (struct partition*) fh-&gt;node-&gt;data;
+-    uint64_t new_pos = fh-&gt;pos;
+-    uint64_t size = part-&gt;size;
+-
+-    switch (origin)  {
+-        case SEEK_SET:
+-            new_pos = offset;
+-            break;
+-
+-        case SEEK_CUR:
+-            new_pos += offset;
+-            break;
+-
+-        case SEEK_END:
+-            new_pos = size;
+-            break;
+-    }
++    struct partition* part = res-&gt;opaque;
++    struct cdi_storage_device* device = part-&gt;dev;
++    int result;
+ 
+-    // Position nur aktualisieren, wenn sie nicht ausserhalb des Datentraegers
+-    // liegt.
+-    if (new_pos &gt; size) {
+-        return -1;
+-    } else if (new_pos == size) {
+-        // Gegebenen Falles noch EOF setzen
+-        fh-&gt;flags |= LOSTIO_FLAG_EOF;
+-    } else {
+-        // Sonst EOF loeschen
+-        fh-&gt;flags &amp;= ~LOSTIO_FLAG_EOF;
++    // Groesse anpassen, wenn ueber das Medium hinaus geschrieben werden soll
++    if (size &gt; (part-&gt;size - offset)) {
++        size = part-&gt;size - offset;
+     }
+-    fh-&gt;pos = new_pos;
+-    return 0;
+-}
+ 
++    // Daten schreiben
++    result = cdi_storage_write(device, offset + part-&gt;start, size, buf);
+ 
++    return (result ? -1 : 0);
++}
+-- 
+1.7.7
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002456.html">[tyndur-devel] [PATCH 10/11] init: Unterstützung für LIOv2-Pipequellen
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002458.html">[tyndur-devel] [PATCH] lutils: tar.xz entpacken
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2457">[ Datum ]</a>
+              <a href="thread.html#2457">[ Thema ]</a>
+              <a href="subject.html#2457">[ Betreff (Subject)]</a>
+              <a href="author.html#2457">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

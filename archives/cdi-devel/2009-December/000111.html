@@ -1,0 +1,149 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH 0/3] Rework device creation mechanism
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%200/3%5D%20Rework%20device%20creation%20mechanism&In-Reply-To=%3C61acd8d30912301029t16e98262g1874059d7beb8c7e%40mail.gmail.com%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000110.html">
+   <LINK REL="Next"  HREF="000112.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH 0/3] Rework device creation mechanism</H1>
+    <B>Rich Edelman</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%200/3%5D%20Rework%20device%20creation%20mechanism&In-Reply-To=%3C61acd8d30912301029t16e98262g1874059d7beb8c7e%40mail.gmail.com%3E"
+       TITLE="[cdi-devel] [PATCH 0/3] Rework device creation mechanism">redelman at gmail.com
+       </A><BR>
+    <I>Wed Dec 30 19:29:50 CET 2009</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000110.html">[cdi-devel] [PATCH 0/3] Rework device creation mechanism
+</A></li>
+        <LI>Next message: <A HREF="000112.html">[cdi-devel] [PATCH 0/3] Rework device creation mechanism
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#111">[ date ]</a>
+              <a href="thread.html#111">[ thread ]</a>
+              <a href="subject.html#111">[ subject ]</a>
+              <a href="author.html#111">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>On Wed, Dec 30, 2009 at 11:39 AM, Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt; wrote:
+&gt;<i> Kevin Wolf wrote:
+</I>&gt;&gt;&gt;<i>
+</I>&gt;&gt;&gt;<i> The OS then looks after a
+</I>&gt;&gt;&gt;<i> registered USB device driver which is able to handle that device.
+</I>&gt;&gt;<i>
+</I>&gt;&gt;<i> Registered means running here, right? If so, it doesn't use help any
+</I>&gt;&gt;<i> further. What Matt is talking about is _launching_ the driver if it's
+</I>&gt;&gt;<i> not running. We have a device 8086:100e, no running driver likes the
+</I>&gt;&gt;<i> device and we need to find out that we should start e1000.
+</I>&gt;<i>
+</I>&gt;<i> Well, what do you mean with not running? Not even loaded? I don't know
+</I>&gt;<i> how you want to start a not loaded driver upon device detection. No
+</I>
+I think not even loaded is what Matt had originally intended, and what
+Kevin was referring to as well.
+It's certainly what I've been thinking all along so far, but perhaps
+that's just me.
+
+&gt;<i> problem in a monolithic kernel, of course - all drivers are &quot;loaded&quot;
+</I>&gt;<i> right from loading the kernel because they're all in the kernel. But a
+</I>
+I'd love to just have a minimal driver set compiled in to my kernel,
+or perhaps loaded from an initrd of some sort,
+and then dynamically load drivers for other devices as they are
+detected (whether a hotplugged USB device or
+an add-in PCI SATA card).
+
+&gt;<i> driver needs to register itself somehow, be it active or passive. The
+</I>&gt;<i> current model for USB is active registering (call a function), but
+</I>&gt;<i> there's no problem about making it passive (store information in a new
+</I>&gt;<i> section or whatever about the devices to be handled). Anyway the OS
+</I>&gt;<i> must (just imo, of course ;-)) load the driver first to know which
+</I>&gt;<i> devices it's able to handle. The only &quot;escape&quot; would be to name the
+</I>&gt;<i> driver in a way the OS can search a driver by its name - i. e. call
+</I>&gt;<i> that e1000 driver &quot;8086-100e&quot;. But that's imo stupid (sorry, I just
+</I>&gt;<i> say it in that way, because nobody except me suggested this model up
+</I>&gt;<i> to now *g*) because the name of a driver _in the filesystem_ is
+</I>&gt;<i> totally unrelated to CDI. So one must _load_ a driver before knowing
+</I>&gt;<i> which devices it is able to handle. And if you use a &quot;passive&quot;
+</I>&gt;<i> registration system, loading means registering. Hence, registered is
+</I>&gt;<i> not forced to mean running (just in the active model) but to mean
+</I>&gt;<i> loaded.
+</I>
+For quite a while I had planned on just using a native driver
+architecture in QuokOS, but Matt and Kevin got me interested in CDI.
+:<i>)
+</I>I had planned on dynamically loading all drivers as they were needed,
+except for a couple of base drivers that would always be compiled in
+to the kernel.
+Some of those drivers were: IDE driver, some filesystem drivers, cdrom
+driver, a PCI bus driver. When I initialized the driver subsystem the
+first thing it did
+after internal initialization was to call the register functions of
+the drivers that were compiled in. Those register functions did
+nothing more than register the drivers with the appropriate driver
+subsystem. The PCI bus driver would use a register_bus_driver()
+function, while the a SATA driver would call
+register_storage_driver().
+Once all the compiled-in drivers were registered, the subsystem would
+iterate through the list of bus drivers. Each bus driver would
+enumerate the bus and call the init method on each driver in the list
+until one of them returned true. At that point, the driver's &quot;start&quot;
+method would be called, and the device would be handled. The init
+method was passed information from the PCI header.. class code,
+subclass code, vendor id, device id, so it could test against those
+and do whatever else the driver needed to do to make sure it did
+really support that device. If no drivers were found for the device,
+the device was put on an &quot;unhandled&quot; list.
+
+After all the appropriate compiled-in drivers were started, I'd be
+able to iterate through the unhandled list and call a helper process
+to locate and load any needed drivers. I had planned on having each
+driver also provide a mapping file of which devices it supported. All
+the driver mapping files would be added to an index file (likely a
+sqlite database) that the helper process would query. This would allow
+multiple drivers to be returned for a single device, perhaps even with
+other metainfo about the driver itself. The helper process would then
+be able to direct the kernel to load each driver in succession until
+one was able to handle the device.
+
+This also allowed drivers that returned false from the init method to
+be unregistered and unloaded if you wanted.
+
+In practice I've never actually implemented any of this, but it's how
+I was planning on doing things. Also, I should note that each driver
+was meant to run in it's own thread, whether that be kernel space or
+userspace.
+
+Now I've rambled on enough, especially for a first post to this list,
+but I hope it at least gives some ideas!
+
+Rich aka &quot;quok&quot;
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000110.html">[cdi-devel] [PATCH 0/3] Rework device creation mechanism
+</A></li>
+	<LI>Next message: <A HREF="000112.html">[cdi-devel] [PATCH 0/3] Rework device creation mechanism
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#111">[ date ]</a>
+              <a href="thread.html#111">[ thread ]</a>
+              <a href="subject.html#111">[ subject ]</a>
+              <a href="author.html#111">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

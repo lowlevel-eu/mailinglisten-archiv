@@ -1,0 +1,148 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH] usb: A bit faster
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%5D%20usb%3A%20A%20bit%20faster&In-Reply-To=%3C1251624956-7021-1-git-send-email-max%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000024.html">
+   <LINK REL="Next"  HREF="000026.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH] usb: A bit faster</H1>
+    <B>max at tyndur.org</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%5D%20usb%3A%20A%20bit%20faster&In-Reply-To=%3C1251624956-7021-1-git-send-email-max%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH] usb: A bit faster">max at tyndur.org
+       </A><BR>
+    <I>Sun Aug 30 11:35:56 CEST 2009</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000024.html">[cdi-devel] [PATCH] Multiple packets
+</A></li>
+        <LI>Next message: <A HREF="000026.html">[cdi-devel] [PATCH] Mehrere ISRs pro IRQ
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#25">[ date ]</a>
+              <a href="thread.html#25">[ thread ]</a>
+              <a href="subject.html#25">[ subject ]</a>
+              <a href="author.html#25">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>From: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+
+* Made faster (OHCI is now limited to 48 packets at a time,
+  so the MSC driver may send or receive more than 4 sectors
+  consecutively)
+
+Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+---
+ usb/msd.c  |    2 +-
+ usb/ohci.c |   22 +++++++++++++++++++---
+ usb/uhci.c |    4 ++--
+ 3 files changed, 22 insertions(+), 6 deletions(-)
+
+diff --git a/usb/msd.c b/usb/msd.c
+index 34e6e04..b3f303c 100644
+--- a/usb/msd.c
++++ b/usb/msd.c
+@@ -376,7 +376,7 @@ static inline int tsl(volatile int* variable)
+     return rval;
+ }
+ 
+-#define MAX_ACCESS_BLOCKS 4
++#define MAX_ACCESS_BLOCKS 32
+ 
+ static uint32_t msd_read(struct usb_device* usbdev, uint32_t lba,
+     uint16_t sectors, void* buffer,
+diff --git a/usb/ohci.c b/usb/ohci.c
+index d95f330..cc88169 100644
+--- a/usb/ohci.c
++++ b/usb/ohci.c
+@@ -53,7 +53,8 @@ static void ohci_kill(struct cdi_driver* cdi_hcd);
+ static void ohci_deinit(struct cdi_device* cdi_hci);
+ void ohci_init(struct cdi_device* cdi_hci);
+ static void ohci_handler(struct cdi_device* dev);
+-static int ohci_do_packets(struct usb_packet* packet, int num_packets);
++static int ohci_do_all_packets(struct usb_packet* packet, int num_packets);
++static int ohci_do_some_packets(struct usb_packet* packets, int num_packets);
+ static cdi_list_t get_devices(struct hci* gen_hci);
+ static void activate_device(struct usb_device* device);
+ static void ohci_reset_device(struct usb_device* device);
+@@ -229,7 +230,7 @@ void ohci_init(struct cdi_device* cdi_hci)
+ 
+     gen_hci-&gt;find_devices = &amp;get_devices;
+     gen_hci-&gt;activate_device = &amp;activate_device;
+-    gen_hci-&gt;do_packets = &amp;ohci_do_packets;
++    gen_hci-&gt;do_packets = &amp;ohci_do_all_packets;
+     gen_hci-&gt;add_pipe = &amp;ohci_establish_pipe;
+ 
+     enumerate_hci(gen_hci);
+@@ -243,7 +244,22 @@ static inline int tsl(volatile int* variable)
+     return rval;
+ }
+ 
+-static int ohci_do_packets(struct usb_packet* packets, int num_packets)
++static int ohci_do_all_packets(struct usb_packet* packets, int num_packets)
++{
++    int error = USB_NO_ERROR;
++
++    //Mehr als 48 sind wohl nicht ratsam (vor allem wegen des Mempools)
++    while ((num_packets &gt; 0) &amp;&amp; (error == USB_NO_ERROR)) {
++        error = ohci_do_some_packets(packets,
++            (num_packets &gt; 48) ? 48 : num_packets);
++        packets = &amp;packets[48];
++        num_packets -= (num_packets &gt; 48) ? 48 : num_packets;
++    }
++
++    return error;
++}
++
++static int ohci_do_some_packets(struct usb_packet* packets, int num_packets)
+ {
+     struct ohci_ed_desc* edsc;
+     struct ohci_td_desc* tdsc, * otdsc;
+diff --git a/usb/uhci.c b/usb/uhci.c
+index bad63bb..bd9169f 100644
+--- a/usb/uhci.c
++++ b/usb/uhci.c
+@@ -341,9 +341,9 @@ static int uhci_do_packets(struct usb_packet* packet, int num_packets)
+     int i, cond = 0;
+ 
+     //TODO
+-    for (i = 0; i &lt; num_packets; i++) {
++    for (i = 0; (i &lt; num_packets) &amp;&amp; !cond; i++) {
+         packet[i].condition = uhci_do_packet(&amp;packet[i]);
+-        cond |= packet[i].condition;
++        cond = packet[i].condition;
+     }
+ 
+     return cond;
+-- 
+1.6.3.3
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000024.html">[cdi-devel] [PATCH] Multiple packets
+</A></li>
+	<LI>Next message: <A HREF="000026.html">[cdi-devel] [PATCH] Mehrere ISRs pro IRQ
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#25">[ date ]</a>
+              <a href="thread.html#25">[ thread ]</a>
+              <a href="subject.html#25">[ subject ]</a>
+              <a href="author.html#25">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

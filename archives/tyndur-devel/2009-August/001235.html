@@ -1,0 +1,196 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] bincat: Positionsangabe moeglich (wird auf	1k-Bloecke gerundet)
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20bincat%3A%20Positionsangabe%20moeglich%20%28wird%20auf%0A%091k-Bloecke%20gerundet%29&In-Reply-To=%3C1249769359-8569-1-git-send-email-alex%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001244.html">
+   <LINK REL="Next"  HREF="001239.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] bincat: Positionsangabe moeglich (wird auf	1k-Bloecke gerundet)</H1>
+    <B>Alexander Siol</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20bincat%3A%20Positionsangabe%20moeglich%20%28wird%20auf%0A%091k-Bloecke%20gerundet%29&In-Reply-To=%3C1249769359-8569-1-git-send-email-alex%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH] bincat: Positionsangabe moeglich (wird auf	1k-Bloecke gerundet)">alex at tyndur.org
+                  </A><BR>
+    <I>So Aug  9 00:09:19 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001244.html">[tyndur-devel] [PATCH] ls: Versteckte Dateien,	Mehrere	Verzeichnisse listen
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001239.html">[tyndur-devel] [PATCH] bincat: Positionsangabe moeglich	(wird	auf 1k-Bloecke gerundet)
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1235">[ Datum ]</a>
+              <a href="thread.html#1235">[ Thema ]</a>
+              <a href="subject.html#1235">[ Betreff (Subject) ]</a>
+              <a href="author.html#1235">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+bincat: Positionsangaben (Start, Länge und Ende)
+*bincat: Umstellung auf getopt
+
+Signed-off-by: Alexander Siol &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">alex at tyndur.org</A>&gt;
+---
+ trunk/src/modules/c/shell/cmds/bincat.c |   75 +++++++++++++++++++++++++++---
+ 1 files changed, 67 insertions(+), 8 deletions(-)
+
+diff --git a/trunk/src/modules/c/shell/cmds/bincat.c b/trunk/src/modules/c/shell/cmds/bincat.c
+index 8c0372e..0fa8539 100644
+--- a/trunk/src/modules/c/shell/cmds/bincat.c
++++ b/trunk/src/modules/c/shell/cmds/bincat.c
+@@ -1,8 +1,8 @@
+ /*
+- * Copyright (c) 2007 The tyndur Project. All rights reserved.
++ * Copyright (c) 2007-2009 The tyndur Project. All rights reserved.
+  *
+  * This code is derived from software contributed to the tyndur Project
+- * by Antoine Kaufmann.
++ * by Antoine Kaufmann, Alexander Siol
+  *
+  * Redistribution and use in source and binary forms, with or without
+  * modification, are permitted provided that the following conditions
+@@ -38,35 +38,94 @@
+ #include &quot;stdio.h&quot;
+ #include &quot;unistd.h&quot;
+ #include &lt;lost/config.h&gt;
++#include &lt;getopt.h&gt;
+ 
+ #define BLOCK_SIZE 1024
+ 
+ void bincat_display_usage(void);
+ 
++#define min(a,b) (a &lt; b)?(a):(b);
++
+ #ifdef CONFIG_SHELL_BUILTIN_ONLY
+     int shell_command_bincat(int argc, char* argv[], const char* args)
+ #else
+     int main(int argc, char* argv[])
+ #endif
+ {
+-    if (argc != 2) {
++    static const struct option long_options[] =
++    {
++        { &quot;start&quot;, required_argument,  0, 's' },
++        { &quot;size&quot;, required_argument,   0, 'l' },
++        { &quot;end&quot;, required_argument,    0, 'e' },
++        { &quot;help&quot;, no_argument,         0, 'h' },
++        { 0, 0, 0, 0 }
++    };
++
++    optind = 0;
++    int start = 0;
++    int end = 0;
++    int length = 0;
++    char *path = NULL;
++    int n = 0;
++    int m = 0;
++    size_t total_read = 0;
++
++
++    while (optind &lt; argc) {
++        int result = getopt_long(argc, argv, &quot;s:l:e:h&quot;, long_options, NULL);
++        if (result == -1) {
++            break;
++        }
++        switch (result) {
++            case 's':
++                start = atoi(optarg);
++                break;
++            case 'l':
++                length = atoi(optarg);
++                break;
++            case 'e':
++                end = atoi(optarg);
++                break;
++            case 'h':
++                bincat_display_usage();
++                return EXIT_SUCCESS;
++            default:
++                break;
++        }
++    }
++
++    if (length &amp;&amp; end) {
++        printf(&quot;--size und --end schließen sich aus. Verwende --size\n&quot;);
++    } else if (end) {
++        length = end - start;
++    }
++
++    while (optind &lt; argc) {
++        path = argv[optind++];
++    }
++
++    if (path == NULL) {
+         bincat_display_usage();
+-        return -1;
++        return EXIT_SUCCESS;
+     }
+ 
+-    char* path = argv[1];
+     FILE* file = fopen(path, &quot;r&quot;);
+ 
++    fseek(file, start, SEEK_SET);
++    m = start / 8;
++
+     if (file == NULL) {
+         printf(&quot;Konnte '%s' nicht zum lesen oeffnen!\n&quot;, path);
+         return -1;
+     } else {
+         char buffer[BLOCK_SIZE];
+         size_t size;
+-        int n, m = 0;
+-        while (feof(file) != EOF) {
++        while (feof(file) != EOF &amp;&amp; (total_read &lt;= length || length == 0)) {
++
+             size = fread(buffer, 1, BLOCK_SIZE, file);
+ 
++            total_read += size;
++
+             printf(&quot;0x%08x: &quot;, m);
+ 
+             for (n=0; n &lt; size; n++) {
+@@ -82,7 +141,7 @@ void bincat_display_usage(void);
+ 
+         fclose(file);
+     }
+-    
++    printf(&quot;\n&quot;);
+     return EXIT_SUCCESS;
+ }
+ 
+-- 
+1.5.6.5
+
+</PRE>
+
+
+
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001244.html">[tyndur-devel] [PATCH] ls: Versteckte Dateien,	Mehrere	Verzeichnisse listen
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001239.html">[tyndur-devel] [PATCH] bincat: Positionsangabe moeglich	(wird	auf 1k-Bloecke gerundet)
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1235">[ Datum ]</a>
+              <a href="thread.html#1235">[ Thema ]</a>
+              <a href="subject.html#1235">[ Betreff (Subject)]</a>
+              <a href="author.html#1235">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

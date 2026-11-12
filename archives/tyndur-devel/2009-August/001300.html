@@ -1,0 +1,233 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 4/6] libc: POSIX: fcntl
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%204/6%5D%20libc%3A%20POSIX%3A%20fcntl&In-Reply-To=%3C1250454132-11413-5-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001311.html">
+   <LINK REL="Next"  HREF="001301.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 4/6] libc: POSIX: fcntl</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%204/6%5D%20libc%3A%20POSIX%3A%20fcntl&In-Reply-To=%3C1250454132-11413-5-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 4/6] libc: POSIX: fcntl">kevin at tyndur.org
+                  </A><BR>
+    <I>So Aug 16 22:22:10 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001311.html">[tyndur-devel] [PATCH 3/6] libc: Mehr Konstanten
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001301.html">[tyndur-devel] [PATCH 5/6] libc: POSIX: getpagesize()
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1300">[ Datum ]</a>
+              <a href="thread.html#1300">[ Thema ]</a>
+              <a href="subject.html#1300">[ Betreff (Subject) ]</a>
+              <a href="author.html#1300">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ libc: POSIX: Ungefaehr ganz genau jedes Programm braucht diese
+  Funktion, implementieren wir halt mal irgendwas, was so aehnlich
+  aussieht. Flags, die gesetzt werden, koennen wieder abgeholt werden,
+  aber haben ansonsten keine Auswirkungen.
+- libc: O_BINARY ist kein POSIX, wir unterscheiden nicht zwischen Text-
+  und Binaerdateien und das Gegenstueck O_TEXT fehlt auch.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/include/fcntl.h         |   20 ++++++++-
+ src/modules/lib/posix/posix_files.c |   83 ++++++++++++++++++++++++++++++++++-
+ 2 files changed, 101 insertions(+), 2 deletions(-)
+
+diff --git a/src/modules/include/fcntl.h b/src/modules/include/fcntl.h
+index dee23f5..f8211ab 100644
+--- a/src/modules/include/fcntl.h
++++ b/src/modules/include/fcntl.h
+@@ -36,7 +36,22 @@
+ #define O_CREAT 16
+ #define O_EXCL 32
+ #define O_TRUNC 64
+-#define O_BINARY 128
++
++#define O_ACCMODE (O_RDONLY | O_WRONLY | O_RDWR)
++
++enum {
++    /// Liest die Flags des Filedeskriptors
++    F_GETFD,
++
++    /// Setzt die Flags ds Filedeskriptors
++    F_SETFD,
++
++    /// Liest die Flags einer Datei
++    F_GETFL,
++
++    /// Setzt die Flags einer Datei
++    F_SETFL,
++};
+ 
+ /// Emulierter Unix-Syscall zum oeffnen von Dateien
+ int open(const char* filename, int flags, ...);
+@@ -44,5 +59,8 @@ int open(const char* filename, int flags, ...);
+ /// Emulierter Unix-Syscall zum erstellen von Dateien
+ int creat(const char *pathname, mode_t mode);
+ 
++/// Fuehrt unterschiedliche Aktionen (F_*) auf Dateien aus
++int fcntl(int fd, int cmd, ...);
++
+ #endif //ifndef _FCNTL_H_
+ 
+diff --git a/src/modules/lib/posix/posix_files.c b/src/modules/lib/posix/posix_files.c
+index d8c17e6..4c1cf90 100644
+--- a/src/modules/lib/posix/posix_files.c
++++ b/src/modules/lib/posix/posix_files.c
+@@ -38,6 +38,9 @@
+ struct fd_list_element {
+     FILE* io_res;
+     int fd;
++
++    int fd_flags;
++    int file_flags;
+ };
+ 
+ /// Liste mit den Dateideskriptoren
+@@ -104,6 +107,8 @@ int fileno(FILE* io_res)
+ 
+         fdl_element-&gt;io_res = io_res;
+         fdl_element-&gt;fd = next_fd++;
++        fdl_element-&gt;fd_flags = 0;
++        fdl_element-&gt;file_flags = 0;
+     }
+ 
+     return fdl_element-&gt;fd;
+@@ -149,6 +154,77 @@ FILE* fdopen(int fd, const char* mode)
+ }
+ 
+ /**
++ * Fuehrt unterschiedliche Aktionen (F_*) auf Dateien aus
++ */
++int fcntl(int fd, int cmd, ...)
++{
++    // Liste mit den Dateideskriptoren durchsuchen
++    struct fd_list_element* fdl_element = NULL;
++    int i = 0;
++    while ((fdl_element = list_get_element_at(fd_list, i))) {
++        if (fdl_element-&gt;fd == fd) {
++            break;
++        }
++        i++;
++    }
++
++    if (fdl_element == NULL) {
++        errno = EBADF;
++        return -1;
++    }
++
++    // Aktion durchfuehren
++    switch (cmd) {
++        case F_GETFD:
++            return fdl_element-&gt;fd_flags;
++
++        case F_GETFL:
++            return fdl_element-&gt;file_flags;
++
++        case F_SETFD:
++        {
++            va_list ap;
++            int arg;
++
++            va_start(ap, cmd);
++            arg = va_arg(ap, int);
++            va_end(ap);
++
++            if (arg != fdl_element-&gt;fd_flags) {
++                fprintf(stderr, &quot;Warnung: S_SETFD Ã¤ndert Flags (%#x =&gt; %#x) &quot;
++                    &quot;ohne Effekt\n&quot;, fdl_element-&gt;fd_flags, arg);
++            }
++
++            fdl_element-&gt;fd_flags = arg;
++            return 0;
++        }
++
++        case F_SETFL:
++        {
++            va_list ap;
++            int arg;
++
++            va_start(ap, cmd);
++            arg = va_arg(ap, int);
++            va_end(ap);
++
++            // Wenn die Flags bisher 0 sind, ist es open, das aendert. In
++            // diesem Fall wollen wir keine Warnung.
++            if ((arg != fdl_element-&gt;file_flags) &amp;&amp; fdl_element-&gt;file_flags) {
++                fprintf(stderr, &quot;Warnung: S_SETFL Ã¤ndert Flags (%#x =&gt; %#x) &quot;
++                    &quot;ohne Effekt\n&quot;, fdl_element-&gt;file_flags, arg);
++            }
++
++            fdl_element-&gt;file_flags = arg;
++            return 0;
++        }
++    }
++
++    errno = EINVAL;
++    return -1;
++}
++
++/**
+  * Eine Datei als Unix-Dateideskriptor oeffnen
+  *
+  * @param filename Dateiname
+@@ -161,6 +237,7 @@ int open(const char* filename, int flags, ...)
+ {
+     char fopen_flags[4];
+     size_t flags_size = 0;
++    int fd;
+ 
+     // Wenn O_CREAT und O_EXCL gleichzeitig gesetzt ist, muessen wir abbrechen
+     // wenn die Datei existiert.
+@@ -217,7 +294,11 @@ int open(const char* filename, int flags, ...)
+         errno = ENOENT;
+         return -1;
+     }
+-    return fileno(file);
++
++    fd = fileno(file);
++    fcntl(fd, F_SETFL, flags);
++
++    return fd;
+ }
+ 
+ /**
+-- 
+1.6.0.2
+
+</PRE>
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001311.html">[tyndur-devel] [PATCH 3/6] libc: Mehr Konstanten
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001301.html">[tyndur-devel] [PATCH 5/6] libc: POSIX: getpagesize()
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1300">[ Datum ]</a>
+              <a href="thread.html#1300">[ Thema ]</a>
+              <a href="subject.html#1300">[ Betreff (Subject)]</a>
+              <a href="author.html#1300">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

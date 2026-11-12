@@ -1,0 +1,141 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] tcpip: Schreibvorgaenge auf mehrere	TCP-Pakete aufteilen
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20tcpip%3A%20Schreibvorgaenge%20auf%20mehrere%0A%09TCP-Pakete%20aufteilen&In-Reply-To=%3C1240867115-10532-1-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="000817.html">
+   <LINK REL="Next"  HREF="000819.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] tcpip: Schreibvorgaenge auf mehrere	TCP-Pakete aufteilen</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20tcpip%3A%20Schreibvorgaenge%20auf%20mehrere%0A%09TCP-Pakete%20aufteilen&In-Reply-To=%3C1240867115-10532-1-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH] tcpip: Schreibvorgaenge auf mehrere	TCP-Pakete aufteilen">kevin at tyndur.org
+                  </A><BR>
+    <I>Mo Apr 27 23:18:35 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="000817.html">[tyndur-devel] [PATCH] kernel2: Dokumentation	der	i386-Interrupt-Stubs
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="000819.html">[tyndur-devel] [PATCH] tcpip: Schreibvorgaenge auf	mehrere	TCP-Pakete aufteilen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#818">[ Datum ]</a>
+              <a href="thread.html#818">[ Thema ]</a>
+              <a href="subject.html#818">[ Betreff (Subject) ]</a>
+              <a href="author.html#818">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>! tcpip: Beim Senden von TCP-Paketen sollte man die MSS nicht
+  ueberschreiten, sonst spielt der Netzwerktreiber nicht mehr mit und
+  man kann keine Foreneintraege abschicken. Daher werden in der
+  LostIO-Schnittstelle jetzt die Daten auf mehrere Pakete verteilt.
+---
+ src/modules/tcpip/include/tcp.h |    7 +++++++
+ src/modules/tcpip/lostio_if.c   |   24 ++++++++++++++++++------
+ src/modules/tcpip/tcp.c         |   10 ++++++++++
+ 3 files changed, 35 insertions(+), 6 deletions(-)
+
+diff --git a/src/modules/tcpip/include/tcp.h b/src/modules/tcpip/include/tcp.h
+index e325ae7..42b5699 100644
+--- a/src/modules/tcpip/include/tcp.h
++++ b/src/modules/tcpip/include/tcp.h
+@@ -121,4 +121,11 @@ void tcp_update_checksum
+ void tcp_receive(dword source_ip, void* data, dword data_size);
+ void tcp_send_ack(struct tcp_connection* conn); // TODO Ersetzen
+ 
++/**
++ * Gibt die MSS (Maximum Segment Size) fuer eine TCP-Verbindung zurueck, d.h.
++ * die maximale Anzahl Bytes, die als Nutzdaten in einem TCP-Paket uebertragen
++ * werden koennen
++ */
++size_t tcp_get_mss(struct tcp_connection* conn);
++
+ #endif
+diff --git a/src/modules/tcpip/lostio_if.c b/src/modules/tcpip/lostio_if.c
+index 5b4037b..410d221 100644
+--- a/src/modules/tcpip/lostio_if.c
++++ b/src/modules/tcpip/lostio_if.c
+@@ -293,13 +293,25 @@ size_t lostio_tcp_write
+         return 0;
+     }
+ 
+-    struct tcp_out_buffer* out_buffer = malloc(sizeof(*out_buffer));
+-    out_buffer-&gt;data = data;
+-    out_buffer-&gt;size = blocksize * count;
++    // Zu schreibende Teile auf passende Paketgroessen zusammenhacken und in
++    // den ausgehenden Puffer speichern
++    struct tcp_out_buffer* out_buffer;
++    size_t size = blocksize * count;
++    size_t mss = tcp_get_mss(conn);
++    while (size &gt; 0) {
++        size_t packet_size = size &gt; mss ? mss : size;
+ 
+-    list_insert(conn-&gt;out_buffer, list_size(conn-&gt;out_buffer), out_buffer);
+-    //list_push(conn-&gt;out_buffer, &quot;GET / HTTP/1.0\r\n\r\n&quot;);
+-    
++        out_buffer = malloc(packet_size);
++        out_buffer-&gt;data = data;
++        out_buffer-&gt;size = packet_size;
++
++        list_insert(conn-&gt;out_buffer, list_size(conn-&gt;out_buffer), out_buffer);
++
++        data += packet_size;
++        size -= packet_size;
++    }
++
++    // Ausgehenden Puffer senden
+     while (!list_is_empty(conn-&gt;out_buffer)) {
+         tcp_send_ack(conn);
+     }
+diff --git a/src/modules/tcpip/tcp.c b/src/modules/tcpip/tcp.c
+index 7e63c9e..7eac8b2 100644
+--- a/src/modules/tcpip/tcp.c
++++ b/src/modules/tcpip/tcp.c
+@@ -81,6 +81,16 @@ static word tcp_get_free_port(void)
+     return source_port++;
+ }
+ 
++/**
++ * Gibt die MSS (Maximum Segment Size) fuer eine TCP-Verbindung zurueck, d.h.
++ * die maximale Anzahl Bytes, die als Nutzdaten in einem TCP-Paket uebertragen
++ * werden koennen
++ */
++size_t tcp_get_mss(struct tcp_connection* conn)
++{
++    return 1500 - sizeof(struct ip_header) - sizeof(struct tcp_header);
++}
++
+ static void tcp_send_packet(struct tcp_connection* conn, void* data, 
+     dword data_size, byte flags)
+ {
+-- 
+1.6.0.2
+
+
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="000817.html">[tyndur-devel] [PATCH] kernel2: Dokumentation	der	i386-Interrupt-Stubs
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="000819.html">[tyndur-devel] [PATCH] tcpip: Schreibvorgaenge auf	mehrere	TCP-Pakete aufteilen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#818">[ Datum ]</a>
+              <a href="thread.html#818">[ Thema ]</a>
+              <a href="subject.html#818">[ Betreff (Subject)]</a>
+              <a href="author.html#818">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

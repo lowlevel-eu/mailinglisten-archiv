@@ -1,0 +1,1098 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 19/22] ehci: Add EHCI driver
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%2019/22%5D%20ehci%3A%20Add%20EHCI%20driver&In-Reply-To=%3C1449962772-29705-20-git-send-email-max%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002537.html">
+   <LINK REL="Next"  HREF="002539.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 19/22] ehci: Add EHCI driver</H1>
+    <B>Max Reitz</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%2019/22%5D%20ehci%3A%20Add%20EHCI%20driver&In-Reply-To=%3C1449962772-29705-20-git-send-email-max%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 19/22] ehci: Add EHCI driver">max at tyndur.org
+                  </A><BR>
+    <I>So Dez 13 00:26:09 CET 2015</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002537.html">[tyndur-devel] [PATCH 18/22] usb: Entferne týndur-eigene Treiber
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002539.html">[tyndur-devel] [PATCH 20/22] usb: Add USB 2.0 bus driver
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2538">[ Datum ]</a>
+              <a href="thread.html#2538">[ Thema ]</a>
+              <a href="subject.html#2538">[ Betreff (Subject) ]</a>
+              <a href="author.html#2538">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ This adds an EHCI USB host controller driver. It is missing support
+  for periodic schedule (interrupt and isochronous transfers),
+  hotplugging, suspend/resume, etc. pp..
+
+Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">max at tyndur.org</A>&gt;
+Acked-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/cdi/ehci/ehci.c | 640 ++++++++++++++++++++++++++++++++++++++++++++
+ src/modules/cdi/ehci/ehci.h | 292 ++++++++++++++++++++
+ src/modules/cdi/ehci/main.c |  69 +++++
+ 3 files changed, 1001 insertions(+)
+ create mode 100644 src/modules/cdi/ehci/ehci.c
+ create mode 100644 src/modules/cdi/ehci/ehci.h
+ create mode 100644 src/modules/cdi/ehci/main.c
+
+diff --git a/src/modules/cdi/ehci/ehci.c b/src/modules/cdi/ehci/ehci.c
+new file mode 100644
+index 0000000..7f3838c
+--- /dev/null
++++ b/src/modules/cdi/ehci/ehci.c
+@@ -0,0 +1,640 @@
++/******************************************************************************
++ * Copyright (c) 2015 Max Reitz                                               *
++ *                                                                            *
++ * Permission is hereby granted,  free of charge,  to any person  obtaining a *
++ * copy of this software and associated documentation files (the &quot;Software&quot;), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
++ * and/or  sell copies of the  Software,  and to permit  persons to whom  the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED,  INCLUDING BUT NOT LIMITED TO THE WARRANTIES  OF MERCHANTABILITY, *
++ * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH  THE SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#include &lt;assert.h&gt;
++#include &lt;stdbool.h&gt;
++#include &lt;stdio.h&gt;
++#include &lt;stdlib.h&gt;
++#include &lt;string.h&gt;
++#include &lt;cdi.h&gt;
++#include &lt;cdi/lists.h&gt;
++#include &lt;cdi/misc.h&gt;
++#include &lt;cdi/pci.h&gt;
++#include &lt;cdi/usb.h&gt;
++#include &lt;cdi/usb_hcd.h&gt;
++
++#include &quot;ehci.h&quot;
++
++
++#define EHCI_TIMEOUT 1000 // ms
++
++
++static void bios_handoff(struct cdi_pci_device *pci_dev, struct ehci *hc);
++static void irq_handler(struct cdi_device *dev);
++
++
++struct cdi_device *ehci_init_device(struct cdi_bus_data *bus_data)
++{
++    struct cdi_pci_device *pci_dev = (struct cdi_pci_device *)bus_data;
++    static int dev_counter = 0;
++
++    if (pci_dev-&gt;class_id     != PCI_CLASS_SERIAL_BUS_CONTROLLER ||
++        pci_dev-&gt;subclass_id  != PCI_SUBCLASS_USB_HOST_CONTROLLER ||
++        pci_dev-&gt;interface_id != PCI_INTERFACE_EHCI)
++    {
++        return NULL;
++    }
++
++    struct ehci *hc = calloc(1, sizeof(*hc));
++
++    hc-&gt;hc.dev.name = malloc(8);
++    sprintf((char *)hc-&gt;hc.dev.name, &quot;ehci%i&quot;, dev_counter++);
++
++    hc-&gt;retired_qhs = cdi_list_create();
++
++    cdi_pci_alloc_memory(pci_dev);
++
++    struct cdi_pci_resource *res;
++    for (int i = 0; (res = cdi_list_get(pci_dev-&gt;resources, i)); i++) {
++        if (res-&gt;type == CDI_PCI_MEMORY &amp;&amp; !res-&gt;index) {
++            hc-&gt;caps = res-&gt;address;
++            hc-&gt;regs = (struct ehci_registers *)((uintptr_t)res-&gt;address +
++                                                 hc-&gt;caps-&gt;caplength);
++            break;
++        }
++    }
++    if (!hc-&gt;regs) {
++        goto fail;
++    }
++
++    bios_handoff(pci_dev, hc);
++
++    // Stop operation
++    hc-&gt;regs-&gt;usbcmd = (hc-&gt;regs-&gt;usbcmd &amp; EHCI_CMD_RSVD) | EHCI_CMD_ITC(8);
++
++    // Wait until HCHALTED becomes true
++    CDI_CONDITION_WAIT(hc-&gt;regs-&gt;usbsts &amp; EHCI_STS_HCH, 50);
++    if (!(hc-&gt;regs-&gt;usbsts &amp; EHCI_STS_HCH)) {
++        goto fail;
++    }
++
++    hc-&gt;regs-&gt;usbcmd |= EHCI_CMD_HCRES; // Reset
++    CDI_CONDITION_WAIT(!(hc-&gt;regs-&gt;usbcmd &amp; EHCI_CMD_HCRES), 50);
++    if (hc-&gt;regs-&gt;usbcmd &amp; EHCI_CMD_HCRES) {
++        goto fail;
++    }
++
++    if (hc-&gt;caps-&gt;hccparams &amp; EHCI_HCC_64) {
++        // 64-bit addressing capability
++        hc-&gt;regs-&gt;ctrldssegment = 0;
++    }
++
++    hc-&gt;regs-&gt;usbintr = 0;
++    hc-&gt;regs-&gt;usbsts  = hc-&gt;regs-&gt;usbsts;
++
++    hc-&gt;periodic_list_mem = cdi_mem_alloc(4096, 12
++                                                | CDI_MEM_PHYS_CONTIGUOUS
++                                                | CDI_MEM_DMA_4G
++                                                | CDI_MEM_NOINIT);
++    hc-&gt;periodic_list = hc-&gt;periodic_list_mem-&gt;vaddr;
++    for (int i = 0; i &lt; 1024; i++) {
++        hc-&gt;periodic_list[i] = EHCI_T;
++    }
++    hc-&gt;regs-&gt;periodiclistbase = hc-&gt;periodic_list_mem-&gt;paddr.items[0].start;
++
++    // Create anchor
++    struct cdi_mem_area *anchor_qh;
++    anchor_qh = cdi_mem_alloc(sizeof(ehci_fat_qh_t), 6
++                                                     | CDI_MEM_PHYS_CONTIGUOUS
++                                                     | CDI_MEM_DMA_4G
++                                                     | CDI_MEM_NOINIT);
++
++    hc-&gt;async_start = anchor_qh-&gt;vaddr;
++    memset(hc-&gt;async_start, 0, sizeof(*hc-&gt;async_start));
++
++    hc-&gt;async_start-&gt;cdi_mem_area = anchor_qh;
++    hc-&gt;async_start-&gt;paddr = anchor_qh-&gt;paddr.items[0].start
++                           + offsetof(ehci_fat_qh_t, qh);
++
++    hc-&gt;async_start-&gt;next = hc-&gt;async_start;
++    hc-&gt;async_start-&gt;previous = hc-&gt;async_start;
++
++    hc-&gt;async_start-&gt;qh.next_qh = hc-&gt;async_start-&gt;paddr | EHCI_QH;
++    hc-&gt;async_start-&gt;qh.ep_state[0] = EHCI_QHES0_RL(0) | EHCI_QHES0_MPL(8)
++                                    | EHCI_QHES0_EP(0) | EHCI_QHES0_DEV(0)
++                                    | EHCI_QHES0_H | EHCI_QHES0_DTC
++                                    | EHCI_QHES0_EPS_HS;
++    hc-&gt;async_start-&gt;qh.ep_state[1] = EHCI_QHES1_MULT(1) | EHCI_QHES1_SCM(0xff);
++
++    hc-&gt;async_start-&gt;qh.overlay.next_qtd = EHCI_T;
++    hc-&gt;async_start-&gt;qh.overlay.alt_next_qtd = EHCI_T;
++
++    hc-&gt;regs-&gt;asynclistaddr = hc-&gt;async_start-&gt;paddr;
++
++    // Start operation
++    hc-&gt;regs-&gt;usbcmd = (hc-&gt;regs-&gt;usbcmd &amp; EHCI_CMD_RSVD)
++                      | EHCI_CMD_ITC(8) | EHCI_CMD_ASE | EHCI_CMD_PSE
++                      | EHCI_CMD_FLS_1K | EHCI_CMD_RS;
++
++    // Wait until HCHalted becomes false and the schedules are running
++    CDI_CONDITION_WAIT((hc-&gt;regs-&gt;usbsts
++                        &amp; (EHCI_STS_ASS | EHCI_STS_PSS | EHCI_STS_HCH))
++                       == (EHCI_STS_ASS | EHCI_STS_PSS), 50);
++    if ((hc-&gt;regs-&gt;usbsts &amp; (EHCI_STS_ASS | EHCI_STS_PSS | EHCI_STS_HCH))
++        != (EHCI_STS_ASS | EHCI_STS_PSS))
++    {
++        goto fail;
++    }
++
++    cdi_register_irq(pci_dev-&gt;irq, &amp;irq_handler, &amp;hc-&gt;hc.dev);
++
++    // async advance doorbell
++    hc-&gt;regs-&gt;usbintr = EHCI_INT_IAA;
++
++    // Route everything to this HC
++    hc-&gt;regs-&gt;configflag |= EHCI_CF_CF;
++
++    cdi_sleep_ms(5);
++
++    hc-&gt;hc.rh.ports = EHCI_HCS_N_PORTS(hc-&gt;caps-&gt;hcsparams);
++
++    // Power up all ports
++    for (int i = 0; i &lt; hc-&gt;hc.rh.ports; i++) {
++        hc-&gt;regs-&gt;portsc[i] |= EHCI_PSC_PP;
++    }
++
++    return &amp;hc-&gt;hc.dev;
++
++fail:
++    if (hc-&gt;async_start) {
++        cdi_mem_free(hc-&gt;async_start-&gt;cdi_mem_area);
++    }
++    if (hc-&gt;periodic_list_mem) {
++        cdi_mem_free(hc-&gt;periodic_list_mem);
++    }
++    cdi_list_destroy(hc-&gt;retired_qhs);
++    free((void *)hc-&gt;hc.dev.name);
++    free(hc);
++    cdi_pci_free_memory(pci_dev);
++
++    return NULL;
++}
++
++
++static void bios_handoff(struct cdi_pci_device *pci_dev, struct ehci *hc)
++{
++    int eecp = EHCI_HCC_EECP(hc-&gt;caps-&gt;hccparams);
++
++    // Iterate through the list of capabilities
++    while (eecp &gt;= 0x40) {
++        uint32_t cap = cdi_pci_config_readl(pci_dev, eecp);
++
++        // Look for USBLEGSUP
++        if (EHCI_EEC_ID(cap) == EHCI_EECID_LEGSUP) {
++            // Set OS semaphore
++            cdi_pci_config_writeb(pci_dev, eecp + 3, 1);
++
++            // Wait for BIOS semaphore to get unset
++            CDI_CONDITION_WAIT(!(cdi_pci_config_readb(pci_dev, eecp + 2) &amp; 1),
++                               5000);
++            if (cdi_pci_config_readb(pci_dev, eecp + 2) &amp; 1) {
++                // Okay Max, stay calm, don't swear
++                printf(&quot;[ehci] Warning: Clean BIOS handoff failed\n&quot;);
++                // Disable all SMI sources (0xff000000 is the R/WC mask of this
++                // register)
++                cdi_pci_config_writel(pci_dev, eecp + 4,
++                    cdi_pci_config_readl(pci_dev, eecp + 4) &amp; 0xff000000u);
++                // Unset BIOS semaphore
++                cdi_pci_config_writeb(pci_dev, eecp + 2, 0);
++            }
++        }
++
++        eecp = EHCI_EEC_NEXT(cap);
++    }
++}
++
++
++static void irq_handler(struct cdi_device *dev)
++{
++    struct cdi_usb_hc *cdi_hc = CDI_UPCAST(dev, struct cdi_usb_hc, dev);
++    struct ehci *hc = CDI_UPCAST(cdi_hc, struct ehci, hc);
++
++    uint32_t usbsts = hc-&gt;regs-&gt;usbsts;
++    hc-&gt;regs-&gt;usbsts = usbsts;
++
++    // async advance doorbell
++    if (!(usbsts &amp; EHCI_STS_IAA)) {
++        return;
++    }
++
++    ehci_fat_qh_t *rqh;
++    while ((rqh = cdi_list_pop(hc-&gt;retired_qhs))) {
++        cdi_mem_free(rqh-&gt;cdi_mem_area);
++    }
++}
++
++
++void ehci_rh_port_down(struct cdi_usb_hub *hub, int index)
++{
++    struct cdi_usb_hc *cdi_hc = CDI_UPCAST(hub, struct cdi_usb_hc, rh);
++    struct ehci *hc = CDI_UPCAST(cdi_hc, struct ehci, hc);
++
++    hc-&gt;regs-&gt;portsc[index] &amp;= ~EHCI_PSC_PED;
++}
++
++
++void ehci_rh_port_up(struct cdi_usb_hub *hub, int index)
++{
++    struct cdi_usb_hc *cdi_hc = CDI_UPCAST(hub, struct cdi_usb_hc, rh);
++    struct ehci *hc = CDI_UPCAST(cdi_hc, struct ehci, hc);
++    uint32_t portsc = hc-&gt;regs-&gt;portsc[index];
++
++    if ((portsc &amp; EHCI_PSC_LS_MASK) == EHCI_PSC_LS_K) {
++        // Low-speed device, release ownership
++        hc-&gt;regs-&gt;portsc[index] = portsc | EHCI_PSC_PO;
++        return;
++    }
++
++    // Assert reset signal
++    hc-&gt;regs-&gt;portsc[index] = ((portsc &amp; ~(EHCI_PSC_PO | EHCI_PSC_SUS |
++                                           EHCI_PSC_FPR | EHCI_PSC_PED))
++                                       | EHCI_PSC_RES);
++    cdi_sleep_ms(50);
++
++    // De-assert reset signal
++    hc-&gt;regs-&gt;portsc[index] = portsc &amp; ~EHCI_PSC_RES;
++    CDI_CONDITION_WAIT(!(hc-&gt;regs-&gt;portsc[index] &amp; EHCI_PSC_RES), 50);
++
++    portsc = hc-&gt;regs-&gt;portsc[index];
++    if (portsc &amp; EHCI_PSC_RES) {
++        // Disable port, route on to companion controller
++        // (maybe it can do at least something with it)
++        hc-&gt;regs-&gt;portsc[index] = (portsc &amp; ~EHCI_PSC_PED) | EHCI_PSC_PO;
++    } else if ((portsc &amp; (EHCI_PSC_PED | EHCI_PSC_CCS)) == EHCI_PSC_CCS) {
++        // Device connected but port disabled:
++        // Full-speed device, release ownership
++        hc-&gt;regs-&gt;portsc[index] = portsc | EHCI_PSC_PO;
++    }
++}
++
++
++cdi_usb_port_status_t ehci_rh_port_status(struct cdi_usb_hub *hub, int index)
++{
++    struct cdi_usb_hc *cdi_hc = CDI_UPCAST(hub, struct cdi_usb_hc, rh);
++    struct ehci *hc = CDI_UPCAST(cdi_hc, struct ehci, hc);
++    uint32_t portsc = hc-&gt;regs-&gt;portsc[index];
++    cdi_usb_port_status_t status = 0;
++
++    if ((portsc &amp; (EHCI_PSC_PED | EHCI_PSC_CCS)) ==
++                  (EHCI_PSC_PED | EHCI_PSC_CCS))
++    {
++        // Device connected and port enabled
++        status |= CDI_USB_PORT_CONNECTED | CDI_USB_HIGH_SPEED;
++    }
++
++    return status;
++}
++
++
++static void enter_async_qh(struct ehci *hc, ehci_fat_qh_t *qh)
++{
++    // Enter the new QH as last
++
++    qh-&gt;next = hc-&gt;async_start;
++    qh-&gt;previous = hc-&gt;async_start-&gt;previous;
++
++    qh-&gt;previous-&gt;next = qh;
++    hc-&gt;async_start-&gt;previous = qh;
++
++    qh-&gt;qh.next_qh = hc-&gt;async_start-&gt;paddr | EHCI_QH;
++    qh-&gt;previous-&gt;qh.next_qh = qh-&gt;paddr | EHCI_QH;
++}
++
++
++static void retire_qh(struct ehci *hc, ehci_fat_qh_t *qh)
++{
++    qh-&gt;previous-&gt;qh.next_qh = qh-&gt;qh.next_qh;
++
++    qh-&gt;previous-&gt;next = qh-&gt;next;
++    qh-&gt;next-&gt;previous = qh-&gt;previous;
++
++    cdi_list_push(hc-&gt;retired_qhs, qh);
++    // Request async advance doorbell
++    hc-&gt;regs-&gt;usbcmd |= EHCI_CMD_IAADB;
++}
++
++
++static void retire_first_qtd(ehci_fat_qh_t *qh)
++{
++    ehci_fat_qtd_t *qtd = qh-&gt;first_qtd;
++
++    assert(qtd);
++
++    uint32_t err_mask = (qh-&gt;qh.ep_state[0] &amp; EHCI_QHES0_EPS_MASK)
++                         == EHCI_QHES0_EPS_HS
++                        ? EHCI_QTDS_HS_ERR_MASK
++                        : EHCI_QTDS_LFS_ERR_MASK;
++
++    if (qtd-&gt;qtd.status &amp; err_mask) {
++        if (qtd-&gt;qtd.status &amp; EHCI_QTDS_BABBLE) {
++            *qtd-&gt;result = CDI_USB_BABBLE;
++        } else if (qtd-&gt;qtd.status &amp; (EHCI_QTDS_XACTERR | EHCI_QTDS_P_ERR)) {
++            *qtd-&gt;result = CDI_USB_BAD_RESPONSE;
++        } else if (qtd-&gt;qtd.status &amp; (EHCI_QTDS_BUFERR | EHCI_QTDS_MuF)) {
++            *qtd-&gt;result = CDI_USB_HC_ERROR;
++        } else if (qtd-&gt;qtd.status &amp; EHCI_QTDS_HALTED) {
++            *qtd-&gt;result = CDI_USB_STALL;
++        } else {
++            *qtd-&gt;result = CDI_USB_HC_ERROR;
++        }
++    }
++
++    if (qtd-&gt;write_back) {
++        size_t rem = qtd-&gt;write_back_size;
++        for (int i = 0; i &lt; 5 &amp;&amp; rem; i++) {
++            size_t sz = rem &gt; 4096 ? 4096 : rem;
++            memcpy((void *)((uintptr_t)qtd-&gt;write_back + i * 4096),
++                   qtd-&gt;buffers[i]-&gt;vaddr, sz);
++            rem -= sz;
++        }
++        assert(!rem);
++    }
++
++    qh-&gt;first_qtd = qtd-&gt;next;
++    if (qh-&gt;last_qtd == qtd) {
++        qh-&gt;last_qtd = NULL;
++    }
++
++    for (int i = 0; i &lt; 5; i++) {
++        if (qtd-&gt;buffers[i]) {
++            cdi_mem_free(qtd-&gt;buffers[i]);
++        }
++    }
++
++    cdi_mem_free(qtd-&gt;cdi_mem_area);
++}
++
++
++/**
++ * Enters a qTD into a QH that has not yet been entered into the async schedule.
++ */
++static void enter_qtd(ehci_fat_qh_t *qh, ehci_fat_qtd_t *qtd)
++{
++    bool first;
++
++    qtd-&gt;qh = qh;
++    qtd-&gt;qtd.next_qtd = EHCI_T;
++    qtd-&gt;qtd.alt_next_qtd = EHCI_T;
++
++    first = !qh-&gt;first_qtd;
++
++    if (first) {
++        qh-&gt;first_qtd = qtd;
++    } else {
++        qh-&gt;last_qtd-&gt;next = qtd;
++    }
++    qh-&gt;last_qtd = qtd;
++
++    if (first) {
++        qh-&gt;qh.overlay.next_qtd = qh-&gt;first_qtd-&gt;paddr;
++    } else {
++        qh-&gt;last_qtd-&gt;qtd.next_qtd = qtd-&gt;paddr;
++    }
++}
++
++
++cdi_usb_hc_transaction_t ehci_create_transaction(struct cdi_usb_hc *cdi_hc,
++    const struct cdi_usb_hc_ep_info *target)
++{
++    (void)cdi_hc;
++
++    struct cdi_mem_area *qh_mem;
++
++    qh_mem = cdi_mem_alloc(sizeof(ehci_fat_qh_t), 6
++                                                  | CDI_MEM_PHYS_CONTIGUOUS
++                                                  | CDI_MEM_DMA_4G
++                                                  | CDI_MEM_NOINIT);
++    ehci_fat_qh_t *qh = qh_mem-&gt;vaddr;
++
++    memset(qh, 0, sizeof(*qh));
++
++    int non_high_speed_control = target-&gt;speed != CDI_USB_HIGH_SPEED
++                                 &amp;&amp; target-&gt;ep_type == CDI_USB_CONTROL;
++
++    qh-&gt;qh.ep_state[0] = EHCI_QHES0_RL(0)
++                       | (non_high_speed_control ? EHCI_QHES0_C : 0)
++                       | EHCI_QHES0_MPL(target-&gt;mps)
++                       | EHCI_QHES0_DTC
++                       | EHCI_QHES0_EP(target-&gt;ep)
++                       | EHCI_QHES0_DEV(target-&gt;dev);
++    switch (target-&gt;speed) {
++        case CDI_USB_LOW_SPEED:  qh-&gt;qh.ep_state[0] |= EHCI_QHES0_EPS_LS; break;
++        case CDI_USB_FULL_SPEED: qh-&gt;qh.ep_state[0] |= EHCI_QHES0_EPS_FS; break;
++        case CDI_USB_HIGH_SPEED: qh-&gt;qh.ep_state[0] |= EHCI_QHES0_EPS_HS; break;
++        case CDI_USB_SUPERSPEED:
++        default:
++            abort();
++    }
++
++    qh-&gt;qh.ep_state[1] = EHCI_QHES1_MULT(1)
++                       | EHCI_QHES1_PORT(target-&gt;tt_port + 1)
++                       | EHCI_QHES1_HUB(target-&gt;tt_addr)
++                       | EHCI_QHES1_SCM(0xff);
++
++    qh-&gt;qh.overlay.next_qtd = EHCI_T;
++    qh-&gt;qh.overlay.alt_next_qtd = EHCI_T;
++
++    qh-&gt;cdi_mem_area = qh_mem;
++    qh-&gt;paddr = qh_mem-&gt;paddr.items[0].start + offsetof(ehci_fat_qh_t, qh);
++
++    return qh;
++}
++
++
++static void create_qtd(ehci_fat_qh_t *qh, cdi_usb_transfer_token_t token,
++                       int toggle, void *buffer, size_t size,
++                       cdi_usb_transmission_result_t *result)
++{
++    struct cdi_mem_area *qtd_mem;
++
++    qtd_mem = cdi_mem_alloc(sizeof(ehci_fat_qtd_t), 6
++                                                    | CDI_MEM_PHYS_CONTIGUOUS
++                                                    | CDI_MEM_DMA_4G
++                                                    | CDI_MEM_NOINIT);
++    ehci_fat_qtd_t *qtd = qtd_mem-&gt;vaddr;
++
++    memset(qtd, 0, sizeof(*qtd));
++
++    qtd-&gt;qtd.status = EHCI_QTDS_DT(toggle)
++                    | EHCI_QTDS_XFLEN(size)
++                    | EHCI_QTDS_CP(0)
++                    | EHCI_QTDS_CERR(3)
++                    | EHCI_QTDS_ACTIVE;
++
++    switch (token) {
++        case CDI_USB_IN:    qtd-&gt;qtd.status |= EHCI_QTDS_PID_IN;    break;
++        case CDI_USB_OUT:   qtd-&gt;qtd.status |= EHCI_QTDS_PID_OUT;   break;
++        case CDI_USB_SETUP: qtd-&gt;qtd.status |= EHCI_QTDS_PID_SETUP; break;
++        default:
++            abort();
++    }
++
++    if (token == CDI_USB_IN) {
++        qtd-&gt;write_back = buffer;
++        qtd-&gt;write_back_size = size;
++    }
++
++    for (int i = 0; i &lt; 5 &amp;&amp; size; i++) {
++        size_t sz = size &gt; 4096 ? 4096 : size;
++
++        qtd-&gt;buffers[i] = cdi_mem_alloc(4096, 12
++                                              | CDI_MEM_PHYS_CONTIGUOUS
++                                              | CDI_MEM_DMA_4G
++                                              | CDI_MEM_NOINIT);
++        qtd-&gt;qtd.buffers[i] = qtd-&gt;buffers[i]-&gt;paddr.items[0].start;
++
++        if (token == CDI_USB_OUT || token == CDI_USB_SETUP) {
++            memcpy(qtd-&gt;buffers[i]-&gt;vaddr,
++                   (void *)((uintptr_t)buffer + i * 4096), sz);
++        }
++
++        size -= sz;
++    }
++
++    qtd-&gt;cdi_mem_area = qtd_mem;
++    qtd-&gt;paddr = qtd_mem-&gt;paddr.items[0].start + offsetof(ehci_fat_qtd_t, qtd);
++
++    qtd-&gt;result = result;
++
++    enter_qtd(qh, qtd);
++}
++
++
++void ehci_enqueue(struct cdi_usb_hc *cdi_hc,
++                  const struct cdi_usb_hc_transmission *trans)
++{
++    (void)cdi_hc;
++
++    ehci_fat_qh_t *qh = trans-&gt;ta;
++    bool first = true;
++    size_t sz = trans-&gt;size;
++    char *buf = trans-&gt;buffer;
++    int toggle = trans-&gt;toggle;
++    size_t mps = EHCI_QHES0_READ_MPL(qh-&gt;qh.ep_state[0]);
++
++    *trans-&gt;result = CDI_USB_OK;
++
++    while (sz || first) {
++        first = false;
++
++        size_t iter_sz = sz &gt; 4096 * 5 ? 4096 * 5 : sz;
++
++        create_qtd(qh, trans-&gt;token, toggle, buf, iter_sz, trans-&gt;result);
++
++        buf += iter_sz;
++        sz -= iter_sz;
++
++        toggle ^= ((iter_sz + mps - 1) / mps) &amp; 1;
++    }
++}
++
++
++void ehci_start_transaction(struct cdi_usb_hc *cdi_hc,
++                            cdi_usb_hc_transaction_t ta)
++{
++    struct ehci *hc = CDI_UPCAST(cdi_hc, struct ehci, hc);
++    ehci_fat_qh_t *qh = ta;
++
++    enter_async_qh(hc, qh);
++}
++
++
++void ehci_wait_transaction(struct cdi_usb_hc *cdi_hc,
++                           cdi_usb_hc_transaction_t ta)
++{
++    (void)cdi_hc;
++
++    ehci_fat_qh_t *qh = ta;
++    bool had_timeout = false;
++
++    irq_handler(&amp;cdi_hc-&gt;dev);
++
++    while (qh-&gt;first_qtd) {
++        if (!had_timeout) {
++            if (!(qh-&gt;qh.overlay.status &amp; EHCI_QTDS_ACTIVE)) {
++                qh-&gt;qh.overlay.next_qtd = qh-&gt;first_qtd-&gt;paddr;
++            }
++
++            uint64_t timestamp = cdi_elapsed_ms();
++
++            while ((qh-&gt;first_qtd-&gt;qtd.status &amp; EHCI_QTDS_ACTIVE) &amp;&amp;
++                   cdi_elapsed_ms() - timestamp &lt; EHCI_TIMEOUT)
++            {
++                // I don't really know who's to blame for this (qemu or
++                // týndur), and actually, I don't even want to know.
++                // As a matter of fact, qemu will not work on the async
++                // schedule if the async advance doorbell is set but the driver
++                // has not acknowledged this; however, the interrupt handler
++                // will always clear that bit and the interrupt handler is
++                // active all the time, so something is apparently sometimes
++                // blocking the handler from being executed. Force it here to
++                // prevent qemu's HC from stalling.
++                irq_handler(&amp;cdi_hc-&gt;dev);
++            }
++
++            had_timeout = qh-&gt;first_qtd-&gt;qtd.status &amp; EHCI_QTDS_ACTIVE;
++        }
++
++        if (had_timeout) {
++            // Stop this queue
++            qh-&gt;qh.overlay.next_qtd = EHCI_T;
++            qh-&gt;qh.overlay.status &amp;= ~(uint32_t)EHCI_QTDS_ACTIVE;
++
++            *qh-&gt;first_qtd-&gt;result = CDI_USB_TIMEOUT;
++        }
++
++        retire_first_qtd(qh);
++    }
++}
++
++
++void ehci_destroy_transaction(struct cdi_usb_hc *cdi_hc,
++                              cdi_usb_hc_transaction_t ta)
++{
++    struct ehci *hc = CDI_UPCAST(cdi_hc, struct ehci, hc);
++    ehci_fat_qh_t *qh = ta;
++
++    qh-&gt;qh.overlay.next_qtd = EHCI_T;
++
++    uint64_t timestamp = cdi_elapsed_ms();
++
++    while ((qh-&gt;qh.overlay.status &amp; EHCI_QTDS_ACTIVE) &amp;&amp;
++           cdi_elapsed_ms() - timestamp &lt; EHCI_TIMEOUT)
++    {
++        // See above.
++        irq_handler(&amp;cdi_hc-&gt;dev);
++    }
++
++    if (qh-&gt;qh.overlay.status &amp; EHCI_QTDS_ACTIVE) {
++        qh-&gt;qh.overlay.status &amp;= ~(uint32_t)EHCI_QTDS_ACTIVE;
++        // Could probably be solved more elegantly, but we are in a timeout
++        // already, so waiting a bit longer will not be that big of a problem
++        // (the sleep is here to ensure that the HC is no longer trying to work
++        // on the qTDs belonging to this QH)
++        cdi_sleep_ms(100);
++    }
++
++    while (qh-&gt;first_qtd) {
++        retire_first_qtd(qh);
++    }
++    retire_qh(hc, qh);
++}
+diff --git a/src/modules/cdi/ehci/ehci.h b/src/modules/cdi/ehci/ehci.h
+new file mode 100644
+index 0000000..d37f141
+--- /dev/null
++++ b/src/modules/cdi/ehci/ehci.h
+@@ -0,0 +1,292 @@
++/******************************************************************************
++ * Copyright (c) 2015 Max Reitz                                               *
++ *                                                                            *
++ * Permission is hereby granted,  free of charge,  to any person  obtaining a *
++ * copy of this software and associated documentation files (the &quot;Software&quot;), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
++ * and/or  sell copies of the  Software,  and to permit  persons to whom  the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED,  INCLUDING BUT NOT LIMITED TO THE WARRANTIES  OF MERCHANTABILITY, *
++ * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH  THE SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#ifndef EHCI_H
++#define EHCI_H
++
++#include &lt;stddef.h&gt;
++#include &lt;stdint.h&gt;
++
++#include &lt;cdi/lists.h&gt;
++#include &lt;cdi/mem.h&gt;
++#include &lt;cdi/usb.h&gt;
++#include &lt;cdi/usb_hcd.h&gt;
++
++
++struct ehci_registers {
++    uint32_t usbcmd;
++    uint32_t usbsts;
++    uint32_t usbintr;
++    uint32_t frindex;
++    uint32_t ctrldssegment;
++    uint32_t periodiclistbase;
++    uint32_t asynclistaddr;
++    uint8_t reserved[0x24];
++    uint32_t configflag;
++    uint32_t portsc[];
++} __attribute__((packed));
++
++struct ehci_capabilities {
++    uint8_t caplength;
++    uint8_t reserved;
++    uint16_t hciversion;
++    uint32_t hcsparams;
++    uint32_t hccparams;
++    uint64_t hcsp_portroute;
++} __attribute__((packed));
++
++struct ehci_qtd {
++    uint32_t next_qtd;
++    uint32_t alt_next_qtd;
++    uint32_t status;
++    uint32_t buffers[5];
++
++    // 64-bit structures
++    uint32_t ext_buffer[5];
++} __attribute__((packed));
++
++struct ehci_qh {
++    uint32_t next_qh;
++    uint32_t ep_state[2];
++    uint32_t current_qtd;
++    struct ehci_qtd overlay;
++} __attribute__((packed));
++
++typedef struct ehci_fat_qh ehci_fat_qh_t;
++typedef struct ehci_fat_qtd ehci_fat_qtd_t;
++
++#define DIFF_TO_MULTIPLE(value, divisor) \
++    ((divisor) - ((((value) + (divisor) - 1) % (divisor)) + 1))
++
++struct ehci_fat_qh {
++    volatile struct ehci_qh qh;
++
++    // Align the QH to 128 bytes (something with cache lines?). Otherwise,
++    // there may be conflicts between data we are writing to our very own
++    // fields provided by ehci_fat_qh_t and writes done by the HC to this
++    // structure.
++    uint8_t alignment[DIFF_TO_MULTIPLE(sizeof(struct ehci_qh), 128)];
++
++    struct cdi_mem_area *cdi_mem_area;
++    uintptr_t paddr;
++
++    ehci_fat_qh_t *next, *previous;
++    ehci_fat_qtd_t *first_qtd, *last_qtd;
++};
++
++struct ehci_fat_qtd {
++    volatile struct ehci_qtd qtd;
++
++    // Align the qTD to a multiple of 128 bytes.
++    uint8_t alignment[DIFF_TO_MULTIPLE(sizeof(struct ehci_qtd), 128)];
++
++    struct cdi_mem_area *cdi_mem_area;
++    uintptr_t paddr;
++
++    ehci_fat_qh_t *qh;
++    ehci_fat_qtd_t *next;
++
++    struct cdi_mem_area *buffers[5];
++
++    void *write_back;
++    size_t write_back_size;
++
++    cdi_usb_transmission_result_t *result;
++};
++
++struct ehci {
++    struct cdi_usb_hc hc;
++
++    volatile struct ehci_capabilities *caps;
++    volatile struct ehci_registers *regs;
++
++    struct cdi_mem_area *periodic_list_mem;
++    volatile uint32_t *periodic_list;
++
++    ehci_fat_qh_t *async_start;
++    cdi_list_t retired_qhs;
++};
++
++#define PCI_CLASS_SERIAL_BUS_CONTROLLER     0x0c
++#define PCI_SUBCLASS_USB_HOST_CONTROLLER    0x03
++#define PCI_INTERFACE_EHCI                  0x20
++
++#define EHCI_T       (1u &lt;&lt; 0)
++#define EHCI_ITD     (0u &lt;&lt; 1)
++#define EHCI_QH      (1u &lt;&lt; 1)
++#define EHCI_SITD    (2u &lt;&lt; 1)
++#define EHCI_FSTN    (3u &lt;&lt; 1)
++
++// Operational Registers: USBCMD
++#define EHCI_CMD_RSVD   0xff00ff00u // Consider async sched park mode reserved
++#define EHCI_CMD_ITC(x) ((x) &lt;&lt; 16) // Interrupt Threshold Control
++#define EHCI_CMD_LHCRES (1 &lt;&lt;  7)   // Light Host Controller Reset
++#define EHCI_CMD_IAADB  (1 &lt;&lt;  6)   // Interrupt on Async Advance Doorbell
++#define EHCI_CMD_ASE    (1 &lt;&lt;  5)   // Async Schedule Enable
++#define EHCI_CMD_PSE    (1 &lt;&lt;  4)   // Periodic Schedule Enable
++#define EHCI_CMD_FLS_1K (0 &lt;&lt;  2)   // Frame List Size: 1024 elements (default)
++#define EHCI_CMD_HCRES  (1 &lt;&lt;  1)   // Host Controller Reset
++#define EHCI_CMD_RS     (1 &lt;&lt;  0)   // Run/Stop (1 = Run)
++
++// Operational Registers: USBINTR
++#define EHCI_INT_IAA    (1 &lt;&lt;  5)   // Interrupt on Async Advance Enable
++#define EHCI_INT_HSE    (1 &lt;&lt;  4)   // Host System Error Enable
++#define EHCI_INT_FLR    (1 &lt;&lt;  3)   // Frame List Rollover Enable
++#define EHCI_INT_PCD    (1 &lt;&lt;  2)   // Port Change Detect Enable
++#define EHCI_INT_USBERR (1 &lt;&lt;  1)   // USB Error Interrupt
++#define EHCI_INT_USBINT (1 &lt;&lt;  0)   // USB Interrupt
++
++// Operational Registers: USBSTS
++#define EHCI_STS_ASS    (1 &lt;&lt; 15)   // Async Schedule Status
++#define EHCI_STS_PSS    (1 &lt;&lt; 14)   // Periodic Schedule Status
++#define EHCI_STS_REC    (1 &lt;&lt; 13)   // Reclamation bit
++#define EHCI_STS_HCH    (1 &lt;&lt; 12)   // Host Controller Halted
++#define EHCI_STS_IAA    EHCI_INT_IAA    // Interrupt on Async Advance
++#define EHCI_STS_HSE    EHCI_INT_HSE    // Host System Error
++#define EHCI_STS_FLR    EHCI_INT_FLR    // Frame List Rollover
++#define EHCI_STS_PCD    EHCI_INT_PCD    // Port Change Detect
++#define EHCI_STS_USBERR EHCI_INT_USBERR // USB Error Interrupt
++#define EHCI_STS_USBINT EHCI_INT_USBINT // USB Interrupt
++
++// Operational Registers: FRINDEX
++#define EHCI_FI_FI(x)   (((x) &gt;&gt; 3) &amp; 0x3ff)    // Frame Index
++
++// Operational Registers: CONFIGFLAG
++#define EHCI_CF_CF      (1 &lt;&lt;  0)   // Configure Flag
++
++// Operational Registers: PORTSC
++#define EHCI_PSC_WKOC_E     (1 &lt;&lt; 22)   // Wake on Over-current Enable
++#define EHCI_PSC_WKDSCNNT_E (1 &lt;&lt; 21)   // Wake on Disconnect Enable
++#define EHCI_PSC_WKCNNT_E   (1 &lt;&lt; 20)   // Wake on Connect Enable
++#define EHCI_PSC_PTC_DIS    (0 &lt;&lt; 16)   // Port Test Control: disabled
++#define EHCI_PSC_PTC_J      (1 &lt;&lt; 16)   // Port Test Control: J-State
++#define EHCI_PSC_PTC_K      (2 &lt;&lt; 16)   // Port Test Control: K-State
++#define EHCI_PSC_PTC_SE0    (3 &lt;&lt; 16)   // Port Test Control: SE0 Nak
++#define EHCI_PSC_PTC_PKT    (4 &lt;&lt; 16)   // Port Test Control: Packet
++#define EHCI_PSC_PTC_FEN    (5 &lt;&lt; 16)   // Port Test Control: Force Enable
++#define EHCI_PSC_PI_OFF     (0 &lt;&lt; 14)   // Port Indicators: off
++#define EHCI_PSC_PI_AMBER   (1 &lt;&lt; 14)   // Port Indicators: amber
++#define EHCI_PSC_PI_GREEN   (2 &lt;&lt; 14)   // Port Indicators: green
++#define EHCI_PSC_PO         (1 &lt;&lt; 13)   // Port Owner
++#define EHCI_PSC_PP         (1 &lt;&lt; 12)   // Port Power
++#define EHCI_PSC_LS_MASK    (3 &lt;&lt; 10)   // Line Status mask
++#define EHCI_PSC_LS_SE0     (0 &lt;&lt; 10)   // Line Status: SE0
++#define EHCI_PSC_LS_K       (1 &lt;&lt; 10)   // Line Status: K-State
++#define EHCI_PSC_LS_J       (2 &lt;&lt; 10)   // Line Status: J-State
++#define EHCI_PSC_RES        (1 &lt;&lt;  8)   // Port Reset
++#define EHCI_PSC_SUS        (1 &lt;&lt;  7)   // Suspend
++#define EHCI_PSC_FPR        (1 &lt;&lt;  6)   // Force Port Resume
++#define EHCI_PSC_OCC        (1 &lt;&lt;  5)   // Over-current Change
++#define EHCI_PSC_OCA        (1 &lt;&lt;  4)   // Over-current Active
++#define EHCI_PSC_PEDC       (1 &lt;&lt;  3)   // Port Enable/Disable Change
++#define EHCI_PSC_PED        (1 &lt;&lt;  2)   // Port Enabled/Disabled
++#define EHCI_PSC_CSC        (1 &lt;&lt;  1)   // Connect Status Change
++#define EHCI_PSC_CCS        (1 &lt;&lt;  0)   // Current Connect Status
++
++// Capability Registers: HCSPARAMS
++#define EHCI_HCS_N_CC(x)    (((x) &gt;&gt; 12) &amp; 0xf) // Number of Companion
++                                                // Controllers
++#define EHCI_HCS_N_PCC(x)   (((x) &gt;&gt;  8) &amp; 0xf) // Number of Ports per CC
++#define EHCI_HCS_PRR        (1 &lt;&lt;  7)           // Port Routing Rules
++#define EHCI_HCS_PPC        (1 &lt;&lt;  4)           // Port Power Control
++#define EHCI_HCS_N_PORTS(x) (((x) &gt;&gt;  0) &amp; 0xf) // Number of Ports
++
++// Capability Registers: HCCPARAMS
++#define EHCI_HCC_EECP(x)    (((x) &gt;&gt; 8) &amp; 0xff) // EHCI Extended Capabilities
++                                                // Pointer
++#define EHCI_HCC_64         (1 &lt;&lt;  0)           // 64-bit Addressing Capability
++
++// EHCI Extended Capability
++#define EHCI_EEC_NEXT(x)    (((x) &gt;&gt; 8) &amp; 0xff)
++#define EHCI_EEC_ID(x)      (((x) &gt;&gt; 0) &amp; 0xff)
++
++#define EHCI_EECID_LEGSUP   0x01
++
++// QH.ep_state[0] (Endpoint Characteristics)
++#define EHCI_QHES0_RL(x)    ((uint32_t)(x) &lt;&lt; 28) // Nak Count Reload
++#define EHCI_QHES0_C        (1 &lt;&lt; 27)   // Control Endpoint Flag
++#define EHCI_QHES0_MPL(x)   ((x) &lt;&lt; 16) // Maximum Packet Length
++#define EHCI_QHES0_READ_MPL(x)  (((x) &gt;&gt; 16) &amp; 0x7ff)
++#define EHCI_QHES0_H        (1 &lt;&lt; 15)   // Head of Reclamation List flag
++#define EHCI_QHES0_DTC      (1 &lt;&lt; 14)   // Data Toggle Control
++#define EHCI_QHES0_EPS_MASK (3 &lt;&lt; 12)   // Endpoint Speed mask
++#define EHCI_QHES0_EPS_FS   (0 &lt;&lt; 12)   // Endpoint Speed: Full Speed
++#define EHCI_QHES0_EPS_LS   (1 &lt;&lt; 12)   // Endpoint Speed: Low Speed
++#define EHCI_QHES0_EPS_HS   (2 &lt;&lt; 12)   // Endpoint Speed: High Speed
++#define EHCI_QHES0_EP(x)    ((x) &lt;&lt;  8) // Endpoint Number
++#define EHCI_QHES0_I        (1 &lt;&lt;  7)   // Inactive on Next Transaction
++#define EHCI_QHES0_DEV(x)   ((x) &lt;&lt;  0) // Device Address
++
++// QH.ep_state[1] (Endpoint Capabilities)
++#define EHCI_QHES1_MULT(x)  ((uint32_t)(x) &lt;&lt; 30) // High-Bandwidth Pipe
++                                                  // Multiplier
++#define EHCI_QHES1_PORT(x)  ((x) &lt;&lt; 23) // Port Number
++#define EHCI_QHES1_HUB(x)   ((x) &lt;&lt; 16) // Hub Address
++#define EHCI_QHES1_SCM(x)   ((x) &lt;&lt;  8) // Split Completion Mask
++#define EHCI_QHES1_ISM(x)   ((x) &lt;&lt;  0) // Interrupt Schedule Mask
++
++// qTD.status (Token)
++#define EHCI_QTDS_DT(x)     ((uint32_t)(x) &lt;&lt; 31) // Data Toggle
++#define EHCI_QTDS_XFLEN(x)  ((x) &lt;&lt; 16) // Total Bytes to Transfer
++#define EHCI_QTDS_IOC       (1 &lt;&lt; 15)   // Interrupt on Complete
++#define EHCI_QTDS_CP(x)     ((x) &lt;&lt; 12) // Current Page
++#define EHCI_QTDS_CERR(x)   ((x) &lt;&lt; 10) // Error Counter
++#define EHCI_QTDS_PID_OUT   (0 &lt;&lt;  8)   // PID: OUT
++#define EHCI_QTDS_PID_IN    (1 &lt;&lt;  8)   // PID: IN
++#define EHCI_QTDS_PID_SETUP (2 &lt;&lt;  8)   // PID: SETUP
++#define EHCI_QTDS_ACTIVE    (1 &lt;&lt;  7)   // Status: Active
++#define EHCI_QTDS_HALTED    (1 &lt;&lt;  6)   // Status: Halted
++#define EHCI_QTDS_BUFERR    (1 &lt;&lt;  5)   // Status: Data Buffer Error
++#define EHCI_QTDS_BABBLE    (1 &lt;&lt;  4)   // Status: Babble Detected
++#define EHCI_QTDS_XACTERR   (1 &lt;&lt;  3)   // Status: Transaction Error
++#define EHCI_QTDS_MuF       (1 &lt;&lt;  2)   // Status: Missed Microframe
++#define EHCI_QTDS_SPLITXS   (1 &lt;&lt;  1)   // Status: Split Transaction State
++#define EHCI_QTDS_P_ERR     (1 &lt;&lt;  0)   // Status: Ping State / Error
++
++// High Speed Error Mask
++#define EHCI_QTDS_HS_ERR_MASK \
++    (EHCI_QTDS_HALTED | EHCI_QTDS_BUFERR | EHCI_QTDS_BABBLE | \
++     EHCI_QTDS_XACTERR | EHCI_QTDS_MuF)
++
++// Low/Full Speed Error Mask
++#define EHCI_QTDS_LFS_ERR_MASK \
++    (EHCI_QTDS_HS_ERR_MASK | EHCI_QTDS_P_ERR)
++
++
++struct cdi_device *ehci_init_device(struct cdi_bus_data *bus_data);
++
++void ehci_rh_port_down(struct cdi_usb_hub *hub, int index);
++void ehci_rh_port_up(struct cdi_usb_hub *hub, int index);
++cdi_usb_port_status_t ehci_rh_port_status(struct cdi_usb_hub *hub, int index);
++
++cdi_usb_hc_transaction_t
++    ehci_create_transaction(struct cdi_usb_hc *hc,
++                            const struct cdi_usb_hc_ep_info *target);
++void ehci_enqueue(struct cdi_usb_hc *hc,
++                  const struct cdi_usb_hc_transmission *trans);
++void ehci_start_transaction(struct cdi_usb_hc *cdi_hc,
++                            cdi_usb_hc_transaction_t ta);
++void ehci_wait_transaction(struct cdi_usb_hc *hc, cdi_usb_hc_transaction_t ta);
++void ehci_destroy_transaction(struct cdi_usb_hc *hc,
++                              cdi_usb_hc_transaction_t ta);
++
++#endif
+diff --git a/src/modules/cdi/ehci/main.c b/src/modules/cdi/ehci/main.c
+new file mode 100644
+index 0000000..5623819
+--- /dev/null
++++ b/src/modules/cdi/ehci/main.c
+@@ -0,0 +1,69 @@
++/******************************************************************************
++ * Copyright (c) 2015 Max Reitz                                               *
++ *                                                                            *
++ * Permission is hereby granted,  free of charge,  to any person  obtaining a *
++ * copy of this software and associated documentation files (the &quot;Software&quot;), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
++ * and/or  sell copies of the  Software,  and to permit  persons to whom  the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED,  INCLUDING BUT NOT LIMITED TO THE WARRANTIES  OF MERCHANTABILITY, *
++ * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH  THE SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#include &lt;cdi.h&gt;
++#include &lt;cdi/usb_hcd.h&gt;
++
++#include &quot;ehci.h&quot;
++
++
++#define DRIVER_NAME &quot;ehci&quot;
++
++
++static struct cdi_usb_hcd ehcd;
++
++static int ehcd_init(void)
++{
++    cdi_driver_init(&amp;ehcd.drv);
++    return 0;
++}
++
++static int ehcd_destroy(void)
++{
++    cdi_driver_destroy(&amp;ehcd.drv);
++    return 0;
++}
++
++static struct cdi_usb_hcd ehcd = {
++    .drv = {
++        .name           = DRIVER_NAME,
++        .type           = CDI_USB_HCD,
++        .bus            = CDI_PCI,
++        .init           = ehcd_init,
++        .destroy        = ehcd_destroy,
++        .init_device    = ehci_init_device,
++    },
++
++    .rh_drv = {
++        .port_disable       = ehci_rh_port_down,
++        .port_reset_enable  = ehci_rh_port_up,
++        .port_status        = ehci_rh_port_status,
++    },
++
++    .create_transaction     = ehci_create_transaction,
++    .enqueue                = ehci_enqueue,
++    .start_transaction      = ehci_start_transaction,
++    .wait_transaction       = ehci_wait_transaction,
++    .destroy_transaction    = ehci_destroy_transaction,
++};
++
++CDI_DRIVER(DRIVER_NAME, ehcd)
+-- 
+2.6.3
+
+</PRE>
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002537.html">[tyndur-devel] [PATCH 18/22] usb: Entferne týndur-eigene Treiber
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002539.html">[tyndur-devel] [PATCH 20/22] usb: Add USB 2.0 bus driver
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2538">[ Datum ]</a>
+              <a href="thread.html#2538">[ Thema ]</a>
+              <a href="subject.html#2538">[ Betreff (Subject)]</a>
+              <a href="author.html#2538">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

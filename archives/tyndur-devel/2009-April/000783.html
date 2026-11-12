@@ -1,0 +1,137 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 1/2] vterm: EOF gescheit setzen
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%201/2%5D%20vterm%3A%20EOF%20gescheit%20setzen&In-Reply-To=%3C1240672591-18954-2-git-send-email-toni%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="000782.html">
+   <LINK REL="Next"  HREF="000804.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 1/2] vterm: EOF gescheit setzen</H1>
+    <B>Antoine Kaufmann</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%201/2%5D%20vterm%3A%20EOF%20gescheit%20setzen&In-Reply-To=%3C1240672591-18954-2-git-send-email-toni%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 1/2] vterm: EOF gescheit setzen">toni at tyndur.org
+                  </A><BR>
+    <I>Sa Apr 25 17:16:30 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="000782.html">[tyndur-devel] vterm: EOF
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="000804.html">[tyndur-devel] [PATCH 1/2] vterm: EOF gescheit setzen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#783">[ Datum ]</a>
+              <a href="thread.html#783">[ Thema ]</a>
+              <a href="subject.html#783">[ Betreff (Subject) ]</a>
+              <a href="author.html#783">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* vtem: EOF nur nach Betaetigen von Strg+D setzen
+---
+ src/modules/vterm/lostio.c |    8 +++++++-
+ src/modules/vterm/term.c   |    7 ++++++-
+ src/modules/vterm/vterm.h  |    3 +++
+ 3 files changed, 16 insertions(+), 2 deletions(-)
+
+diff --git a/src/modules/vterm/lostio.c b/src/modules/vterm/lostio.c
+index 92d57fa..428d339 100644
+--- a/src/modules/vterm/lostio.c
++++ b/src/modules/vterm/lostio.c
+@@ -107,6 +107,13 @@ size_t terminal_read(lostio_filehandle_t* file, void* buf,
+     size_t size = blocksize * blockcount;
+     vterminal_t* vterm = (vterminal_t*) file-&gt;node-&gt;data;
+ 
++    if (vterm-&gt;set_eof) {
++        vterm-&gt;set_eof = FALSE;
++        file-&gt;flags |= LOSTIO_FLAG_EOF;
++        v();
++        return 0;
++    }
++
+     if (vterm-&gt;in_buffer_size == 0) {
+         v();
+         return 0;
+@@ -119,7 +126,6 @@ size_t terminal_read(lostio_filehandle_t* file, void* buf,
+     memcpy(buf, vterm-&gt;in_buffer, size);
+     
+     vterm-&gt;in_buffer_size -= size;
+-    vterm-&gt;in_node-&gt;size = vterm-&gt;in_buffer_size;
+     // Die uebrigen Daten am ende des Buffers an den Anfang schieben
+     if (vterm-&gt;in_buffer_size != 0) {
+         memmove(vterm-&gt;in_buffer, vterm-&gt;in_buffer + size,
+diff --git a/src/modules/vterm/term.c b/src/modules/vterm/term.c
+index 5fab963..3e6881f 100644
+--- a/src/modules/vterm/term.c
++++ b/src/modules/vterm/term.c
+@@ -107,6 +107,8 @@ vterminal_t* vterm_create(char shortcut)
+     vfstree_create_node(path, LOSTIO_TYPES_IN, 0, vterm,
+         LOSTIO_FLAG_NOAUTOEOF);
+     vterm-&gt;in_node = vfstree_get_node_by_path(path);
++    // Sonst setzt LIO das EOF
++    vterm-&gt;in_node-&gt;size = 1;
+ 
+     // Out-Node
+     memcpy(path + name_len + 1, &quot;/out&quot;, 5);
+@@ -149,7 +151,6 @@ static void input_buffer_append(vterminal_t* vterm, char c)
+ {
+     // FIXME; Ineffizienter konnte ich das nicht loesen. ;-)
+     vterm-&gt;in_buffer_size += 1;
+-    vterm-&gt;in_node-&gt;size = current_vterm-&gt;in_buffer_size;
+     vterm-&gt;in_buffer = realloc(vterm-&gt;in_buffer, vterm-&gt;in_buffer_size);
+     // Daten in den Puffer kopieren
+     vterm-&gt;in_buffer[vterm-&gt;in_buffer_size - 1] = c;
+@@ -237,6 +238,10 @@ bool vterm_process_raw_input(uint8_t keycode, struct modifiers* modifiers)
+             case KEYCODE_F11: vterm_switch_to(11); return TRUE;
+             case KEYCODE_F12: vterm_switch_to(12); return TRUE;
+         }
++    } else if (modifiers-&gt;control &amp;&amp; (keycode == 32)) {
++        // Strg + D = EOF
++        current_vterm-&gt;set_eof = TRUE;
++        return TRUE;
+     } else if (keycode == KEYCODE_SCROLL_LOCK) {
+         current_vterm-&gt;output.scroll_lock = !current_vterm-&gt;output.scroll_lock;
+         return TRUE;
+diff --git a/src/modules/vterm/vterm.h b/src/modules/vterm/vterm.h
+index 450252a..d5149da 100644
+--- a/src/modules/vterm/vterm.h
++++ b/src/modules/vterm/vterm.h
+@@ -163,6 +163,9 @@ typedef struct {
+ 
+     /// Anzahl der Zeichen im utf-8 Puffer
+     size_t utf8_buffer_offset;
++
++    /// Beim naechsten Lesen EOF setzen
++    bool set_eof;
+ } vterminal_t;
+ 
+ /// Status der Modifiertasten
+-- 
+1.6.0.6
+
+
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="000782.html">[tyndur-devel] vterm: EOF
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="000804.html">[tyndur-devel] [PATCH 1/2] vterm: EOF gescheit setzen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#783">[ Datum ]</a>
+              <a href="thread.html#783">[ Thema ]</a>
+              <a href="subject.html#783">[ Betreff (Subject)]</a>
+              <a href="author.html#783">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

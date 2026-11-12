@@ -1,0 +1,147 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 3/3] kernel2: mmc_destroy implementieren
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%203/3%5D%20kernel2%3A%20mmc_destroy%20implementieren&In-Reply-To=%3C20100101181827.GD4316%40neo.geekcave.lan%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001610.html">
+   <LINK REL="Next"  HREF="001615.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 3/3] kernel2: mmc_destroy implementieren</H1>
+    <B>Antoine Kaufmann</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%203/3%5D%20kernel2%3A%20mmc_destroy%20implementieren&In-Reply-To=%3C20100101181827.GD4316%40neo.geekcave.lan%3E"
+           TITLE="[tyndur-devel] [PATCH 3/3] kernel2: mmc_destroy implementieren">toni at tyndur.org
+                  </A><BR>
+    <I>Fr Jan  1 19:18:27 CET 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001610.html">[tyndur-devel] [PATCH 3/3] kernel2: mmc_destroy implementieren
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001615.html">[tyndur-devel] [PATCH v2 0/7] kernel2: Speicher beim Prozessende	freigeben (und andere Fixes)
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1614">[ Datum ]</a>
+              <a href="thread.html#1614">[ Thema ]</a>
+              <a href="subject.html#1614">[ Betreff (Subject) ]</a>
+              <a href="author.html#1614">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>On Fri, Jan 01 14:58, Kevin Wolf wrote:
+&gt;<i> + kernel2: mmc_destroy implementiert. Damit wird jetzt nach Prozessende
+</I>&gt;<i>   der Speicher auch wieder freigegeben.
+</I>&gt;<i> 
+</I>&gt;<i> Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+</I>&gt;<i> ---
+</I>&gt;<i>  src/kernel2/src/arch/i386/mm/mm_context.c |   38 +++++++++++++++++++++++++++-
+</I>&gt;<i>  1 files changed, 36 insertions(+), 2 deletions(-)
+</I>&gt;<i> 
+</I>&gt;<i> diff --git a/src/kernel2/src/arch/i386/mm/mm_context.c b/src/kernel2/src/arch/i386/mm/mm_context.c
+</I>&gt;<i> index 34ac946..b5d8d3f 100644
+</I>&gt;<i> --- a/src/kernel2/src/arch/i386/mm/mm_context.c
+</I>&gt;<i> +++ b/src/kernel2/src/arch/i386/mm/mm_context.c
+</I>&gt;<i> @@ -61,6 +61,9 @@ bool use_phys_addr = TRUE;
+</I>&gt;<i>   */
+</I>&gt;<i>  static void mmc_sync(mmc_context_t* context);
+</I>&gt;<i>  
+</I>&gt;<i> +static inline vaddr_t get_pagetable(mmc_context_t* context, size_t index);
+</I>&gt;<i> +static inline void free_pagetable(mmc_context_t* context, vaddr_t page_table);
+</I>&gt;<i> +
+</I>&gt;<i>  /**
+</I>&gt;<i>   * Erstellt einen neuen MM-Kontext (Page Directory)
+</I>&gt;<i>   */
+</I>&gt;<i> @@ -142,11 +145,40 @@ void mmc_activate(mmc_context_t* context)
+</I>&gt;<i>  /**
+</I>&gt;<i>   * Kontext zerstoeren und Userspace-Speicher freigeben
+</I>&gt;<i>   *
+</I>&gt;<i> + * Achtung: Der noch gemappte Speicher darf nur zu diesem Kontext gehoeren, er
+</I>&gt;<i> + * wird physisch freigegeben! Shared Memory muss vorher freigegeben werden.
+</I>&gt;<i> + *
+</I>&gt;<i>   * @param context Kontext
+</I>&gt;<i>   */
+</I>&gt;<i>  void mmc_destroy(mmc_context_t* context)
+</I>&gt;<i>  {
+</I>&gt;<i> -    // TODO
+</I>&gt;<i> +    page_directory_t page_directory = context-&gt;page_directory_virt;
+</I>&gt;<i> +    page_table_t page_table;
+</I>&gt;<i> +    int i, n;
+</I>&gt;<i> +
+</I>&gt;<i> +    for (i = (MM_USER_START &gt;&gt; PGDIR_SHIFT);
+</I>&gt;<i> +         i &lt; (MM_USER_END &gt;&gt; PGDIR_SHIFT);
+</I>&gt;<i> +         i++)
+</I>&gt;<i> +    {
+</I>&gt;<i> +        page_table = get_pagetable(context, i);
+</I>&gt;<i> +        if (page_table == NULL) {
+</I>&gt;<i> +            continue;
+</I>&gt;<i> +        }
+</I>&gt;<i> +
+</I>&gt;<i> +        // Alle Page-Table-Eintraege freigeben
+</I>&gt;<i> +        for(n = 0; n &lt; 1024; n++) {
+</I>&gt;<i> +            if(page_table[n] &amp; PTE_P) {
+</I>&gt;<i> +                pmm_free((paddr_t) (page_table[n] &amp; PAGE_MASK), 1);
+</I>&gt;<i> +            }
+</I>&gt;<i> +        }
+</I>&gt;<i> +        free_pagetable(context, page_table);
+</I>&gt;<i> +
+</I>&gt;<i> +        // Page Table freigeben
+</I>&gt;<i> +        pmm_free((paddr_t) (page_directory[i] &amp; PAGE_MASK), 1);
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    // Page Directory freigeben
+</I>&gt;<i> +    pmm_free(context-&gt;page_directory_virt, 1);
+</I>
+Also dieses virt kommt mir etwas seltsam vor...
+
+&gt;<i>  }
+</I>&gt;<i>  
+</I>&gt;<i>  /**
+</I>&gt;<i> @@ -160,7 +192,9 @@ static inline vaddr_t get_pagetable(mmc_context_t* context, size_t index)
+</I>&gt;<i>      page_table_t page_table;
+</I>&gt;<i>  
+</I>&gt;<i>      if (context-&gt;page_directory == mmc_current_context().page_directory) {
+</I>&gt;<i> -        if (!use_phys_addr) {
+</I>&gt;<i> +        if ((pagedir[index] &amp; PTE_P) == 0) {
+</I>&gt;<i> +            page_table = NULL;
+</I>&gt;<i> +        } else if (!use_phys_addr) {
+</I>&gt;<i>              page_table = (page_table_t) 
+</I>&gt;<i>                  (PAGETABLES_MEM_START + (PAGE_TABLE_LENGTH * 4 * index));
+</I>&gt;<i>          } else {
+</I>
+Der Rest sieht gut aus.
+
+-- 
+Antoine Kaufmann
+&lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">toni at famkaufmann.info</A>&gt;
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : &lt;<A HREF="http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100101/e3b8c19c/attachment.pgp">http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100101/e3b8c19c/attachment.pgp</A>&gt;
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001610.html">[tyndur-devel] [PATCH 3/3] kernel2: mmc_destroy implementieren
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001615.html">[tyndur-devel] [PATCH v2 0/7] kernel2: Speicher beim Prozessende	freigeben (und andere Fixes)
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1614">[ Datum ]</a>
+              <a href="thread.html#1614">[ Thema ]</a>
+              <a href="subject.html#1614">[ Betreff (Subject)]</a>
+              <a href="author.html#1614">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

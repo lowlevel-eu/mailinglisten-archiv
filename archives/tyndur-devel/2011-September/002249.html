@@ -1,0 +1,203 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH v2 5/6] libc: Rückgabewerte von fread/fwrite gefixt
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_v2_5/6%3D5D_libc%3D3A_R%3DC3%3DBCckgabe%3F%3D%0A%09%3D%3Futf-8%3Fq%3Fwerte_von_fread/fwrite_gefixt%3F%3D&In-Reply-To=%3C1316380276-13445-6-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002254.html">
+   <LINK REL="Next"  HREF="002256.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH v2 5/6] libc: Rückgabewerte von fread/fwrite gefixt</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_v2_5/6%3D5D_libc%3D3A_R%3DC3%3DBCckgabe%3F%3D%0A%09%3D%3Futf-8%3Fq%3Fwerte_von_fread/fwrite_gefixt%3F%3D&In-Reply-To=%3C1316380276-13445-6-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH v2 5/6] libc: Rückgabewerte von fread/fwrite gefixt">kevin at tyndur.org
+                  </A><BR>
+    <I>So Sep 18 23:11:15 CEST 2011</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002254.html">[tyndur-devel] [PATCH v2 4/6] libc: lio_compat_read()
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002256.html">[tyndur-devel] [PATCH v2 5/6] libc: Rückgabewerte von fread/fwrite gefixt
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2249">[ Datum ]</a>
+              <a href="thread.html#2249">[ Thema ]</a>
+              <a href="subject.html#2249">[ Betreff (Subject) ]</a>
+              <a href="author.html#2249">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>! libc: Die Rückgabewerte von fread und fwrite sind eigentlich nicht
+  in Bytes, sondern in Blocks.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/lib/stdlibc/file.c |   98 +++++++++++++++++++++++-----------------
+ 1 files changed, 57 insertions(+), 41 deletions(-)
+
+diff --git a/src/modules/lib/stdlibc/file.c b/src/modules/lib/stdlibc/file.c
+index b1b9aec..c8aa4cf 100644
+--- a/src/modules/lib/stdlibc/file.c
++++ b/src/modules/lib/stdlibc/file.c
+@@ -230,7 +230,7 @@ size_t fread(void* dest, size_t blocksize, size_t blockcount, FILE* io_res)
+         return 0;
+     }
+ 
+-    return read_bytes + ret;
++    return (read_bytes + ret) / blocksize;
+ }
+ 
+ 
+@@ -344,9 +344,10 @@ int ungetc(int c, FILE* io_res)
+ size_t fwrite(const void* data, size_t blocksize, size_t blockcount,
+     FILE* io_res)
+ {
+-   	size_t data_size = blocksize * blockcount;
+-	
+-    if ((io_res == NULL) || (io_res-&gt;res-&gt;pid == 0)) {
++    size_t data_size = blocksize * blockcount;
++    int ret;
++
++    if ((io_res == NULL) || (io_res-&gt;res-&gt;pid == 0) || (blocksize == 0)) {
+         return 0;
+     }
+ 
+@@ -363,53 +364,68 @@ size_t fwrite(const void* data, size_t blocksize, size_t blockcount,
+ 	{
+ 		io_res-&gt;buffer_mode = IO_BUFFER_MODE_NONE;
+ 	}
+-	
++
+     //Wenn die Daten groesser als 64 Kilobyte sind, werden sie nicht im Buffer
+     // gespeichert, sondern direkt an den Zielprozess gesendet.
+-	switch (io_res-&gt;buffer_mode) {
+-		case IO_BUFFER_MODE_NONE:
+-			return lio_compat_write(data, blocksize, blockcount, io_res-&gt;res);
+-			break;
+-		
+-		case IO_BUFFER_MODE_FULL:
+-			//Ueberpruefen, ob genug Platz im Buffer ist, dann werden die Daten
+-			// in den Buffer kopiert, sonst wird der Buffer geleert, und die
+-			// Daten werden direkt geschrieben.
++    switch (io_res-&gt;buffer_mode) {
++        case IO_BUFFER_MODE_NONE:
++            ret = lio_compat_write(data, blocksize, blockcount, io_res-&gt;res);
++            if (ret &lt; 0) {
++                return 0;
++            } else {
++                return ret / blocksize;
++            }
++            break;
++
++        case IO_BUFFER_MODE_FULL:
++            //Ueberpruefen, ob genug Platz im Buffer ist, dann werden die Daten
++            // in den Buffer kopiert, sonst wird der Buffer geleert, und die
++            // Daten werden direkt geschrieben.
+             if (io_res-&gt;buffer_size &gt;= (io_res-&gt;buffer_pos + data_size)) {
+-				//Daten in den Buffer kopieren.
++                //Daten in den Buffer kopieren.
+                 memcpy(io_res-&gt;buffer_ptr + io_res-&gt;buffer_pos, data,
+-                    data_size);
+-				io_res-&gt;buffer_pos += data_size;
+-                return data_size;
+-			} else {
+-				if (fflush(io_res) == EOF) {
++                        data_size);
++                io_res-&gt;buffer_pos += data_size;
++                return data_size / blocksize;
++            } else {
++                if (fflush(io_res) == EOF) {
+                     return 0;
+                 }
+-				return lio_compat_write(data, blocksize, blockcount, io_res-&gt;res);
+-			}
+-			break;
+-		
+-		case IO_BUFFER_MODE_LINE: {
+-			//Ueberpruefen, ob genug Platz im Buffer ist, sonst wird der Buffer
+-			// geleert, und die Daten werden auch direkt geschrieben. Auch wenn
+-			// die Daten mindestens einen Zeilenumbruch enthalten, wird der
+-			// Buffer geleert.
+-			if ((io_res-&gt;buffer_size &lt; (io_res-&gt;buffer_pos + data_size)) || 
+-				(memchr(data, '\n', data_size) != NULL))
+-			{
+-			    if (fflush(io_res) == EOF) {
++                ret = lio_compat_write(data, blocksize, blockcount, io_res-&gt;res);
++                if (ret &lt; 0) {
+                     return 0;
++                } else {
++                    return ret / blocksize;
+                 }
+-				return lio_compat_write(data, blocksize, blockcount, io_res-&gt;res);
+-			} else {
+-				//Daten in den Buffer kopieren.
+-				memcpy((void*)((uint32_t) io_res-&gt;buffer_ptr +
++            }
++            break;
++
++        case IO_BUFFER_MODE_LINE: {
++            //Ueberpruefen, ob genug Platz im Buffer ist, sonst wird der Buffer
++            // geleert, und die Daten werden auch direkt geschrieben. Auch wenn
++            // die Daten mindestens einen Zeilenumbruch enthalten, wird der
++            // Buffer geleert.
++            if ((io_res-&gt;buffer_size &lt; (io_res-&gt;buffer_pos + data_size)) ||
++                (memchr(data, '\n', data_size) != NULL))
++            {
++                if (fflush(io_res) == EOF) {
++                    return 0;
++                }
++                ret = lio_compat_write(data, blocksize, blockcount, io_res-&gt;res);
++                if (ret &lt; 0) {
++                    return 0;
++                } else {
++                    return ret / blocksize;
++                }
++            } else {
++                //Daten in den Buffer kopieren.
++                memcpy((void*)((uint32_t) io_res-&gt;buffer_ptr +
+                     io_res-&gt;buffer_pos), data, data_size);
+-				io_res-&gt;buffer_pos += data_size;
+-                return data_size;
+-			}
++                io_res-&gt;buffer_pos += data_size;
++                return data_size / blocksize;
++            }
+         }
+-	}
++    }
+ 
+     return 0;
+ }
+-- 
+1.6.0.2
+
+</PRE>
+
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002254.html">[tyndur-devel] [PATCH v2 4/6] libc: lio_compat_read()
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002256.html">[tyndur-devel] [PATCH v2 5/6] libc: Rückgabewerte von fread/fwrite gefixt
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2249">[ Datum ]</a>
+              <a href="thread.html#2249">[ Thema ]</a>
+              <a href="subject.html#2249">[ Betreff (Subject)]</a>
+              <a href="author.html#2249">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

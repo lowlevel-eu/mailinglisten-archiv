@@ -1,0 +1,493 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 7/7] argv über PPB übergeben
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%0A%20%3D%3Fiso-8859-1%3Fq%3F%3D5BPATCH_7/7%3D5D_argv_%3DFCber_PPB_%3DFC%3F%3D%0A%20%3D%3Fiso-8859-1%3Fq%3Fbergeben%3F%3D&In-Reply-To=%3C20110108183951.GH7079%40neo.geekcave.lan%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002004.html">
+   <LINK REL="Next"  HREF="002006.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 7/7] argv über PPB übergeben</H1>
+    <B>Antoine Kaufmann</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%0A%20%3D%3Fiso-8859-1%3Fq%3F%3D5BPATCH_7/7%3D5D_argv_%3DFCber_PPB_%3DFC%3F%3D%0A%20%3D%3Fiso-8859-1%3Fq%3Fbergeben%3F%3D&In-Reply-To=%3C20110108183951.GH7079%40neo.geekcave.lan%3E"
+           TITLE="[tyndur-devel] [PATCH 7/7] argv über PPB übergeben">toni at tyndur.org
+                  </A><BR>
+    <I>Sa Jan  8 19:39:51 CET 2011</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002004.html">[tyndur-devel] [PATCH]	=?UTF-8?q?*=20crosscompiler=20mit=20binutils=202.21=20und=20gcc=204.5.2
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002006.html">[tyndur-devel] [PATCH 7/7] argv über PPB übergeben
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2005">[ Datum ]</a>
+              <a href="thread.html#2005">[ Thema ]</a>
+              <a href="subject.html#2005">[ Betreff (Subject) ]</a>
+              <a href="author.html#2005">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>On Wed, Dec 29 14:12, Kevin Wolf wrote:
+&gt;<i> * libc: Die Argumente von neu gestarteten Programmen werden jetzt in
+</I>&gt;<i>   einem PPB statt in der Kommandozeile übergeben
+</I>&gt;<i> * init: Angepasst, um Programme mit PPB starten zu können
+</I>&gt;<i> * Pascal-RTL: argv wird jetzt aus dem PPB ausgelesen
+</I>
+Wäre der letzte Punkt nicht eher was für einen separaten Pätsch?
+
+&gt;<i> 
+</I>&gt;<i> Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+</I>&gt;<i> ---
+</I>&gt;<i>  src/modules/include/init.h         |    1 +
+</I>&gt;<i>  src/modules/init/init.c            |   76 ++++++++++++++++++++----------------
+</I>&gt;<i>  src/modules/init/loader.c          |    7 +++-
+</I>&gt;<i>  src/modules/lib/init.c             |   32 +++++++++++++--
+</I>&gt;<i>  src/modules/lib/param.c            |   16 ++++++++
+</I>&gt;<i>  src/modules/pas/lib/prt0.asm       |   17 +++++++-
+</I>&gt;<i>  src/modules/pas/lib/rtl/system.pas |   61 +++++++----------------------
+</I>&gt;<i>  7 files changed, 122 insertions(+), 88 deletions(-)
+</I>&gt;<i> 
+</I>&gt;<i> diff --git a/src/modules/include/init.h b/src/modules/include/init.h
+</I>&gt;<i> index eb29b3a..4bd3ebd 100644
+</I>&gt;<i> --- a/src/modules/include/init.h
+</I>&gt;<i> +++ b/src/modules/include/init.h
+</I>&gt;<i> @@ -44,6 +44,7 @@ char *init_service_get_name(pid_t pid);
+</I>&gt;<i>  
+</I>&gt;<i>  void init_process_exit(int result);
+</I>&gt;<i>  pid_t init_execute(const char* cmd);
+</I>&gt;<i> +pid_t init_execv(const char* file, const char* const argv[]);
+</I>&gt;<i>  int ppb_from_argv(const char* const argv[]);
+</I>&gt;<i>  
+</I>&gt;<i>  int cmdline_get_argc(const char* args);
+</I>&gt;<i> diff --git a/src/modules/init/init.c b/src/modules/init/init.c
+</I>&gt;<i> index 573bccd..384b151 100644
+</I>&gt;<i> --- a/src/modules/init/init.c
+</I>&gt;<i> +++ b/src/modules/init/init.c
+</I>&gt;<i> @@ -76,8 +76,9 @@ void rpc_dev_list(pid_t pid, uint32_t cid, size_t size, void* data);
+</I>&gt;<i>  
+</I>&gt;<i>  void load_modules(init_module_list_t* modules);
+</I>&gt;<i>  pid_t load_single_module(void* image, size_t image_size, char* args,
+</I>&gt;<i> -    pid_t parent_pid) ;
+</I>&gt;<i> -pid_t start_program(char* path, char* args, pid_t parent_pid);
+</I>&gt;<i> +    pid_t parent_pid, int ppb_shm_id);
+</I>&gt;<i> +static pid_t start_program(const char* path, char* args, pid_t parent_pid,
+</I>&gt;<i> +    int shm);
+</I>&gt;<i>  extern void init_sync_messages(void);
+</I>&gt;<i>  
+</I>&gt;<i>  struct service_s* get_service_by_name(const char* name);
+</I>&gt;<i> @@ -355,7 +356,7 @@ void load_modules(init_module_list_t* modules)
+</I>&gt;<i>      { 
+</I>&gt;<i>          //printf(&quot;Modul %d: %s\n&quot;, i, modules-&gt;modules[i].cmdline);
+</I>&gt;<i>          load_single_module((Elf32_Ehdr*) modules-&gt;modules[i].start,
+</I>&gt;<i> -            modules-&gt;modules[i].size, modules-&gt;modules[i].cmdline, 0);
+</I>&gt;<i> +            modules-&gt;modules[i].size, modules-&gt;modules[i].cmdline, 0, 0);
+</I>&gt;<i>          mem_free(modules-&gt;modules[i].start, modules-&gt;modules[i].size);
+</I>&gt;<i>          //msleep(50); // Damit die Meldungen nicht durcheinandergeraten
+</I>&gt;<i>      } 
+</I>&gt;<i> @@ -436,7 +437,8 @@ size_t ainflate(void* src, size_t len, void** dest_ptr)
+</I>&gt;<i>      return ret;
+</I>&gt;<i>  }
+</I>&gt;<i>  
+</I>&gt;<i> -pid_t start_program(char* path, char* args, pid_t parent_pid)
+</I>&gt;<i> +static pid_t start_program(const char* path, char* args, pid_t parent_pid,
+</I>&gt;<i> +    int shm)
+</I>&gt;<i>  {
+</I>&gt;<i>      pid_t pid;
+</I>&gt;<i>      FILE* f = fopen(path, &quot;r&quot;);
+</I>&gt;<i> @@ -479,10 +481,13 @@ pid_t start_program(char* path, char* args, pid_t parent_pid)
+</I>&gt;<i>      {
+</I>&gt;<i>          /* Skript: Interpreter aufrufen */
+</I>&gt;<i>          char interpreter[256];
+</I>&gt;<i> -        char* new_path;
+</I>&gt;<i> -        char* new_args;
+</I>&gt;<i> +        char* interp_args;
+</I>&gt;<i> +        int ppb_argc, interp_argc, argc;
+</I>&gt;<i>          int ret;
+</I>&gt;<i>          size_t i;
+</I>&gt;<i> +        struct proc_param_block* ppb;
+</I>&gt;<i> +        size_t ppb_size;
+</I>&gt;<i> +        int new_shm;
+</I>&gt;<i>  
+</I>&gt;<i>          fgets(interpreter, 256, f);
+</I>&gt;<i>          fclose(f);
+</I>&gt;<i> @@ -496,14 +501,29 @@ pid_t start_program(char* path, char* args, pid_t parent_pid)
+</I>&gt;<i>              return false;
+</I>&gt;<i>          }
+</I>&gt;<i>  
+</I>&gt;<i> -        asprintf(&amp;new_args, &quot;%s%s%s&quot;,
+</I>&gt;<i> -            interpreter + 2,
+</I>&gt;<i> -            args ? &quot; &quot; : &quot;&quot;,
+</I>&gt;<i> -            args ? args : &quot;&quot;);
+</I>&gt;<i> -        new_path = strtok(interpreter + 2, &quot; &quot;);
+</I>&gt;<i> +        interp_args = interpreter + 2;
+</I>&gt;<i> +
+</I>&gt;<i> +        ppb = open_shared_memory(shm);
+</I>&gt;<i> +        if (ppb == NULL) {
+</I>&gt;<i> +            return false;
+</I>&gt;<i> +        }
+</I>&gt;<i> +        ppb_size = PAGE_SIZE; // FIXME
+</I>
+Was gehoert denn hier in richtig hin? Ein shm_size-Syscall?
+
+&gt;<i> +
+</I>&gt;<i> +        ppb_argc = ppb_get_argc(ppb, ppb_size);
+</I>&gt;<i> +        interp_argc = cmdline_get_argc(interp_args);
+</I>&gt;<i> +        argc = ppb_argc + interp_argc;
+</I>&gt;<i> +
+</I>&gt;<i> +        const char* argv[argc + 1];
+</I>&gt;<i> +
+</I>&gt;<i> +        cmdline_copy_argv(interp_args, argv, interp_argc);
+</I>&gt;<i> +        ppb_copy_argv(ppb, ppb_size, (char**) argv + interp_argc, ppb_argc);
+</I>&gt;<i> +        argv[argc] = NULL;
+</I>&gt;<i> +
+</I>&gt;<i> +        new_shm = ppb_from_argv(argv);
+</I>&gt;<i> +        ret = start_program(argv[0], args, parent_pid, new_shm);
+</I>&gt;<i> +        close_shared_memory(new_shm);
+</I>&gt;<i> +        close_shared_memory(shm);
+</I>&gt;<i>  
+</I>&gt;<i> -        ret = start_program(new_path, new_args, parent_pid);
+</I>&gt;<i> -        free(new_args);
+</I>&gt;<i>          return ret;
+</I>&gt;<i>      }
+</I>&gt;<i>      else
+</I>&gt;<i> @@ -514,7 +534,7 @@ pid_t start_program(char* path, char* args, pid_t parent_pid)
+</I>&gt;<i>      }
+</I>&gt;<i>      fclose(f);
+</I>&gt;<i>  
+</I>&gt;<i> -    pid = load_single_module(buffer, buffer_size, args, parent_pid);
+</I>&gt;<i> +    pid = load_single_module(buffer, buffer_size, args, parent_pid, shm);
+</I>&gt;<i>      free(buffer);
+</I>&gt;<i>      return pid;
+</I>&gt;<i>  }
+</I>&gt;<i> @@ -522,33 +542,21 @@ pid_t start_program(char* path, char* args, pid_t parent_pid)
+</I>&gt;<i>  
+</I>&gt;<i>  void rpc_loadelf(pid_t pid, uint32_t correlation_id, size_t data_size, void* data)
+</I>&gt;<i>  {
+</I>&gt;<i> -    char* first_space;
+</I>&gt;<i>      pid_t new_pid;
+</I>&gt;<i> +    size_t fn_len;
+</I>&gt;<i> +    int shm;
+</I>&gt;<i>  
+</I>&gt;<i> -    // Wir erwarten einen Null-terminierten String
+</I>&gt;<i> -    if (strnlen(data, data_size) == data_size) {
+</I>&gt;<i> +    // Wir erwarten einen Null-terminierten String und einen Integer
+</I>&gt;<i> +    fn_len = strnlen(data, data_size);
+</I>&gt;<i> +
+</I>&gt;<i> +    if (data_size &lt; fn_len + sizeof(int) + 1) {
+</I>&gt;<i>          rpc_send_dword_response(pid, correlation_id, 0);
+</I>&gt;<i>          return;
+</I>&gt;<i>      }
+</I>&gt;<i>  
+</I>&gt;<i> +    shm = *(int*)((uintptr_t) data + fn_len + 1);
+</I>&gt;<i>  
+</I>&gt;<i> -    first_space = strchr(data, ' ');
+</I>&gt;<i> -
+</I>&gt;<i> -    //Wenn kein leerschlag vorhanden ist, muessen keine Kommandozeilenargumente
+</I>&gt;<i> -    //abgetrennt werden.
+</I>&gt;<i> -    if (first_space == NULL) {
+</I>&gt;<i> -        new_pid = start_program(data, data, pid);
+</I>&gt;<i> -    } else {
+</I>&gt;<i> -        //Sonst wird erst der Name rauskopiert
+</I>&gt;<i> -        size_t filename_length = (uint32_t) first_space - (uint32_t) data;
+</I>&gt;<i> -        char* filename = malloc(filename_length + 1);
+</I>&gt;<i> -        memcpy(filename, data, filename_length);
+</I>&gt;<i> -        filename[filename_length] = '\0';
+</I>&gt;<i> -
+</I>&gt;<i> -        new_pid = start_program(filename, data, pid);
+</I>&gt;<i> -        
+</I>&gt;<i> -        free(filename);
+</I>&gt;<i> -    }
+</I>&gt;<i> +    new_pid = start_program(data, data, pid, shm);
+</I>&gt;<i>      rpc_send_dword_response(pid, correlation_id, new_pid);
+</I>&gt;<i>  }
+</I>&gt;<i>  
+</I>&gt;<i> diff --git a/src/modules/init/loader.c b/src/modules/init/loader.c
+</I>&gt;<i> index 3a5fdea..3f440ca 100644
+</I>&gt;<i> --- a/src/modules/init/loader.c
+</I>&gt;<i> +++ b/src/modules/init/loader.c
+</I>&gt;<i> @@ -99,7 +99,7 @@ bool loader_create_thread(pid_t process, vaddr_t address)
+</I>&gt;<i>   * Erstellt einen neuen Prozess aus einer ELF-Datei
+</I>&gt;<i>   */
+</I>&gt;<i>  pid_t load_single_module(void* image, size_t image_size, char* args,
+</I>&gt;<i> -    pid_t parent_pid)
+</I>&gt;<i> +    pid_t parent_pid, int ppb_shm_id)
+</I>&gt;<i>  {
+</I>&gt;<i>      p();
+</I>&gt;<i>      lock(&amp;loader_state.lock);
+</I>&gt;<i> @@ -110,6 +110,11 @@ pid_t load_single_module(void* image, size_t image_size, char* args,
+</I>&gt;<i>          loader_state.pid = 0;
+</I>&gt;<i>          goto fail;
+</I>&gt;<i>      }
+</I>&gt;<i> +
+</I>&gt;<i> +    if (ppb_shm_id) {
+</I>&gt;<i> +        init_child_ppb(loader_state.pid, ppb_shm_id);
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i>      unblock_process(loader_state.pid);
+</I>&gt;<i>  
+</I>&gt;<i>  fail:
+</I>&gt;<i> diff --git a/src/modules/lib/init.c b/src/modules/lib/init.c
+</I>&gt;<i> index ea0a7d2..2edad3e 100644
+</I>&gt;<i> --- a/src/modules/lib/init.c
+</I>&gt;<i> +++ b/src/modules/lib/init.c
+</I>&gt;<i> @@ -99,9 +99,12 @@ void init_process_exit(int result)
+</I>&gt;<i>  }
+</I>&gt;<i>  
+</I>&gt;<i>  /**
+</I>&gt;<i> + * Startet einen neuen Prozess
+</I>&gt;<i>   *
+</I>&gt;<i> + * @param cmd Dateiname des zu startenden Programms
+</I>&gt;<i> + * @param ppb_shm_id ID des SHM, der den Process Parameter Block enthaelt
+</I>&gt;<i>   */
+</I>&gt;<i> -pid_t init_execute(const char* cmd)
+</I>&gt;<i> +pid_t __init_exec(const char* cmd, int ppb_shm_id)
+</I>&gt;<i>  {
+</I>&gt;<i>      pid_t pid;
+</I>&gt;<i>  
+</I>&gt;<i> @@ -161,11 +164,10 @@ pid_t init_execute(const char* cmd)
+</I>&gt;<i>      
+</I>&gt;<i>      // Ansonsten wird jetzt der ganze Befehl in einen Puffer kopiert
+</I>&gt;<i>      size_t abs_path_len = strlen(abs_path);
+</I>&gt;<i> -    size_t args_len = strlen(cmd + program_len);
+</I>&gt;<i> -    size_t rpc_size = abs_path_len + args_len + 1;
+</I>&gt;<i> +    size_t rpc_size = abs_path_len + sizeof(int) + 1;
+</I>&gt;<i>      char rpc_data[rpc_size];
+</I>&gt;<i>      strcpy(rpc_data, abs_path);
+</I>&gt;<i> -    strcpy(rpc_data + abs_path_len, cmd + program_len);
+</I>&gt;<i> +    *(int*)(rpc_data + abs_path_len + 1) = ppb_shm_id;
+</I>&gt;<i>      free(abs_path);
+</I>&gt;<i>  
+</I>&gt;<i>      // TODO: Relative Pfade
+</I>&gt;<i> @@ -215,6 +217,28 @@ void cmdline_copy_argv(char* args, const char** argv, size_t argc)
+</I>&gt;<i>      argv[argc] = NULL;
+</I>&gt;<i>  }
+</I>&gt;<i>  
+</I>&gt;<i> +pid_t init_execute(const char* args)
+</I>&gt;<i> +{
+</I>&gt;<i> +    int argc;
+</I>&gt;<i> +    char* s;
+</I>&gt;<i> +    int ret;
+</I>&gt;<i> +
+</I>&gt;<i> +    /* Zunaechst die Argumente zaehlen. */
+</I>&gt;<i> +    argc = cmdline_get_argc(args);
+</I>&gt;<i> +
+</I>&gt;<i> +    /* Jetzt argv anlegen und befuellen */
+</I>&gt;<i> +    const char* argv[argc + 1];
+</I>&gt;<i> +
+</I>&gt;<i> +    s = strdup(args);
+</I>&gt;<i> +    cmdline_copy_argv(s, argv, argc);
+</I>&gt;<i> +
+</I>&gt;<i> +    /* Und den Prozess starten */
+</I>&gt;<i> +    ret = init_execv(args, argv);
+</I>&gt;<i> +    free(s);
+</I>&gt;<i> +
+</I>&gt;<i> +    return ret;
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i>  int init_dev_register(struct init_dev_desc* dev, size_t size)
+</I>&gt;<i>  {
+</I>&gt;<i>      return rpc_get_int(1, &quot;DEV_REG &quot;, size, (char*) dev);
+</I>&gt;<i> diff --git a/src/modules/lib/param.c b/src/modules/lib/param.c
+</I>&gt;<i> index c3a4f60..1267216 100644
+</I>&gt;<i> --- a/src/modules/lib/param.c
+</I>&gt;<i> +++ b/src/modules/lib/param.c
+</I>&gt;<i> @@ -193,6 +193,22 @@ int ppb_from_argv(const char* const argv[])
+</I>&gt;<i>      return shm;
+</I>&gt;<i>  }
+</I>&gt;<i>  
+</I>&gt;<i> +pid_t init_execv(const char* file, const char* const argv[])
+</I>&gt;<i> +{
+</I>&gt;<i> +    int shm;
+</I>&gt;<i> +    pid_t ret;
+</I>&gt;<i> +
+</I>&gt;<i> +    shm = ppb_from_argv(argv);
+</I>&gt;<i> +    if (shm == -1) {
+</I>&gt;<i> +        return -1;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    ret = __init_exec(file, shm);
+</I>&gt;<i> +    close_shared_memory(shm);
+</I>&gt;<i> +
+</I>&gt;<i> +    return ret;
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i>  bool ppb_is_valid(struct proc_param_block* ppb, size_t ppb_size)
+</I>&gt;<i>  {
+</I>&gt;<i>      size_t offset;
+</I>&gt;<i> diff --git a/src/modules/pas/lib/prt0.asm b/src/modules/pas/lib/prt0.asm
+</I>&gt;<i> index 8aff18a..4570d62 100644
+</I>&gt;<i> --- a/src/modules/pas/lib/prt0.asm
+</I>&gt;<i> +++ b/src/modules/pas/lib/prt0.asm
+</I>&gt;<i> @@ -1,13 +1,24 @@
+</I>&gt;<i>  ; startup
+</I>&gt;<i>  extern PASCALMAIN
+</I>&gt;<i> -global _start
+</I>&gt;<i>  
+</I>&gt;<i>  section .text
+</I>&gt;<i>  
+</I>&gt;<i> +global _start
+</I>&gt;<i>  _start:
+</I>&gt;<i> +        mov [__ppb_shm_id], eax
+</I>&gt;<i> +        mov [__ppb_ptr], ebx
+</I>&gt;<i> +        mov [__ppb_size], ecx
+</I>&gt;<i>          call PASCALMAIN
+</I>&gt;<i>          hlt
+</I>&gt;<i> -        
+</I>&gt;<i> +
+</I>&gt;<i>  section .data
+</I>&gt;<i> -        
+</I>&gt;<i> +
+</I>&gt;<i>  section .bss
+</I>&gt;<i> +
+</I>&gt;<i> +global __ppb_size
+</I>&gt;<i> +global __ppb_ptr
+</I>&gt;<i> +global __ppb_shm_id
+</I>&gt;<i> +
+</I>&gt;<i> +__ppb_size:     resd 1
+</I>&gt;<i> +__ppb_ptr:      resd 1
+</I>&gt;<i> +__ppb_shm_id:   resd 1
+</I>&gt;<i> diff --git a/src/modules/pas/lib/rtl/system.pas b/src/modules/pas/lib/rtl/system.pas
+</I>&gt;<i> index 92701ea..1cc5d7b 100644
+</I>&gt;<i> --- a/src/modules/pas/lib/rtl/system.pas
+</I>&gt;<i> +++ b/src/modules/pas/lib/rtl/system.pas
+</I>&gt;<i> @@ -58,6 +58,11 @@ procedure DisableFlushing(var f: Text);
+</I>&gt;<i>  
+</I>&gt;<i>  implementation
+</I>&gt;<i>  
+</I>&gt;<i> +var
+</I>&gt;<i> +    ppb_size: integer; external name '__ppb_size';
+</I>&gt;<i> +    ppb_ptr: Pointer; external name '__ppb_ptr';
+</I>&gt;<i> +    ppb_shm_id: integer; external name '__ppb_shm_id';
+</I>&gt;<i> +
+</I>&gt;<i>  procedure InitMessaging; cdecl; external name 'init_messaging';
+</I>&gt;<i>  procedure InitEnvironment; cdecl; external name 'init_envvars';
+</I>&gt;<i>  procedure InitWaitpid; cdecl; external name 'init_waitpid';
+</I>&gt;<i> @@ -96,7 +101,7 @@ end;
+</I>&gt;<i>  { number of args }
+</I>&gt;<i>  function paramcount : longint;
+</I>&gt;<i>  begin
+</I>&gt;<i> -    paramcount := argc;
+</I>&gt;<i> +    paramcount := argc - 1;
+</I>&gt;<i>  end;
+</I>&gt;<i>  
+</I>&gt;<i>  { argument number l }
+</I>&gt;<i> @@ -105,23 +110,7 @@ var
+</I>&gt;<i>      p: PChar;
+</I>&gt;<i>  begin
+</I>&gt;<i>      if (l &gt;= 0) and (l &lt;= argc) then begin
+</I>&gt;<i> -        (*paramstr := StrPas(argv[l])*)
+</I>&gt;<i> -        p := commandline;
+</I>&gt;<i> -        while (l &gt; 0) and (p^ &lt;&gt; #0) do begin
+</I>&gt;<i> -            if p^ = ' ' then begin
+</I>&gt;<i> -                Dec(l);
+</I>&gt;<i> -                while (p+1)^ = ' ' do begin
+</I>&gt;<i> -                    Inc(p);
+</I>&gt;<i> -                end;
+</I>&gt;<i> -            end;
+</I>&gt;<i> -            Inc(p);
+</I>&gt;<i> -        end;
+</I>&gt;<i> -
+</I>&gt;<i> -        paramstr := '';
+</I>&gt;<i> -        while not (p^ in [' ', #0]) do begin 
+</I>&gt;<i> -            paramstr := paramstr + p^;
+</I>&gt;<i> -            Inc(p);
+</I>&gt;<i> -        end;
+</I>&gt;<i> +        paramstr := StrPas(argv[l]);
+</I>&gt;<i>      end else begin
+</I>&gt;<i>          paramstr := '';
+</I>&gt;<i>      end;
+</I>&gt;<i> @@ -223,41 +212,21 @@ begin
+</I>&gt;<i>      OpenStdIO(StdErr, fmOutput, StdErrorHandle);
+</I>&gt;<i>  end;
+</I>&gt;<i>  
+</I>&gt;<i> +function ppb_get_argc(ppb: Pointer; size: integer): integer;
+</I>&gt;<i> +    cdecl; external name 'ppb_get_argc';
+</I>&gt;<i> +procedure ppb_copy_argv(ppb: Pointer; size: integer; argv: PPChar; argc: integer);
+</I>&gt;<i> +    cdecl; external name 'ppb_copy_argv';
+</I>&gt;<i> +
+</I>&gt;<i>  procedure InitParams;
+</I>&gt;<i>  var
+</I>&gt;<i>      i: integer;
+</I>&gt;<i>      p: PChar;
+</I>&gt;<i>      space: boolean;
+</I>&gt;<i>  begin
+</I>&gt;<i> -    commandline := GetCmdline();
+</I>&gt;<i> -
+</I>&gt;<i> -    p := commandline;
+</I>&gt;<i> -    argc := 0;
+</I>&gt;<i> -    space := false;
+</I>&gt;<i> -    while p^ &lt;&gt; #0 do begin
+</I>&gt;<i> -        if p^ = ' ' then begin
+</I>&gt;<i> -            space := true;
+</I>&gt;<i> -        end else if space then begin
+</I>&gt;<i> -            space := false;
+</I>&gt;<i> -            Inc(argc);
+</I>&gt;<i> -        end;
+</I>&gt;<i> -
+</I>&gt;<i> -        Inc(p);
+</I>&gt;<i> -    end;
+</I>&gt;<i> +    argc := ppb_get_argc(ppb_ptr, ppb_size);
+</I>
+Hier vielleicht noch etwas Fehlerbehandlung?
+
+&gt;<i>  
+</I>&gt;<i> -    (*argv := GetMem((argc + 1) * sizeof(PChar));
+</I>&gt;<i> -    
+</I>&gt;<i> -    p := cmdline;
+</I>&gt;<i> -    argv^ := p;
+</I>&gt;<i> -    i := 1;
+</I>&gt;<i> -    while p^ &lt;&gt; #0 do begin
+</I>&gt;<i> -        if p^ = ' ' then begin
+</I>&gt;<i> -            (argv + i)^ := p;
+</I>&gt;<i> -            Inc(i);
+</I>&gt;<i> -        end;
+</I>&gt;<i> -
+</I>&gt;<i> -        Inc(p);
+</I>&gt;<i> -    end;*)
+</I>&gt;<i> +    argv := GetMem((argc + 1) * sizeof(PChar));
+</I>&gt;<i> +    ppb_copy_argv(ppb_ptr, ppb_size, argv, argc);
+</I>&gt;<i>  end;
+</I>&gt;<i>  
+</I>&gt;<i>  Begin
+</I>
+Weiter fällt mir auf, dass die crt0 noch den Code für ohne PPB enthält,
+aber prt0 nicht. Hat das irgend einen konkreten Grund? ;-)
+
+Sonst könnte das wohl etwa hinkommen, glaube ich.
+
+-- 
+Antoine Kaufmann
+&lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">toni at famkaufmann.info</A>&gt;
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : &lt;<A HREF="http://list.tyndur.org/pipermail/tyndur-devel/attachments/20110108/98ccef07/attachment.pgp">http://list.tyndur.org/pipermail/tyndur-devel/attachments/20110108/98ccef07/attachment.pgp</A>&gt;
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002004.html">[tyndur-devel] [PATCH]	=?UTF-8?q?*=20crosscompiler=20mit=20binutils=202.21=20und=20gcc=204.5.2
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002006.html">[tyndur-devel] [PATCH 7/7] argv über PPB übergeben
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2005">[ Datum ]</a>
+              <a href="thread.html#2005">[ Thema ]</a>
+              <a href="subject.html#2005">[ Betreff (Subject)]</a>
+              <a href="author.html#2005">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

@@ -1,0 +1,551 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] build hinzugefuegt
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20build%20hinzugefuegt&In-Reply-To=%3C1237735309-10223-1-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="000699.html">
+   <LINK REL="Next"  HREF="000701.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] build hinzugefuegt</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20build%20hinzugefuegt&In-Reply-To=%3C1237735309-10223-1-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH] build hinzugefuegt">kevin at tyndur.org
+                  </A><BR>
+    <I>So Mär 22 16:21:49 CET 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="000699.html">[tyndur-devel] [PATCH 1/2] kedit: Fix	fuer	Schluesselworterkennung
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="000701.html">[tyndur-devel] [PATCH v2] build hinzugefuegt
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#690">[ Datum ]</a>
+              <a href="thread.html#690">[ Thema ]</a>
+              <a href="subject.html#690">[ Betreff (Subject) ]</a>
+              <a href="author.html#690">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ build: Erster Commit des Buildtools fuer tyndur
+---
+ src/modules/c/build/Makefile.all    |    7 ++
+ src/modules/c/build/build.c         |  202 +++++++++++++++++++++++++++++++++++
+ src/modules/c/build/dir.c           |  138 ++++++++++++++++++++++++
+ src/modules/c/build/include/build.h |   41 +++++++
+ src/modules/c/build/main.c          |   61 +++++++++++
+ 5 files changed, 449 insertions(+), 0 deletions(-)
+ create mode 100644 src/modules/c/build/Makefile.all
+ create mode 100644 src/modules/c/build/build.c
+ create mode 100644 src/modules/c/build/dir.c
+ create mode 100644 src/modules/c/build/include/build.h
+ create mode 100644 src/modules/c/build/main.c
+
+diff --git a/src/modules/c/build/Makefile.all b/src/modules/c/build/Makefile.all
+new file mode 100644
+index 0000000..8c9b17a
+--- /dev/null
++++ b/src/modules/c/build/Makefile.all
+@@ -0,0 +1,7 @@
++shopt -s extglob
++source $LOST_BUILDMK_ROOT/config.sh
++
++echo &quot;LD   $1/apps/build&quot;
++
++$LOST_TOOLS_LD -obuild -Ttext=0x40000000 *.o --start-group $2 --end-group
++$LOST_TOOLS_STRIP -s build -o $1/apps/build
+diff --git a/src/modules/c/build/build.c b/src/modules/c/build/build.c
+new file mode 100644
+index 0000000..391e025
+--- /dev/null
++++ b/src/modules/c/build/build.c
+@@ -0,0 +1,202 @@
++#include &lt;stdio.h&gt;
++#include &lt;string.h&gt;
++#include &lt;stdlib.h&gt;
++#include &lt;stdarg.h&gt;
++#include &lt;unistd.h&gt;
++
++#include &quot;build.h&quot;
++
++#if 0
++static const char* cflags = &quot;-m32 -g -O0 -Wall -fno-stack-protector -nostdinc&quot;
++    &quot; -fno-leading-underscore -fno-omit-frame-pointer -fno-strict-aliasing&quot;
++    &quot; -fno-builtin -c&quot;;
++#else
++//static const char* cflags = &quot;-c -combine&quot;;
++static const char* cflags = &quot;-c&quot;;
++#endif
++
++static const char* fpcflags = &quot;-n -Cn -CX -Tlost&quot;;
++static const char* nasmflags = &quot;-felf -O99&quot;;
++static const char* gasflags = &quot;-32&quot;;
++
++static int dry_run = 0;
++static char* root_path;
++
++extern int verbose;
++
++static void do_command(const char* path, const char* binary,
++    const char* args_fmt, ...)
++{
++    char* buf;
++    char* buf2;
++    char* dirname;
++    va_list ap;
++
++    asprintf(&amp;dirname, &quot;%s/%s&quot;, root_path, path);
++    if (verbose) {
++        printf(&quot;&gt;&gt;&gt; cd %s\n&quot;, dirname);
++    }
++    chdir(dirname);
++
++    va_start(ap, args_fmt);
++    vasprintf(&amp;buf, args_fmt, ap);
++    va_end(ap);
++
++    asprintf(&amp;buf2, &quot;%s %s&quot;, binary, buf);
++
++    if (verbose) {
++        printf(&quot;&gt;&gt;&gt; %s\n&quot;, buf2);
++    }
++    if (!dry_run) {
++        system(buf2);
++    }
++
++    free(buf);
++    free(buf2);
++    chdir(root_path);
++}
++
++static char* get_obj_files(const char* path)
++{
++    struct build_dir* dir;
++    struct build_dir* subdir;
++    struct build_file* file;
++    char* tmp = NULL;
++    char* subdir_files;
++    char* file_list = strdup(&quot;&quot;);
++    int i;
++
++    dir = scan_directory(NULL, path);
++    for (i = 0; (file = list_get_element_at(dir-&gt;obj_files, i)); i++) {
++        tmp = file_list;
++        asprintf(&amp;file_list, &quot;%s %s/%s&quot;, tmp, dir-&gt;path, file-&gt;name);
++        free(tmp);
++    }
++
++    for (i = 0; (subdir = list_get_element_at(dir-&gt;subdirs, i)); i++) {
++        tmp = file_list;
++        subdir_files = get_obj_files(subdir-&gt;path);
++        asprintf(&amp;file_list, &quot;%s %s&quot;, tmp, subdir_files);
++        free(subdir_files);
++        free(tmp);
++    }
++
++    return file_list;
++}
++
++static void compile(const char* path, list_t* files, const char* compiler,
++    const char* flags, const char* include)
++{
++    struct build_file* file;
++    char* file_list = strdup(&quot;&quot;);
++    char* tmp;
++    int i;
++
++    for (i = 0; (file = list_get_element_at(files, i)); i++) {
++        tmp = file_list;
++        asprintf(&amp;file_list, &quot;%s %s&quot;, tmp, file-&gt;name);
++        free(tmp);
++    }
++
++    if (*file_list) {
++        do_command(path, compiler, &quot;%s -I %s/%s %s %s&quot;,
++            flags, root_path, path, include, file_list);
++    }
++}
++
++static void do_build(struct build_dir* dir, const char* parent_include,
++    const char* parent_lib, int depth)
++{
++    char* include;
++    char* lib;
++    char* tmp = NULL;
++
++    char* objs;
++    struct build_dir* subdir;
++    struct build_file* file;
++    int i;
++
++    for (i = 0; i &lt; depth; i++) {
++        printf(&quot;| &quot;);
++    }
++    printf(&quot;+ %s\n&quot;, dir-&gt;path);
++
++    // Ggf. include-Verzeichnis anhaengen
++    if (dir-&gt;has_include) {
++        asprintf(&amp;include, &quot;%s -I %s/%s/include&quot;,
++            parent_include, root_path, dir-&gt;path);
++    } else {
++        include = strdup(parent_include);
++    }
++
++    if (dir-&gt;has_arch_include) {
++        tmp = include;
++        asprintf(&amp;include, &quot;%s -I %s/%s/include/arch/%s&quot;,
++            tmp, root_path, dir-&gt;path, arch);
++        free(tmp);
++    }
++
++    // Ggf. Lib-Verzeichnis anhaengen
++    if (dir-&gt;lib != NULL) {
++        asprintf(&amp;lib, &quot;%s %s/%s/lib/library.a&quot;,
++            parent_lib, root_path, dir-&gt;path);
++    } else {
++        lib = strdup(parent_lib);
++    }
++
++    // lib-Verzeichnis wird als erstes kompiliert
++    if (dir-&gt;lib) {
++        do_build(dir-&gt;lib, include, lib, depth + 1);
++        objs = get_obj_files(dir-&gt;lib-&gt;path);
++        do_command(&quot;.&quot;, &quot;ar&quot;, &quot;rs %s/library.a %s&quot;,
++            dir-&gt;lib-&gt;path, objs);
++        free(objs);
++    }
++
++    // Dann alle anderen Unterverzeichnisse
++    for (i = 0; (subdir = list_get_element_at(dir-&gt;subdirs, i)); i++) {
++        do_build(subdir, include, lib, depth + 1);
++    }
++
++    // Und schliesslich noch die einzelnen Dateien
++    // TODO Pruefen, ob sich Abhaengigkeiten veraendert haben
++    printf(&quot;%s: Kompilieren (C)...&quot;, dir-&gt;path);
++    fflush(stdout);
++    compile(dir-&gt;path, dir-&gt;src_files[LANG_C], &quot;gcc&quot;, cflags, include);
++
++    printf(&quot;\r%s: Kompilieren (Pascal)...\033[K&quot;, dir-&gt;path);
++    fflush(stdout);
++    compile(dir-&gt;path, dir-&gt;src_files[LANG_PAS], &quot;fpc&quot;, fpcflags, include);
++
++    printf(&quot;\r%s: Assemblieren (gas)...\033[K&quot;, dir-&gt;path);
++    fflush(stdout);
++    compile(dir-&gt;path, dir-&gt;src_files[LANG_ASM_GAS], &quot;as&quot;, gasflags, include);
++
++    for (i = 0; (file = list_get_element_at(dir-&gt;src_files[LANG_ASM_NASM], i)); i++) {
++        do_command(dir-&gt;path, &quot;nasm&quot;, &quot;%s %s&quot;, nasmflags, file-&gt;name);
++    }
++
++    // Im Wurzelverzeichnis wird gelinkt (TODO einstellbar machen)
++    if (dir-&gt;parent == NULL) {
++        printf(&quot;\r%s: Linken...\033[K&quot;, dir-&gt;path);
++        fflush(stdout);
++
++        objs = get_obj_files(dir-&gt;path);
++        do_command(&quot;.&quot;, &quot;gcc&quot;, &quot;-o %s/run %s %s&quot;, dir-&gt;path, lib, objs);
++        free(objs);
++    }
++
++    printf(&quot;\r\033[K&quot;);
++    fflush(stdout);
++
++    free(include);
++    free(lib);
++}
++
++void build(struct build_dir* root)
++{
++    root_path = getcwd(NULL, 0);
++    do_build(root, &quot;&quot;, &quot;&quot;, 0);
++    printf(&quot;Fertig gebaut.\n&quot;);
++    free(root_path);
++}
+diff --git a/src/modules/c/build/dir.c b/src/modules/c/build/dir.c
+new file mode 100644
+index 0000000..0a9210f
+--- /dev/null
++++ b/src/modules/c/build/dir.c
+@@ -0,0 +1,138 @@
++#include &lt;dirent.h&gt;
++#include &lt;stdio.h&gt;
++#include &lt;string.h&gt;
++#include &lt;stdlib.h&gt;
++#include &lt;sys/stat.h&gt;
++
++#include &quot;build.h&quot;
++
++struct build_dir* scan_directory(struct build_dir* parent, const char* path)
++{
++    DIR* dir = opendir(path);
++    struct dirent* ent;
++    char* suffix;
++    struct build_file* file;
++    enum filetype filetype;
++    struct stat stat_buf;
++    struct build_dir* build_dir;
++    struct build_dir* subdir;
++    char* file_path;
++    int i;
++
++    int nobuild = 0;
++    int ignorenobuild = 0;
++
++    if (dir == NULL) {
++        fprintf(stderr, &quot;Verzeichnis %s kann nicht geoeffnet werden.\n&quot;,
++            path);
++        return NULL;
++    }
++
++    build_dir = calloc(1, sizeof(*build_dir));
++    build_dir-&gt;path = strdup(path);
++    build_dir-&gt;parent = parent;
++    build_dir-&gt;subdirs = list_create();
++    build_dir-&gt;obj_files = list_create();
++    for (i = 0; i &lt; MAX_LANG; i++) {
++        build_dir-&gt;src_files[i] = list_create();
++    }
++
++//    printf(&quot;---&gt; %s\n&quot;, path);
++    while ((ent = readdir(dir))) {
++
++        filetype = OTHER_FILE;
++        suffix = strrchr(ent-&gt;d_name, '.');
++
++        asprintf(&amp;file_path, &quot;%s/%s&quot;, path, ent-&gt;d_name);
++        stat(file_path, &amp;stat_buf);
++
++        if (!strcmp(ent-&gt;d_name, &quot;.nobuild&quot;)) {
++            nobuild = 1;
++            goto next;
++        } else if (!strcmp(ent-&gt;d_name, &quot;.ignorenobuild&quot;)) {
++            ignorenobuild = 1;
++            goto next;
++        } else if (*ent-&gt;d_name == '.') {
++            goto next;
++        } else if (S_ISDIR(stat_buf.st_mode)) {
++            filetype = SUBDIR;
++        } else if (suffix == NULL) {
++            filetype = OTHER_FILE;
++        } else if (!strcmp(suffix, &quot;.o&quot;)) {
++            filetype = OBJ;
++        } else if (!strcmp(suffix, &quot;.c&quot;)) {
++            filetype = LANG_C;
++        } else if (!strcmp(suffix, &quot;.pas&quot;)) {
++            filetype = LANG_PAS;
++        } else if (!strcmp(suffix, &quot;.asm&quot;)) {
++            filetype = LANG_ASM_NASM;
++        } else if (!strcmp(suffix, &quot;.S&quot;)) {
++            filetype = LANG_ASM_GAS;
++        }
++
++//        printf(&quot;[%s] %s\n&quot;, filetype_str[filetype], ent-&gt;d_name);
++
++        if (filetype == OTHER_FILE) {
++            goto next;
++        }
++
++        file = calloc(1, sizeof(*file));
++        file-&gt;type = LANG_ASM_GAS;
++        file-&gt;name = strdup(ent-&gt;d_name);
++
++        switch (filetype) {
++            case SUBDIR:
++                if (!strcmp(file-&gt;name, &quot;include&quot;)) {
++                    DIR* arch_dir;
++                    char* tmp;
++
++                    build_dir-&gt;has_include = 1;
++
++                    asprintf(&amp;tmp, &quot;include/arch/%s&quot;, arch);
++                    arch_dir = opendir(tmp);
++                    free(tmp);
++
++                    if (arch_dir != NULL) {
++                        closedir(arch_dir);
++                        build_dir-&gt;has_arch_include = 1;
++                    }
++
++                } else if (!strcmp(file-&gt;name, &quot;lib&quot;)) {
++                    build_dir-&gt;lib = scan_directory(build_dir, file_path);
++                } else if (!strcmp(file-&gt;name, &quot;arch&quot;)) {
++                    char* tmp;
++                    asprintf(&amp;tmp, &quot;%s/%s&quot;, file_path, arch);
++                    subdir = scan_directory(build_dir, tmp);
++                    free(tmp);
++                    if (subdir != NULL) {
++                        list_push(build_dir-&gt;subdirs, subdir);
++                    }
++                } else {
++                    subdir = scan_directory(build_dir, file_path);
++                    if (subdir != NULL) {
++                        list_push(build_dir-&gt;subdirs, subdir);
++                    }
++                }
++                break;
++            case OBJ:
++                list_push(build_dir-&gt;obj_files, file);
++                break;
++            default:
++                list_push(build_dir-&gt;src_files[filetype], file);
++                break;
++        }
++
++    next:
++        free(file_path);
++    }
++//    printf(&quot;&lt;--- %s\n&quot;, path);
++
++    closedir(dir);
++
++    if (nobuild &amp;&amp; !ignorenobuild) {
++        // TODO Freigeben
++        return NULL;
++    }
++
++    return build_dir;
++}
+diff --git a/src/modules/c/build/include/build.h b/src/modules/c/build/include/build.h
+new file mode 100644
+index 0000000..2bd2326
+--- /dev/null
++++ b/src/modules/c/build/include/build.h
+@@ -0,0 +1,41 @@
++#ifndef _BUILD_H_
++#define _BUILD_H_
++
++#include &quot;collections.h&quot;
++
++enum filetype {
++    LANG_C,
++    LANG_PAS,
++    LANG_ASM_GAS,
++    LANG_ASM_NASM,
++
++#define MAX_LANG OTHER_FILE
++    OTHER_FILE,
++    SUBDIR,
++    OBJ,
++};
++
++
++extern char* filetype_str[];
++extern char* arch;
++
++struct build_dir {
++    int                 has_include;
++    int                 has_arch_include;
++    char*               path;
++    struct build_dir*   parent;
++    struct build_dir*   lib;
++    list_t*             src_files[MAX_LANG];
++    list_t*             obj_files;
++    list_t*             subdirs;
++};
++
++struct build_file {
++    enum filetype   type;
++    char*           name;
++};
++
++struct build_dir* scan_directory(struct build_dir* parent, const char* path);
++void build(struct build_dir* root);
++
++#endif
+diff --git a/src/modules/c/build/main.c b/src/modules/c/build/main.c
+new file mode 100644
+index 0000000..ef91ea8
+--- /dev/null
++++ b/src/modules/c/build/main.c
+@@ -0,0 +1,61 @@
++#include &lt;stdio.h&gt;
++#include &lt;unistd.h&gt;
++#include &lt;stdlib.h&gt;
++#include &lt;string.h&gt;
++
++#include &quot;build.h&quot;
++
++char* filetype_str[] = {
++    [OTHER_FILE]    = &quot; ? &quot;,
++    [SUBDIR]        = &quot;DIR&quot;,
++    [OBJ]           = &quot;OBJ&quot;,
++    [LANG_C]        = &quot; C &quot;,
++    [LANG_PAS]      = &quot;PAS&quot;,
++    [LANG_ASM_GAS]  = &quot;ASM&quot;,
++    [LANG_ASM_NASM] = &quot;ASM&quot;,
++};
++
++char* arch = &quot;i386&quot;;
++int verbose = 0;
++
++static void usage(char* binary)
++{
++    fprintf(stderr, &quot;Aufruf: %s [-v] [&lt;Wurzelverzeichnis&gt;]\n&quot;, binary);
++    exit(1);
++}
++
++int main(int argc, char** argv)
++{
++    struct build_dir* rootdir;
++    int i;
++    char* rootdir_path = NULL;
++
++    for (i = 1; i &lt; argc; i++) {
++        if (!strcmp(argv[i], &quot;-v&quot;)) {
++            verbose = 1;
++        } else if (argv[i][0] == '-') {
++            usage(argv[0]);
++        } else if (rootdir_path) {
++            usage(argv[0]);
++        } else {
++            rootdir_path = argv[i];
++        }
++    }
++
++    if (rootdir_path) {
++        if (chdir(argv[i])) {
++            fprintf(stderr, &quot;Verzeichnis nicht gefunden\n&quot;);
++            return 1;
++        }
++    }
++
++    rootdir = scan_directory(NULL, &quot;.&quot;);
++    if (rootdir == NULL) {
++        fprintf(stderr, &quot;Verzeichnis nicht gefunden\n&quot;);
++        return 1;
++    }
++
++    build(rootdir);
++
++    return 0;
++}
+-- 
+1.5.6.5
+
+
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="000699.html">[tyndur-devel] [PATCH 1/2] kedit: Fix	fuer	Schluesselworterkennung
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="000701.html">[tyndur-devel] [PATCH v2] build hinzugefuegt
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#690">[ Datum ]</a>
+              <a href="thread.html#690">[ Thema ]</a>
+              <a href="subject.html#690">[ Betreff (Subject)]</a>
+              <a href="author.html#690">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

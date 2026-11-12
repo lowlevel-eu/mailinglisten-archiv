@@ -1,0 +1,166 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH libext2 6/8] libext2: Bootloader nicht zerstören
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_libext2_6/8%3D5D_libext2%3D3A_Bootl%3F%3D%0A%09%3D%3Futf-8%3Fq%3Foader_nicht_zerst%3DC3%3DB6ren%3F%3D&In-Reply-To=%3C1388274569-12096-7-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002431.html">
+   <LINK REL="Next"  HREF="002433.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH libext2 6/8] libext2: Bootloader nicht zerstören</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_libext2_6/8%3D5D_libext2%3D3A_Bootl%3F%3D%0A%09%3D%3Futf-8%3Fq%3Foader_nicht_zerst%3DC3%3DB6ren%3F%3D&In-Reply-To=%3C1388274569-12096-7-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH libext2 6/8] libext2: Bootloader nicht zerstören">kevin at tyndur.org
+                  </A><BR>
+    <I>So Dez 29 00:49:27 CET 2013</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002431.html">[tyndur-devel] [PATCH libext2 5/8] testlib: CDI-Cache aktualisiert
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002433.html">[tyndur-devel] [PATCH libext2 7/8] 67: Bootloader muss beim	Superblock-Update erhalten werden
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2432">[ Datum ]</a>
+              <a href="thread.html#2432">[ Thema ]</a>
+              <a href="subject.html#2432">[ Betreff (Subject) ]</a>
+              <a href="author.html#2432">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>Die ersten 1024 Bytes auf dem Gerät müssen in Ruhe gelassen werden. Wenn
+sie Teil des ersten Blocks sind, müssen sie bei jedem Superblock-Update
+rausgeschrieben werden, weil der Cache nur auf Blockgranularität
+arbeitet.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ libext2/fs.c           | 21 +++++++++++++++++----
+ libext2/include/ext2.h |  3 +++
+ libext2/superblock.c   | 14 ++++++++++++--
+ 3 files changed, 32 insertions(+), 6 deletions(-)
+
+diff --git a/libext2/fs.c b/libext2/fs.c
+index 036257c..06f8565 100644
+--- a/libext2/fs.c
++++ b/libext2/fs.c
+@@ -66,11 +66,18 @@ static int fs_check_fast(ext2_fs_t* fs)
+ int ext2_fs_mount(ext2_fs_t* fs)
+ {
+     fs-&gt;sb = malloc(sizeof(ext2_superblock_t));
++    fs-&gt;boot_sectors = malloc(1024);
++
++    if (!fs-&gt;sb || !fs-&gt;boot_sectors) {
++        goto fail;
++    }
+ 
+     if (!ext2_sb_read(fs, fs-&gt;sb)) {
+-        free(fs-&gt;sb);
+-        fs-&gt;sb = NULL;
+-        return 0;
++        goto fail;
++    }
++
++    if (!fs-&gt;dev_read(0, 1024, fs-&gt;boot_sectors, fs-&gt;dev_private)) {
++        goto fail;
+     }
+ 
+     fs-&gt;cache_handle = fs-&gt;cache_create(fs, ext2_sb_blocksize(fs-&gt;sb));
+@@ -88,6 +95,12 @@ int ext2_fs_mount(ext2_fs_t* fs)
+     }
+ #endif
+     return 1;
++
++fail:
++    free(fs-&gt;boot_sectors);
++    free(fs-&gt;sb);
++    fs-&gt;sb = NULL;
++    return 0;
+ }
+ 
+ int ext2_fs_unmount(ext2_fs_t* fs)
+@@ -97,6 +110,7 @@ int ext2_fs_unmount(ext2_fs_t* fs)
+         return 0;
+     }
+ 
++    free(fs-&gt;boot_sectors);
+     free(fs-&gt;sb);
+     fs-&gt;cache_destroy(fs-&gt;cache_handle);
+     fs-&gt;sb = fs-&gt;cache_handle = NULL;
+@@ -107,4 +121,3 @@ void ext2_fs_sync(ext2_fs_t* fs)
+ {
+     fs-&gt;cache_sync(fs-&gt;cache_handle);
+ }
+-
+diff --git a/libext2/include/ext2.h b/libext2/include/ext2.h
+index 6f7563c..9529960 100644
+--- a/libext2/include/ext2.h
++++ b/libext2/include/ext2.h
+@@ -158,6 +158,9 @@ typedef struct ext2_fs {
+ 
+     /// Letzte allozierte Blocknummer
+     uint64_t block_prev_alloc;
++
++    /// Der Inhalt der ersten 1024 Bytes auf dem Gerät
++    void* boot_sectors;
+ } ext2_fs_t;
+ 
+ /**
+diff --git a/libext2/superblock.c b/libext2/superblock.c
+index c761066..6dc8737 100644
+--- a/libext2/superblock.c
++++ b/libext2/superblock.c
+@@ -130,8 +130,18 @@ int ext2_sb_update(ext2_fs_t* fs, ext2_superblock_t* sb)
+             blocks_per_group) * block_size;
+ 
+         block = fs-&gt;cache_block(fs-&gt;cache_handle, start / block_size, 1);
+-        memcpy(block-&gt;data + (start % block_size), sb,
+-            sizeof(ext2_superblock_t));
++        if (i == 0 &amp;&amp; block_size &gt; 1024) {
++            memcpy(block-&gt;data, fs-&gt;boot_sectors, 1024);
++            memcpy(block-&gt;data + 1024, sb, sizeof(ext2_superblock_t));
++            memset(block-&gt;data + 1024 + sizeof(ext2_superblock_t), 0,
++                   block_size - 1024 - sizeof(ext2_superblock_t));
++        } else if (i == 0) {
++            memcpy(block-&gt;data, sb, sizeof(ext2_superblock_t));
++        } else {
++            memcpy(block-&gt;data, sb, sizeof(ext2_superblock_t));
++            memset(block-&gt;data + sizeof(ext2_superblock_t), 0,
++                   block_size - sizeof(ext2_superblock_t));
++        }
+         fs-&gt;cache_block_free(block, 1);
+     }
+ 
+-- 
+1.8.1.4
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002431.html">[tyndur-devel] [PATCH libext2 5/8] testlib: CDI-Cache aktualisiert
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002433.html">[tyndur-devel] [PATCH libext2 7/8] 67: Bootloader muss beim	Superblock-Update erhalten werden
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2432">[ Datum ]</a>
+              <a href="thread.html#2432">[ Thema ]</a>
+              <a href="subject.html#2432">[ Betreff (Subject)]</a>
+              <a href="author.html#2432">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

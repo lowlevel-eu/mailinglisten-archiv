@@ -1,0 +1,2182 @@
+From shyxormz at asxsoft.de  Sun Apr  3 00:58:36 2011
+From: shyxormz at asxsoft.de (Patrick Pokatilo)
+Date: Sun,  3 Apr 2011 00:58:36 +0200
+Subject: [tyndur-devel] [PATCH][LIOv2] LostIOv2: lio_seek() benutzt bei
+	SEEK_END auch den offset, Testcase
+Message-ID: <1301785116-24007-1-git-send-email-shyxormz@asxsoft.de>
+
+* lio_seek() hat bei SEEK_END bis jetzt den offset nicht mitbenutzt,
+  dadurch wurden Positionierungen relativ zum Dateiende erschwert
++ Testcase für lio_seek() hinzugefügt
+
+Signed-off-by: Patrick Pokatilo <shyxormz at asxsoft.de>
+---
+ src/kernel2/src/lostio/client.c |    6 +++-
+ tests/lostio/001.c              |   68 +++++++++++++++++++++++++++++++++++++++
+ tests/lostio/run_test.sh        |    1 +
+ 3 files changed, 74 insertions(+), 1 deletions(-)
+
+diff --git a/src/kernel2/src/lostio/client.c b/src/kernel2/src/lostio/client.c
+index 9ee4101..ecb9e1f 100644
+--- a/src/kernel2/src/lostio/client.c
++++ b/src/kernel2/src/lostio/client.c
+@@ -459,7 +459,11 @@ int64_t lio_seek(lio_stream_t s, int64_t offset, int whence)
+             break;
+ 
+         case LIO_SEEK_END:
+-            s->pos_read = s->res_read->size;
++            if (s->res_read->size + offset < 0) {
++                return -1;
++            } else {
++                s->pos_read = s->res_read->size + offset;
++            }
+             break;
+     }
+ 
+diff --git a/tests/lostio/001.c b/tests/lostio/001.c
+index dde6ea7..ca6d9e7 100644
+--- a/tests/lostio/001.c
++++ b/tests/lostio/001.c
+@@ -254,6 +254,71 @@ static void test3(void)
+     printf("* PASS %s\n", test_name);
+ }
+ 
++static void test4(void)
++{
++    lio_resource_t tmp_root;
++    lio_resource_t tmp_file;
++    lio_stream_t s;
++    int64_t r;
++    char *data = "DATA";
++
++    test_name = "Suchen in Dateien";
++
++    /* Testdatei anlegen und öffnen */
++    tmp_root = lio_resource("tmp:/", false);
++    test_assert(tmp_root >= 0);
++
++    tmp_file = lio_mkfile(tmp_root, "test_seek");
++    test_assert(tmp_file >= 0);
++
++    s = lio_open(tmp_file, LIO_WRITE);
++    test_assert(s >= 0);
++
++    /* In Datei schreiben */
++    r = lio_write(s, 4, data);
++    test_assert(r == 4);
++
++    /* Ein paar Bytes überspringen (sollten mit 0 aufgefüllt werden) */
++    r = lio_seek(s, 4, LIO_SEEK_CUR);
++    test_assert(r == 8);
++
++    /* Noch was in die Datei schreiben */
++    r = lio_write(s, 4, data);
++    test_assert(r == 4);
++
++    /* Datei schließen und erneut öffnen */
++    r = lio_close(s);
++    test_assert(r >= 0);
++
++    char buffer[8];
++
++    s = lio_open(tmp_file, LIO_READ);
++    test_assert(tmp_file >= 0);
++
++    /* Relativ zum Ende der Datei springen */
++    r = lio_seek(s, -8, LIO_SEEK_END);
++    test_assert(r == 4);
++
++    /* Daten einlesen und überprüfen */
++    r = lio_read(s, 8, buffer);
++    test_assert(r == 8);
++    test_assert(memcmp("\0\0\0\0DATA", buffer, 8) == 0);
++
++    /* Auch die Daten vom Anfang einlesen */
++    r = lio_seek(s, 0, LIO_SEEK_SET);
++    test_assert(r == 0);
++
++    r = lio_read(s, 4, buffer);
++    test_assert(r == 4);
++    test_assert(memcmp("DATA", buffer, 4) == 0);
++
++    /* Datei entfernen */
++    r = lio_unlink(tmp_root, "test_seek");
++    test_assert(r >= 0);
++
++    printf("* PASS %s\n", test_name);
++}
++
+ int main(int argc, char* argv[])
+ {
+     if (argc < 2) {
+@@ -271,6 +336,9 @@ int main(int argc, char* argv[])
+         case 3:
+             test3();
+             break;
++        case 4:
++            test4();
++            break;
+ 
+         default:
+             printf("* ERROR Unbekannter Testfall\n");
+diff --git a/tests/lostio/run_test.sh b/tests/lostio/run_test.sh
+index 5bf5e52..311b637 100755
+--- a/tests/lostio/run_test.sh
++++ b/tests/lostio/run_test.sh
+@@ -25,3 +25,4 @@ dd if=/dev/zero of=scratch.img bs=1M count=4
+ run_test 001 1
+ run_test 001 2
+ run_test 001 3
++run_test 001 4
+-- 
+1.7.4.1
+
+
+From m.nemo at gmx.net  Sun Apr  3 19:26:10 2011
+From: m.nemo at gmx.net (Andreas Freimuth)
+Date: Sun,  3 Apr 2011 19:26:10 +0200
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH=5D_libc=3A_Vorzeichen_beachten_?=
+	=?utf-8?q?in_atol?=
+Message-ID: <1301851570-12398-1-git-send-email-m.nemo@gmx.net>
+
+! atol beachted jetzt auch das gespeicherte Vorzeichen
+
+Signed-off-by: Andreas Freimuth <m.nemo at gmx.net>
+---
+ src/lib/string.c |   19 +++++++++++--------
+ 1 files changed, 11 insertions(+), 8 deletions(-)
+
+diff --git a/src/lib/string.c b/src/lib/string.c
+index d6d662f..939bcb9 100644
+--- a/src/lib/string.c
++++ b/src/lib/string.c
+@@ -165,12 +165,12 @@ long atol(const char *str)
+     if (!*str) {
+         return 0;
+     }
+-    int positive = 1;
++    bool positive = true;
+     long result = 0;
+     int length = 0;
+     //Vorzeichen
+     if (*str == '-') {
+-        positive = 0;
++        positive = false;
+         str++;
+     } else if (*str == '+') {
+         str++;
+@@ -184,17 +184,20 @@ long atol(const char *str)
+             //Ziffer hinzufügen
+             result = result * 10 + c - '0';
+         } else {
+-            if (!length) {
+-                return 0;
+-            }
+-            return result;
+-        } 
++            break;
++        }
+         str++;
+     }
+-            
++
+     if (!length) {
+         return 0;
+     }
++
++    // Vorzeichen anwenden
++    if (!positiv) {
++        result = -result;
++    }
++
+     return result;
+ }
+ 
+-- 
+1.7.4.2
+
+
+From m.nemo at gmx.net  Sun Apr  3 19:46:18 2011
+From: m.nemo at gmx.net (MNemo)
+Date: Sun, 03 Apr 2011 19:46:18 +0200
+Subject: [tyndur-devel] [PATCH] libc: Vorzeichen beachten in atol
+In-Reply-To: <1301851570-12398-1-git-send-email-m.nemo@gmx.net>
+References: <1301851570-12398-1-git-send-email-m.nemo@gmx.net>
+Message-ID: <4D98B26A.2080909@gmx.net>
+
+lol, sorry das kommt noch mal.
+zu viel mit eclipse gearbeited, wenns beim speichern nicht knallt ist
+alles in ordnung xD
+
+From m.nemo at gmx.net  Sun Apr  3 19:48:43 2011
+From: m.nemo at gmx.net (Andreas Freimuth)
+Date: Sun,  3 Apr 2011 19:48:43 +0200
+Subject: [tyndur-devel] =?latin1?q?=5BPATCH=5D_libc=3A_Vorzeichen_beachten?=
+	=?latin1?q?_in_atol?=
+Message-ID: <1301852923-3612-1-git-send-email-m.nemo@gmx.net>
+
+! atol beachted jetzt auch das gespeicherte Vorzeichen
+
+Signed-off-by: Andreas Freimuth <m.nemo at gmx.net>
+---
+ src/lib/string.c |   20 ++++++++++++--------
+ 1 files changed, 12 insertions(+), 8 deletions(-)
+
+diff --git a/src/lib/string.c b/src/lib/string.c
+index d6d662f..4b4c9dd 100644
+--- a/src/lib/string.c
++++ b/src/lib/string.c
+@@ -28,6 +28,7 @@
+ #include <lost/config.h>
+ #include <string.h>
+ #include <stdlib.h>
++#include <stdbool.h>
+ #include <ctype.h>
+ #include <errno.h>
+ 
+@@ -165,12 +166,12 @@ long atol(const char *str)
+     if (!*str) {
+         return 0;
+     }
+-    int positive = 1;
++    bool positive = true;
+     long result = 0;
+     int length = 0;
+     //Vorzeichen
+     if (*str == '-') {
+-        positive = 0;
++        positive = false;
+         str++;
+     } else if (*str == '+') {
+         str++;
+@@ -184,17 +185,20 @@ long atol(const char *str)
+             //Ziffer hinzufügen
+             result = result * 10 + c - '0';
+         } else {
+-            if (!length) {
+-                return 0;
+-            }
+-            return result;
+-        } 
++            break;
++        }
+         str++;
+     }
+-            
++
+     if (!length) {
+         return 0;
+     }
++
++    // Vorzeichen anwenden
++    if (!positive) {
++        result = -result;
++    }
++
+     return result;
+ }
+ 
+-- 
+1.7.4.2
+
+
+From kevin at tyndur.org  Mon Apr  4 00:20:56 2011
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Mon, 4 Apr 2011 00:20:56 +0200
+Subject: [tyndur-devel] [PATCH] libc: Vorzeichen beachten in atol
+In-Reply-To: <1301852923-3612-1-git-send-email-m.nemo@gmx.net>
+References: <1301852923-3612-1-git-send-email-m.nemo@gmx.net>
+Message-ID: <20110403222055.GA6456@silvanus>
+
+On Sun, Apr 03, 2011 at 07:48:43PM +0200, Andreas Freimuth wrote:
+> ! atol beachted jetzt auch das gespeicherte Vorzeichen
+> 
+> Signed-off-by: Andreas Freimuth <m.nemo at gmx.net>
+
+Danke, ist drin.
+
+Aber wäre es eigentlich nicht viel einfacher, atol() als Wrapper um
+strtol() zu implementieren?
+
+Kevin
+
+From m.nemo at gmx.net  Mon Apr  4 12:18:34 2011
+From: m.nemo at gmx.net (MNemo)
+Date: Mon, 04 Apr 2011 12:18:34 +0200
+Subject: [tyndur-devel] [PATCH] libc: Vorzeichen beachten in atol
+In-Reply-To: <20110403222055.GA6456@silvanus>
+References: <1301852923-3612-1-git-send-email-m.nemo@gmx.net>
+	<20110403222055.GA6456@silvanus>
+Message-ID: <4D999AFA.603@gmx.net>
+
+On 04/04/2011 12:20 AM, Kevin Wolf wrote:
+> On Sun, Apr 03, 2011 at 07:48:43PM +0200, Andreas Freimuth wrote:
+>> ! atol beachted jetzt auch das gespeicherte Vorzeichen
+>>
+>> Signed-off-by: Andreas Freimuth <m.nemo at gmx.net>
+> 
+> Danke, ist drin.
+> 
+> Aber wäre es eigentlich nicht viel einfacher, atol() als Wrapper um
+> strtol() zu implementieren?
+
+Ja, soweit habe ich nicht gedacht. Mein Ziel war es lediglich die
+gcc-4.6 warnung: "variable set but not used" zu beheben ;)
+
+Aber so auf die schnelle finde ich jetzt auch kein fertiges strtol.
+
+nur strtoul(l) strto(l)d ?
+
+--
+Andreas
+
+
+From m.nemo at gmx.net  Mon Apr  4 17:12:18 2011
+From: m.nemo at gmx.net (Andreas Freimuth)
+Date: Mon,  4 Apr 2011 17:12:18 +0200
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH_1/2=5D_ftp=3A_fix_behandlung_vo?=
+	=?utf-8?q?n_Servermeldungen_mit_=C3=9Cberlangen_Zeilen?=
+Message-ID: <1301929939-32132-1-git-send-email-m.nemo@gmx.net>
+
+! ftp.c/response: kann jetzt auch mit Zeilen länger als LINE_LENGTH
+  umgehen
+
+Signed-off-by: Andreas Freimuth <m.nemo at gmx.net>
+---
+ src/modules/c/ftp/ftp.c |   64 +++++++++++++++++++++-------------------------
+ 1 files changed, 29 insertions(+), 35 deletions(-)
+
+diff --git a/src/modules/c/ftp/ftp.c b/src/modules/c/ftp/ftp.c
+index 3346e56..824b389 100644
+--- a/src/modules/c/ftp/ftp.c
++++ b/src/modules/c/ftp/ftp.c
+@@ -75,29 +75,11 @@ char* parser(char* string)
+  */
+ void request(const char* command)
+ {
+-    char buffer;
+-    char response[LINE_LENGTH];
+-    bool line_end = true;
+-    int i = 0;
+ 
+     fprintf(handle, "%s\r\n", command);
+     fflush(handle);
+ 
+-    while (line_end) {
+-        while (((buffer = fgetc(handle)) != '\n') && i < (LINE_LENGTH - 1)) {
+-            if (buffer != EOF) {
+-               response[i++] = buffer;
+-            }
+-        }
+-        response[i] = '\0';
+-        printf("%s\n", response);
+-        line_end = false;
+-
+-        if ((i > 3) && (response[3] == '-')) {
+-            line_end = true;
+-            i = 0;
+-        }
+-    }
++    response();
+ }
+ 
+ 
+@@ -106,26 +88,38 @@ void request(const char* command)
+  */
+ void response(void)
+ {
+-    char buffer;
+-    char response[LINE_LENGTH];
+-    bool line_end = true;
+-    int i = 0;
++    char code[5];
+ 
+-    while (line_end) {
+-        while (((buffer = fgetc(handle)) != '\n') && i < (LINE_LENGTH - 1)) {
+-            if (buffer != EOF) {
+-               response[i++] = buffer;
++    fgets(code, 5, handle);
++    printf("%s", code);
++
++    bool oneLine = code[3] == ' ';
++
++    code[3] = ' '; code[4] = '\0';
++
++    char buffer[LINE_LENGTH];
++
++    while(fgets(buffer, LINE_LENGTH, handle) != NULL) {
++        printf("%s", buffer);
++
++        bool lastLine = oneLine || strncmp(buffer, code, 4) == 0;
++
++        size_t resp_size = strlen(buffer);
++        while (buffer[resp_size-1] != '\n') {
++
++            if (fgets(buffer, LINE_LENGTH, handle) == NULL) {
++                lastLine = true;
++                break;
+             }
+-        }
+-        response[i] = '\0';
+-        printf("%s\n", response);
+-        line_end = false;
+ 
+-        if ((i > 3) && (response[3] == '-')) {
+-            line_end = true;
+-            i = 0;
++            resp_size = strlen(buffer);
++            printf("%s", buffer);
+         }
++
++        if (lastLine)
++            break;
+     }
++
+ }
+ 
+ 
+-- 
+1.7.4.2
+
+
+From m.nemo at gmx.net  Mon Apr  4 17:12:19 2011
+From: m.nemo at gmx.net (Andreas Freimuth)
+Date: Mon,  4 Apr 2011 17:12:19 +0200
+Subject: [tyndur-devel] [PATCH 2/2] ftp: nur nach einem passwort fragen wenn
+	eins gefordert wird
+In-Reply-To: <1301929939-32132-1-git-send-email-m.nemo@gmx.net>
+References: <1301929939-32132-1-git-send-email-m.nemo@gmx.net>
+Message-ID: <1301929939-32132-2-git-send-email-m.nemo@gmx.net>
+
++ ftp.c: response/request geben jetzt den status code zurück
++ ftp.c: nur wenn der Server danach verlangt wird ein
+  Passwort abgefragt
+
+Signed-off-by: Andreas Freimuth <m.nemo at gmx.net>
+---
+ src/modules/c/ftp/ftp.c |   27 ++++++++++++++++-----------
+ src/modules/c/ftp/ftp.h |    4 ++--
+ 2 files changed, 18 insertions(+), 13 deletions(-)
+
+diff --git a/src/modules/c/ftp/ftp.c b/src/modules/c/ftp/ftp.c
+index 824b389..da5dc23 100644
+--- a/src/modules/c/ftp/ftp.c
++++ b/src/modules/c/ftp/ftp.c
+@@ -72,21 +72,24 @@ char* parser(char* string)
+  * sendet einen Befehl an den FTP-Server und gibt den Request aus
+  *
+  * @param command enthaelt den Befehl für den FTP-Server
++ * @return Statuscode
+  */
+-void request(const char* command)
++int request(const char* command)
+ {
+ 
+     fprintf(handle, "%s\r\n", command);
+     fflush(handle);
+ 
+-    response();
++    return response();
+ }
+ 
+ 
+ /**
+  * gibt den Requeststring auf dem Bildschirm aus
++ *
++ * @return Statuscode
+  */
+-void response(void)
++int response(void)
+ {
+     char code[5];
+ 
+@@ -120,6 +123,7 @@ void response(void)
+             break;
+     }
+ 
++    return atoi(code);
+ }
+ 
+ 
+@@ -162,17 +166,18 @@ void ftp_connect(char* hostname)
+ 
+     fprintf(handle, "USER %s\r\n", input);
+     fflush(handle);
+-    response();
++    if (response() == 331) {
+ 
+-    input = readline("\033[1;37mPasswort: \033[0m");
++        input = readline("\033[1;37mPasswort: \033[0m");
+ 
+-    for (; isspace(*input); input++);
+-    for (c = input; !isspace(*c) && *c; c++);
+-    *c = '\0';
++        for (; isspace(*input); input++);
++        for (c = input; !isspace(*c) && *c; c++);
++        *c = '\0';
+ 
+-    fprintf(handle, "PASS %s\r\n", input);
+-    fflush(handle);
+-    response();
++        fprintf(handle, "PASS %s\r\n", input);
++        fflush(handle);
++           response();
++    }
+ 
+     request("TYPE A");
+ }
+diff --git a/src/modules/c/ftp/ftp.h b/src/modules/c/ftp/ftp.h
+index 3725768..bfed48e 100644
+--- a/src/modules/c/ftp/ftp.h
++++ b/src/modules/c/ftp/ftp.h
+@@ -40,8 +40,8 @@ extern FILE* ftp_data_connect(void);
+ extern char* parser(char*);
+ extern void ftp_connect(char*);
+ extern void ftp_disconnect(void);
+-extern void request(const char*);
+-extern void response(void);
++extern int request(const char*);
++extern int response(void);
+ 
+ extern FILE* handle;
+ extern char* host;
+-- 
+1.7.4.2
+
+
+From m.nemo at gmx.net  Mon Apr  4 17:50:45 2011
+From: m.nemo at gmx.net (Andreas Freimuth)
+Date: Mon,  4 Apr 2011 17:50:45 +0200
+Subject: [tyndur-devel] [PATCH] kernel2: erkennung von vm86 tasks im
+	exception handler
+Message-ID: <1301932245-2062-1-git-send-email-m.nemo@gmx.net>
+
+! vm86: das flag für den vm86 ist Bit 17 nicht Bit 1
+
+Signed-off-by: Andreas Freimuth <m.nemo at gmx.net>
+---
+ Ich habe keine Ahnung wie ich das testen soll. Ich bin da drübergestolpert, und
+ für mich sieht das nach einem Bug aus.
+ Laut AMD-Manuals ist Bit 1 jedenfals reserved.
+
+ Vielleicht guckt sich das mal jemand an der sich mit dem VM86-Zeug besser auskennt.
+
+ src/kernel2/src/interrupts/im.c |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/src/kernel2/src/interrupts/im.c b/src/kernel2/src/interrupts/im.c
+index a342669..e75f817 100644
+--- a/src/kernel2/src/interrupts/im.c
++++ b/src/kernel2/src/interrupts/im.c
+@@ -88,7 +88,7 @@ static void handle_exception(interrupt_stack_frame_t* isf, uint8_t int_num)
+ #if CONFIG_ARCH == ARCH_I386
+     // Pruefen, ob ein VM86-Task die Exception ausgeloest hat
+     // Falls ja lassen wir sie vom VM86-Code behandeln, wenn er kann
+-    if (!(isf->eflags & (1 << 1))) {
++    if (isf->eflags & (1 << 17)) {
+         if (vm86_exception(isf)) {
+             return;
+         }
+-- 
+1.7.4.2
+
+
+From m.nemo at gmx.net  Mon Apr  4 18:38:05 2011
+From: m.nemo at gmx.net (Andreas Freimuth)
+Date: Mon,  4 Apr 2011 18:38:05 +0200
+Subject: [tyndur-devel] [PATCH] libc: fix variable x set but not used
+Message-ID: <1301935085-3698-1-git-send-email-m.nemo@gmx.net>
+
+! posix/socket.c: verschluckt jetzt keine fehler mehr
+* posix/getopt_long.c: nur von DEBUG-code genutzte variablen
+  mit __attribute__((unused)) markiert.
+* posix/regex/engine.h: nur von DEBUG-code genutzte variablen
+  mit __attribute__((unused)) markiert.
+- mmc_contexct.c(i386): entferne unbenutzten code
+
+Signed-off-by: Andreas Freimuth <m.nemo at gmx.net>
+---
+ src/kernel2/src/arch/i386/mm/mm_context.c |    7 +------
+ src/modules/lib/posix/getopt_long.c       |    2 +-
+ src/modules/lib/posix/regex/engine.h      |    2 +-
+ src/modules/lib/posix/socket.c            |    2 +-
+ 4 files changed, 4 insertions(+), 9 deletions(-)
+
+diff --git a/src/kernel2/src/arch/i386/mm/mm_context.c b/src/kernel2/src/arch/i386/mm/mm_context.c
+index affb8e6..bfeb84e 100644
+--- a/src/kernel2/src/arch/i386/mm/mm_context.c
++++ b/src/kernel2/src/arch/i386/mm/mm_context.c
+@@ -472,7 +472,6 @@ paddr_t mmc_resolve(mmc_context_t* context, vaddr_t vaddr)
+ {
+     page_directory_t page_directory = context->page_directory_virt;
+     page_table_t page_table;
+-    paddr_t phys_page_table;
+     paddr_t result;
+     
+     uint32_t vpage = (uint32_t) vaddr / PAGE_SIZE;
+@@ -491,11 +490,7 @@ paddr_t mmc_resolve(mmc_context_t* context, vaddr_t vaddr)
+           | ((uint32_t) vaddr & 0x3FFFFF));
+         
+     } 
+-    else 
+-    {
+-        phys_page_table = (page_directory[vpage / PAGE_TABLE_LENGTH] & ~0xFFF);
+-    }
+-        
++
+     // Die Page-Table-Adresse ist eine physische Adresse. Am sichersten ist es,
+     // die Adresse einfach noch einmal zu mappen.
+     page_table = get_pagetable(context, vpage / PAGE_TABLE_LENGTH);
+diff --git a/src/modules/lib/posix/getopt_long.c b/src/modules/lib/posix/getopt_long.c
+index f123181..2639e95 100644
+--- a/src/modules/lib/posix/getopt_long.c
++++ b/src/modules/lib/posix/getopt_long.c
+@@ -203,7 +203,7 @@ parse_long_options(char * const *nargv, const char *options,
+ {
+ 	char *current_argv, *has_equal;
+ #ifdef GNU_COMPATIBLE
+-	char *current_dash;
++	char *current_dash __attribute__((unused));
+ #endif
+ 	size_t current_argv_len;
+ 	int i, match, exact_match, second_partial_match;
+diff --git a/src/modules/lib/posix/regex/engine.h b/src/modules/lib/posix/regex/engine.h
+index 36a6440..385d4cd 100644
+--- a/src/modules/lib/posix/regex/engine.h
++++ b/src/modules/lib/posix/regex/engine.h
+@@ -382,7 +382,7 @@ dissect(struct match *m,
+ 	const char *ssp;	/* start of string matched by subsubRE */
+ 	const char *sep;	/* end of string matched by subsubRE */
+ 	const char *oldssp;	/* previous ssp */
+-	const char *dp;
++	const char *dp __attribute__((unused));
+ 
+ 	AT("diss", start, stop, startst, stopst);
+ 	sp = start;
+diff --git a/src/modules/lib/posix/socket.c b/src/modules/lib/posix/socket.c
+index 462c41c..1179a67 100644
+--- a/src/modules/lib/posix/socket.c
++++ b/src/modules/lib/posix/socket.c
+@@ -169,7 +169,7 @@ out_path:
+ out_ip_string:
+     free(ip_string);
+ 
+-    return 0;
++    return ret;
+ }
+ 
+ /**
+-- 
+1.7.4.2
+
+
+From kevin at tyndur.org  Mon Apr  4 22:42:41 2011
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Mon, 4 Apr 2011 22:42:41 +0200
+Subject: [tyndur-devel] [PATCH] libc: Vorzeichen beachten in atol
+In-Reply-To: <4D999AFA.603@gmx.net>
+References: <1301852923-3612-1-git-send-email-m.nemo@gmx.net>
+	<20110403222055.GA6456@silvanus> <4D999AFA.603@gmx.net>
+Message-ID: <20110404204241.GA9553@silvanus>
+
+On Mon, Apr 04, 2011 at 12:18:34PM +0200, MNemo wrote:
+> On 04/04/2011 12:20 AM, Kevin Wolf wrote:
+> > On Sun, Apr 03, 2011 at 07:48:43PM +0200, Andreas Freimuth wrote:
+> >> ! atol beachted jetzt auch das gespeicherte Vorzeichen
+> >>
+> >> Signed-off-by: Andreas Freimuth <m.nemo at gmx.net>
+> > 
+> > Danke, ist drin.
+> > 
+> > Aber wäre es eigentlich nicht viel einfacher, atol() als Wrapper um
+> > strtol() zu implementieren?
+> 
+> Ja, soweit habe ich nicht gedacht. Mein Ziel war es lediglich die
+> gcc-4.6 warnung: "variable set but not used" zu beheben ;)
+> 
+> Aber so auf die schnelle finde ich jetzt auch kein fertiges strtol.
+> 
+> nur strtoul(l) strto(l)d ?
+
+Was hast du getan?! Ich habe jetzt mal nach einem strtol gesucht und
+natürlich die dritte mehr oder weniger gleiche Implementierung gefunden.
+;-) (src/lib/stdlibc/strtol.c)
+
+Wobei es ein vorsichtig gecastetes strtoul() doch dafür auch tun müsste,
+oder? Oder ist das komplett undefiniert?
+
+Die verschiedenen Implementierungen scheinen nur an verschiedenen
+Stellen kaputt zu sein, das müsste man mal genau vergleichen...
+
+Kevin
+
+From kevin at tyndur.org  Mon Apr  4 22:54:54 2011
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Mon, 4 Apr 2011 22:54:54 +0200
+Subject: [tyndur-devel] [PATCH] kernel2: erkennung von vm86 tasks im
+ exception handler
+In-Reply-To: <1301932245-2062-1-git-send-email-m.nemo@gmx.net>
+References: <1301932245-2062-1-git-send-email-m.nemo@gmx.net>
+Message-ID: <20110404205454.GB9553@silvanus>
+
+On Mon, Apr 04, 2011 at 05:50:45PM +0200, Andreas Freimuth wrote:
+> ! vm86: das flag für den vm86 ist Bit 17 nicht Bit 1
+> 
+> Signed-off-by: Andreas Freimuth <m.nemo at gmx.net>
+> ---
+>  Ich habe keine Ahnung wie ich das testen soll. Ich bin da drübergestolpert, und
+>  für mich sieht das nach einem Bug aus.
+>  Laut AMD-Manuals ist Bit 1 jedenfals reserved.
+> 
+>  Vielleicht guckt sich das mal jemand an der sich mit dem VM86-Zeug besser auskennt.
+
+Sieht nach Absicht aus. In arch/i386/vm86.c haben wir diesen Code:
+
+        // Das gelöschte Bit 1 zeigt, dass es sich um einen vm86-Task
+        // handelt
+        .eflags = 0x200
+
+Ich weiß nicht, ob es einen Grund gibt, warum man da nicht einfach das
+VM-Bit wieder hernehmen kann, das wäre irgendwie intuitiver. Aber das
+wäre dann sowieso nur ein bisschen Aufräumarbeit und kein Fix.
+
+Kevin
+
+From max at tyndur.org  Tue Apr  5 18:12:25 2011
+From: max at tyndur.org (Max Reitz)
+Date: Tue, 05 Apr 2011 18:12:25 +0200
+Subject: [tyndur-devel] [PATCH] kernel2: erkennung von vm86 tasks im
+ exception handler
+In-Reply-To: <20110404205454.GB9553@silvanus>
+References: <1301932245-2062-1-git-send-email-m.nemo@gmx.net>
+	<20110404205454.GB9553@silvanus>
+Message-ID: <4D9B3F69.1060507@tyndur.org>
+
+So, nachdem ich mir gestern den ganzen vm86-Code mal wieder erarbeitet habe, glaube ich
+jetzt zu verstehen, was da geschieht...
+
+Der einzige Interrupt, der für vm86-Tasks erlaubt ist, ist der GPF. Alle anderen
+Interrupts lösen einen GPF aus, anhand des Fehlercodes kann dann erkannt werden, dass
+es ursprünglich ein anderer Interrupt war. Irgendwie muss dann dieser andere Interrupt
+aber dem normalen im_handler gemeldet werden. Dafür wird im GPF-Handler für vm86-Tasks
+(vm86_gpf_entry) ein Stackframe erstellt, der so aussieht, als wäre der andere
+Interrupt ausgelöst worden. Damit man dann im Exceptionhandler (handle_exception)
+erkennen kann, dass es sich um einen vm86-Task handelte, wird das reservierte Bit 1
+im EFLAGS-Feld auf 0 gesetzt (was bei normalen Tasks natürlich nie der Fall ist).
+
+Das VM-Flag kann hierfür nicht verwendet werden. Um in den vm86-Task zurückzukehren,
+ist ein Sprung ins vm86-TSS notwendig. Dies geht nur, indem vorher in speziellen Code
+(vm86_task_entry) gesprungen wird, der das Backlinkfeld des normalen TSS auf das
+vm86-TSS umbiegt und das NT-Flag im EFLAGS-Register setzt, sodass beim iret in das
+vm86-TSS gesprungen wird. Daher kann das VM-Flag nicht gesetzt sein, sonst würde
+dieser Code ja im vm86-Modus ausgeführt, was nicht so toll wäre.
+
+Das Problem, was sich jetzt tatsächlich auftut, ist, dass der erstellte Stackframe
+bei einem Taskwechsel wegen des Interrupts als tatsächlicher Stackframe das
+vm86-Threads verwendet wird. Dadurch wird bei einem Wiederaufrufen des Threads zwar
+wunderschön in die erwähnte vm86_task_entry-Funktion gesprungen, welche das TSS und
+damit den alten Prozessorzustand wiederherstellt, aber gleichzeitig leider auch das
+Bit 1 in EFLAGS gelöscht, was eher doof ist. Da müsste ich also nochmal einen
+kleinen Fix senden.
+
+Diesen kleinen Fix könnte ich mir aber gleich sparen, weil es natürlich schon ein
+bisschen gemogelt ist, dieses Bit zu benutzen, was später jederzeit eine Bedeutung
+gewinnen könnte. Deshalb müsste man vm86-Threads sowieso besser irgendwie anders
+identifizieren. Da müsste ich mir aber noch irgendwas überlegen... Eine Möglichkeit
+wäre vielleicht ein Flag in vm86.c, dass am Ende von vm86_gpf_entry gesetzt wird,
+vor dem im_handler-Aufruf, und dann vor dem load_isf_and_return-Aufruf wieder
+gelöscht wird. Aber das müsste ich mir auch erstmal genauer ansehen, nicht, dass
+im_handler irgendwo so schlau ist und einfach so einen Stackframe lädt...
+
+
+Max
+
+From kevin at tyndur.org  Wed Apr  6 22:03:56 2011
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Wed,  6 Apr 2011 22:03:56 +0200
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH=5D_kernel2=3A_Bedingte_Kompilie?=
+	=?utf-8?q?rung_f=C3=BCr_ARCH=5FI386_gefixt?=
+Message-ID: <1302120236-8384-1-git-send-email-kevin@tyndur.org>
+
+! kernel2: #ifdef ARCH_I386 bringt nichts, weil das Symbol immer
+  definiert ist. Entscheidend ist, was CONFIG_ARCH sagt.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/include/tasks.h |    4 ++--
+ 1 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/kernel2/include/tasks.h b/src/kernel2/include/tasks.h
+index 4ae09cd..d4b4334 100644
+--- a/src/kernel2/include/tasks.h
++++ b/src/kernel2/include/tasks.h
+@@ -91,10 +91,10 @@ typedef struct pm_process {
+     /// Eine Liste von geoeffneten SHM-Bereichen
+     list_t* shm;
+ 
+-#ifdef ARCH_I386
++#if CONFIG_ARCH == ARCH_I386
+     /// IO-Bitmap
+     void* io_bitmap;
+-#elif ARCH_AMD64
++#elif CONFIG_ARCH == ARCH_AMD64
+ #else
+ #error Architektur nicht unterstuetzt
+ #endif
+-- 
+1.6.0.2
+
+
+From shyxormz at asxsoft.de  Wed Apr  6 22:29:59 2011
+From: shyxormz at asxsoft.de (Patrick Pokatilo)
+Date: Wed, 06 Apr 2011 22:29:59 +0200
+Subject: [tyndur-devel]
+ =?iso-8859-1?q?=5BPATCH=5D_kernel2=3A_Bedingte_Kom?=
+ =?iso-8859-1?q?pilierung_f=FCr_ARCH=5FI386_gefixt?=
+In-Reply-To: <1302120236-8384-1-git-send-email-kevin@tyndur.org>
+References: <1302120236-8384-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1302121799.3075.173.camel@ASXSoft-Mobile>
+
+2011-04-06 (?) ? 22:03 +0200 ? Kevin Wolf ????????: 
+> ! kernel2: #ifdef ARCH_I386 bringt nichts, weil das Symbol immer
+>   definiert ist. Entscheidend ist, was CONFIG_ARCH sagt.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+Acked-by: Patrick Pokatilo <shyxormz at asxsoft.de>
+
+
+From kevin at tyndur.org  Sat Apr  9 18:18:36 2011
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat,  9 Apr 2011 18:18:36 +0200
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH=5D_libc=3A_ctype=2Eh=3A_extern_?=
+	=?utf-8?q?=22C=22_f=C3=BCr_C++-Programme?=
+Message-ID: <1302365916-29914-1-git-send-email-kevin@tyndur.org>
+
+! libc: ctype.h enthält mittlerweile nicht mehr static-inline-
+  Funktionen, sondern richtige Prototypen, also brauchen wir jetzt auch
+  ein extern "C", wenn libstdc++ noch funktionieren soll
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/include/ctype.h |    8 ++++++++
+ 1 files changed, 8 insertions(+), 0 deletions(-)
+
+diff --git a/src/include/ctype.h b/src/include/ctype.h
+index f777511..4beba2c 100644
+--- a/src/include/ctype.h
++++ b/src/include/ctype.h
+@@ -29,6 +29,10 @@
+ #ifndef _CTYPE_H_
+ #define _CTYPE_H_
+ 
++#ifdef __cplusplus
++extern "C" {
++#endif
++
+ int isprint(int c);
+ int iscntrl(int c);
+ int isspace(int c);
+@@ -45,4 +49,8 @@ int isgraph(int c);
+ int tolower(int c);
+ int toupper(int c);
+ 
++#ifdef __cplusplus
++}; // extern "C"
++#endif
++
+ #endif /* ndef CTYPE_H */
+-- 
+1.6.0.2
+
+
+From alex at tyndur.org  Sat Apr  9 20:22:01 2011
+From: alex at tyndur.org (alex at tyndur.org)
+Date: Sat, 09 Apr 2011 20:22:01 +0200
+Subject: [tyndur-devel]
+	=?iso-8859-1?q?=5BPATCH=5D_libc=3A_ctype=2Eh=3A_ex?=
+	=?iso-8859-1?q?tern_=22C=22_f=FCr_C++-Programme?=
+In-Reply-To: <1302365916-29914-1-git-send-email-kevin@tyndur.org>
+References: <1302365916-29914-1-git-send-email-kevin@tyndur.org>
+Message-ID: <20110409202201.12381sjr0nvvywg9@mail.famkaufmann.info>
+
+Quoting Kevin Wolf <kevin at tyndur.org>:
+
+> ! libc: ctype.h enthält mittlerweile nicht mehr static-inline-
+>   Funktionen, sondern richtige Prototypen, also brauchen wir jetzt auch
+>   ein extern "C", wenn libstdc++ noch funktionieren soll
+>
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Alexander Siol <alex at tyndur.org>
+
+From max at tyndur.org  Sun Apr 10 19:46:00 2011
+From: max at tyndur.org (Max Reitz)
+Date: Sun, 10 Apr 2011 19:46:00 +0200
+Subject: [tyndur-devel] [PATCH] kernel2: Kennzeichnung von vm86-Threads
+Message-ID: <1302457560-25460-1-git-send-email-max@tyndur.org>
+
+! Ein Bool in der Threadstruktur ist wesentlich schöner als ein nicht
+  gesetztes reserviertes Flag in EFLAGS und erspart obendrein
+  Peinlichkeiten, wenn das Flag irgendwann doch nicht mehr reserviert
+  sein sollte.
+
+Signed-off-by: Max Reitz <max at tyndur.org>
+---
+ src/kernel2/include/tasks.h      |    3 +++
+ src/kernel2/src/arch/i386/vm86.c |    6 ++++--
+ src/kernel2/src/interrupts/im.c  |    2 +-
+ src/kernel2/src/tasks/thread.c   |    3 +++
+ 4 files changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/src/kernel2/include/tasks.h b/src/kernel2/include/tasks.h
+index d4b4334..04d6b41 100644
+--- a/src/kernel2/include/tasks.h
++++ b/src/kernel2/include/tasks.h
+@@ -133,6 +133,9 @@ typedef struct {
+ 
+     /// Wird gesperrt, wenn aenderungen am Thread vorgenommen werden
+     lock_t lock;
++
++    /// Gesetzt, wenn der Thread ein VM86-Thread mit allem Drum und Dran ist
++    bool vm86;
+ } pm_thread_t;
+ 
+ typedef void (*pm_process_destroy_handler)(pm_process_t* process, void* prv);
+diff --git a/src/kernel2/src/arch/i386/vm86.c b/src/kernel2/src/arch/i386/vm86.c
+index 4edb42c..4bb33d5 100644
+--- a/src/kernel2/src/arch/i386/vm86.c
++++ b/src/kernel2/src/arch/i386/vm86.c
+@@ -180,8 +180,7 @@ static void vm86_gpf_entry(uint32_t above_error_code)
+         .error_code = (error_code & (1 << 1)) ? 0 : error_code,
+         .eip = (uintptr_t) &vm86_task_entry,
+         .cs = 0x08,
+-        // Das gelöschte Bit 1 zeigt, dass es sich um einen vm86-Task handelt
+-        .eflags = 0x200
++        .eflags = 0x202
+     };
+ 
+     if ((isf.interrupt_number < 0x20) && (isf.interrupt_number != 13)) {
+@@ -225,6 +224,9 @@ static int create_vm86_task(int intr, vm86_regs_t* regs, uintptr_t stack)
+     pm_thread_t* task = pm_thread_create(current_process,
+         &vm86_task_entry);
+ 
++    // Na ja... Fast normal.
++    task->vm86 = true;
++
+     cpu_tss_t* vm86_tss = mmc_valloc_limits(&mmc_current_context(),
+         NUM_PAGES(2 * sizeof(cpu_tss_t)), 0, 0,
+         0x100000, KERNEL_MEM_END, MM_FLAGS_KERNEL_DATA);
+diff --git a/src/kernel2/src/interrupts/im.c b/src/kernel2/src/interrupts/im.c
+index a342669..97862ac 100644
+--- a/src/kernel2/src/interrupts/im.c
++++ b/src/kernel2/src/interrupts/im.c
+@@ -88,7 +88,7 @@ static void handle_exception(interrupt_stack_frame_t* isf, uint8_t int_num)
+ #if CONFIG_ARCH == ARCH_I386
+     // Pruefen, ob ein VM86-Task die Exception ausgeloest hat
+     // Falls ja lassen wir sie vom VM86-Code behandeln, wenn er kann
+-    if (!(isf->eflags & (1 << 1))) {
++    if (current_thread->vm86) {
+         if (vm86_exception(isf)) {
+             return;
+         }
+diff --git a/src/kernel2/src/tasks/thread.c b/src/kernel2/src/tasks/thread.c
+index 618d369..3450626 100644
+--- a/src/kernel2/src/tasks/thread.c
++++ b/src/kernel2/src/tasks/thread.c
+@@ -67,6 +67,9 @@ pm_thread_t* pm_thread_create(pm_process_t* process, vaddr_t entry)
+     // Der Lock wird gesperrt initialisiert
+     thread->lock = 1;
+ 
++    // Normalerweise sind Threads keine VM86-Threads
++    thread->vm86 = false;
++
+     // Eine Page fuer den Kernelstacks des Threads allozieren
+     thread->kernel_stack_size = 0x1000;
+     paddr_t kernel_stack_phys = pmm_alloc(NUM_PAGES(thread->
+-- 
+1.7.3.4
+
+
+From christian.klahn at live.de  Mon Apr 18 02:53:51 2011
+From: christian.klahn at live.de (Christian Klahn)
+Date: Mon, 18 Apr 2011 02:53:51 +0200
+Subject: [tyndur-devel] =?iso-8859-1?q?=28kein_Betreff=29?=
+Message-ID: <BLU154-w12DB0F303732C0D080418FC910@phx.gbl>
+
+
+
+ 		 	   		  
+-------------- nächster Teil --------------
+Ein Dateianhang mit HTML-Daten wurde abgetrennt...
+URL: <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20110418/7a28bb85/attachment.html>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : 0001-Versionsnummer-der-MPFR-lib-erh-ht.-die-alte-ist-nic.patch
+Dateityp    : text/x-patch
+Dateigröße  : 845 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20110418/7a28bb85/attachment.bin>
+
+From m.nemo at gmx.net  Mon Apr 18 13:42:19 2011
+From: m.nemo at gmx.net (Andreas Freimuth)
+Date: Mon, 18 Apr 2011 13:42:19 +0200
+Subject: [tyndur-devel] AMD64-Port orphaned
+Message-ID: <1303126945-5762-1-git-send-email-m.nemo@gmx.net>
+
+Dieses Semester ist mein Stundenplan etwas voller als normal. So
+dass ich nicht genug Zeit haben werde am AMD64 Port erkennbare 
+Vortschritte zu machen. Deshalb ist es wohl am besten wenn ihr 
+meine Arbeiten daran als eingestellt betrachted.
+
+Hier meine patches die ich noch im REPO liegen habe. Damit
+compiliert das ganze zwar immernoch lange nicht. Aber wenn man 
+den flat-binary-loader auskommentiert kommt es schon ein ganzes
+Stück weiter ;)
+
+
+From m.nemo at gmx.net  Mon Apr 18 13:42:20 2011
+From: m.nemo at gmx.net (Andreas Freimuth)
+Date: Mon, 18 Apr 2011 13:42:20 +0200
+Subject: [tyndur-devel] [PATCH 1/6] kernel2: handle_exception nach arch
+	verschoben
+In-Reply-To: <1303126945-5762-1-git-send-email-m.nemo@gmx.net>
+References: <1303126945-5762-1-git-send-email-m.nemo@gmx.net>
+Message-ID: <1303126945-5762-2-git-send-email-m.nemo@gmx.net>
+
+* handle_exception ist architektur abhängig und gehört daher in
+  den arch/* abschnitt
+
+Signed-off-by: Andreas Freimuth <m.nemo at gmx.net>
+---
+ src/kernel2/include/arch/amd64/cpu.h      |    5 ++
+ src/kernel2/src/arch/amd64/im/im.c        |   72 ++++++++++++++++++++++++-
+ src/kernel2/src/arch/i386/interrupts/im.c |   84 +++++++++++++++++++++++++++++
+ src/kernel2/src/interrupts/im.c           |   84 +----------------------------
+ 4 files changed, 161 insertions(+), 84 deletions(-)
+
+diff --git a/src/kernel2/include/arch/amd64/cpu.h b/src/kernel2/include/arch/amd64/cpu.h
+index 0826c32..b5214c4 100644
+--- a/src/kernel2/include/arch/amd64/cpu.h
++++ b/src/kernel2/include/arch/amd64/cpu.h
+@@ -107,5 +107,10 @@ uint64_t cpu_read_msr(uint32_t reg);
+ mmc_context_t cpu_get_context();
+ void cpu_set_context(mmc_context_t context);
+ 
++/*
++ * Aktiviert die I/O-Bitmap fuer den Prozess
++ */
++void io_activate_bitmap(pm_process_t* task);
++
+ #endif //ifndef _CPU_H_
+ 
+diff --git a/src/kernel2/src/arch/amd64/im/im.c b/src/kernel2/src/arch/amd64/im/im.c
+index 59008f9..0a58beb 100644
+--- a/src/kernel2/src/arch/amd64/im/im.c
++++ b/src/kernel2/src/arch/amd64/im/im.c
+@@ -40,6 +40,8 @@
+ #include "im.h"
+ #include "apic.h"
+ #include "pic.h"
++#include "debug.h"
++#include "syscall.h"
+ 
+ #define IDT_GATE_COUNT 256
+ #define IDT_GATE_TYPE_INT 0xE
+@@ -77,6 +79,7 @@ typedef struct {
+ idt_gate_t idt[IDT_GATE_COUNT];
+ bool use_apic;
+ 
++extern void increase_user_stack_size(pm_thread_t* task_ptr, int pages);
+ static void idt_set_gate(size_t interrupt, vaddr_t handler, uint8_t privilege_level);
+ 
+ // Die ASM-Stubs
+@@ -659,4 +662,71 @@ void im_end_of_interrupt(uint8_t interrupt)
+     }
+ }
+ 
+-
++
++/**
++ * Verarbeitet eine CPU-Exception
++ */
++void handle_exception(interrupt_stack_frame_t* isf, uint8_t int_num)
++{
++    uintptr_t cr2;
++    asm("mov %%cr2, %0" : "=r" (cr2));
++
++//    kprintf("user_stack_bottom = %x\n",
++//        current_thread->user_stack_bottom);
++
++    if (int_num == 0x0d) {
++        // Prüfen, ob der #GP möglicherweise durch eine nicht geladene
++        // I/O-Bitmap verurscht worden ist
++        if (cpu_get_current()->tss.io_bit_map_offset ==
++                TSS_IO_BITMAP_NOT_LOADED)
++        {
++            io_activate_bitmap(current_process);
++            return;
++        }
++    }
++
++    if (int_num == 0x0e) {
++        // Überprüfen ob der Pagefault durch einen Stackoverflow
++        // hervorgerufen wurde. Falls ja: Stack vergrößern und weitermachen
++        if ((cr2 <= isf->rsp + 0x800) && (cr2 >= isf->rsp - 0x20)
++            && (current_thread != NULL)
++            && ((void*) cr2 >= current_thread->user_stack_bottom - 0x1000000)
++            && ((void*) cr2 <  current_thread->user_stack_bottom))
++        {
++            increase_user_stack_size(current_thread, 1);
++            return;
++        }
++    }
++
++    // Exception
++    kprintf("\033[1;41m");
++    kprintf("[CPU%d] Exception %d; Error Code = 0x%lx\n",
++        cpu_get_current()->id, int_num, isf->error_code);
++
++    kprintf("PID %d: %s\n",
++        current_process->pid, current_process->cmdline);
++    cpu_dump(isf);
++    kprintf("\033[0;40m");
++
++    // Ein Stacktrace dürfen wir nur ausgeben, wenn kein Pagefault wegen
++    // dem Stack aufgetreten ist!
++    if (!((cr2 < isf->rsp + 800) && (cr2 >= isf->rsp -0x20))) {
++        stack_backtrace(isf->rbp, isf->rip);
++    }
++
++    // Wenn die Exception im Kernel passiert ist, geben wir auf
++    if ((isf->cs & 0x03) == 0) {
++        // Hier werden alle Prozessoren zum halten gebracht
++        if (cpu_count > 1) {
++            apic_ipi_broadcast(0xF0, true);
++        }
++
++        // Aber da das ohne APIC nicht so funktioniert, wird das noch
++        // abgefangen.
++        asm("cli; hlt");
++    }
++
++    // Ansonsten wird nur der aktuelle Task beendet
++    syscall_pm_exit_process();
++}
++
+diff --git a/src/kernel2/src/arch/i386/interrupts/im.c b/src/kernel2/src/arch/i386/interrupts/im.c
+index 08642fa..413ef15 100644
+--- a/src/kernel2/src/arch/i386/interrupts/im.c
++++ b/src/kernel2/src/arch/i386/interrupts/im.c
+@@ -41,6 +41,8 @@
+ #include "im.h"
+ #include "apic.h"
+ #include "pic.h"
++#include "debug.h"
++#include "syscall.h"
+ 
+ #define IDT_GATE_COUNT 256
+ #define IDT_GATE_TYPE_TASK 0x5
+@@ -727,3 +729,85 @@ void im_end_of_interrupt(uint8_t interrupt)
+     }
+ }
+ 
++extern void increase_user_stack_size(pm_thread_t* task_ptr, int pages);
++extern int vm86_exception(interrupt_stack_frame_t* isf);
++
++/**
++ * Verarbeitet eine CPU-Exception
++ */
++void handle_exception(interrupt_stack_frame_t* isf, uint8_t int_num)
++{
++    uintptr_t cr2;
++    asm("mov %%cr2, %0" : "=r" (cr2));
++
++//    kprintf("user_stack_bottom = %x\n",
++//        current_thread->user_stack_bottom);
++
++    // Prüfen, ob ein VM86-Task die Exception ausgelöst hat
++    // Falls ja lassen wir sie vom VM86-Code behandeln, wenn er kann
++    if (current_thread->vm86) {
++        if (vm86_exception(isf)) {
++            return;
++        }
++    }
++
++    if (int_num == 0x0d) {
++        // Prüfen, ob der #GP möglicherweise durch eine nicht geladene
++        // I/O-Bitmap verurscht worden ist
++        if (cpu_get_current()->tss.io_bit_map_offset ==
++                TSS_IO_BITMAP_NOT_LOADED)
++        {
++            io_activate_bitmap(current_process);
++            return;
++        }
++    }
++
++    if (int_num == 0x0e) {
++        // Überprüfen ob der Pagefault durch einen Stackoverflow
++        // hervorgerufen wurde. Falls ja: Stack vergrößern und weitermachen
++        if ((cr2 <= isf->esp + 0x800) && (cr2 >= isf->esp - 0x20)
++            && (current_thread != NULL)
++            && ((void*) cr2 >= current_thread->user_stack_bottom - 0x1000000)
++            && ((void*) cr2 <  current_thread->user_stack_bottom))
++        {
++            increase_user_stack_size(current_thread, 1);
++            return;
++        }
++    }
++
++    // Exception
++    kprintf("\033[1;41m");
++    kprintf("[CPU%d] Exception %d; Error Code = 0x%x\n",
++        cpu_get_current()->id, int_num, isf->error_code);
++
++    kprintf("PID %d: %s\n",
++        current_process->pid, current_process->cmdline);
++    cpu_dump(isf);
++    kprintf("\033[0;40m");
++
++    // Ein Stacktrace dürfen wir nur ausgeben, wenn kein Pagefault wegen
++    // dem Stack aufgetreten ist!
++    if (!((cr2 < isf->esp + 800) && (cr2 >= isf->esp -0x20))) {
++        // Und für VM86 müssten wir wenigstens noch das Segment
++        // berücksichtigen, aber eigentlich brauchen wir ihn da gar nicht
++        if ((isf->eflags & 0x20000) == 0) {
++            stack_backtrace(isf->ebp, isf->eip);
++        }
++    }
++
++    // Wenn die Exception im Kernel passiert ist, geben wir auf
++    if ((isf->cs & 0x03) == 0) {
++        // Hier werden alle Prozessoren zum halten gebracht
++        if (cpu_count > 1) {
++            apic_ipi_broadcast(0xF0, true);
++        }
++
++        // Aber da das ohne APIC nicht so funktioniert, wird das noch
++        // abgefangen.
++        asm("cli; hlt");
++    }
++
++    // Ansonsten wird nur der aktuelle Task beendet
++    syscall_pm_exit_process();
++}
++
+diff --git a/src/kernel2/src/interrupts/im.c b/src/kernel2/src/interrupts/im.c
+index 97862ac..9879f98 100644
+--- a/src/kernel2/src/interrupts/im.c
++++ b/src/kernel2/src/interrupts/im.c
+@@ -71,89 +71,7 @@ void im_send_interrupts(void);
+ bool fastrpc_irq(pm_process_t* callee, size_t metadata_size, void* metadata,
+     size_t data_size, void* data, uint8_t irq);
+ 
+-extern void increase_user_stack_size(pm_thread_t* task_ptr, int pages);
+-extern int vm86_exception(interrupt_stack_frame_t* isf);
+-
+-/**
+- * Verarbeitet eine CPU-Exception
+- */
+-static void handle_exception(interrupt_stack_frame_t* isf, uint8_t int_num)
+-{
+-    uintptr_t cr2;
+-    asm("mov %%cr2, %0" : "=r" (cr2));
+-
+-//    kprintf("user_stack_bottom = %x\n",
+-//        current_thread->user_stack_bottom);
+-
+-#if CONFIG_ARCH == ARCH_I386
+-    // Pruefen, ob ein VM86-Task die Exception ausgeloest hat
+-    // Falls ja lassen wir sie vom VM86-Code behandeln, wenn er kann
+-    if (current_thread->vm86) {
+-        if (vm86_exception(isf)) {
+-            return;
+-        }
+-    }
+-#endif
+-
+-    if (int_num == 0x0d) {
+-        // Pruefen, ob der #GP moeglicherweise durch eine nicht geladene
+-        // I/O-Bitmap verurscht worden ist
+-        if (cpu_get_current()->tss.io_bit_map_offset ==
+-                TSS_IO_BITMAP_NOT_LOADED)
+-        {
+-            io_activate_bitmap(current_process);
+-            return;
+-        }
+-    }
+-
+-    if (int_num == 0x0e) {
+-        // Ueberprüfen ob der Pagefault durch einen Stackoverflow
+-        // hervorgerufen wurde. Falls ja: Stack vergroessern und weitermachen
+-        if ((cr2 <= isf->esp + 0x800) && (cr2 >= isf->esp - 0x20)
+-            && (current_thread != NULL)
+-            && ((void*) cr2 >= current_thread->user_stack_bottom - 0x1000000)
+-            && ((void*) cr2 <  current_thread->user_stack_bottom))
+-        {
+-            increase_user_stack_size(current_thread, 1);
+-            return;
+-        }
+-    }
+-
+-    // Exception
+-    kprintf("\033[1;41m");
+-    kprintf("[CPU%d] Exception %d; Error Code = 0x%x\n",
+-        cpu_get_current()->id, int_num, isf->error_code);
+-
+-    kprintf("PID %d: %s\n",
+-        current_process->pid, current_process->cmdline);
+-    cpu_dump(isf);
+-    kprintf("\033[0;40m");
+-
+-    // Ein Stacktrace duerfen wir nur ausgeben, wenn kein Pagefault wegen
+-    // dem Stack aufgetreten ist!
+-    if (!((cr2 < isf->esp + 800) && (cr2 >= isf->esp -0x20))) {
+-        // Und fuer VM86 muessten wir wenigstens noch das Segment
+-        // beruecksichtigen, aber eigentlich brauchen wir ihn da gar nicht
+-        if ((isf->eflags & 0x20000) == 0) {
+-            stack_backtrace(isf->ebp, isf->eip);
+-        }
+-    }
+-
+-    // Wenn die Exception im Kernel passiert ist, geben wir auf
+-    if ((isf->cs & 0x03) == 0) {
+-        // Hier werden alle Prozessoren zum halten gebracht
+-        if (cpu_count > 1) {
+-            apic_ipi_broadcast(0xF0, true);
+-        }
+-
+-        // Aber da das ohne APIC nicht so funktioniert, wird das noch
+-        // abgefangen.
+-        asm("cli; hlt");
+-    }
+-
+-    // Ansonsten wird nur der aktuelle Task beendet
+-    syscall_pm_exit_process();
+-}
++void handle_exception(interrupt_stack_frame_t* isf, uint8_t int_num);
+ 
+ /**
+  * Behandelt alle Interrupts. Wird aus den Interrupt-Stubs aufgerufen.
+-- 
+1.7.4.4
+
+
+From m.nemo at gmx.net  Mon Apr 18 13:42:21 2011
+From: m.nemo at gmx.net (Andreas Freimuth)
+Date: Mon, 18 Apr 2011 13:42:21 +0200
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH_2/6=5D_kernel2=3A_Pointer_auf_m?=
+	=?utf-8?q?mc=5Fcontext=5Ft_benutzen?=
+In-Reply-To: <1303126945-5762-1-git-send-email-m.nemo@gmx.net>
+References: <1303126945-5762-1-git-send-email-m.nemo@gmx.net>
+Message-ID: <1303126945-5762-3-git-send-email-m.nemo@gmx.net>
+
+* vmm_init(amd64): bekommt, wie alle Anderen auch, nur einen
+  Pointer auf mmc_contexct_t
+
+Signed-off-by: Andreas Freimuth <m.nemo at gmx.net>
+---
+ src/kernel2/src/arch/amd64/mm/mm_virt.c |    8 ++++----
+ 1 files changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/src/kernel2/src/arch/amd64/mm/mm_virt.c b/src/kernel2/src/arch/amd64/mm/mm_virt.c
+index 2b2e9c3..e5ff28d 100644
+--- a/src/kernel2/src/arch/amd64/mm/mm_virt.c
++++ b/src/kernel2/src/arch/amd64/mm/mm_virt.c
+@@ -46,13 +46,13 @@ extern bool mmc_use_no_exec;
+ 
+ /**
+  * Initialisiert die virtuelle Speicherverwaltung. Insbesondere wird eine
+- * Page Map fuer den Kernel vorbereitet und geladen.
++ * Page Map für den Kernel vorbereitet und geladen.
+  *
+  * Die physische Speicherverwaltung muss dazu bereits initialisiert sein.
+  *
+- * @context Kontext der zur initialisierung benutzt werden soll.
++ * @param context Kontext der zur initialisierung benutzt werden soll.
+  */
+-void vmm_init(mmc_context_t context)
++void vmm_init(mmc_context_t* context)
+ {
+     // No execute - Erweiterung aktivieren
+     // Mit cpuid wird geprueft, ob sie ueberhaupt verfügbar ist
+@@ -97,7 +97,7 @@ void vmm_init(mmc_context_t context)
+  *
+  * @param context Initialisierungscontext
+  */
+-void vmm_init_local(mmc_context_t context)
++void vmm_init_local(mmc_context_t* context)
+ {
+     // NXE aktivieren.
+     if (mmc_use_no_exec == true) {
+-- 
+1.7.4.4
+
+
+From m.nemo at gmx.net  Mon Apr 18 13:42:22 2011
+From: m.nemo at gmx.net (Andreas Freimuth)
+Date: Mon, 18 Apr 2011 13:42:22 +0200
+Subject: [tyndur-devel] [PATCH 3/6] kernel2: mmc_activate statt
+	cpu_set_context
+In-Reply-To: <1303126945-5762-1-git-send-email-m.nemo@gmx.net>
+References: <1303126945-5762-1-git-send-email-m.nemo@gmx.net>
+Message-ID: <1303126945-5762-4-git-send-email-m.nemo@gmx.net>
+
+* mmc_activate(amd64): ersetzt cpu_sec_context
+  so heißt das auch unter (i386)
+
+Signed-off-by: Andreas Freimuth <m.nemo at gmx.net>
+---
+ src/kernel2/include/arch/amd64/cpu.h    |    1 -
+ src/kernel2/src/arch/amd64/mm/mm_virt.c |    4 ++--
+ 2 files changed, 2 insertions(+), 3 deletions(-)
+
+diff --git a/src/kernel2/include/arch/amd64/cpu.h b/src/kernel2/include/arch/amd64/cpu.h
+index b5214c4..f4ab11e 100644
+--- a/src/kernel2/include/arch/amd64/cpu.h
++++ b/src/kernel2/include/arch/amd64/cpu.h
+@@ -105,7 +105,6 @@ void cpu_write_msr(uint32_t msr, uint64_t value);
+ uint64_t cpu_read_msr(uint32_t reg);
+ 
+ mmc_context_t cpu_get_context();
+-void cpu_set_context(mmc_context_t context);
+ 
+ /*
+  * Aktiviert die I/O-Bitmap fuer den Prozess
+diff --git a/src/kernel2/src/arch/amd64/mm/mm_virt.c b/src/kernel2/src/arch/amd64/mm/mm_virt.c
+index e5ff28d..8dae4c1 100644
+--- a/src/kernel2/src/arch/amd64/mm/mm_virt.c
++++ b/src/kernel2/src/arch/amd64/mm/mm_virt.c
+@@ -103,9 +103,9 @@ void vmm_init_local(mmc_context_t* context)
+     if (mmc_use_no_exec == true) {
+         cpu_write_msr(0xC0000080, cpu_read_msr(0xC0000080) | (1 << 11));
+     }
+-    
++
+     // Kontext aktivieren
+-    cpu_set_context(context);
++    mmc_activate(contecxt);
+ }
+ 
+ /**
+-- 
+1.7.4.4
+
+
+From m.nemo at gmx.net  Mon Apr 18 13:42:23 2011
+From: m.nemo at gmx.net (Andreas Freimuth)
+Date: Mon, 18 Apr 2011 13:42:23 +0200
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH_4/6=5D_kernel2=3A_cpu=5Fhalt_ei?=
+	=?utf-8?b?bmdlZsO8aHJ0?=
+In-Reply-To: <1303126945-5762-1-git-send-email-m.nemo@gmx.net>
+References: <1303126945-5762-1-git-send-email-m.nemo@gmx.net>
+Message-ID: <1303126945-5762-5-git-send-email-m.nemo@gmx.net>
+
++ cpu.h: cpu_halt zum anhalten der CPU
+* init.c, im.c: verwendet jetzt cpu_halt statt direktem Inline-
+  Assembler und wird so ein Stück architekturunabhängiger
+
+Signed-off-by: Andreas Freimuth <m.nemo at gmx.net>
+---
+ src/kernel2/include/arch/amd64/cpu.h |    7 +++++++
+ src/kernel2/include/arch/i386/cpu.h  |    7 +++++++
+ src/kernel2/src/init.c               |    2 +-
+ src/kernel2/src/interrupts/im.c      |    4 ++--
+ 4 files changed, 17 insertions(+), 3 deletions(-)
+
+diff --git a/src/kernel2/include/arch/amd64/cpu.h b/src/kernel2/include/arch/amd64/cpu.h
+index f4ab11e..ec13819 100644
+--- a/src/kernel2/include/arch/amd64/cpu.h
++++ b/src/kernel2/include/arch/amd64/cpu.h
+@@ -111,5 +111,12 @@ mmc_context_t cpu_get_context();
+  */
+ void io_activate_bitmap(pm_process_t* task);
+ 
++/**
++ * Hält die CPU an
++ */
++static inline void cpu_halt(void) {
++    asm volatile ("cli; hlt");
++}
++
+ #endif //ifndef _CPU_H_
+ 
+diff --git a/src/kernel2/include/arch/i386/cpu.h b/src/kernel2/include/arch/i386/cpu.h
+index 1275496..db407bd 100644
+--- a/src/kernel2/include/arch/i386/cpu.h
++++ b/src/kernel2/include/arch/i386/cpu.h
+@@ -185,5 +185,12 @@ void cpu_prepare_current_task(void);
+  */
+ void io_activate_bitmap(pm_process_t* task);
+ 
++/**
++ * Hält die CPU an.
++ */
++static inline void cpu_halt(void) {
++    asm volatile ("cli; hlt");
++}
++
+ #endif //ifndef _CPU_H_
+ 
+diff --git a/src/kernel2/src/init.c b/src/kernel2/src/init.c
+index bb3b182..f754122 100644
+--- a/src/kernel2/src/init.c
++++ b/src/kernel2/src/init.c
+@@ -291,6 +291,6 @@ __attribute__((noreturn)) void panic(char * message, ...)
+     
+ 
+     while(1) {
+-      __asm__ __volatile__("cli; hlt");
++      cpu_halt();
+     }
+ }
+diff --git a/src/kernel2/src/interrupts/im.c b/src/kernel2/src/interrupts/im.c
+index 9879f98..4e95be2 100644
+--- a/src/kernel2/src/interrupts/im.c
++++ b/src/kernel2/src/interrupts/im.c
+@@ -137,12 +137,12 @@ interrupt_stack_frame_t* im_handler(interrupt_stack_frame_t* isf)
+     } else if (int_num == 0xF0) {
+         // Interrupt um Prozessor anzuhalten
+         kprintf("\n[CPU%d] Angehalten", cpu_get_current()->id);
+-        asm("cli; hlt");
++        cpu_halt();
+     } else {
+         kprintf("Interrupt %d\n", int_num);
+         if (int_num == 252) {
+             apic_ipi_broadcast(0xF0, true);
+-            asm("cli; hlt");
++            cpu_halt();
+         }
+     }
+ 
+-- 
+1.7.4.4
+
+
+From m.nemo at gmx.net  Mon Apr 18 13:42:24 2011
+From: m.nemo at gmx.net (Andreas Freimuth)
+Date: Mon, 18 Apr 2011 13:42:24 +0200
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH_5/6=5D_kernel2=3A_isf=5Fis=5Fus?=
+	=?utf-8?q?erspace_hinzugef=C3=BCgt?=
+In-Reply-To: <1303126945-5762-1-git-send-email-m.nemo@gmx.net>
+References: <1303126945-5762-1-git-send-email-m.nemo@gmx.net>
+Message-ID: <1303126945-5762-6-git-send-email-m.nemo@gmx.net>
+
++ cpu.h: isf_is_userspace zum überprüfen ob es sich um ein
+  Userspace-Stackframe handelt
+* im.c: verwendet isf_is_userspace um noch ein Stück
+  architekturunabhängiger zu werden
+
+Signed-off-by: Andreas Freimuth <m.nemo at gmx.net>
+---
+ src/kernel2/include/arch/amd64/cpu.h |    9 +++++++++
+ src/kernel2/include/arch/i386/cpu.h  |    9 +++++++++
+ src/kernel2/src/interrupts/im.c      |    2 +-
+ 3 files changed, 19 insertions(+), 1 deletions(-)
+
+diff --git a/src/kernel2/include/arch/amd64/cpu.h b/src/kernel2/include/arch/amd64/cpu.h
+index ec13819..0640608 100644
+--- a/src/kernel2/include/arch/amd64/cpu.h
++++ b/src/kernel2/include/arch/amd64/cpu.h
+@@ -66,6 +66,15 @@ typedef struct {
+     uint64_t fs, gs;
+ } __attribute__((packed)) interrupt_stack_frame_t;
+ 
++/**
++ * Überprüft ob es sich um ein Stackframe aus dem Userspace handelt.
++ *
++ * @return true wenn es ein Userspace Stackframe ist
++ */
++static inline bool isf_is_userspace(interrupt_stack_frame_t* isf) {
++    return (isf->cs & 0x3) || (isf->rflags & 0x20000);
++}
++
+ typedef interrupt_stack_frame_t machine_state_t;
+ 
+ /// Task state segment
+diff --git a/src/kernel2/include/arch/i386/cpu.h b/src/kernel2/include/arch/i386/cpu.h
+index db407bd..64f11b2 100644
+--- a/src/kernel2/include/arch/i386/cpu.h
++++ b/src/kernel2/include/arch/i386/cpu.h
+@@ -67,6 +67,15 @@ typedef struct {
+     uint32_t ss;
+ } __attribute__((packed)) interrupt_stack_frame_t;
+ 
++/**
++ * Überprüft ob es sich um ein Stackframe aus dem Userspace handelt.
++ *
++ * @return true wenn es ein Userspace Stackframe ist
++ */
++static inline bool isf_is_userspace(interrupt_stack_frame_t* isf) {
++    return (isf->cs & 0x3) || (isf->eflags & 0x20000);
++}
++
+ /** Der erweiterte Interruptstackframe fuer VM86-Tasks */
+ struct vm86_isf {
+     interrupt_stack_frame_t isf;
+diff --git a/src/kernel2/src/interrupts/im.c b/src/kernel2/src/interrupts/im.c
+index 4e95be2..327ca80 100644
+--- a/src/kernel2/src/interrupts/im.c
++++ b/src/kernel2/src/interrupts/im.c
+@@ -99,7 +99,7 @@ interrupt_stack_frame_t* im_handler(interrupt_stack_frame_t* isf)
+     }
+ 
+     // Wenn der Int aus dem Userspace kommt, legen wir den zugehoerigen ISF ab
+-    if ((isf->cs & 0x3) || (isf->eflags & 0x20000)) {
++    if (isf_is_userspace(isf)) {
+         thread->user_isf = isf;
+     }
+ 
+-- 
+1.7.4.4
+
+
+From m.nemo at gmx.net  Mon Apr 18 13:42:25 2011
+From: m.nemo at gmx.net (Andreas Freimuth)
+Date: Mon, 18 Apr 2011 13:42:25 +0200
+Subject: [tyndur-devel] [PATCH 6/6] kernel2: #if CONFIG_ARCH Zeugs
+In-Reply-To: <1303126945-5762-1-git-send-email-m.nemo@gmx.net>
+References: <1303126945-5762-1-git-send-email-m.nemo@gmx.net>
+Message-ID: <1303126945-5762-7-git-send-email-m.nemo@gmx.net>
+
+* im.c: register zugriff damit verpackt
+
+Signed-off-by: Andreas Freimuth <m.nemo at gmx.net>
+---
+ src/kernel2/src/interrupts/im.c |    7 ++++++-
+ 1 files changed, 6 insertions(+), 1 deletions(-)
+
+diff --git a/src/kernel2/src/interrupts/im.c b/src/kernel2/src/interrupts/im.c
+index 327ca80..38b2b43 100644
+--- a/src/kernel2/src/interrupts/im.c
++++ b/src/kernel2/src/interrupts/im.c
+@@ -87,7 +87,12 @@ interrupt_stack_frame_t* im_handler(interrupt_stack_frame_t* isf)
+     interrupt_stack_frame_t* new_isf = isf;
+     uintptr_t isf_addr = (uintptr_t) isf;
+ #ifndef CONFIG_RELEASE_VERSION
+-    uint32_t eax = isf->eax;
++    uint32_t eax = 0xd00fc0de;
++#    if CONIFG_ARCH == ARCH_I386
++    eax = isf->eax;
++#    elif CONIFG_ARCH == ARCH_AMD64
++    eax = isf->rax;
++#    endif
+ #endif
+ 
+     if ((isf_addr < (uintptr_t) thread->kernel_stack_bottom) ||
+-- 
+1.7.4.4
+
+
+From m.nemo at gmx.net  Mon Apr 18 14:45:19 2011
+From: m.nemo at gmx.net (Andreas Freimuth)
+Date: Mon, 18 Apr 2011 14:45:19 +0200
+Subject: [tyndur-devel] [PATCH] kernel2: mmc_activate statt cpu_set_context
+In-Reply-To: <1303126945-5762-4-git-send-email-m.nemo@gmx.net>
+References: <1303126945-5762-4-git-send-email-m.nemo@gmx.net>
+Message-ID: <1303130719-19705-1-git-send-email-m.nemo@gmx.net>
+
+* mmc_activate(amd64): ersetzt cpu_sec_context
+  so heißt das auch unter (i386)
+
+Signed-off-by: Andreas Freimuth <m.nemo at gmx.net>
+---
+ src/kernel2/include/arch/amd64/cpu.h    |    1 -
+ src/kernel2/src/arch/amd64/mm/mm_virt.c |    4 ++--
+ 2 files changed, 2 insertions(+), 3 deletions(-)
+
+diff --git a/src/kernel2/include/arch/amd64/cpu.h b/src/kernel2/include/arch/amd64/cpu.h
+index b5214c4..f4ab11e 100644
+--- a/src/kernel2/include/arch/amd64/cpu.h
++++ b/src/kernel2/include/arch/amd64/cpu.h
+@@ -105,7 +105,6 @@ void cpu_write_msr(uint32_t msr, uint64_t value);
+ uint64_t cpu_read_msr(uint32_t reg);
+ 
+ mmc_context_t cpu_get_context();
+-void cpu_set_context(mmc_context_t context);
+ 
+ /*
+  * Aktiviert die I/O-Bitmap fuer den Prozess
+diff --git a/src/kernel2/src/arch/amd64/mm/mm_virt.c b/src/kernel2/src/arch/amd64/mm/mm_virt.c
+index e5ff28d..8f5af47 100644
+--- a/src/kernel2/src/arch/amd64/mm/mm_virt.c
++++ b/src/kernel2/src/arch/amd64/mm/mm_virt.c
+@@ -103,9 +103,9 @@ void vmm_init_local(mmc_context_t* context)
+     if (mmc_use_no_exec == true) {
+         cpu_write_msr(0xC0000080, cpu_read_msr(0xC0000080) | (1 << 11));
+     }
+-    
++
+     // Kontext aktivieren
+-    cpu_set_context(context);
++    mmc_activate(context);
+ }
+ 
+ /**
+-- 
+1.7.4.4
+
+
+From max at tyndur.org  Fri Apr 22 12:40:53 2011
+From: max at tyndur.org (Max Reitz)
+Date: Fri, 22 Apr 2011 12:40:53 +0200
+Subject: [tyndur-devel] [PATCH] kernel2: IRQ-Sharing (Bug 79)
+Message-ID: <1303468853-29491-1-git-send-email-max@tyndur.org>
+
+! Ein IRQ sollte erst dann demaskiert werden, wenn alle RPCs, die ihn
+  behandeln, zurückgekehrt sind.
+
+Signed-off-by: Max Reitz <max at tyndur.org>
+---
+ src/kernel2/include/im.h        |   12 ++++++++++++
+ src/kernel2/src/interrupts/im.c |   25 +++++++++++++++++++++++++
+ src/kernel2/src/syscalls/rpc.c  |    4 +++-
+ 3 files changed, 40 insertions(+), 1 deletions(-)
+
+diff --git a/src/kernel2/include/im.h b/src/kernel2/include/im.h
+index 05f7200..23ccf22 100644
+--- a/src/kernel2/include/im.h
++++ b/src/kernel2/include/im.h
+@@ -54,6 +54,18 @@ void im_disable(void);
+ void im_enable_irq(uint8_t irq);
+ void im_disable_irq(uint8_t irq);
+ 
++/**
++ * Zeigt an, dass ein RPC zu einem Task ausgelöst wurde, der den entsprechenden
++ * IRQ verarbeiten soll.
++ */
++void im_irq_handlers_increment(uint8_t irq);
++/**
++ * Zeigt an, dass solch ein RPC beendet wurde. Ist die Zahl der Tasks, die sich
++ * um diesen IRQ kümmern, auf 0 gesunken, kann der IRQ wieder per im_enable_irq
++ * zugelassen werden.
++ */
++void im_irq_handlers_decrement(uint8_t irq);
++
+ void im_end_of_interrupt(uint8_t interrupt);
+ interrupt_stack_frame_t* im_handler(interrupt_stack_frame_t* isf);
+ interrupt_stack_frame_t* im_prepare_current_thread(void);
+diff --git a/src/kernel2/src/interrupts/im.c b/src/kernel2/src/interrupts/im.c
+index 97862ac..f22498a 100644
+--- a/src/kernel2/src/interrupts/im.c
++++ b/src/kernel2/src/interrupts/im.c
+@@ -34,6 +34,7 @@
+  */
+ 
+ #include <stdbool.h>
++#include <lock.h>
+ #include <types.h>
+ #include <lost/config.h>
+ 
+@@ -67,6 +68,12 @@ static int intr_num_tasks[IM_NUM_INTERRUPTS];
+ // Interrupt 0 sind, sonst true).
+ static bool any_intr[IM_NUM_INTERRUPTS];
+ 
++// Anzahl von Tasks, die sich gerade um einen bestimmten IRQ kümmern (zu denen
++// also ein fastrpc_irq ausgeführt wurde und noch nicht beendet ist)
++static uint32_t intr_active_tasks[IM_NUM_INTERRUPTS];
++// Ein Lock für dieses Array
++static lock_t intr_active_tasks_lock = LOCK_UNLOCKED;
++
+ void im_send_interrupts(void);
+ bool fastrpc_irq(pm_process_t* callee, size_t metadata_size, void* metadata,
+     size_t data_size, void* data, uint8_t irq);
+@@ -373,3 +380,21 @@ void im_send_interrupts(void)
+         pm_scheduler_try_switch(new_thread);
+     }
+ }
++
++void im_irq_handlers_increment(uint8_t irq)
++{
++    locked_increment(&intr_active_tasks[irq]);
++}
++
++void im_irq_handlers_decrement(uint8_t irq)
++{
++    lock(&intr_active_tasks_lock);
++
++    if (--intr_active_tasks[irq] <= 0)
++    {
++        intr_active_tasks[irq] = 0;
++        im_enable_irq(irq);
++    }
++
++    unlock(&intr_active_tasks_lock);
++}
+diff --git a/src/kernel2/src/syscalls/rpc.c b/src/kernel2/src/syscalls/rpc.c
+index 382c882..1b57ae0 100644
+--- a/src/kernel2/src/syscalls/rpc.c
++++ b/src/kernel2/src/syscalls/rpc.c
+@@ -325,6 +325,8 @@ bool fastrpc_irq(pm_process_t* callee, size_t metadata_size, void* metadata,
+         return false;
+     }
+ 
++    im_irq_handlers_increment(irq);
++
+     rpc_t* rpc = list_get_element_at(callee->rpcs, 0);
+     rpc->reenable_irq = irq;
+ 
+@@ -381,7 +383,7 @@ void syscall_fastrpc_ret(void)
+     // Wenn es ein IRQ-verarbeitender RPC war, den Interrupt jetzt
+     // wieder aktivieren
+     if (rpc->reenable_irq) {
+-        im_enable_irq(rpc->reenable_irq);
++        im_irq_handlers_decrement(rpc->reenable_irq);
+     }
+ 
+     free(rpc);
+-- 
+1.7.4.4
+
+
+From max at tyndur.org  Fri Apr 22 12:57:23 2011
+From: max at tyndur.org (Max Reitz)
+Date: Fri, 22 Apr 2011 12:57:23 +0200
+Subject: [tyndur-devel] [PATCH v2] kernel2: IRQ-Sharing (Bug 79)
+In-Reply-To: <1303468853-29491-1-git-send-email-max@tyndur.org>
+References: <1303468853-29491-1-git-send-email-max@tyndur.org>
+Message-ID: <1303469843-30362-1-git-send-email-max@tyndur.org>
+
+! Ein IRQ sollte erst dann demaskiert werden, wenn alle RPCs, die ihn
+  behandeln, zurückgekehrt sind.
+
+Signed-off-by: Max Reitz <max at tyndur.org>
+---
+ src/kernel2/include/im.h        |   12 ++++++++++++
+ src/kernel2/src/interrupts/im.c |   25 +++++++++++++++++++++++++
+ src/kernel2/src/syscalls/rpc.c  |    4 +++-
+ 3 files changed, 40 insertions(+), 1 deletions(-)
+
+diff --git a/src/kernel2/include/im.h b/src/kernel2/include/im.h
+index 05f7200..23ccf22 100644
+--- a/src/kernel2/include/im.h
++++ b/src/kernel2/include/im.h
+@@ -54,6 +54,18 @@ void im_disable(void);
+ void im_enable_irq(uint8_t irq);
+ void im_disable_irq(uint8_t irq);
+ 
++/**
++ * Zeigt an, dass ein RPC zu einem Task ausgelöst wurde, der den entsprechenden
++ * IRQ verarbeiten soll.
++ */
++void im_irq_handlers_increment(uint8_t irq);
++/**
++ * Zeigt an, dass solch ein RPC beendet wurde. Ist die Zahl der Tasks, die sich
++ * um diesen IRQ kümmern, auf 0 gesunken, kann der IRQ wieder per im_enable_irq
++ * zugelassen werden.
++ */
++void im_irq_handlers_decrement(uint8_t irq);
++
+ void im_end_of_interrupt(uint8_t interrupt);
+ interrupt_stack_frame_t* im_handler(interrupt_stack_frame_t* isf);
+ interrupt_stack_frame_t* im_prepare_current_thread(void);
+diff --git a/src/kernel2/src/interrupts/im.c b/src/kernel2/src/interrupts/im.c
+index 97862ac..f22498a 100644
+--- a/src/kernel2/src/interrupts/im.c
++++ b/src/kernel2/src/interrupts/im.c
+@@ -34,6 +34,7 @@
+  */
+ 
+ #include <stdbool.h>
++#include <lock.h>
+ #include <types.h>
+ #include <lost/config.h>
+ 
+@@ -67,6 +68,12 @@ static int intr_num_tasks[IM_NUM_INTERRUPTS];
+ // Interrupt 0 sind, sonst true).
+ static bool any_intr[IM_NUM_INTERRUPTS];
+ 
++// Anzahl von Tasks, die sich gerade um einen bestimmten IRQ kümmern (zu denen
++// also ein fastrpc_irq ausgeführt wurde und noch nicht beendet ist)
++static uint32_t intr_active_tasks[IM_NUM_INTERRUPTS];
++// Ein Lock für dieses Array
++static lock_t intr_active_tasks_lock = LOCK_UNLOCKED;
++
+ void im_send_interrupts(void);
+ bool fastrpc_irq(pm_process_t* callee, size_t metadata_size, void* metadata,
+     size_t data_size, void* data, uint8_t irq);
+@@ -373,3 +380,20 @@ void im_send_interrupts(void)
+         pm_scheduler_try_switch(new_thread);
+     }
+ }
++
++void im_irq_handlers_increment(uint8_t irq)
++{
++    locked_increment(&intr_active_tasks[irq]);
++}
++
++void im_irq_handlers_decrement(uint8_t irq)
++{
++    lock(&intr_active_tasks_lock);
++
++    if (--intr_active_tasks[irq] <= 0) {
++        intr_active_tasks[irq] = 0;
++        im_enable_irq(irq);
++    }
++
++    unlock(&intr_active_tasks_lock);
++}
+diff --git a/src/kernel2/src/syscalls/rpc.c b/src/kernel2/src/syscalls/rpc.c
+index 382c882..1b57ae0 100644
+--- a/src/kernel2/src/syscalls/rpc.c
++++ b/src/kernel2/src/syscalls/rpc.c
+@@ -325,6 +325,8 @@ bool fastrpc_irq(pm_process_t* callee, size_t metadata_size, void* metadata,
+         return false;
+     }
+ 
++    im_irq_handlers_increment(irq);
++
+     rpc_t* rpc = list_get_element_at(callee->rpcs, 0);
+     rpc->reenable_irq = irq;
+ 
+@@ -381,7 +383,7 @@ void syscall_fastrpc_ret(void)
+     // Wenn es ein IRQ-verarbeitender RPC war, den Interrupt jetzt
+     // wieder aktivieren
+     if (rpc->reenable_irq) {
+-        im_enable_irq(rpc->reenable_irq);
++        im_irq_handlers_decrement(rpc->reenable_irq);
+     }
+ 
+     free(rpc);
+-- 
+1.7.4.4
+
+
+From max at tyndur.org  Fri Apr 22 13:35:47 2011
+From: max at tyndur.org (Max Reitz)
+Date: Fri, 22 Apr 2011 13:35:47 +0200
+Subject: [tyndur-devel] [PATCH] nixer: RPCs zum Teil abgesichert (Bug 77)
+Message-ID: <1303472147-32602-1-git-send-email-max@tyndur.org>
+
+! Die Größe des SHMs muss immer ein Vielfaches der Framegröße sein.
+* Beim Konfigurieren des Nixers sollte der der aktuelle SHM ungültig
+  werden.
+! get_position sollte, wie alle anderen Funktionen auch, überprüfen, ob
+  der Aufrufer tatsächlich die aktuell angemeldete Anwendung ist.
+
+Signed-off-by: Max Reitz <max at tyndur.org>
+---
+ src/modules/c/mixer/input.c |   33 ++++++++++++++++++++++++++++-----
+ 1 files changed, 28 insertions(+), 5 deletions(-)
+
+diff --git a/src/modules/c/mixer/input.c b/src/modules/c/mixer/input.c
+index 2a0d800..b612e88 100644
+--- a/src/modules/c/mixer/input.c
++++ b/src/modules/c/mixer/input.c
+@@ -47,7 +47,7 @@ static pid_t current_source;
+ // Daten zum SHM in Richtung Anwendung
+ static uint32_t current_input_shm_id;
+ static size_t current_input_shm_size;
+-static void* current_input_shm;
++static void* current_input_shm = NULL;
+ 
+ // Anzahl der Eingabechannels
+ static int input_channel_count;
+@@ -80,8 +80,10 @@ RPC(mixer_config)
+     if (current_source && !mc->channel_count) {
+         current_source = 0;
+         current_input_shm_size = 0;
+-        current_input_shm = NULL;
+-        close_shared_memory(current_input_shm_id);
++        if (current_input_shm != NULL) {
++            current_input_shm = NULL;
++            close_shared_memory(current_input_shm_id);
++        }
+ 
+         trash_sound(false);
+ 
+@@ -96,6 +98,13 @@ RPC(mixer_config)
+     input_format = mc->sample_format;
+     input_channel_count = mc->channel_count;
+ 
++    // Wenn bereits ein SHM existiert, wird die Anwendung den wohl eher nicht
++    // mehr nutzen wollen.
++    if (current_input_shm != NULL) {
++        current_input_shm = NULL;
++        close_shared_memory(current_input_shm_id);
++    }
++
+     // TODO: Rückgabewert nutzen und bei Bedarf resamplen
+     adriver->set_sample_rate(adriver, pbi, 0, mc->sample_rate);
+ 
+@@ -119,11 +128,18 @@ RPC(get_shm)
+     }
+ 
+     // Wenn es bereits einen SHM gibt, muss dieser zuerst geschlossen werden.
+-    if (current_input_shm_id) {
++    if (current_input_shm != NULL) {
+         current_input_shm = NULL;
+         close_shared_memory(current_input_shm_id);
+     }
+ 
++    // Die Größe des SHMs muss immer ein Vielfaches der Größe eines Frames sein
++    // (halbe Frames lassen sich schlecht abspielen).
++    if (*((size_t*) data) % (sample_size[input_format] * input_channel_count)) {
++        rpc_dword_resp(0);
++        return;
++    }
++
+     current_input_shm_size = *((size_t*) data);
+ 
+     current_input_shm_id = create_shared_memory(current_input_shm_size);
+@@ -147,7 +163,9 @@ RPC(play_input)
+     }
+ 
+     // Kleine Kontrolle
+-    if (*((uint32_t*) data) != current_input_shm_id) {
++    if ((current_input_shm == NULL) ||
++        (*((uint32_t*) data) != current_input_shm_id))
++    {
+         rpc_int_resp(0);
+         return;
+     }
+@@ -249,6 +267,11 @@ RPC(play_input)
+  */
+ RPC(get_position)
+ {
++    if (src != current_source) {
++        rpc_int_resp(0);
++        return;
++    }
++
+     if (!playing && (iq_start == NULL)) {
+         rpc_int_resp(0);
+         return;
+-- 
+1.7.4.4
+
+
+From kevin at tyndur.org  Fri Apr 22 20:31:54 2011
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Fri, 22 Apr 2011 20:31:54 +0200
+Subject: [tyndur-devel] [PATCH v2] kernel2: IRQ-Sharing (Bug 79)
+In-Reply-To: <1303469843-30362-1-git-send-email-max@tyndur.org>
+References: <1303468853-29491-1-git-send-email-max@tyndur.org>
+	<1303469843-30362-1-git-send-email-max@tyndur.org>
+Message-ID: <20110422183153.GA7189@silvanus>
+
+On Fri, Apr 22, 2011 at 12:57:23PM +0200, Max Reitz wrote:
+> ! Ein IRQ sollte erst dann demaskiert werden, wenn alle RPCs, die ihn
+>   behandeln, zurückgekehrt sind.
+> 
+> Signed-off-by: Max Reitz <max at tyndur.org>
+
+Das Locking ist irgendwie nicht ganz in Ordnung, aber Sound geht jetzt
+auch mit einer Netzwerkkarte im qemu.
+
+Tested-by: Kevin Wolf <kevin at tyndur.org>
+
+From max at tyndur.org  Fri Apr 22 20:27:53 2011
+From: max at tyndur.org (Max Reitz)
+Date: Fri, 22 Apr 2011 20:27:53 +0200
+Subject: [tyndur-devel] [PATCH v3] kernel2: IRQ-Sharing (Bug 79)
+In-Reply-To: <1303468853-29491-1-git-send-email-max@tyndur.org>
+References: <1303468853-29491-1-git-send-email-max@tyndur.org>
+Message-ID: <1303496873-17572-1-git-send-email-max@tyndur.org>
+
+! Ein IRQ sollte erst dann demaskiert werden, wenn alle RPCs, die ihn
+  behandeln, zurückgekehrt sind.
+
+Signed-off-by: Max Reitz <max at tyndur.org>
+---
+ src/kernel2/include/im.h        |   12 ++++++++++++
+ src/kernel2/src/interrupts/im.c |   24 ++++++++++++++++++++++++
+ src/kernel2/src/syscalls/rpc.c  |    4 +++-
+ 3 files changed, 39 insertions(+), 1 deletions(-)
+
+diff --git a/src/kernel2/include/im.h b/src/kernel2/include/im.h
+index 05f7200..23ccf22 100644
+--- a/src/kernel2/include/im.h
++++ b/src/kernel2/include/im.h
+@@ -54,6 +54,18 @@ void im_disable(void);
+ void im_enable_irq(uint8_t irq);
+ void im_disable_irq(uint8_t irq);
+ 
++/**
++ * Zeigt an, dass ein RPC zu einem Task ausgelöst wurde, der den entsprechenden
++ * IRQ verarbeiten soll.
++ */
++void im_irq_handlers_increment(uint8_t irq);
++/**
++ * Zeigt an, dass solch ein RPC beendet wurde. Ist die Zahl der Tasks, die sich
++ * um diesen IRQ kümmern, auf 0 gesunken, kann der IRQ wieder per im_enable_irq
++ * zugelassen werden.
++ */
++void im_irq_handlers_decrement(uint8_t irq);
++
+ void im_end_of_interrupt(uint8_t interrupt);
+ interrupt_stack_frame_t* im_handler(interrupt_stack_frame_t* isf);
+ interrupt_stack_frame_t* im_prepare_current_thread(void);
+diff --git a/src/kernel2/src/interrupts/im.c b/src/kernel2/src/interrupts/im.c
+index 97862ac..60b57b2 100644
+--- a/src/kernel2/src/interrupts/im.c
++++ b/src/kernel2/src/interrupts/im.c
+@@ -34,6 +34,7 @@
+  */
+ 
+ #include <stdbool.h>
++#include <lock.h>
+ #include <types.h>
+ #include <lost/config.h>
+ 
+@@ -67,6 +68,12 @@ static int intr_num_tasks[IM_NUM_INTERRUPTS];
+ // Interrupt 0 sind, sonst true).
+ static bool any_intr[IM_NUM_INTERRUPTS];
+ 
++// Anzahl von Tasks, die sich gerade um einen bestimmten IRQ kümmern (zu denen
++// also ein fastrpc_irq ausgeführt wurde und noch nicht beendet ist)
++static uint32_t intr_active_tasks[IM_NUM_INTERRUPTS];
++// Ein Lock für dieses Array
++static lock_t intr_active_tasks_lock = LOCK_UNLOCKED;
++
+ void im_send_interrupts(void);
+ bool fastrpc_irq(pm_process_t* callee, size_t metadata_size, void* metadata,
+     size_t data_size, void* data, uint8_t irq);
+@@ -373,3 +380,22 @@ void im_send_interrupts(void)
+         pm_scheduler_try_switch(new_thread);
+     }
+ }
++
++void im_irq_handlers_increment(uint8_t irq)
++{
++    lock(&intr_active_tasks_lock);
++    intr_active_tasks[irq]++;
++    unlock(&intr_active_tasks_lock);
++}
++
++void im_irq_handlers_decrement(uint8_t irq)
++{
++    lock(&intr_active_tasks_lock);
++
++    if (--intr_active_tasks[irq] <= 0) {
++        intr_active_tasks[irq] = 0;
++        im_enable_irq(irq);
++    }
++
++    unlock(&intr_active_tasks_lock);
++}
+diff --git a/src/kernel2/src/syscalls/rpc.c b/src/kernel2/src/syscalls/rpc.c
+index 382c882..1b57ae0 100644
+--- a/src/kernel2/src/syscalls/rpc.c
++++ b/src/kernel2/src/syscalls/rpc.c
+@@ -325,6 +325,8 @@ bool fastrpc_irq(pm_process_t* callee, size_t metadata_size, void* metadata,
+         return false;
+     }
+ 
++    im_irq_handlers_increment(irq);
++
+     rpc_t* rpc = list_get_element_at(callee->rpcs, 0);
+     rpc->reenable_irq = irq;
+ 
+@@ -381,7 +383,7 @@ void syscall_fastrpc_ret(void)
+     // Wenn es ein IRQ-verarbeitender RPC war, den Interrupt jetzt
+     // wieder aktivieren
+     if (rpc->reenable_irq) {
+-        im_enable_irq(rpc->reenable_irq);
++        im_irq_handlers_decrement(rpc->reenable_irq);
+     }
+ 
+     free(rpc);
+-- 
+1.7.4.4
+
+

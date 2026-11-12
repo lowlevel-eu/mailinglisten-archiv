@@ -1,0 +1,560 @@
+Index: src/include/errno.h
+===================================================================
+--- src/include/errno.h	(Revision 692)
++++ src/include/errno.h	(Arbeitskopie)
+@@ -49,6 +49,7 @@
+ #define EFAULT 11
+ #define E2BIG 12
+ #define ENOTDIR 13
++#define EACCES 14
+ extern int errno;
+ 
+ #endif
+Index: src/modules/include/unistd.h
+===================================================================
+--- src/modules/include/unistd.h	(Revision 692)
++++ src/modules/include/unistd.h	(Arbeitskopie)
+@@ -36,8 +36,13 @@
+ #ifndef _UNISTD_H_
+ #define _UNISTD_H_
+ #include <types.h>
+-#define isatty(x) (1)
++#include <sys/types.h>
++#include <config.h>
+ 
++#ifndef CONFIG_LIBC_NO_STUBS
++int isatty(int desc);
++#endif
++
+ /// PID des aktuellen Prozesses auslesen
+ pid_t getpid();
+ 
+@@ -68,6 +73,10 @@
+ /// Eigentuemer einer Datei aendern
+ int chown(const char* path, uid_t owner, gid_t group);
+ 
++#ifndef CONFIG_LIBC_NO_STUBS
++/// Datei verschieben
++int rename(const char *oldpath, const char *newpath);
++#endif
+ 
+ // UNIX-Dateifunktionen: ACHTUNG: Emuliert Unix-Dateien =>
+ // Geschwindigkeitsbremse!
+@@ -78,8 +87,16 @@
+ /// Daten in eine Datei schreiben
+ ssize_t write(int fd, const void* buffer, size_t size);
+ 
++/// Datei-Zeiger verschieben
++off_t lseek(int fd, off_t offset, int whence);
++
+ /// Unix-Datei schliessen
+ int close(int fd);
+ 
++#ifndef CONFIG_LIBC_NO_STUBS
++/// Ersetzt das aktuelle Prozessimage
++int execvp(const char* path, char* const argv[]);
+ #endif
+ 
++#endif
++
+Index: src/modules/include/fcntl.h
+===================================================================
+--- src/modules/include/fcntl.h	(Revision 692)
++++ src/modules/include/fcntl.h	(Arbeitskopie)
+@@ -47,7 +47,7 @@
+ #define O_BINARY 64
+ 
+ /// Emulierter Unix-Syscall zum oeffnen von Dateien
+-int open(const char* filename, int flags, mode_t mode);
++int open(const char* filename, int flags, ...);
+ 
+ /// Emulierter Unix-Syscall zum erstellen von Dateien
+ int creat(const char *pathname, mode_t mode);
+Index: src/modules/include/io.h
+===================================================================
+--- src/modules/include/io.h	(Revision 692)
++++ src/modules/include/io.h	(Arbeitskopie)
+@@ -56,6 +56,7 @@
+ typedef struct
+ {
+     io_resource_id_t    id;
++    char*               path;
+     pid_t               pid;
+     qword               resid;
+ 
+Index: src/modules/include/stdio.h
+===================================================================
+--- src/modules/include/stdio.h	(Revision 692)
++++ src/modules/include/stdio.h	(Arbeitskopie)
+@@ -39,6 +39,7 @@
+ #include <types.h>
+ #include <string.h>
+ #include <stdarg.h>
++#include <config.h>
+ #include "syscall.h"
+ #include "io.h"
+ 
+@@ -85,10 +86,15 @@
+ int vfprintf(FILE * fp, const char * format, va_list);
+ int vasprintf(char ** buffer, const char * format, va_list);
+ 
++#ifndef CONFIG_LIBC_NO_STUBS
++int fscanf(FILE* fp, const char* format, ...);
++int sscanf(const char* str, const char* format, ...);
++#endif
+ 
+-
+ //Dateihandling
+ FILE* fopen(const char* filename, const char* mode);
++FILE* fdopen(int fd, const char* mode);
++FILE* freopen(const char* filename, const char* mode, FILE* stream);
+ int fclose(FILE* io_res);
+ FILE* tmpfile();
+ 
+@@ -111,6 +117,9 @@
+ int fflush(io_resource_t* io_res);
+ int fpurge(io_resource_t* io_res);
+ int setvbuf(FILE* io_res, char* buffer, int mode, size_t size);
++int setbuf(FILE* io_res, char* buffer);
++int setbuffer(FILE* io_res, char* buffer, size_t size);
++int setlinebuf(FILE* io_res);
+ 
+ int remove(const char* filename);
+ 
+Index: src/modules/include/sys/stat.h
+===================================================================
+--- src/modules/include/sys/stat.h	(Revision 692)
++++ src/modules/include/sys/stat.h	(Arbeitskopie)
+@@ -38,16 +38,36 @@
+ #include <sys/types.h>
+ #include <time.h>
+ 
++// Modus Format: 3 Bits fuer Dateityp
++
+ /// Zugriffsberechtigungen: Eigentuemer hat schreibrechte
+ #define S_IWUSR 0
+ 
++/// Modus: Maske fuer Dateityp
++#define S_IFMT 0x7
++
++/// Modus: Blockdatei
++#define S_IFBLK 0x0
++
++/// Modus: Character Datei
++#define S_IFCHR 0x1
++
+ /// Modus: Regulaere Datei
+-#define S_IFREG 2
++#define S_IFREG 0x2
+ 
++/// Modus: FIFO
++#define S_FIFO 0x3
++
+ /// Modus: Verzeichnis
+-#define S_IFDIR 4
++#define S_IFDIR 0x4
+ 
++/// Modus: Symlink
++#define S_IFLNK 0x5
+ 
++/// Modus: Socket
++#define S_IFSOCK 0x6
++
++
+ /// Ueberprueft ob es sich bei einem st_mode-Feld um eine Regulaere Datei
+ /// handelt
+ #define S_ISREG(m) (((m) & S_IFREG) == S_IFREG)
+Index: src/modules/lib/stdlibc/fscanf.c
+===================================================================
+--- src/modules/lib/stdlibc/fscanf.c	(Revision 0)
++++ src/modules/lib/stdlibc/fscanf.c	(Revision 0)
+@@ -0,0 +1,47 @@
++/*
++ * Copyright (c) 2007 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Antoine Kaufmann.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <stdio.h>
++#include <config.h>
++
++#ifndef CONFIG_LIBC_NO_STUBS
++int fscanf(FILE* fp, const char* format, ...)
++{
++    // FIXME
++    puts("TODO in LOST-Libc: fscanf!");
++    return 0;
++}
++#endif
++
+Index: src/modules/lib/stdlibc/sscanf.c
+===================================================================
+--- src/modules/lib/stdlibc/sscanf.c	(Revision 0)
++++ src/modules/lib/stdlibc/sscanf.c	(Revision 0)
+@@ -0,0 +1,47 @@
++/*
++ * Copyright (c) 2007 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Antoine Kaufmann.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <stdio.h>
++#include <config.h>
++
++#ifndef CONFIG_LIBC_NO_STUBS
++int sscanf(const char* str, const char* format, ...)
++{
++    // FIXME
++    puts("TODO in LOST-Libc: sscanf!");
++    return 0;
++}
++#endif
++
+Index: src/modules/lib/stdlibc/file.c
+===================================================================
+--- src/modules/lib/stdlibc/file.c	(Revision 692)
++++ src/modules/lib/stdlibc/file.c	(Arbeitskopie)
+@@ -117,12 +117,42 @@
+         io_res->buffer_ptr = NULL;
+         io_res->buffer_size = 0;
+         io_res->buffer_pos = 0;
++
++        // Pfad im Handle hinterlegen
++        io_res->path = malloc(strlen(filename) + 1);
++        strcpy(io_res->path, filename);
+     }
+     free(resp);
+     
+     return io_res;
+ }
+ 
++/**
++ * Neue Datei mit dem selben Stream oeffnen
++ *
++ * @param path Pfad
++ * @param mode Modus
++ * @param stream Stream
++ *
++ * @return stream bei Erfolg, im Fehlerfall NULL
++ */
++FILE* freopen(const char* path, const char* mode, FILE* stream)
++{
++    // Neue Datei in anderem Stream oeffnen
++    FILE* new_file = fopen(path, mode);
++    if (new_file == NULL) {
++        return NULL;
++    }
++    
++    // Inhalte der Streams wechseln
++    FILE tmp_file = *stream;
++    *stream = *new_file;
++    *new_file = tmp_file;
++    
++    // Altes Handle im neuen Stream schliessen
++    fclose(new_file);
++    return stream;
++}
+ 
+ /**
+  * Alle Buffer flushen und Dateihandle schliessen.
+@@ -751,7 +781,26 @@
+ 	return 0;
+ }
+ 
++/**
++ * Diese Funktionen sind alle von setvbuf abgeleitet
++ */
++int setbuf(FILE* io_res, char* buffer)
++{
++    return setvbuf(io_res, buffer, (buffer != NULL) ? _IOFBF : _IONBF,
++        BUFSIZ);
++}
+ 
++int setbuffer(FILE* io_res, char* buffer, size_t size)
++{
++    return setvbuf(io_res, buffer, (buffer != NULL) ? _IOFBF : _IONBF, size);
++}
++
++int setlinebuf(FILE* io_res)
++{
++    return setvbuf(io_res, (char*) NULL, _IOLBF, 0);
++}
++
++
+ /**
+  * Datei loeschen
+  *
+@@ -761,10 +810,19 @@
+  */
+ int remove(const char* filename)
+ {
+-    printf("[file.c] FIXME: remove(%s) aufgerufen, aber noch nicht implementiert\n", filename);
+-    return 0;
++    return io_remove_link(filename);
+ }
+ 
++#ifndef CONFIG_LIBC_NO_STUBS
++/**
++ * Datei verschieben
++ */
++int rename(const char* oldpath, const char* newpath)
++{
++    printf("[file.c] FIXME: rename aufgerufen, aber nicht implementiert\n");
++    return -1;
++}
++#endif
+ 
+ /**
+  * Temporaere Datei erstellen, die nur solange besteht, wie sie geoeffnet ist.
+Index: src/modules/lib/posix/posix_files.c
+===================================================================
+--- src/modules/lib/posix/posix_files.c	(Revision 692)
++++ src/modules/lib/posix/posix_files.c	(Arbeitskopie)
+@@ -128,6 +128,15 @@
+ }
+ 
+ /**
++ * Einen Dateideskriptor als Stream oeffnen.
++ */
++FILE* fdopen(int fd, const char* mode)
++{
++    // TODO: Modus pruefen
++    return fd_to_file(fd);
++}
++
++/**
+  * Eine Datei als Unix-Dateideskriptor oeffnen
+  *
+  * @param filename Dateiname
+@@ -136,7 +145,7 @@
+  *
+  * @return Dateideskriptor bei Erfolg, -1 im Fehlerfall
+  */
+-int open(const char* filename, int flags, mode_t mode)
++int open(const char* filename, int flags, ...)
+ {
+     char* fopen_flags = "   ";
+     size_t flags_size = 0;
+@@ -144,12 +153,17 @@
+     // Open-Flags auf fopen-Kompatible uebersetzen
+     if ((flags & O_RDONLY) == O_RDONLY) {
+         fopen_flags[flags_size++] = 'r';
++    } else if (((flags & O_WRONLY) == O_WRONLY) && (((flags & O_TRUNC) ==
++        O_TRUNC)))
++    {
++        fopen_flags[flags_size++] = 'w';
+     } else if ((flags & O_WRONLY) == O_WRONLY) {
+-        fopen_flags[flags_size++] = 'w';
++        fopen_flags[flags_size++] = 'r';
++        fopen_flags[flags_size++] = '+';
+     } else if ((flags & O_RDWR) == O_RDWR) {
+         // FIXME
+         fopen_flags[flags_size++] = 'r';
+-        fopen_flags[flags_size++] = 'w';
++        fopen_flags[flags_size++] = '+';
+     }
+     // Append-Flag
+     if ((flags & O_APPEND) == O_APPEND) {
+@@ -189,7 +203,6 @@
+ ssize_t read(int fd, void* buffer, size_t size)
+ {
+     FILE* file = fd_to_file(fd);
+-
+     // Bei einem ungueltigen Deskriptor wird abgebrochen
+     if (file == NULL) {
+         errno = EBADF;
+@@ -226,6 +239,23 @@
+ }
+ 
+ /**
++ * Cursorposition veraendern
++ */
++off_t lseek(int fd, off_t offset, int whence)
++{
++    FILE* file = fd_to_file(fd);
++
++    // Pruefen ob der Dateideskriptor gueltig ist
++    if (file == NULL) {
++        errno = EBADF;
++        return (off_t) -1;
++    }
++
++    fseek(file, offset, whence);
++    return ftell(file);
++}
++
++/**
+  * Unix-Dateideskriptor schliessen
+  *
+  * @param fd Unix-Dateideskriptor
+Index: src/modules/lib/posix/exec.c
+===================================================================
+--- src/modules/lib/posix/exec.c	(Revision 0)
++++ src/modules/lib/posix/exec.c	(Revision 0)
+@@ -0,0 +1,55 @@
++/*  
++ * Copyright (c) 2007 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Antoine Kaufmann.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS 
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR 
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, 
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, 
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; 
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR 
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <unistd.h>
++#include <errno.h>
++#include <string.h>
++#include <stdlib.h>
++#include "init.h"
++#include "syscall.h"
++#include <config.h>
++
++#ifndef CONFIG_LIBC_NO_STUBS
++/**
++ * Diese Funktion ersetzt laut POSIX das aktuelle Programm durch das angegebene
++ * und uebergibt die Parameter.
++ * @return -1 im Fehlerfall, bei Erfolg kehrt die Funktion nicht zurueck
++ */
++int execvp(const char* path, char* const argv[])
++{
++    errno = EACCES;
++    return -1;
++}
++#endif
+Index: src/modules/lib/posix/misc.c
+===================================================================
+--- src/modules/lib/posix/misc.c	(Revision 0)
++++ src/modules/lib/posix/misc.c	(Revision 0)
+@@ -0,0 +1,48 @@
++/*  
++ * Copyright (c) 2007 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Antoine Kaufmann.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS 
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR 
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, 
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, 
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; 
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR 
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <unistd.h>
++#include <config.h>
++
++#ifndef CONFIG_LIBC_NO_STUBS
++/**
++ * Wir haben keine TTYs
++ */
++int isatty(int desc)
++{
++    return 0;
++}
++#endif
++

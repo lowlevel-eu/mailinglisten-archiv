@@ -1,0 +1,269 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 5/5] servmgr/vterm: Mehr Bootmeldungen	anzeigen
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%205/5%5D%20servmgr/vterm%3A%20Mehr%20Bootmeldungen%0A%09anzeigen&In-Reply-To=%3C1260731248-16477-6-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001553.html">
+   <LINK REL="Next"  HREF="001556.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 5/5] servmgr/vterm: Mehr Bootmeldungen	anzeigen</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%205/5%5D%20servmgr/vterm%3A%20Mehr%20Bootmeldungen%0A%09anzeigen&In-Reply-To=%3C1260731248-16477-6-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 5/5] servmgr/vterm: Mehr Bootmeldungen	anzeigen">kevin at tyndur.org
+                  </A><BR>
+    <I>So Dez 13 20:07:28 CET 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001553.html">[tyndur-devel] [PATCH 4/5] ext2: Debugmeldung entfernen
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001556.html">[tyndur-devel] [PATCH 5/5] servmgr/vterm: Mehr Bootmeldungen anzeigen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1547">[ Datum ]</a>
+              <a href="thread.html#1547">[ Thema ]</a>
+              <a href="subject.html#1547">[ Betreff (Subject) ]</a>
+              <a href="author.html#1547">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ vterm: RPC an servmgr schicken, sobald vterm geladen ist
+* servmgr: Solange vterm noch nicht da ist, werden Meldungen auch auf
+  der Kernelkonsole ausgegeben
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/servmgr/rpcif.c   |   11 +++++++++++
+ src/modules/servmgr/servio.c  |   40 ++++++++++++++++++++++++----------------
+ src/modules/servmgr/servmgr.h |   11 +++++++++++
+ src/modules/vterm/vterm.c     |   25 ++++++++++++++++++++++---
+ 4 files changed, 68 insertions(+), 19 deletions(-)
+
+diff --git a/src/modules/servmgr/rpcif.c b/src/modules/servmgr/rpcif.c
+index fae72cd..013eabd 100644
+--- a/src/modules/servmgr/rpcif.c
++++ b/src/modules/servmgr/rpcif.c
+@@ -40,11 +40,13 @@
+ #include &quot;servmgr.h&quot;
+ 
+ static void rpc_needserv(pid_t pid, dword cid, size_t data_size, void* data);
++static void rpc_vterm(pid_t pid, dword cid, size_t data_size, void* data);
+ 
+ 
+ void rpcif_init()
+ {
+     register_message_handler(&quot;NEEDSERV&quot;, rpc_needserv);
++    register_message_handler(&quot;VTERM   &quot;, rpc_vterm);
+     init_service_register(&quot;servmgr&quot;);
+ }
+ 
+@@ -74,3 +76,12 @@ static void rpc_needserv(pid_t pid, dword cid, size_t data_size, void* data)
+     rpc_send_dword_response(pid, cid, result);
+ }
+ 
++/**
++ * RPC um mitzuteilen, dass vterm jetzt da ist
++ */
++static void rpc_vterm(pid_t pid, dword cid, size_t data_size, void* data)
++{
++    service_io_stop_kputsn();
++    rpc_send_dword_response(pid, cid, 0);
++    service_io_flush();
++}
+diff --git a/src/modules/servmgr/servio.c b/src/modules/servmgr/servio.c
+index 27156ec..5537002 100644
+--- a/src/modules/servmgr/servio.c
++++ b/src/modules/servmgr/servio.c
+@@ -41,7 +41,7 @@
+ 
+ #include &quot;servmgr.h&quot;
+ 
+-#define FLUSH_DELAY 5
++#define FLUSH_DELAY 1
+ 
+ 
+ /// Pfad zum Ausgabeterminal
+@@ -56,11 +56,8 @@ static char* out_buffer = NULL;
+ /// Anzahl der Zeichen im Ausgabepuffer
+ static size_t out_buffer_pos = 0;
+ 
+-
+-/**
+- * IO-Puffer flushen
+- */
+-static void service_io_flush(void);
++/// Ausgaben auf Kernelkonsole kopieren?
++static int use_kputsn = 1;
+ 
+ 
+ /**
+@@ -68,7 +65,6 @@ static void service_io_flush(void);
+  */
+ void service_io_init(void)
+ {
+-    timer_register(service_io_flush, 1000000 * FLUSH_DELAY);
+     send_message(1, RPC_MESSAGE, 0, 8, &quot;UP_STDIO&quot;);
+ }
+ 
+@@ -90,6 +86,12 @@ void service_io_write(const char* buf, size_t size)
+         out_buffer = realloc(out_buffer, out_buffer_pos + size);
+         memcpy(out_buffer + out_buffer_pos, buf, size);
+         out_buffer_pos += size;
++
++        // Solange vterm noch nicht da ist, geben wir es auch noch ueber den
++        // Kernel aus
++        if (use_kputsn) {
++            syscall_putsn(size, buf);
++        }
+     } else {
+         fwrite(buf, 1, size, servterm);
+         fflush(servterm);
+@@ -101,30 +103,36 @@ void service_io_write(const char* buf, size_t size)
+ /**
+  * IO-Puffer flushen
+  */
+-static void service_io_flush(void)
++void service_io_flush(void)
+ {
++    FILE* f = servterm;
+ 
+-    p();
+     // Terminal oeffnen falls es noch nicht geoeffnet ist
+-    if (!out_buffer || (!servterm &amp;&amp;
+-        !(servterm = fopen(service_terminal, &quot;w&quot;))))
+-    {
++    if (!f &amp;&amp; !(f = fopen(service_terminal, &quot;w&quot;))) {
+         timer_register(service_io_flush, 1000000 * FLUSH_DELAY);
+         goto out;
+     }
+ 
+     // Pufferinhalt in das Terminal schreiben
+-    if (!fwrite(out_buffer, 1, out_buffer_pos, servterm)) {
++    p();
++    if (!out_buffer || !fwrite(out_buffer, 1, out_buffer_pos, f)) {
+         goto out;
+     }
+-    fflush(servterm);
++    fflush(f);
+ 
+     free(out_buffer);
+     out_buffer = NULL;
+     out_buffer_pos = 0;
++    v();
+ 
+ out:
+-    v();
++    servterm = f;
+ }
+ 
+-
++/**
++ * Aufhoeren, Ausgaben auch auf die Kernelkonsole weiterzuleiten
++ */
++void service_io_stop_kputsn(void)
++{
++    use_kputsn = 0;
++}
+diff --git a/src/modules/servmgr/servmgr.h b/src/modules/servmgr/servmgr.h
+index 065f524..ff98ab8 100644
+--- a/src/modules/servmgr/servmgr.h
++++ b/src/modules/servmgr/servmgr.h
+@@ -112,6 +112,17 @@ void service_io_init(void);
+  */
+ void service_io_write(const char* buf, size_t size);
+ 
++/**
++ * IO-Puffer flushen
++ */
++void service_io_flush(void);
++
++
++/**
++ * Aufhoeren, Ausgaben auch auf die Kernelkonsole weiterzuleiten
++ */
++void service_io_stop_kputsn(void);
++
+ 
+ /**
+  * Konfiguration der Services einlesen
+diff --git a/src/modules/vterm/vterm.c b/src/modules/vterm/vterm.c
+index d27fbc6..91055a3 100644
+--- a/src/modules/vterm/vterm.c
++++ b/src/modules/vterm/vterm.c
+@@ -49,15 +49,34 @@ FILE* input = NULL;
+ 
+ int main(int argc, char* argv[])
+ {
++    pid_t servmgr_pid;
++
+     // Schnittstelle fuer die anderen Prozesse einrichten
+     init_lostio_interface();
+ 
++    // Service registrieren
++    //
++    // HACK: Wenn wir uns fast gleichzeitig bei init und servmgr anmelden,
++    // treiben wir sie direkt in einen Deadlock (servmgr brauch init, um
++    // vterm:/vterm8/out zu oeffnen und init will &quot;service_register&quot; auf stdout
++    // schreiben, das beim servmgr liegt). Also warten wir, bis init fertig
++    // ist.
++    p();
++    init_service_register(&quot;vterm&quot;);
++    while(!init_service_get(&quot;vterm&quot;)) {
++        yield();
++    }
++
++    // servmgr kann aufhoeren, syscall_putsn zu benutzen
++    servmgr_pid = init_service_get(&quot;servmgr&quot;);
++    if (servmgr_pid != 0) {
++        rpc_get_dword(servmgr_pid, &quot;VTERM   &quot;, 0, NULL);
++    }
++
+     // Virtuelle Terminal initialisieren
+     init_output();
+     init_vterminals(10);
+-
+-    // Service registrieren
+-    init_service_register(&quot;vterm&quot;);
++    v();
+ 
+     // Eingabe initialisieren
+     // Dies registriert einen RPC-Callbackhandler bei kbc. Der Aufruf
+-- 
+1.6.0.2
+
+</PRE>
+
+
+
+
+
+
+
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001553.html">[tyndur-devel] [PATCH 4/5] ext2: Debugmeldung entfernen
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001556.html">[tyndur-devel] [PATCH 5/5] servmgr/vterm: Mehr Bootmeldungen anzeigen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1547">[ Datum ]</a>
+              <a href="thread.html#1547">[ Thema ]</a>
+              <a href="subject.html#1547">[ Betreff (Subject)]</a>
+              <a href="author.html#1547">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

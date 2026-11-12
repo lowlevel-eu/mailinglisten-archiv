@@ -1,0 +1,179 @@
+Index: trunk/src/kernel/src/mm/kmm.c
+===================================================================
+--- trunk.orig/src/kernel/src/mm/kmm.c
++++ trunk/src/kernel/src/mm/kmm.c
+@@ -53,6 +53,7 @@ bool kernel_identity_map(paddr_t paddr,
+ // Der Teil des Page Directorys, der den Kernelraum mappt und für alle Prozesse gleich ist
+ #define kernel_page_tables ((dword*)(kernel_page_directory + (KERNEL_BASE >> PGDIR_SHIFT)))
+ extern page_directory_t kernel_page_directory;
++extern dword kernel_pd_id;
+ 
+ /**
+  * Errechnet die virtuelle Adresse der Page Table, die zur Adresse addr gehört.
+@@ -85,6 +86,8 @@ static void map_kernel_page_table(int pg
+     // Jede Page Table ist genau 4KB groß, also wird sie mit genau einem Eintrag
+     // in der Page Table der Kernel Page Tables gemappt.
+     page_table[pgdir_index] = (addr & PAGE_MASK) | PTE_W | PTE_P;
++
++    asm volatile("invlpg %0" : : "m" (*page_table));
+ }
+ 
+ /**
+@@ -101,67 +104,6 @@ static void map_kernel_page_table(int pg
+ }
+ 
+ /**
+- * Allokiert eine Seite (4 KBytes) im Kernel-Adressraum
+- */
+-vaddr_t alloc_kernel_page()
+-{
+-    int i, j;
+-    page_table_t page_table;
+-    vaddr_t vaddr;
+-    
+-    // Eine Page Table suchen, die frei ist.
+-    for(i = 0; i < NUM_KERNEL_PAGE_TABLES; i++)
+-    {
+-        if(kernel_page_tables[i] & PTE_P)
+-        {
+-            page_table = (page_table_t)(KERNEL_PAGE_TABLES_VADDR + (i << PAGE_SHIFT));
+-            
+-            for(j = 0; j < PAGE_TABLE_LENGTH; j++)
+-            {
+-                if(!(page_table[j] & PTE_P))
+-                {
+-                    vaddr = (vaddr_t)(KERNEL_BASE + (i << PGDIR_SHIFT) + (j << PAGE_SHIFT));
+-                    
+-                    if((dword)vaddr > KERNEL_PAGE_TABLES_VADDR)
+-                    {
+-                        // Eine Adresse über KERNEL_PAGE_TABLES_VADDR ist für die Kernel Page Tables reserviert
+-                        break;
+-                    }
+-
+-                    // Unsere neue Page in die Page Table eintragen
+-                    page_table[j] = (dword)phys_alloc_page() | PTE_W | PTE_P;
+-
+-                    return vaddr;
+-                }
+-            }
+-        }
+-    }
+-
+-    // Eine freien Eintrag im Page Directory für eine neue Page Table suchen.
+-    for(i = 0; i < NUM_KERNEL_PAGE_TABLES; i++)
+-    {
+-        if(!(kernel_page_tables[i] & PTE_P))
+-        {
+-            
+-            // Speicher für eine neue Page Table reservieren und nach KERNEL_PAGE_TABLES_VADDR mappen
+-            kernel_page_tables[i] = (dword)phys_alloc_page() | PTE_W | PTE_P;
+-            map_kernel_page_table(i, kernel_page_tables[i]);
+-            page_table = (page_table_t)(KERNEL_PAGE_TABLES_VADDR + (i << PAGE_SHIFT)); 
+-
+-            // Page Table mit Nullen initialisieren
+-            memset(page_table, PAGE_SIZE, 0);
+-
+-            // Unsere neue Page an den Anfang eintragen
+-            page_table[0] = (dword)phys_alloc_page() | PTE_W | PTE_P;
+-
+-            return (void*)(KERNEL_BASE + (i << PGDIR_SHIFT));
+-        }
+-    }
+-            
+-    panic("Der virtuelle Adressraum > 3GB ist voll.");
+-}
+-
+-/**
+  * Gibt eine Seite (4 KBytes) im Kernel-Adressraum frei.
+  */
+ void free_kernel_page(vaddr_t page)
+@@ -306,6 +248,8 @@ vaddr_t alloc_kernel_pages(int num)
+ 
+             // Page Table mit Nullen initialisieren
+             memset(page_table, PAGE_SIZE, 0);
++
++            kernel_pd_id++;
+         }
+         else
+         {
+@@ -316,6 +260,7 @@ vaddr_t alloc_kernel_pages(int num)
+         for(j = (i == pgdir_index) ? pgtbl_index : 0; j < PAGE_TABLE_LENGTH && num; j++, num--)
+         {
+             page_table[j] = (dword)phys_alloc_page() | PTE_W | PTE_P;
++            asm volatile("invlpg %0" : : "m" (*(char*)(page_table[j] & PAGE_MASK)));
+         }
+     }
+ 
+Index: trunk/src/kernel/include/tasks.h
+===================================================================
+--- trunk.orig/src/kernel/include/tasks.h
++++ trunk/src/kernel/include/tasks.h
+@@ -24,6 +24,7 @@ struct task
+     vaddr_t rpc_handler;
+     list_t* rpcs;
+     page_directory_t cr3;
++    dword pd_id;
+     dword slices;
+     dword blocked_by_pid;
+     dword blocked_count;
+Index: trunk/src/kernel/src/intr.c
+===================================================================
+--- trunk.orig/src/kernel/src/intr.c
++++ trunk/src/kernel/src/intr.c
+@@ -117,6 +117,7 @@ void handle_exception(dword* esp);
+ 
+ void send_irqs(dword* esp);
+ dword irqs_to_send[16];
++extern dword kernel_pd_id;
+ 
+ /*
+  * gibt einen neuen Wert für esp zurck
+@@ -163,6 +164,14 @@ dword handle_int(dword esp)
+         //kprintf("PID=%d  cr3=0x%08x  kernel_pd=0x%08x eip=0x%08x\n", 
+         //  current_task->pid, current_task->cr3, (dword)kernel_page_directory, isf->eip);
+         //memcpy((void*)current_task->cr3, kernel_page_directory, 1024);
++
++        // Aktuelles Kernel-PD kopieren, wenn noetig
++        if (kernel_pd_id != current_task->pd_id) {
++            memcpy((void*) current_task->cr3, kernel_page_directory, 1020);
++            current_task->pd_id = kernel_pd_id;
++        }
++
++        // Page Directory des neuen Tasks laden
+         __asm("mov %0, %%cr3" : : "r"(resolve_vaddr(kernel_page_directory, current_task->cr3)));
+     }
+ 
+Index: trunk/src/kernel/src/mm/paging.c
+===================================================================
+--- trunk.orig/src/kernel/src/mm/paging.c
++++ trunk/src/kernel/src/mm/paging.c
+@@ -49,6 +49,7 @@ bool map_page(page_directory_t page_dire
+ bool map_page_range(page_directory_t page_directory, vaddr_t vaddr, paddr_t paddr, int flags, int num_pages);
+ 
+ page_directory_t kernel_page_directory;
++dword kernel_pd_id = 0;
+ 
+ /**
+  * Wenn TRUE, werden Page Tables nicht über ihre virtuelle Adresse
+@@ -217,6 +218,9 @@ bool map_page(page_directory_t page_dire
+             page_table = kernel_page_table;
+         }
+ 
++        if (vaddr < (vaddr_t) 0x40000000) {
++            kernel_pd_id++;
++        }
+         
+         memset(page_table, 0, PAGE_SIZE);
+         
+Index: trunk/src/kernel/src/task.c
+===================================================================
+--- trunk.orig/src/kernel/src/task.c
++++ trunk/src/kernel/src/task.c
+@@ -196,6 +196,7 @@ struct task * create_task(void* entry, c
+ 
+     memset((void*) pagedir, 0, PAGE_SIZE);
+     memcpy((void*) pagedir, kernel_page_directory, 1024);
++    pagedir[0xff] = (dword) phys_pagedir | PTE_W | PTE_P;
+     new_task->cr3 = pagedir;
+ 
+     // Speicher fuer die Stacks allokieren

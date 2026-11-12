@@ -1,0 +1,402 @@
+=== src/modules/cdi/lib/storage.c
+==================================================================
+--- src/modules/cdi/lib/storage.c	(revision 1472)
++++ src/modules/cdi/lib/storage.c	(local)
+@@ -23,7 +23,7 @@
+     size_t blocksize, size_t blockcount);
+ static size_t lostio_mst_write_handler(lostio_filehandle_t* fh,
+     size_t blocksize, size_t blockcount, void* data);
+-static int lostio_mst_seek_handler(lostio_filehandle_t* fh, int offset,
++static int lostio_mst_seek_handler(lostio_filehandle_t* fh, uint64_t offset,
+     int origin);
+ 
+ #define CDI_LOSTIO_TYPE_MST 255
+@@ -283,7 +283,7 @@
+ /**
+  * Seek-Handler fuer LostIO
+  */
+-static int lostio_mst_seek_handler(lostio_filehandle_t* fh, int offset,
++static int lostio_mst_seek_handler(lostio_filehandle_t* fh, uint64_t offset,
+     int origin)
+ {
+     struct cdi_storage_device* device = (struct cdi_storage_device*) fh->node->
+=== src/modules/ext2/include/lostio_if.h
+==================================================================
+--- src/modules/ext2/include/lostio_if.h	(revision 1472)
++++ src/modules/ext2/include/lostio_if.h	(local)
+@@ -79,7 +79,7 @@
+ 
+ 
+ ///
+-int lostio_seek_handler(lostio_filehandle_t* filehandle , int offset,
++int lostio_seek_handler(lostio_filehandle_t* filehandle, uint64_t offset,
+     int origin);
+ 
+ /// Handler zum erstellen von Hardlinks
+=== src/modules/ext2/libext2/block.c
+==================================================================
+--- src/modules/ext2/libext2/block.c	(revision 1472)
++++ src/modules/ext2/libext2/block.c	(local)
+@@ -37,6 +37,7 @@
+ #include <string.h>
+ #include <assert.h>
+ #include "ext2.h"
++#include <lostio.h>
+ 
+ static void ext2_block_cache_write(block_cache_t* cache,
+     bc_element_t* element);
+@@ -89,10 +90,8 @@
+         }
+ 
+         // Daten schreiben
+-        if (fseek(root_handle->device, start * block_size, SEEK_SET)
+-            != 0)
+-        {
+-            print_error("fseek beim cache-sync fehlgeschlagen!");
++        if (!lio_seek(root_handle->device, start * block_size, SEEK_SET)) {
++            print_error("seek beim cache-sync fehlgeschlagen!");
+             return;
+         }
+ 
+@@ -187,12 +186,14 @@
+         }
+         
+         // Daten einlesen
+-        if (fseek(root_handle->device, block * block_size, SEEK_SET) != 0) {
++        if (!lio_seek(root_handle->device, block * block_size, SEEK_SET)) {
++            print_error("Fehler beim Seek");
+             return -2;
+         }
+         if (fread(load_dest, 1, block_size, root_handle->device) !=
+             block_size) 
+         {
++            print_error("Fehler beim Lesen");
+             return -3;
+         }
+     } else {
+@@ -233,7 +234,7 @@
+         element->flags.dirty = 1;
+     } else {
+ 
+-        if (fseek(root_handle->device, block * block_size, SEEK_SET) != 0) {
++        if (!lio_seek(root_handle->device, block * block_size, SEEK_SET)) {
+             return -1;
+         }
+         if (fwrite(buffer, 1, block_size, root_handle->device) != block_size) {
+@@ -304,6 +305,7 @@
+         for (b = 0; b < count; b++) {
+             ptr = (void*) ((uintptr_t) buffer + b * block_size);
+             if (ext2_block_read_single(root_handle, block + b, ptr) != 0) {
++                print_error("Fehler beim einlesen des Blocks");
+                 return -1;
+             }
+         }
+=== src/modules/ext2/libext2/superblock.c
+==================================================================
+--- src/modules/ext2/libext2/superblock.c	(revision 1472)
++++ src/modules/ext2/libext2/superblock.c	(local)
+@@ -33,7 +33,7 @@
+  * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ #include <stdio.h>
+-
++#include <lostio.h>
+ #include "ext2.h"
+ 
+ /**
+@@ -50,8 +50,8 @@
+     uint32_t block_size = 1024;
+ 
+     // Superblock suchen
+-    if (fseek(root_handle->device, root_handle->superblock_block * block_size,
+-        SEEK_SET) != 0)
++    if (!lio_seek(root_handle->device, root_handle->superblock_block *
++        block_size, SEEK_SET))
+     {
+         return -1;
+     }
+@@ -81,8 +81,7 @@
+     uint32_t offset)
+ {
+     // Superblock suchen
+-    if (fseek(root_handle->device, offset, SEEK_SET) != 0)
+-    {
++    if (!lio_seek(root_handle->device, offset, SEEK_SET)) {
+         return -1;
+     }
+ 
+=== src/modules/ext2/lostio_if.c
+==================================================================
+--- src/modules/ext2/lostio_if.c	(revision 1472)
++++ src/modules/ext2/lostio_if.c	(local)
+@@ -598,7 +598,7 @@
+     return result;
+ }
+ 
+-int lostio_seek_handler(lostio_filehandle_t* filehandle , int offset,
++int lostio_seek_handler(lostio_filehandle_t* filehandle, uint64_t offset,
+     int origin)
+ {
+     p();
+@@ -615,7 +615,7 @@
+                     v();
+                     return -1;
+                 } else {
+-                    size_t len = offset - filehandle->node->size;
++                    uint64_t len = offset - filehandle->node->size;
+                     uint8_t data[len];
+                     dir_handle_t* dir_handle = (dir_handle_t*) filehandle->
+                         node->data;
+@@ -664,7 +664,7 @@
+                     v();
+                     return -1;
+                 } else {
+-                    size_t len = newpos - filehandle->node->size;
++                    uint64_t len = newpos - filehandle->node->size;
+                     uint8_t data[len];
+                     dir_handle_t* dir_handle = (dir_handle_t*) filehandle->
+                         node->data;
+=== src/modules/fat/file.c
+==================================================================
+--- src/modules/fat/file.c	(revision 1472)
++++ src/modules/fat/file.c	(local)
+@@ -194,7 +194,8 @@
+     return size;
+ }
+ 
+-int fat_file_seek_handler(lostio_filehandle_t* filehandle , int offset, int origin)
++int fat_file_seek_handler(lostio_filehandle_t* filehandle, uint64_t offset,
++    int origin)
+ {
+     p();
+     switch(origin)
+=== src/modules/fat/include/fat.h
+==================================================================
+--- src/modules/fat/include/fat.h	(revision 1472)
++++ src/modules/fat/include/fat.h	(local)
+@@ -195,7 +195,8 @@
+ bool fat_res_not_found_handler(char** path, byte args, pid_t pid, io_resource_t* pipe_source);
+ void fat_res_post_open_handler(lostio_filehandle_t* filehandle);
+ 
+-int fat_file_seek_handler(lostio_filehandle_t* filehandle , int offset, int origin);
++int fat_file_seek_handler(lostio_filehandle_t* filehandle, uint64_t offset,
++    int origin);
+ read_hdl_reply fat_file_read_handler(lostio_filehandle_t* filehandle, size_t blocksize, size_t blockcount);
+ size_t fat_file_write_handler(lostio_filehandle_t* filehandle, size_t blocksize, size_t blockcount, void* data);
+ int fat_file_close_handler(lostio_filehandle_t* filehandle);
+=== src/modules/floppy/floppy.c
+==================================================================
+--- src/modules/floppy/floppy.c	(revision 1472)
++++ src/modules/floppy/floppy.c	(local)
+@@ -154,7 +154,8 @@
+ 
+ read_hdl_reply  floppy_read_handler(lostio_filehandle_t* filehandle, size_t blocksize, size_t blockcount);
+ size_t          floppy_write_handler(lostio_filehandle_t* filehandle, size_t blocksize, size_t blockcount, void* data);
+-int             floppy_seek_handler(lostio_filehandle_t* filehandle , int offset, int origin);
++int             floppy_seek_handler(lostio_filehandle_t* filehandle,
++    uint64_t offset, int origin);
+ 
+ static void start_motor_shutdown_timeout();
+ 
+@@ -1050,7 +1051,8 @@
+ }
+ 
+ 
+-int floppy_seek_handler(lostio_filehandle_t* filehandle , int offset, int origin)
++int floppy_seek_handler(lostio_filehandle_t* filehandle, uint64_t offset,
++    int origin)
+ {
+     switch(origin)
+     {
+=== src/modules/include/io.h
+==================================================================
+--- src/modules/include/io.h	(revision 1472)
++++ src/modules/include/io.h	(local)
+@@ -77,7 +77,7 @@
+     typedef struct
+     {
+         io_resource_id_t id;
+-        long int offset;
++        uint64_t offset;
+         int origin;
+     } __attribute__ ((packed)) io_seek_request_t;
+ 
+=== src/modules/include/lostio.h
+==================================================================
+--- src/modules/include/lostio.h	(revision 1472)
++++ src/modules/include/lostio.h	(local)
+@@ -41,6 +41,7 @@
+ #include "types.h"
+ #include "collections.h"
+ #include "io.h"
++#include <stdint.h>
+ 
+ 
+ ///ID des Verzeichnis Typs
+@@ -113,7 +114,7 @@
+ 
+     read_hdl_reply  (*read)(lostio_filehandle_t*,size_t,size_t);
+     size_t          (*write)(lostio_filehandle_t*,size_t,size_t,void*);
+-    int             (*seek)(lostio_filehandle_t*,int,int);
++    int             (*seek)(lostio_filehandle_t*,uint64_t,int);
+     int             (*close)(lostio_filehandle_t*);
+     int             (*link)(lostio_filehandle_t*,lostio_filehandle_t*,
+                         const char*);
+@@ -174,6 +175,11 @@
+ ///Den Verzechnis-Typ unter einer bestimmten ID benutzbar machen
+ void lostio_type_directory_use_as(typeid_t id);
+ 
++
++
++/// Stream-Position setzen
++bool lio_seek(io_resource_t* res, uint64_t off, int whence);
++
+ /** @}  */
+ 
+ #endif
+=== src/modules/lib/lostio/types/directory.c
+==================================================================
+--- src/modules/lib/lostio/types/directory.c	(revision 1472)
++++ src/modules/lib/lostio/types/directory.c	(local)
+@@ -43,7 +43,8 @@
+ 
+ 
+ read_hdl_reply  dir_read(lostio_filehandle_t* filehandle, size_t blocksize, size_t blockcount);
+-int             dir_seek(lostio_filehandle_t* filehandle , int offset, int origin);
++int             dir_seek(lostio_filehandle_t* filehandle, uint64_t offset,
++    int origin);
+ 
+ /**
+  * Die Ramfile-Handler unter einer bestimmten id registrieren, damit sie
+@@ -141,7 +142,7 @@
+ /**
+  *
+  */
+-int dir_seek(lostio_filehandle_t* filehandle , int offset, int origin)
++int dir_seek(lostio_filehandle_t* filehandle, uint64_t offset, int origin)
+ {
+     switch(origin)
+     {
+=== src/modules/lib/lostio/types/ramfile.c
+==================================================================
+--- src/modules/lib/lostio/types/ramfile.c	(revision 1472)
++++ src/modules/lib/lostio/types/ramfile.c	(local)
+@@ -43,7 +43,7 @@
+ 
+ read_hdl_reply  ramfile_read(lostio_filehandle_t* filehandle, size_t blocksize, size_t blockcount);
+ size_t          ramfile_write(lostio_filehandle_t* filehandle, size_t blocksize, size_t blockcount, void* data);
+-int             ramfile_seek(lostio_filehandle_t* filehandle , int offset, int origin);
++int ramfile_seek(lostio_filehandle_t* filehandle, uint64_t offset, int origin);
+ 
+ /**
+  * Die Ramfile-Handler registrieren, sodass sie benutzbar werden
+@@ -137,7 +137,7 @@
+ /**
+  *
+  */
+-int ramfile_seek(lostio_filehandle_t* filehandle , int offset, int origin)
++int ramfile_seek(lostio_filehandle_t* filehandle, uint64_t offset, int origin)
+ {
+     switch(origin)
+     {
+=== src/modules/lib/stdlibc/file.c
+==================================================================
+--- src/modules/lib/stdlibc/file.c	(revision 1472)
++++ src/modules/lib/stdlibc/file.c	(local)
+@@ -551,7 +551,7 @@
+  */
+ int fseek (FILE* io_res, long int offset, int origin)
+ {
+-    //Ungueltige Handles abfangen
++    // Ungueltige Handles abfangen
+     if ((io_res == NULL) || (io_res->pid == 0)) {
+         return -1;
+     }
+@@ -562,13 +562,7 @@
+         free(io_res->ungetc_buffer);
+     }
+ 
+-    io_seek_request_t seek_request;
+-    seek_request.id = io_res->id;
+-    seek_request.offset = offset;
+-    seek_request.origin = origin;
+-
+-    return rpc_get_dword(io_res->pid, "IO_SEEK ", sizeof(io_seek_request_t),
+-        (char*) &seek_request);
++    return (lio_seek(io_res, offset, origin) ? 0 : -1);
+ }
+ 
+ 
+=== src/modules/lib/lostio/client/seek.c
+==================================================================
+--- src/modules/lib/lostio/client/seek.c	(revision 1472)
++++ src/modules/lib/lostio/client/seek.c	(local)
+@@ -0,0 +1,68 @@
++/*
++ * Copyright (c) 2008 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Antoine Kaufmann.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++#include <io.h>
++#include <lostio.h>
++#include <rpc.h>
++#include <stdint.h>
++
++/**
++ * Cursorposition im Dateihandle setzen
++ *
++ * @param io_res Dateihandle
++ * @param offset Offset bezogen auf den mit origin festgelegten Ursprung
++ * @param origin Ursprung. Moeglichkeiten: 
++ *                  - SEEK_SET Bezogen auf Dateianfang
++ *                  - SEEK_CUR Bezogen auf die aktuelle Position
++ *                  - SEEK_END Bezogen auf das Ende der Datei
++ *
++ * @return 0 wenn die Position erfolgreich gesetzt wurde, sonst != 0
++ */
++bool lio_seek(io_resource_t* io_res, uint64_t offset, int origin)
++{
++    io_seek_request_t seek_request;
++    
++    // Ungueltige Handles abfangen
++    if ((io_res == NULL) || (io_res->pid == 0)) {
++        return FALSE;
++    }
++
++    seek_request.id = io_res->id;
++    seek_request.offset = offset;
++    seek_request.origin = origin;
++
++    return (rpc_get_dword(io_res->pid, "IO_SEEK ", sizeof(io_seek_request_t),
++        (char*) &seek_request) == 0);
++}
++

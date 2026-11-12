@@ -1,0 +1,1895 @@
+From kevin at tyndur.org  Sat Aug 20 11:50:51 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 20 Aug 2016 11:50:51 +0200
+Subject: [tyndur-devel] [PATCH 0/5] shell: Neuer Parser
+Message-ID: <1471686656-28613-1-git-send-email-kevin@tyndur.org>
+
+Abgesehen von allgemeiner Kaputtheit des Parsers in der Shell, war es bisher
+nicht möglich, Kommandozeilenoptionen z.B. mit Leerzeichen drin zu übergeben.
+Diese Serie macht einen kleinen Technologietransfer von psh und ersetzt den
+alten Parser durch einen, der tatsächlich alles parst anstatt das teilweise den
+Befehlen selbst zu überlassen und der auch Quotes versteht.
+
+Kevin Wolf (5):
+  shell: Programme starten mit init_execv()
+  shell: Kommandozeile nicht mehr an Builtin-Befehle weitergeben
+  libc: strndup()
+  libc: wordexp.h
+  shell: Neuen Parser importiert
+
+ src/include/string.h                |   1 +
+ src/lib/string/strdup.c             |  18 +++
+ src/modules/c/shell/cmds/bench.c    |   2 +-
+ src/modules/c/shell/cmds/bincat.c   |   2 +-
+ src/modules/c/shell/cmds/cat.c      |   2 +-
+ src/modules/c/shell/cmds/cp.c       |   2 +-
+ src/modules/c/shell/cmds/date.c     |   2 +-
+ src/modules/c/shell/cmds/dbg_st.c   |   2 +-
+ src/modules/c/shell/cmds/echo.c     |   2 +-
+ src/modules/c/shell/cmds/free.c     |   2 +-
+ src/modules/c/shell/cmds/kill.c     |   2 +-
+ src/modules/c/shell/cmds/killall.c  |   2 +-
+ src/modules/c/shell/cmds/ln.c       |   2 +-
+ src/modules/c/shell/cmds/ls.c       |   2 +-
+ src/modules/c/shell/cmds/mkdir.c    |   2 +-
+ src/modules/c/shell/cmds/pipe.c     |   2 +-
+ src/modules/c/shell/cmds/ps.c       |   2 +-
+ src/modules/c/shell/cmds/pstree.c   |   2 +-
+ src/modules/c/shell/cmds/pwd.c      |   2 +-
+ src/modules/c/shell/cmds/read.c     |   2 +-
+ src/modules/c/shell/cmds/readlink.c |   2 +-
+ src/modules/c/shell/cmds/rm.c       |   2 +-
+ src/modules/c/shell/cmds/sleep.c    |   2 +-
+ src/modules/c/shell/cmds/stat.c     |   2 +-
+ src/modules/c/shell/cmds/symlink.c  |   2 +-
+ src/modules/c/shell/cmds/sync.c     |   2 +-
+ src/modules/c/shell/commands.c      |  64 +++-----
+ src/modules/c/shell/lang/lang_en.c  |  12 ++
+ src/modules/c/shell/lang/resstr.h   |   4 +
+ src/modules/c/shell/shell.c         | 194 +++++++++++-----------
+ src/modules/c/shell/shell.h         |  91 +++++++----
+ src/modules/c/shell/tokenize.c      | 252 +++++++++++++++++++++++++++++
+ src/modules/include/wordexp.h       |  48 ++++++
+ src/modules/lib/posix/wordexp.c     | 309 ++++++++++++++++++++++++++++++++++++
+ 34 files changed, 838 insertions(+), 203 deletions(-)
+ create mode 100644 src/modules/c/shell/tokenize.c
+ create mode 100644 src/modules/include/wordexp.h
+ create mode 100644 src/modules/lib/posix/wordexp.c
+
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Sat Aug 20 11:50:52 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 20 Aug 2016 11:50:52 +0200
+Subject: [tyndur-devel] [PATCH 1/5] shell: Programme starten mit init_execv()
+In-Reply-To: <1471686656-28613-1-git-send-email-kevin@tyndur.org>
+References: <1471686656-28613-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1471686656-28613-2-git-send-email-kevin@tyndur.org>
+
+* shell: Mit der Benutzung von init_execv() wird der libc direkt ein
+  argv-Array übergeben statt der kompletten Kommandozeile. Sobald die
+  Shell mal anfängt, die Kommandozeile anständig zu parsen, ist das das
+  viel sinnvollere Format.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/c/shell/commands.c | 38 ++++++++++----------------------
+ src/modules/c/shell/shell.c    | 50 ++++++++++++++++++++++--------------------
+ 2 files changed, 38 insertions(+), 50 deletions(-)
+
+diff --git a/src/modules/c/shell/commands.c b/src/modules/c/shell/commands.c
+index 53a8cfe..c36f577 100644
+--- a/src/modules/c/shell/commands.c
++++ b/src/modules/c/shell/commands.c
+@@ -74,17 +74,12 @@
+ #endif
+ 
+ 
+-int shell_start_path_app(const char* cmd, bool wait)
++static int shell_start_path_app(char* argv[], bool wait)
+ {
+-    DEBUG_MSG1("Starte das Programm %s", cmd);
++    DEBUG_MSG1("Starte das Programm %s", argv[0]);
+     pid_t pid;
+ 
+-    // Fuehrende Leerzeichen im Befehl grosszuegig ueberspringen
+-    while (*cmd == ' ') {
+-        cmd++;
+-    }
+-
+-    pid = init_execute(cmd);
++    pid = init_execv(argv[0], (const char const**) argv);
+ 
+     // Fehler ist aufgetreten
+     if (pid == 0) {
+@@ -110,7 +105,7 @@ int shell_command_default(int argc, char* argv[], const char* cmd)
+         return 0;
+     }
+ 
+-    if (shell_start_path_app(cmd, true) == 0) {
++    if (shell_start_path_app(argv, true) == 0) {
+         return 0;
+     }
+ 
+@@ -123,7 +118,6 @@ int shell_command_default(int argc, char* argv[], const char* cmd)
+  */
+ int shell_command_start(int argc, char* argv[], const char* cmd)
+ {
+-    const char* program;
+     DEBUG_MSG("start");
+ 
+     if (argc < 2) {
+@@ -131,12 +125,7 @@ int shell_command_start(int argc, char* argv[], const char* cmd)
+         return -1;
+     }
+ 
+-    program = strchr(cmd, ' ') + 1;
+-    if (program == NULL) {
+-        return -1;
+-    }
+-
+-    if (shell_start_path_app(program, false) == 0) {
++    if (shell_start_path_app(&argv[1], false) == 0) {
+         return 0;
+     }
+ 
+@@ -150,19 +139,16 @@ int shell_command_start(int argc, char* argv[], const char* cmd)
+  */
+ int shell_command_help(int argc, char* argv[], const char* args)
+ {
+-    char* help_args = strchr(args, ' ');
+-    char* cmd;
++    char** thelp_args;
+     int ret;
+ 
+     // Erstmal versuchen, ob thelp installiert ist
+-    if (help_args == NULL) {
+-        cmd = strdup("thelp tyndur");
+-    } else {
+-        asprintf(&cmd, "thelp %s", help_args + 1);
+-    }
+-
+-    ret = shell_start_path_app(cmd, true);
+-    free(cmd);
++    thelp_args = (char*[]) {
++        "thelp",
++        argc > 1 ? argv[1] : "tyndur",
++        NULL,
++    };
++    ret = shell_start_path_app(thelp_args, true);
+     if (ret == 0) {
+         return 0;
+     }
+diff --git a/src/modules/c/shell/shell.c b/src/modules/c/shell/shell.c
+index cdca2f1..b7ed005 100644
+--- a/src/modules/c/shell/shell.c
++++ b/src/modules/c/shell/shell.c
+@@ -259,6 +259,7 @@ int shell_do_cmd(void)
+     shell_command_t* command;
+     uint32_t i;
+     char* cmdstring = shell_command_buffer;
++    int argc, pos;
+ 
+     substitute_envvars();
+ 
+@@ -272,6 +273,30 @@ int shell_do_cmd(void)
+         return 0;
+     }
+ 
++    // argc und argv befüllen
++    char args[strlen(cmdstring) + 1];
++    memcpy(args, cmdstring, strlen(cmdstring) + 1);
++
++    argc = 1;
++    //Jetzt werden die Argumente gezaehlt.
++    for (pos = 0; pos < strlen(args); pos++) {
++        if (args[pos] == ' ') {
++            argc++;
++        }
++    }
++
++    char* argv[argc + 1];
++    argv[0] = strtok(args, " ");
++    for(pos = 1; pos < argc; pos++)
++    {
++        argv[pos] = strtok(NULL, " ");
++    }
++    argv[pos] = NULL;
++
++    while (argv[argc - 1] == NULL) {
++        argc--;
++    }
++
+ 
+     // Die Liste mit den Befehlen durchsuchen. Das wird solange gemacht, bis
+     // der NULL eintrag am Ende erreicht wird.
+@@ -279,33 +304,10 @@ int shell_do_cmd(void)
+     {
+         command = &shell_commands[i];
+         if (shell_match_command(command->name, cmdstring) == true) {
+-            char args[strlen(cmdstring) + 1];
+-            memcpy(args, cmdstring, strlen(cmdstring) + 1);
+-
+-            int argc, pos;
+-            argc = 1;
+-            //Jetzt werden die Argumente gezaehlt.
+-            for (pos = 0; pos < strlen(args); pos++) {
+-                if (args[pos] == ' ') {
+-                    argc++;
+-                }
+-            }
+-
+-            char* argv[argc];
+-            argv[0] = strtok(args, " ");
+-            for(pos = 1; pos < argc; pos++)
+-            {
+-                argv[pos] = strtok(NULL, " ");
+-            }
+-
+-            while (argv[argc - 1] == NULL) {
+-                argc--;
+-            }
+-
+             return command->handler(argc, argv, cmdstring);
+         }
+     }
+-    return shell_command_default(0, 0, cmdstring);
++    return shell_command_default(argc, argv, cmdstring);
+ }
+ /**
+  * Shell-Skript ausfuehren
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Sat Aug 20 11:50:53 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 20 Aug 2016 11:50:53 +0200
+Subject: [tyndur-devel] [PATCH 2/5] shell: Kommandozeile nicht mehr an
+	Builtin-Befehle weitergeben
+In-Reply-To: <1471686656-28613-1-git-send-email-kevin@tyndur.org>
+References: <1471686656-28613-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1471686656-28613-3-git-send-email-kevin@tyndur.org>
+
+* shell: Auch eingebaute Befehle sollten einfach argc/argv benutzen wie
+  alles andere auch. Es gibt keinen Grund, die Kommandozeile in der
+  Implementierung des Befehls zu parsen.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/c/shell/cmds/bench.c    |  2 +-
+ src/modules/c/shell/cmds/bincat.c   |  2 +-
+ src/modules/c/shell/cmds/cat.c      |  2 +-
+ src/modules/c/shell/cmds/cp.c       |  2 +-
+ src/modules/c/shell/cmds/date.c     |  2 +-
+ src/modules/c/shell/cmds/dbg_st.c   |  2 +-
+ src/modules/c/shell/cmds/echo.c     |  2 +-
+ src/modules/c/shell/cmds/free.c     |  2 +-
+ src/modules/c/shell/cmds/kill.c     |  2 +-
+ src/modules/c/shell/cmds/killall.c  |  2 +-
+ src/modules/c/shell/cmds/ln.c       |  2 +-
+ src/modules/c/shell/cmds/ls.c       |  2 +-
+ src/modules/c/shell/cmds/mkdir.c    |  2 +-
+ src/modules/c/shell/cmds/pipe.c     |  2 +-
+ src/modules/c/shell/cmds/ps.c       |  2 +-
+ src/modules/c/shell/cmds/pstree.c   |  2 +-
+ src/modules/c/shell/cmds/pwd.c      |  2 +-
+ src/modules/c/shell/cmds/read.c     |  2 +-
+ src/modules/c/shell/cmds/readlink.c |  2 +-
+ src/modules/c/shell/cmds/rm.c       |  2 +-
+ src/modules/c/shell/cmds/sleep.c    |  2 +-
+ src/modules/c/shell/cmds/stat.c     |  2 +-
+ src/modules/c/shell/cmds/symlink.c  |  2 +-
+ src/modules/c/shell/cmds/sync.c     |  2 +-
+ src/modules/c/shell/commands.c      | 26 +++++++-------
+ src/modules/c/shell/shell.c         |  4 +--
+ src/modules/c/shell/shell.h         | 68 ++++++++++++++++++-------------------
+ 27 files changed, 72 insertions(+), 74 deletions(-)
+
+diff --git a/src/modules/c/shell/cmds/bench.c b/src/modules/c/shell/cmds/bench.c
+index fae16fe..f6fde4b 100644
+--- a/src/modules/c/shell/cmds/bench.c
++++ b/src/modules/c/shell/cmds/bench.c
+@@ -49,7 +49,7 @@ static void usage(void)
+ }
+ 
+ #ifdef CONFIG_SHELL_BUILTIN_ONLY
+-    int shell_command_bench(int argc, char* argv[], const char* args)
++    int shell_command_bench(int argc, char* argv[])
+ #else
+     int main(int argc, char* argv[])
+ #endif
+diff --git a/src/modules/c/shell/cmds/bincat.c b/src/modules/c/shell/cmds/bincat.c
+index 71b8b4b..a228e58 100644
+--- a/src/modules/c/shell/cmds/bincat.c
++++ b/src/modules/c/shell/cmds/bincat.c
+@@ -48,7 +48,7 @@
+ void bincat_display_usage(void);
+ 
+ #ifdef CONFIG_SHELL_BUILTIN_ONLY
+-    int shell_command_bincat(int argc, char* argv[], const char* args)
++    int shell_command_bincat(int argc, char* argv[])
+ #else
+     int main(int argc, char* argv[])
+ #endif
+diff --git a/src/modules/c/shell/cmds/cat.c b/src/modules/c/shell/cmds/cat.c
+index bf5d9bb..87f4358 100644
+--- a/src/modules/c/shell/cmds/cat.c
++++ b/src/modules/c/shell/cmds/cat.c
+@@ -45,7 +45,7 @@
+ void cat_display_usage(void);
+ 
+ #ifdef CONFIG_SHELL_BUILTIN_ONLY
+-    int shell_command_cat(int argc, char* argv[], const char* args)
++    int shell_command_cat(int argc, char* argv[])
+ #else
+     int main(int argc, char* argv[])
+ #endif
+diff --git a/src/modules/c/shell/cmds/cp.c b/src/modules/c/shell/cmds/cp.c
+index 6c0803b..cd58601 100644
+--- a/src/modules/c/shell/cmds/cp.c
++++ b/src/modules/c/shell/cmds/cp.c
+@@ -56,7 +56,7 @@ int cp_file(char* src_path, char* dst_path);
+ int cp_recursive(char* src_path, char* dst_path);
+ 
+ #ifdef CONFIG_SHELL_BUILTIN_ONLY
+-    int shell_command_cp(int argc, char* argv[], const char* args)
++    int shell_command_cp(int argc, char* argv[])
+ #else
+     int main(int argc, char* argv[])
+ #endif
+diff --git a/src/modules/c/shell/cmds/date.c b/src/modules/c/shell/cmds/date.c
+index a6759ca..7ecdd8e 100644
+--- a/src/modules/c/shell/cmds/date.c
++++ b/src/modules/c/shell/cmds/date.c
+@@ -43,7 +43,7 @@
+ void date_display_usage(void);
+ 
+ #ifdef CONFIG_SHELL_BUILTIN_ONLY
+-    int shell_command_date(int argc, char* argv[], const char* args)
++    int shell_command_date(int argc, char* argv[])
+ #else
+     int main(int argc, char* argv[])
+ #endif
+diff --git a/src/modules/c/shell/cmds/dbg_st.c b/src/modules/c/shell/cmds/dbg_st.c
+index 1089759..c87b900 100644
+--- a/src/modules/c/shell/cmds/dbg_st.c
++++ b/src/modules/c/shell/cmds/dbg_st.c
+@@ -46,7 +46,7 @@
+ void dbg_st_display_usage(void);
+ 
+ #ifdef CONFIG_SHELL_BUILTIN_ONLY
+-    int shell_command_dbg_st(int argc, char* argv[], const char* args)
++    int shell_command_dbg_st(int argc, char* argv[])
+ #else
+     int main(int argc, char* argv[])
+ #endif
+diff --git a/src/modules/c/shell/cmds/echo.c b/src/modules/c/shell/cmds/echo.c
+index a51edf2..d3b7262 100644
+--- a/src/modules/c/shell/cmds/echo.c
++++ b/src/modules/c/shell/cmds/echo.c
+@@ -40,7 +40,7 @@
+ #include <tms.h>
+ 
+ #ifdef CONFIG_SHELL_BUILTIN_ONLY
+-    int shell_command_echo(int argc, char* argv[], const char* args)
++    int shell_command_echo(int argc, char* argv[])
+ #else
+     int main(int argc, char* argv[])
+ #endif
+diff --git a/src/modules/c/shell/cmds/free.c b/src/modules/c/shell/cmds/free.c
+index d4e7d0e..5d79ef7 100644
+--- a/src/modules/c/shell/cmds/free.c
++++ b/src/modules/c/shell/cmds/free.c
+@@ -40,7 +40,7 @@
+ #include <tms.h>
+ 
+ #ifdef CONFIG_SHELL_BUILTIN_ONLY
+-    int shell_command_free(int argc, char* argv[], const char* args)
++    int shell_command_free(int argc, char* argv[])
+ #else
+     int main(int argc, char* argv[])
+ #endif
+diff --git a/src/modules/c/shell/cmds/kill.c b/src/modules/c/shell/cmds/kill.c
+index 0efb567..7aa8029 100644
+--- a/src/modules/c/shell/cmds/kill.c
++++ b/src/modules/c/shell/cmds/kill.c
+@@ -45,7 +45,7 @@
+ static void kill_display_usage(void);
+ 
+ #ifdef CONFIG_SHELL_BUILTIN_ONLY
+-    int shell_command_kill(int argc, char* argv[], const char* args)
++    int shell_command_kill(int argc, char* argv[])
+ #else
+     int main(int argc, char* argv[])
+ #endif
+diff --git a/src/modules/c/shell/cmds/killall.c b/src/modules/c/shell/cmds/killall.c
+index f14b7a4..d76b437 100644
+--- a/src/modules/c/shell/cmds/killall.c
++++ b/src/modules/c/shell/cmds/killall.c
+@@ -46,7 +46,7 @@
+ static void killall_display_usage(void);
+ 
+ #ifdef CONFIG_SHELL_BUILTIN_ONLY
+-    int shell_command_killall(int argc, char* argv[], const char* args)
++    int shell_command_killall(int argc, char* argv[])
+ #else
+     int main(int argc, char* argv[])
+ #endif
+diff --git a/src/modules/c/shell/cmds/ln.c b/src/modules/c/shell/cmds/ln.c
+index 2b773eb..4c1b1e2 100644
+--- a/src/modules/c/shell/cmds/ln.c
++++ b/src/modules/c/shell/cmds/ln.c
+@@ -44,7 +44,7 @@
+ void ln_display_usage(void);
+ 
+ #ifdef CONFIG_SHELL_BUILTIN_ONLY
+-    int shell_command_ln(int argc, char* argv[], const char* args)
++    int shell_command_ln(int argc, char* argv[])
+ #else
+     int main(int argc, char* argv[])
+ #endif
+diff --git a/src/modules/c/shell/cmds/ls.c b/src/modules/c/shell/cmds/ls.c
+index 838ae9a..37076e1 100644
+--- a/src/modules/c/shell/cmds/ls.c
++++ b/src/modules/c/shell/cmds/ls.c
+@@ -53,7 +53,7 @@ void ls_display_usage(void);
+ char* format_size(size_t size, bool human_readable);
+ 
+ #ifdef CONFIG_SHELL_BUILTIN_ONLY
+-    int shell_command_ls(int argc, char* argv[], const char* args)
++    int shell_command_ls(int argc, char* argv[])
+ #else
+     int main(int argc, char* argv[])
+ #endif
+diff --git a/src/modules/c/shell/cmds/mkdir.c b/src/modules/c/shell/cmds/mkdir.c
+index 38c4598..a6aadf7 100644
+--- a/src/modules/c/shell/cmds/mkdir.c
++++ b/src/modules/c/shell/cmds/mkdir.c
+@@ -44,7 +44,7 @@
+ void mkdir_display_usage(void);
+ 
+ #ifdef CONFIG_SHELL_BUILTIN_ONLY
+-    int shell_command_mkdir(int argc, char* argv[], const char* args)
++    int shell_command_mkdir(int argc, char* argv[])
+ #else
+     int main(int argc, char* argv[])
+ #endif
+diff --git a/src/modules/c/shell/cmds/pipe.c b/src/modules/c/shell/cmds/pipe.c
+index e7d7ff4..b346c90 100644
+--- a/src/modules/c/shell/cmds/pipe.c
++++ b/src/modules/c/shell/cmds/pipe.c
+@@ -44,7 +44,7 @@
+ void pipe_display_usage(void);
+ 
+ #ifdef CONFIG_SHELL_BUILTIN_ONLY
+-    int shell_command_pipe(int argc, char* argv[], const char* args)
++    int shell_command_pipe(int argc, char* argv[])
+ #else
+     int main(int argc, char* argv[])
+ #endif
+diff --git a/src/modules/c/shell/cmds/ps.c b/src/modules/c/shell/cmds/ps.c
+index ec6e152..dae0618 100644
+--- a/src/modules/c/shell/cmds/ps.c
++++ b/src/modules/c/shell/cmds/ps.c
+@@ -45,7 +45,7 @@
+ void ps_display_usage(void);
+ 
+ #ifdef CONFIG_SHELL_BUILTIN_ONLY
+-    int shell_command_ps(int argc, char* argv[], const char* args)
++    int shell_command_ps(int argc, char* argv[])
+ #else
+     int main(int argc, char* argv[])
+ #endif
+diff --git a/src/modules/c/shell/cmds/pstree.c b/src/modules/c/shell/cmds/pstree.c
+index 8420902..d1be08d 100644
+--- a/src/modules/c/shell/cmds/pstree.c
++++ b/src/modules/c/shell/cmds/pstree.c
+@@ -47,7 +47,7 @@ void pstree_show_children(pid_t pid, uint8_t depth);
+ task_info_t* task_info;
+ 
+ #ifdef CONFIG_SHELL_BUILTIN_ONLY
+-    int shell_command_pstree(int argc, char* argv[], const char* args)
++    int shell_command_pstree(int argc, char* argv[])
+ #else
+     int main(int argc, char* argv[])
+ #endif
+diff --git a/src/modules/c/shell/cmds/pwd.c b/src/modules/c/shell/cmds/pwd.c
+index ed5cea8..db059ad 100644
+--- a/src/modules/c/shell/cmds/pwd.c
++++ b/src/modules/c/shell/cmds/pwd.c
+@@ -43,7 +43,7 @@
+ void pwd_display_usage(void);
+ 
+ #ifdef CONFIG_SHELL_BUILTIN_ONLY
+-    int shell_command_pwd(int argc, char* argv[], const char* args)
++    int shell_command_pwd(int argc, char* argv[])
+ #else
+     int main(int argc, char* argv[])
+ #endif
+diff --git a/src/modules/c/shell/cmds/read.c b/src/modules/c/shell/cmds/read.c
+index 4a0414c..7093c58 100644
+--- a/src/modules/c/shell/cmds/read.c
++++ b/src/modules/c/shell/cmds/read.c
+@@ -47,7 +47,7 @@
+ static void read_display_usage(void);
+ 
+ #ifdef CONFIG_SHELL_BUILTIN_ONLY
+-    int shell_command_read(int argc, char* argv[], const char* args)
++    int shell_command_read(int argc, char* argv[])
+ #else
+     int main(int argc, char* argv[])
+ #endif
+diff --git a/src/modules/c/shell/cmds/readlink.c b/src/modules/c/shell/cmds/readlink.c
+index 51ef146..5be342c 100644
+--- a/src/modules/c/shell/cmds/readlink.c
++++ b/src/modules/c/shell/cmds/readlink.c
+@@ -44,7 +44,7 @@
+ void readlink_display_usage(void);
+ 
+ #ifdef CONFIG_SHELL_BUILTIN_ONLY
+-    int shell_command_readlink(int argc, char* argv[], const char* args)
++    int shell_command_readlink(int argc, char* argv[])
+ #else
+     int main(int argc, char* argv[])
+ #endif
+diff --git a/src/modules/c/shell/cmds/rm.c b/src/modules/c/shell/cmds/rm.c
+index 91bb0c0..954d6fb 100644
+--- a/src/modules/c/shell/cmds/rm.c
++++ b/src/modules/c/shell/cmds/rm.c
+@@ -56,7 +56,7 @@ enum {
+ };
+ 
+ #ifdef CONFIG_SHELL_BUILTIN_ONLY
+-    int shell_command_rm(int argc, char* argv[], const char* args)
++    int shell_command_rm(int argc, char* argv[])
+ #else
+     int main(int argc, char* argv[])
+ #endif
+diff --git a/src/modules/c/shell/cmds/sleep.c b/src/modules/c/shell/cmds/sleep.c
+index a85dd8b..dad8dbd 100644
+--- a/src/modules/c/shell/cmds/sleep.c
++++ b/src/modules/c/shell/cmds/sleep.c
+@@ -44,7 +44,7 @@
+ void sleep_display_usage(void);
+ 
+ #ifdef CONFIG_SHELL_BUILTIN_ONLY
+-    int shell_command_sleep(int argc, char* argv[], const char* args)
++    int shell_command_sleep(int argc, char* argv[])
+ #else
+     int main(int argc, char* argv[])
+ #endif
+diff --git a/src/modules/c/shell/cmds/stat.c b/src/modules/c/shell/cmds/stat.c
+index 1a5436d..55c169d 100644
+--- a/src/modules/c/shell/cmds/stat.c
++++ b/src/modules/c/shell/cmds/stat.c
+@@ -45,7 +45,7 @@ void stat_display_usage(void);
+ void stat_display_results(const char* path, struct stat* stat_buf);
+ 
+ #ifdef CONFIG_SHELL_BUILTIN_ONLY
+-    int shell_command_stat(int argc, char* argv[], const char* args)
++    int shell_command_stat(int argc, char* argv[])
+ #else
+     int main(int argc, char* argv[])
+ #endif
+diff --git a/src/modules/c/shell/cmds/symlink.c b/src/modules/c/shell/cmds/symlink.c
+index b9886f4..aa92d18 100644
+--- a/src/modules/c/shell/cmds/symlink.c
++++ b/src/modules/c/shell/cmds/symlink.c
+@@ -45,7 +45,7 @@
+ void symlink_display_usage(void);
+ 
+ #ifdef CONFIG_SHELL_BUILTIN_ONLY
+-    int shell_command_symlink(int argc, char* argv[], const char* args)
++    int shell_command_symlink(int argc, char* argv[])
+ #else
+     int main(int argc, char* argv[])
+ #endif
+diff --git a/src/modules/c/shell/cmds/sync.c b/src/modules/c/shell/cmds/sync.c
+index 8a322f8..d24e789 100644
+--- a/src/modules/c/shell/cmds/sync.c
++++ b/src/modules/c/shell/cmds/sync.c
+@@ -41,7 +41,7 @@
+ static void sync_display_usage(void);
+ 
+ #ifdef CONFIG_SHELL_BUILTIN_ONLY
+-    int shell_command_sync(int argc, char* argv[], const char* args)
++    int shell_command_sync(int argc, char* argv[])
+ #else
+     int main(int argc, char* argv[])
+ #endif
+diff --git a/src/modules/c/shell/commands.c b/src/modules/c/shell/commands.c
+index c36f577..9d0055a 100644
+--- a/src/modules/c/shell/commands.c
++++ b/src/modules/c/shell/commands.c
+@@ -98,10 +98,10 @@ static int shell_start_path_app(char* argv[], bool wait)
+ /**
+  * Wird aufgerufen, wenn keiner der internen Befehle passt.
+  */
+-int shell_command_default(int argc, char* argv[], const char* cmd)
++int shell_command_default(int argc, char* argv[])
+ {
+     // Leere Kommandozeilen sollen keine Fehlermeldungen bringen
+-    if (strlen(cmd) == 0) {
++    if (argc == 0) {
+         return 0;
+     }
+ 
+@@ -116,7 +116,7 @@ int shell_command_default(int argc, char* argv[], const char* cmd)
+ /**
+  * Eine ausfuerbare Datei im aktuellen Verzeichnis oder in PATH starten.
+  */
+-int shell_command_start(int argc, char* argv[], const char* cmd)
++int shell_command_start(int argc, char* argv[])
+ {
+     DEBUG_MSG("start");
+ 
+@@ -137,7 +137,7 @@ int shell_command_start(int argc, char* argv[], const char* cmd)
+ /**
+  *
+  */
+-int shell_command_help(int argc, char* argv[], const char* args)
++int shell_command_help(int argc, char* argv[])
+ {
+     char** thelp_args;
+     int ret;
+@@ -208,7 +208,7 @@ int shell_command_help(int argc, char* argv[], const char* args)
+ /**
+  *
+  */
+-int shell_command_version(int argc, char* argv[], const char* args)
++int shell_command_version(int argc, char* argv[])
+ {
+     puts("tyndur Shell " TYNDUR_VERSION);
+     return 0;
+@@ -217,24 +217,22 @@ int shell_command_version(int argc, char* argv[], const char* args)
+ /**
+  *
+  */
+-int shell_command_exit(int argc, char* argv[], const char* args)
++int shell_command_exit(int argc, char* argv[])
+ {
+     exit(0);
+     return 0;
+ }
+ 
+-int shell_command_cd(int argc, char* argv[], const char* args)
++int shell_command_cd(int argc, char* argv[])
+ {
+-    char* cd_args = strchr(args, ' ');
+     char* path;
+     DIR* dir;
+ 
+-    if (cd_args == NULL) {
++    if (argc != 2) {
+         goto usage;
+     }
+ 
+-    cd_args++;
+-    path = io_get_absolute_path(cd_args);
++    path = io_get_absolute_path(argv[1]);
+     if (path == NULL) {
+         goto usage;
+     }
+@@ -256,7 +254,7 @@ usage:
+     return -1;
+ }
+ 
+-int shell_command_source(int argc, char* argv[], const char* args)
++int shell_command_source(int argc, char* argv[])
+ {
+     const char* path;
+     if (argc != 2) {
+@@ -274,7 +272,7 @@ int shell_command_source(int argc, char* argv[], const char* args)
+     }
+ }
+ 
+-int shell_command_clear(int argc, char* argv[], const char* args)
++int shell_command_clear(int argc, char* argv[])
+ {
+     printf("\033[1;1H\033[2J");
+ 
+@@ -284,7 +282,7 @@ int shell_command_clear(int argc, char* argv[], const char* args)
+ void set_display_usage(void);
+ void set_list_vars(void);
+ 
+-int shell_command_set(int argc, char* argv[], const char* args)
++int shell_command_set(int argc, char* argv[])
+ {
+     int overwrite = 1;
+ 
+diff --git a/src/modules/c/shell/shell.c b/src/modules/c/shell/shell.c
+index b7ed005..4e07707 100644
+--- a/src/modules/c/shell/shell.c
++++ b/src/modules/c/shell/shell.c
+@@ -304,10 +304,10 @@ int shell_do_cmd(void)
+     {
+         command = &shell_commands[i];
+         if (shell_match_command(command->name, cmdstring) == true) {
+-            return command->handler(argc, argv, cmdstring);
++            return command->handler(argc, argv);
+         }
+     }
+-    return shell_command_default(argc, argv, cmdstring);
++    return shell_command_default(argc, argv);
+ }
+ /**
+  * Shell-Skript ausfuehren
+diff --git a/src/modules/c/shell/shell.h b/src/modules/c/shell/shell.h
+index 8e94409..f119b63 100644
+--- a/src/modules/c/shell/shell.h
++++ b/src/modules/c/shell/shell.h
+@@ -38,7 +38,7 @@
+ 
+ typedef struct shell_command_t {
+     const char* name;
+-    int (*handler)(int argc, char* argv[], const char* args);
++    int (*handler)(int argc, char* argv[]);
+ } shell_command_t;
+ 
+ /** Array mit den Befehlen */
+@@ -49,43 +49,43 @@ bool shell_script(const char* path);
+ bool shell_match_command(const char* cmd, const char* cmdline);
+ void completion_init(void);
+ 
+-int shell_command_default(int argc, char* argv[], const char* args);
+-int shell_command_help(int argc, char* argv[], const char* args);
+-int shell_command_version(int argc, char* argv[], const char* args);
+-int shell_command_exit(int argc, char* argv[], const char* args);
+-int shell_command_start(int argc, char* argv[], const char* args);
+-int shell_command_cd(int argc, char* argv[], const char* args);
+-int shell_command_set(int argc, char* argv[], const char* args);
+-int shell_command_source(int argc, char* argv[], const char* args);
+-int shell_command_clear(int argc, char* argv[], const char* args);
++int shell_command_default(int argc, char* argv[]);
++int shell_command_help(int argc, char* argv[]);
++int shell_command_version(int argc, char* argv[]);
++int shell_command_exit(int argc, char* argv[]);
++int shell_command_start(int argc, char* argv[]);
++int shell_command_cd(int argc, char* argv[]);
++int shell_command_set(int argc, char* argv[]);
++int shell_command_source(int argc, char* argv[]);
++int shell_command_clear(int argc, char* argv[]);
+ 
+ 
+ #include <lost/config.h>
+ #ifdef CONFIG_SHELL_BUILTIN_ONLY
+-    int shell_command_bincat(int argc, char* argv[], const char* args);
+-    int shell_command_cat(int argc, char* argv[], const char* args);
+-    int shell_command_date(int argc, char* argv[], const char* args);
+-    int shell_command_echo(int argc, char* argv[], const char* args);
+-    int shell_command_free(int argc, char* argv[], const char* args);
+-    int shell_command_kill(int argc, char* argv[], const char* args);
+-    int shell_command_killall(int argc, char* argv[], const char* args);
+-    int shell_command_ls(int argc, char* argv[], const char* args);
+-    int shell_command_mkdir(int argc, char* argv[], const char* args);
+-    int shell_command_pipe(int argc, char* argv[], const char* args);
+-    int shell_command_ps(int argc, char* argv[], const char* args);
+-    int shell_command_pstree(int argc, char* argv[], const char* args);
+-    int shell_command_pwd(int argc, char* argv[], const char* args);
+-    int shell_command_symlink(int argc, char* argv[], const char* args);
+-    int shell_command_readlink(int argc, char* argv[], const char* args);
+-    int shell_command_dbg_st(int argc, char* argv[], const char* args);
+-    int shell_command_cp(int argc, char* argv[], const char* args);
+-    int shell_command_ln(int argc, char* argv[], const char* args);
+-    int shell_command_rm(int argc, char* argv[], const char* args);
+-    int shell_command_stat(int argc, char* argv[], const char* args);
+-    int shell_command_sleep(int argc, char* argv[], const char* args);
+-    int shell_command_bench(int argc, char* argv[], const char* args);
+-    int shell_command_read(int argc, char* argv[], const char* args);
+-    int shell_command_sync(int argc, char* argv[], const char* args);
++    int shell_command_bincat(int argc, char* argv[]);
++    int shell_command_cat(int argc, char* argv[]);
++    int shell_command_date(int argc, char* argv[]);
++    int shell_command_echo(int argc, char* argv[]);
++    int shell_command_free(int argc, char* argv[]);
++    int shell_command_kill(int argc, char* argv[]);
++    int shell_command_killall(int argc, char* argv[]);
++    int shell_command_ls(int argc, char* argv[]);
++    int shell_command_mkdir(int argc, char* argv[]);
++    int shell_command_pipe(int argc, char* argv[]);
++    int shell_command_ps(int argc, char* argv[]);
++    int shell_command_pstree(int argc, char* argv[]);
++    int shell_command_pwd(int argc, char* argv[]);
++    int shell_command_symlink(int argc, char* argv[]);
++    int shell_command_readlink(int argc, char* argv[]);
++    int shell_command_dbg_st(int argc, char* argv[]);
++    int shell_command_cp(int argc, char* argv[]);
++    int shell_command_ln(int argc, char* argv[]);
++    int shell_command_rm(int argc, char* argv[]);
++    int shell_command_stat(int argc, char* argv[]);
++    int shell_command_sleep(int argc, char* argv[]);
++    int shell_command_bench(int argc, char* argv[]);
++    int shell_command_read(int argc, char* argv[]);
++    int shell_command_sync(int argc, char* argv[]);
+ #endif
+ 
+ #endif
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Sat Aug 20 11:50:54 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 20 Aug 2016 11:50:54 +0200
+Subject: [tyndur-devel] [PATCH 3/5] libc: strndup()
+In-Reply-To: <1471686656-28613-1-git-send-email-kevin@tyndur.org>
+References: <1471686656-28613-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1471686656-28613-4-git-send-email-kevin@tyndur.org>
+
++ libc: strndup() implementiert
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/include/string.h    |  1 +
+ src/lib/string/strdup.c | 18 ++++++++++++++++++
+ 2 files changed, 19 insertions(+)
+
+diff --git a/src/include/string.h b/src/include/string.h
+index dd11385..c7a6983 100644
+--- a/src/include/string.h
++++ b/src/include/string.h
+@@ -78,6 +78,7 @@ void itoa(unsigned int n, char* s, unsigned int base);
+ char* index(const char* p, int ch);
+ 
+ char* strdup(const char* str);
++char* strndup(const char* str, size_t n);
+ 
+ char *strpbrk(const char *s1, const char *s2);
+ 
+diff --git a/src/lib/string/strdup.c b/src/lib/string/strdup.c
+index 18d19eb..c4e139c 100644
+--- a/src/lib/string/strdup.c
++++ b/src/lib/string/strdup.c
+@@ -45,3 +45,21 @@ strdup(str)
+ 	memcpy(copy, str, len);
+ 	return (copy);
+ }
++
++char* strndup(const char* s, size_t n)
++{
++    char* res;
++    size_t len = strlen(s);
++
++    if (len > n) {
++        len = n;
++    }
++
++    res = malloc(len + 1);
++    if (res) {
++        strncpy(res, s, len);
++        res[len] = '\0';
++    }
++
++    return res;
++}
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Sat Aug 20 11:50:55 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 20 Aug 2016 11:50:55 +0200
+Subject: [tyndur-devel] [PATCH 4/5] libc: wordexp.h
+In-Reply-To: <1471686656-28613-1-git-send-email-kevin@tyndur.org>
+References: <1471686656-28613-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1471686656-28613-5-git-send-email-kevin@tyndur.org>
+
++ libc: wordexp.h hinzugefügt (mitsamt teilfunktionaler Implementierung)
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/include/wordexp.h   |  48 +++++++
+ src/modules/lib/posix/wordexp.c | 309 ++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 357 insertions(+)
+ create mode 100644 src/modules/include/wordexp.h
+ create mode 100644 src/modules/lib/posix/wordexp.c
+
+diff --git a/src/modules/include/wordexp.h b/src/modules/include/wordexp.h
+new file mode 100644
+index 0000000..4a8cc7f
+--- /dev/null
++++ b/src/modules/include/wordexp.h
+@@ -0,0 +1,48 @@
++/*
++ * Copyright (c) 2016 Kevin Wolf
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef _WORDEXP_H_
++#define _WORDEXP_H_
++
++#include <stddef.h>
++
++typedef struct {
++    size_t  we_wordc;
++    char**  we_wordv;
++    size_t  we_offs;
++} wordexp_t;
++
++enum {
++    WRDE_BADCHAR    = 1,
++    WRDE_BADVAL,
++    WRDE_CMDSUB,
++    WRDE_NOSPACE,
++    WRDE_SYNTAX,
++};
++
++int wordexp(const char* word, wordexp_t* we, int flags);
++void wordfree(wordexp_t* we);
++
++#endif
+diff --git a/src/modules/lib/posix/wordexp.c b/src/modules/lib/posix/wordexp.c
+new file mode 100644
+index 0000000..057b84d
+--- /dev/null
++++ b/src/modules/lib/posix/wordexp.c
+@@ -0,0 +1,309 @@
++/*
++ * Copyright (c) 2016 Kevin Wolf
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <wordexp.h>
++#include <stdlib.h>
++#include <string.h>
++#include <assert.h>
++#include <ctype.h>
++
++static void skip_quotes(char** s, char **out)
++{
++    char* p = *s;
++    enum {
++        UNQUOTED,
++        IN_SINGLE_QUOTE,
++        IN_DOUBE_QUOTE,
++    } state = UNQUOTED;
++
++    while (*p) {
++        switch (*p) {
++            case '"':
++                if (state == UNQUOTED) {
++                    state = IN_DOUBE_QUOTE;
++                    break;
++                } else if (state == IN_DOUBE_QUOTE) {
++                    p++;
++                    goto out;
++                }
++                goto normal_char;
++            case '\'':
++                if (state == UNQUOTED) {
++                    state = IN_SINGLE_QUOTE;
++                    break;
++                } else if (state == IN_SINGLE_QUOTE) {
++                    p++;
++                    goto out;
++                }
++                goto normal_char;
++            case '\\':
++                if (p[1]) {
++                    p++;
++                    if (out) {
++                        *(*out)++ = *p;
++                    }
++                }
++                break;
++            normal_char:
++            default:
++                if (state == UNQUOTED) {
++                    goto out;
++                }
++                if (out) {
++                    *(*out)++ = *p;
++                }
++                break;
++        }
++
++        p++;
++    }
++
++out:
++    *s = p;
++}
++
++static int name_length(const char* s)
++{
++    const char* start = s;
++
++    if (!*s || !(isalpha(*s) || *s == '_')) {
++        return 0;
++    }
++
++    while (*s && (isalnum(*s) || *s == '_')) {
++        s++;
++    }
++
++    return s - start;
++}
++
++static int buffer_replace(char** s, char** pos, size_t len, const char* value)
++{
++    size_t offset = *pos - *s;
++    size_t old_total_len = strlen(*s) + 1;
++    size_t new_len = strlen(value);
++    size_t new_total_len = old_total_len - len + new_len;
++    char* p = NULL;
++
++    if (len < new_len) {
++        p = realloc(*s, new_total_len);
++        if (p == NULL) {
++            return WRDE_NOSPACE;
++        }
++        memmove(p + offset + new_len,
++                p + offset + len,
++                old_total_len - (offset + len));
++    } else if (len > new_len) {
++        p = *s;
++        memmove(p + offset + new_len,
++                p + offset + len,
++                old_total_len - (offset + len));
++        p = realloc(*s, new_total_len);
++        if (p == NULL) {
++            return WRDE_NOSPACE;
++        }
++    }
++
++    memcpy(p + offset, value, new_len);
++    *s = p;
++    *pos = p + offset + new_len - 1;
++
++    return 0;
++}
++
++static int we_expand_parameter(char** s)
++{
++    char* p;
++    char* name;
++    const char* value;
++    size_t len;
++    int ret;
++
++    for (p = *s; *p; p++) {
++        if (*p == '\'' || *p == '\\') {
++            skip_quotes(&p, NULL);
++            if (*p == '\0') {
++                break;
++            }
++        }
++        if (*p != '$') {
++            continue;
++        }
++
++        len = name_length(p + 1);
++        if (len == 0) {
++            continue;
++        }
++
++        name = strndup(p + 1, len);
++        if (name == NULL) {
++            return WRDE_NOSPACE;
++        }
++
++        value = getenv(name);
++        if (value == NULL) {
++            value = "";
++        }
++
++        free(name);
++
++        ret = buffer_replace(s, &p, len + 1, value);
++        if (ret != 0) {
++            return ret;
++        }
++    }
++
++    return 0;
++}
++
++static int we_split_fields(char** s, wordexp_t* we)
++{
++    const char* ifs;
++    char* p;
++    int i;
++
++    if (**s == '\0') {
++        free(*s);
++        we->we_wordc = 0;
++        return 0;
++    }
++    we->we_wordc = 1;
++
++    ifs = getenv("IFS");
++    if (ifs == NULL) {
++        ifs = " \n\t";
++    }
++
++    for (p = *s; *p; p++) {
++        skip_quotes(&p, NULL);
++        if (*p == '\0') {
++            break;
++        }
++        if (strchr(ifs, *p)) {
++            we->we_wordc++;
++        }
++    }
++
++    we->we_wordv = calloc(we->we_wordc, sizeof(char*));
++    if (we->we_wordv == NULL) {
++        return WRDE_NOSPACE;
++    }
++
++    we->we_wordv[0] = *s;
++    for (p = *s, i = 0; *p; p++) {
++        skip_quotes(&p, NULL);
++        if (*p == '\0') {
++            break;
++        }
++        if (strchr(ifs, *p)) {
++            assert(i < we->we_wordc);
++            we->we_wordv[++i] = p + 1;
++            *p = '\0';
++        }
++    }
++
++    for (i = 0; i < we->we_wordc; i++) {
++        p = strdup(we->we_wordv[i]);
++        if (p == NULL) {
++            return WRDE_NOSPACE;
++        }
++        we->we_wordv[i] = p;
++    }
++
++    return 0;
++}
++
++static void we_str_remove_quotes(char** s)
++{
++    char *src;
++    char *out;
++
++    for (src = *s, out = *s; *src; src++, out++) {
++        skip_quotes(&src, &out);
++        if (*src == '\0') {
++            break;
++        }
++        if (src != out) {
++            *out = *src;
++        }
++    }
++
++    if (src != out) {
++        size_t len;
++        *out++ = '\0';
++        len = out - *s;
++        out = realloc(*s, len);
++        if (out != NULL) {
++            *s = out;
++        }
++    }
++}
++
++
++static void we_remove_quotes(wordexp_t* we)
++{
++    int i;
++
++    for (i = 0; i < we->we_wordc; i++) {
++        we_str_remove_quotes(&we->we_wordv[i]);
++    }
++}
++
++int wordexp(const char* word, wordexp_t* we, int flags)
++{
++    char *s;
++    int ret;
++
++    s = strdup(word);
++    if (s == NULL) {
++        return WRDE_NOSPACE;
++    }
++
++    ret = we_expand_parameter(&s);
++    if (ret != 0) {
++        free(s);
++        return ret;
++    }
++
++    ret = we_split_fields(&s, we);
++    if (ret != 0) {
++        free(s);
++        return ret;
++    }
++
++    we_remove_quotes(we);
++
++    return 0;
++}
++
++void wordfree(wordexp_t* we)
++{
++    int i;
++
++    for (i = 0; i < we->we_wordc; i++) {
++        free(we->we_wordv[i]);
++    }
++    free(we->we_wordv);
++}
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Sat Aug 20 11:50:56 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 20 Aug 2016 11:50:56 +0200
+Subject: [tyndur-devel] [PATCH 5/5] shell: Neuen Parser importiert
+In-Reply-To: <1471686656-28613-1-git-send-email-kevin@tyndur.org>
+References: <1471686656-28613-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1471686656-28613-6-git-send-email-kevin@tyndur.org>
+
+- shell: Alten kaputten Parser rausgeworfen
+
++ shell: Neuen, hoffentlich weniger kaputten Parser aus psh importiert,
+  der so direkt auf jeden Fall mal Quotes mitbringt. Er kann sogar
+  solche Sachen wie Ausgabeumleitung parsen, jetzt müsste man nur auch
+  noch die passende Funktionalität implementieren.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/c/shell/lang/lang_en.c |  12 ++
+ src/modules/c/shell/lang/resstr.h  |   4 +
+ src/modules/c/shell/shell.c        | 192 +++++++++++++---------------
+ src/modules/c/shell/shell.h        |  23 +++-
+ src/modules/c/shell/tokenize.c     | 252 +++++++++++++++++++++++++++++++++++++
+ 5 files changed, 378 insertions(+), 105 deletions(-)
+ create mode 100644 src/modules/c/shell/tokenize.c
+
+diff --git a/src/modules/c/shell/lang/lang_en.c b/src/modules/c/shell/lang/lang_en.c
+index be52080..3e24b25 100644
+--- a/src/modules/c/shell/lang/lang_en.c
++++ b/src/modules/c/shell/lang/lang_en.c
+@@ -113,6 +113,18 @@ static const struct tms_strings dict[] = {
+     &__tms_shell_script_error,
+     "An error happened while running the script\n",
+ 
++    &__tms_shell_fail_dup,
++    "lio_dup() failed: %s\n",
++
++    &__tms_shell_parse_error,
++    "Parse error in '%s'\n",
++
++    &__tms_shell_err_end_dquot,
++    "Could not find closing '\"'\n",
++
++    &__tms_shell_err_end_squot,
++    "Could not find closing '\''\n",
++
+ 
+ 
+     &__tms_bench_usage,
+diff --git a/src/modules/c/shell/lang/resstr.h b/src/modules/c/shell/lang/resstr.h
+index fdff7b9..6b83be8 100644
+--- a/src/modules/c/shell/lang/resstr.h
++++ b/src/modules/c/shell/lang/resstr.h
+@@ -41,6 +41,10 @@ extern void* __tms_cmd_help_text;
+ 
+ extern void* __tms_shell_usage;
+ extern void* __tms_shell_script_error;
++extern void* __tms_shell_fail_dup;
++extern void* __tms_shell_parse_error;
++extern void* __tms_shell_err_end_squot;
++extern void* __tms_shell_err_end_dquot;
+ 
+ extern void* __tms_bench_usage;
+ extern void* __tms_bench_opening_error;
+diff --git a/src/modules/c/shell/shell.c b/src/modules/c/shell/shell.c
+index 4e07707..8dfd2c0 100644
+--- a/src/modules/c/shell/shell.c
++++ b/src/modules/c/shell/shell.c
+@@ -47,6 +47,7 @@
+ #include <lost/config.h>
+ #include <sleep.h>
+ #include <env.h>
++#include <errno.h>
+ 
+ #define TMS_MODULE shell
+ #include <tms.h>
+@@ -67,7 +68,7 @@ char    shell_command_buffer[COMMAND_BUFFER_SIZE];
+ 
+ char    keyboard_read_char(void);
+ void    shell_read_command(void);
+-int     shell_do_cmd(void);
++int     handle_command(char* buf);
+ 
+ 
+ shell_command_t shell_commands[] = {
+@@ -106,7 +107,7 @@ shell_command_t shell_commands[] = {
+     {"read",        &shell_command_read},
+     {"sync",        &shell_command_sync},
+ #endif
+-    {NULL,          NULL}
++    {NULL,          &shell_command_default}
+ };
+ 
+ 
+@@ -123,7 +124,7 @@ int main(int argc, char* argv[])
+         completion_init();
+         while (true) {
+             shell_read_command();
+-            shell_do_cmd();
++            handle_command(shell_command_buffer);
+         }
+     } else if ((argc == 2) && (strcmp(argv[1], "--help") == 0)) {
+         puts(TMS(usage,
+@@ -141,8 +142,7 @@ int main(int argc, char* argv[])
+                 " Fehler aufgetreten."));
+         }
+     } else if ((argc == 3) && (strcmp(argv[1], "-c") == 0)) {
+-        strcpy(shell_command_buffer, argv[2]);
+-        shell_do_cmd();
++        handle_command(argv[2]);
+     }
+ 
+     return 0;
+@@ -187,128 +187,112 @@ void shell_read_command(void)
+     free(cwd);
+ }
+ 
+-/**
+- * Testet ob der Befehl am Anfang der uebergebenen Kommandozeile steht.
+- *
+- * @param cmd Pointer auf die Befehlsbeschreibung.
+- * @param cmdline Die eingegebene Kommandozeile.
+- *
+- * @return true wenn der Befehl drin steht, sonst false
+- */
+-bool shell_match_command(const char* cmd, const char* cmdline)
++int handle_command(char* buf)
+ {
+-    while (true)
+-    {
+-        // Wenn das Ende des Befehlsnamens erreicht ist, muss in der
+-        // Kommandozeile auch ein Nullbyte oder ein Leerschlag stehen.
+-        if ((*cmd == '\0') && ((*cmdline == '\0') ||(*cmdline == ' '))) {
+-            return true;
+-        } else if (*cmd != *cmdline) {
+-            return false;
+-        }
+-        cmd++;
+-        cmdline++;
+-    }
+-
+-    // Kommt nie vor.
+-    return false;
+-}
+-
+-/**
+- * Alle Vorkommen von einer Zeichenkette im Puffer ersetzen
+- */
+-static void buffer_replace(const char* search, const char* replace)
+-{
+-    char* res;
+-    int search_len = strlen(search);
+-    int replacement_len = strlen(replace);
+-
+-    while ((res = strstr(shell_command_buffer, search))) {
+-        // Was uebrig bleibt verschieben
+-        memmove(res + replacement_len, res + search_len,
+-            strlen(res + search_len) + 1);
++    char* args;
++    char** argv = NULL;
++    int num_tokens, argc;
++    int i;
++    int in_idx, out_idx;
++    struct token* tokens;
++    int ret;
+ 
+-        memcpy(res, replace, replacement_len);
++    num_tokens = tokenize_cmdline(buf, NULL, NULL);
++    if (num_tokens < 0) {
++        return 0;
+     }
+-}
+ 
+-/**
+- * Umgebungsvariablen im Puffer ersetzen
+- */
+-static void substitute_envvars(void)
+-{
+-    int i;
+-    const char* name;
+-    const char* value;
++    tokens = calloc(num_tokens, sizeof(*tokens));
++    if (num_tokens && tokens == NULL) {
++        free(argv);
++        fprintf(stderr, "Interner Fehler: Kein Speicher für tokens\n");
++        return 0;
++    }
+ 
+-    for (i = 0; i < getenv_count(); i++) {
+-        name = getenv_name_by_index(i);
+-        value = getenv_index(i);
++    tokenize_cmdline(buf, &args, tokens);
++
++    /* Befehlszeile parsen */
++    argc = 0;
++    for (i = 0; i < num_tokens; i++) {
++        switch (tokens[i].type) {
++            case TT_OPERATOR:
++            {
++                ret = -1;
++                errno = ENOSYS;
++                if (ret < 0) {
++                    fprintf(stderr,
++                            TMS(fail_dup, "lio_dup() fehlgeschlagen: %s\n"),
++                            strerror(-ret));
++                    goto found;
++                }
++                break;
++            }
+ 
+-        // Suchmuster generieren
+-        char pattern[strlen(name) + 2];
+-        pattern[0] = '$';
+-        strcpy(pattern + 1, name);
++            case TT_WORD:
++                ret = wordexp(tokens[i].value, &tokens[i].we, 0);
++                if (ret < 0) {
++                    fprintf(stderr, TMS(parse_error, "Parserfehler in '%s'\n"),
++                            tokens[i].value);
++                    goto found;
++                }
++                tokens[i].is_argv = true;
++                argc += tokens[i].we.we_wordc;
++                break;
+ 
+-        buffer_replace(pattern, value);
++            default:
++                abort();
++        }
+     }
+-}
+-
+-int shell_do_cmd(void)
+-{
+-    shell_command_t* command;
+-    uint32_t i;
+-    char* cmdstring = shell_command_buffer;
+-    int argc, pos;
+ 
+-    substitute_envvars();
+-
+-    // Einrueckung ignorieren
+-    while (*cmdstring == ' ' || *cmdstring == '\t') {
+-        cmdstring++;
++    /* Leerzeilen ignorieren */
++    if (argc == 0) {
++        goto found;
+     }
+ 
+-    // Kommentarzeilen ignorieren
+-    if (*cmdstring == '#') {
++    /* argv befüllen */
++    argv = calloc(argc + 1, sizeof(*argv));
++    if (argv == NULL) {
++        fprintf(stderr, "Interner Fehler: Kein Speicher für argv\n");
+         return 0;
+     }
+ 
+-    // argc und argv befüllen
+-    char args[strlen(cmdstring) + 1];
+-    memcpy(args, cmdstring, strlen(cmdstring) + 1);
+-
+-    argc = 1;
+-    //Jetzt werden die Argumente gezaehlt.
+-    for (pos = 0; pos < strlen(args); pos++) {
+-        if (args[pos] == ' ') {
+-            argc++;
++    for (in_idx = out_idx = 0; in_idx < num_tokens; in_idx++) {
++        if (tokens[in_idx].is_argv) {
++            int j;
++            for (j = 0; j < tokens[in_idx].we.we_wordc; j++) {
++                argv[out_idx++] = tokens[in_idx].we.we_wordv[j];
++            }
+         }
+     }
+ 
+-    char* argv[argc + 1];
+-    argv[0] = strtok(args, " ");
+-    for(pos = 1; pos < argc; pos++)
+-    {
+-        argv[pos] = strtok(NULL, " ");
+-    }
+-    argv[pos] = NULL;
+ 
+-    while (argv[argc - 1] == NULL) {
+-        argc--;
++    /* Passenden Befehl suchen und ausfuehren */
++    for (i = 0; shell_commands[i].handler != NULL; i++) {
++        if ((shell_commands[i].name == NULL) ||
++            !strcmp(shell_commands[i].name, argv[0]))
++        {
++            shell_commands[i].handler(argc, argv);
++            goto found;
++        }
+     }
+ 
++    fprintf(stderr, "Interner Fehler: Kein Befehl gefunden\n");
++    return 0;
+ 
+-    // Die Liste mit den Befehlen durchsuchen. Das wird solange gemacht, bis
+-    // der NULL eintrag am Ende erreicht wird.
+-    for (i = 0; (command = &shell_commands[i]) && (command->name); i++)
+-    {
+-        command = &shell_commands[i];
+-        if (shell_match_command(command->name, cmdstring) == true) {
+-            return command->handler(argc, argv);
++    /* Aufraeumen */
++found:
++    for (i = 0; i < num_tokens; i++) {
++        if (tokens[i].is_argv) {
++            wordfree(&tokens[i].we);
+         }
+     }
+-    return shell_command_default(argc, argv);
++    free(tokens);
++    free(args);
++    free(argv);
++
++    return 0;
+ }
++
+ /**
+  * Shell-Skript ausfuehren
+  *
+@@ -333,7 +317,7 @@ bool shell_script(const char* path)
+             shell_command_buffer[i - 1] = '\0';
+         }
+ 
+-        shell_do_cmd();
++        handle_command(shell_command_buffer);
+     }
+ 
+     fclose(script);
+diff --git a/src/modules/c/shell/shell.h b/src/modules/c/shell/shell.h
+index f119b63..d86061b 100644
+--- a/src/modules/c/shell/shell.h
++++ b/src/modules/c/shell/shell.h
+@@ -36,12 +36,33 @@
+ #ifndef _SHELL_H_
+ #define _SHELL_H_
+ 
++#include <stdbool.h>
++#include <wordexp.h>
++
++#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
++
++/* Tokenizer */
++enum token_type {
++    TT_WORD,
++    TT_OPERATOR,
++};
++
++struct token {
++    enum token_type type;
++    char* value;
++    bool is_argv;
++    wordexp_t we;
++};
++
++int tokenize_cmdline(const char* str, char** output, struct token* tokens);
++
++
++/** Array mit den Befehlen */
+ typedef struct shell_command_t {
+     const char* name;
+     int (*handler)(int argc, char* argv[]);
+ } shell_command_t;
+ 
+-/** Array mit den Befehlen */
+ extern shell_command_t shell_commands[];
+ 
+ 
+diff --git a/src/modules/c/shell/tokenize.c b/src/modules/c/shell/tokenize.c
+new file mode 100644
+index 0000000..4743845
+--- /dev/null
++++ b/src/modules/c/shell/tokenize.c
+@@ -0,0 +1,252 @@
++/*
++ * Copyright (c) 2016 Kevin Wolf
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "shell.h"
++
++#define TMS_MODULE shell
++#include <tms.h>
++
++#include <errno.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <ctype.h>
++
++#define TOKENIZER_OUTPUT(c) \
++    do { \
++        if (tokens) { \
++            if (output_size <= p - *output) { \
++                char *old_output = *output;\
++                int i; \
++                output_size *= 2; \
++                *output = realloc(*output, output_size); \
++                for (i = 0; i < num_tokens; i++) \
++                    tokens[i].value = *output + (tokens[i].value - old_output); \
++                p = *output + (p - old_output); \
++                p_start = *output + (p_start - old_output); \
++            } \
++            *p++ = (c); \
++        } else {\
++            p++; \
++        } \
++    } while(0)
++
++#define TOKENIZER_ACCEPT(token_type) \
++    do { \
++        if (p != p_start) { \
++            TOKENIZER_OUTPUT('\0'); \
++            if (tokens) { \
++                tokens[num_tokens] = (struct token) { \
++                    .type   = token_type, \
++                    .value  = p_start, \
++                }; \
++            } \
++            p_start = p; \
++            num_tokens++; \
++        } \
++    } while(0);
++
++#define TOKENIZER_IGNORE() \
++    do { \
++        p_start = p; \
++    } while(0);
++
++static bool valid_operator(const char* buf)
++{
++    const char* operators[] = {
++        "<", ">", ">>",
++    };
++    int i;
++
++    for (i = 0; i < ARRAY_SIZE(operators); i++) {
++        if (!strcmp(buf, operators[i])) {
++            return true;
++        }
++    }
++
++    return false;
++}
++
++int tokenize_cmdline(const char* str, char** output, struct token* tokens)
++{
++    int num_tokens = 0;
++    char* p = NULL;
++    char* p_start = NULL;
++    size_t output_size = 0;
++
++    enum state {
++        WHITESPACE,
++        NUMBER,
++        NORMAL,
++        COMMENT,
++        QUOTED,
++        SINGLE_QUOTED,
++        ESCAPED,
++        ESCAPED_QUOTE,
++        ESCAPED_SINGLE_QUOTE,
++        OPERATOR,
++    };
++
++    enum state state = WHITESPACE;
++
++    if (output) {
++        output_size = strlen(str) + 5;
++        p = malloc(output_size);
++        if (!p) {
++            return -ENOMEM;
++        }
++        *output = p;
++    }
++
++    p_start = p;
++    while (*str) {
++        switch (state) {
++            case NUMBER:
++                if (*str == '<' || *str == '>') {
++                    state = OPERATOR;
++                    continue;
++                } else if (!isdigit(*str)) {
++                    state = NORMAL;
++                    continue;
++                }
++                TOKENIZER_OUTPUT(*str);
++                break;
++            case NORMAL:
++                switch (*str) {
++                    case '\'':   TOKENIZER_OUTPUT(*str); state = SINGLE_QUOTED; break;
++                    case '"':   TOKENIZER_OUTPUT(*str); state = QUOTED; break;
++                    case '\\':  TOKENIZER_OUTPUT(*str); state = ESCAPED; break;
++                    case '<':   TOKENIZER_ACCEPT(TT_WORD); state = OPERATOR; continue;
++                    case '>':   TOKENIZER_ACCEPT(TT_WORD); state = OPERATOR; continue;
++                    case '|':   TOKENIZER_ACCEPT(TT_WORD); state = OPERATOR; continue;
++                    default:
++                        if (isspace(*str)) {
++                            TOKENIZER_ACCEPT(TT_WORD);
++                            state = WHITESPACE;
++                        } else {
++                            TOKENIZER_OUTPUT(*str);
++                        }
++                        break;
++                }
++                break;
++
++            case WHITESPACE:
++                if (*str == '#') {
++                    TOKENIZER_IGNORE();
++                    state = COMMENT;
++                } else if (!isspace(*str)) {
++                    TOKENIZER_IGNORE();
++                    state = NUMBER;
++                    continue;
++                }
++                break;
++
++            case COMMENT:
++                break;
++
++            case ESCAPED:
++                TOKENIZER_OUTPUT(*str);
++                state = NORMAL;
++                break;
++
++            case SINGLE_QUOTED:
++                if (*str == '\'') {
++                    state = NORMAL;
++                } else if (*str == '\\') {
++                    state = ESCAPED_SINGLE_QUOTE;
++                }
++                TOKENIZER_OUTPUT(*str);
++                break;
++
++            case QUOTED:
++                if (*str == '"') {
++                    state = NORMAL;
++                } else if (*str == '\\') {
++                    state = ESCAPED_QUOTE;
++                }
++                TOKENIZER_OUTPUT(*str);
++                break;
++
++            case ESCAPED_QUOTE:
++                TOKENIZER_OUTPUT(*str);
++                state = QUOTED;
++                break;
++
++            case ESCAPED_SINGLE_QUOTE:
++                TOKENIZER_OUTPUT(*str);
++                state = SINGLE_QUOTED;
++                break;
++
++            case OPERATOR:
++            {
++                /* Längster Operator ist drei Zeichen */
++                char buf[4] = { 0 };
++                int i;
++
++                for (i = 0; i < 3; i++) {
++                    buf[i] = *str;
++                    if (valid_operator(buf)) {
++                        TOKENIZER_OUTPUT(*str);
++                        str++;
++                    } else {
++                        break;
++                    }
++                }
++
++                TOKENIZER_ACCEPT(TT_OPERATOR);
++                state = NORMAL;
++                continue;
++            }
++        }
++
++        str++;
++    }
++
++    switch (state) {
++        case NUMBER:
++        case NORMAL:
++        case ESCAPED:
++            TOKENIZER_ACCEPT(TT_WORD);
++            break;
++        case WHITESPACE:
++        case COMMENT:
++            TOKENIZER_IGNORE();
++            break;
++        case QUOTED:
++        case ESCAPED_QUOTE:
++            fprintf(stderr, TMS(err_end_dquot,
++                                "Abschliessendes '\"' nicht gefunden\n"));
++            return -EINVAL;
++        case SINGLE_QUOTED:
++        case ESCAPED_SINGLE_QUOTE:
++            fprintf(stderr, TMS(err_end_squot,
++                                "Abschliessendes '\'' nicht gefunden\n"));
++            return -EINVAL;
++        case OPERATOR:
++            abort();
++    }
++
++    return num_tokens;
++}
+-- 
+2.1.4
+
+

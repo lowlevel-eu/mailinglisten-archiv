@@ -1,0 +1,193 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH 5/9] hdaudio: Enable output pins
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%205/9%5D%20hdaudio%3A%20Enable%20output%20pins&In-Reply-To=%3C1451853741-6440-6-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000376.html">
+   <LINK REL="Next"  HREF="000378.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH 5/9] hdaudio: Enable output pins</H1>
+    <B>Kevin Wolf</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%205/9%5D%20hdaudio%3A%20Enable%20output%20pins&In-Reply-To=%3C1451853741-6440-6-git-send-email-kevin%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH 5/9] hdaudio: Enable output pins">kevin at tyndur.org
+       </A><BR>
+    <I>Sun Jan  3 21:42:17 CET 2016</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000376.html">[cdi-devel] [PATCH 4/9] hdaudio: Debug output for every widget
+</A></li>
+        <LI>Next message: <A HREF="000378.html">[cdi-devel] [PATCH 6/9] hdaudio: Fix hda_set_volume() scaling
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#377">[ date ]</a>
+              <a href="thread.html#377">[ thread ]</a>
+              <a href="subject.html#377">[ subject ]</a>
+              <a href="author.html#377">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>While enumerating widgets, don't only consider output widgets (i.e.
+DACs), but also output pins (i.e. the jack or internal device wherer the
+sound actually goes). We need to enable the output there.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">kevin at tyndur.org</A>&gt;
+---
+ hdaudio/device.h | 13 +++++++++++++
+ hdaudio/main.c   | 47 +++++++++++++++++++++++++++++++++++++++--------
+ 2 files changed, 52 insertions(+), 8 deletions(-)
+
+diff --git a/hdaudio/device.h b/hdaudio/device.h
+index eb4746c..b9cedb6 100644
+--- a/hdaudio/device.h
++++ b/hdaudio/device.h
+@@ -179,8 +179,11 @@ enum codec_verbs {
+     VERB_SET_FORMAT         = 0x20000,
+     VERB_GET_AMP_GAIN_MUTE  = 0xb0000,
+     VERB_SET_AMP_GAIN_MUTE  = 0x30000,
++    VERB_GET_CONFIG_DEFAULT = 0xf1c00,
+     VERB_GET_CONN_LIST      = 0xf0200,
+     VERB_GET_CONN_SELECT    = 0xf0100,
++    VERB_GET_PIN_CONTROL    = 0xf0700,
++    VERB_SET_PIN_CONTROL    = 0x70700,
+     VERB_GET_EAPD_BTL       = 0xf0c00,
+ };
+ 
+@@ -188,6 +191,7 @@ enum codec_parameters {
+     PARAM_NODE_COUNT        = 0x04,
+     PARAM_FN_GROUP_TYPE     = 0x05,
+     PARAM_AUDIO_WID_CAP     = 0x09,
++    PARAM_PIN_CAP           = 0x0c,
+     PARAM_CONN_LIST_LEN     = 0x0e,
+     PARAM_OUT_AMP_CAP       = 0x12,
+ };
+@@ -215,6 +219,15 @@ enum widget_capabilities {
+     WIDGET_CAP_TYPE_MASK    = (0xf &lt;&lt; 20),
+ };
+ 
++enum pin_capabilities {
++    PIN_CAP_OUTPUT          = (1 &lt;&lt; 4),
++    PIN_CAP_INPUT           = (1 &lt;&lt; 5),
++};
++
++enum pin_ctl_flags {
++    PIN_CTL_ENABLE_OUTPUT   = (1 &lt;&lt; 6),
++};
++
+ enum sample_format {
+     SR_48_KHZ               = 0,
+     SR_44_KHZ               = (1 &lt;&lt; 14),
+diff --git a/hdaudio/main.c b/hdaudio/main.c
+index 416aa80..5bc0e54 100644
+--- a/hdaudio/main.c
++++ b/hdaudio/main.c
+@@ -265,6 +265,7 @@ static void widget_dump_connections(struct hda_device* hda, int codec, int nid)
+ static void widget_init(struct hda_device* hda, int codec, int nid)
+ {
+     uint32_t widget_cap;
++    enum widget_type type;
+ 
+     widget_cap = codec_query(hda, codec, nid,
+                              VERB_GET_PARAMETER | PARAM_AUDIO_WID_CAP);
+@@ -272,15 +273,14 @@ static void widget_init(struct hda_device* hda, int codec, int nid)
+         return;
+     }
+ 
++    type = (widget_cap &amp; WIDGET_CAP_TYPE_MASK) &gt;&gt; WIDGET_CAP_TYPE_SHIFT;
++
+ #ifdef DEBUG
+-    enum widget_type type;
+     uint32_t eapd_btl;
+     uint32_t amp_gain;
+     uint32_t amp_cap;
+     const char* s;
+ 
+-    type = (widget_cap &amp; WIDGET_CAP_TYPE_MASK) &gt;&gt; WIDGET_CAP_TYPE_SHIFT;
+-
+     switch (type) {
+         case 0:     s = &quot;output&quot;; break;
+         case 1:     s = &quot;input&quot;; break;
+@@ -307,12 +307,43 @@ static void widget_init(struct hda_device* hda, int codec, int nid)
+     widget_dump_connections(hda, codec, nid);
+ #endif
+ 
+-    if ((widget_cap &amp; 0xf00000) == 0) {
+-        if (!hda-&gt;output.nid) {
+-            DPRINTF(&quot;    * Using output at ID %d!\n&quot;, nid);
+-            hda-&gt;output.codec = codec;
+-            hda-&gt;output.nid = nid;
++    switch (type) {
++        case WIDGET_PIN:
++        {
++            uint32_t pin_cap, ctl;
++
++#ifdef DEBUG
++            uint32_t conf = codec_query(hda, codec, nid,
++                                        VERB_GET_CONFIG_DEFAULT);
++            DPRINTF(&quot;        pin config: %x\n&quot;, conf);
++#endif
++
++            pin_cap = codec_query(hda, codec, nid,
++                                  VERB_GET_PARAMETER | PARAM_PIN_CAP);
++            if ((pin_cap &amp; PIN_CAP_OUTPUT) == 0) {
++                return;
++            }
++
++            ctl = codec_query(hda, codec, nid, VERB_GET_PIN_CONTROL);
++            DPRINTF(&quot;        ctl: %x\n&quot;, ctl);
++
++            ctl |= PIN_CTL_ENABLE_OUTPUT;
++            codec_query(hda, codec, nid, VERB_SET_PIN_CONTROL | ctl);
++            break;
+         }
++
++        case WIDGET_OUTPUT:
++        {
++            if (!hda-&gt;output.nid) {
++                DPRINTF(&quot;    * Using output at ID %d!\n&quot;, nid);
++                hda-&gt;output.codec = codec;
++                hda-&gt;output.nid = nid;
++            }
++            break;
++        }
++
++        default:
++            return;
+     }
+ }
+ 
+-- 
+2.1.4
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000376.html">[cdi-devel] [PATCH 4/9] hdaudio: Debug output for every widget
+</A></li>
+	<LI>Next message: <A HREF="000378.html">[cdi-devel] [PATCH 6/9] hdaudio: Fix hda_set_volume() scaling
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#377">[ date ]</a>
+              <a href="thread.html#377">[ thread ]</a>
+              <a href="subject.html#377">[ subject ]</a>
+              <a href="author.html#377">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

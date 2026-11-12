@@ -1,0 +1,299 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 2/7] libc: ELF-32-Loader ein bisschen umgebaut
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%202/7%5D%20libc%3A%20ELF-32-Loader%20ein%20bisschen%20umgebaut&In-Reply-To=%3C1483310141-25674-3-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002607.html">
+   <LINK REL="Next"  HREF="002609.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 2/7] libc: ELF-32-Loader ein bisschen umgebaut</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%202/7%5D%20libc%3A%20ELF-32-Loader%20ein%20bisschen%20umgebaut&In-Reply-To=%3C1483310141-25674-3-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 2/7] libc: ELF-32-Loader ein bisschen umgebaut">kevin at tyndur.org
+                  </A><BR>
+    <I>So Jan  1 23:35:36 CET 2017</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002607.html">[tyndur-devel] [PATCH 1/7] libc: SLIST-Makros aus sys/queue.h
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002609.html">[tyndur-devel] [PATCH 3/7] init: loader_get_library() implementiert
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2608">[ Datum ]</a>
+              <a href="thread.html#2608">[ Thema ]</a>
+              <a href="subject.html#2608">[ Betreff (Subject) ]</a>
+              <a href="author.html#2608">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* libc: Als Vorbereitung für die Erweiterungen erst ein bisschen
+  Refactoring für den bestehenden Loader machen. Der wird dabei so
+  umgebaut, dass er davon ausgeht, dass es mal mehrere Images zu laden
+  geben könnte.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/lib/bin_loader/elf32.c | 168 ++++++++++++++++++++++++++++++++++++---------
+ 1 file changed, 137 insertions(+), 31 deletions(-)
+
+diff --git a/src/lib/bin_loader/elf32.c b/src/lib/bin_loader/elf32.c
+index fb3d3e6..97dd729 100644
+--- a/src/lib/bin_loader/elf32.c
++++ b/src/lib/bin_loader/elf32.c
+@@ -29,12 +29,16 @@
+ #include &lt;types.h&gt;
+ #include &lt;string.h&gt;
+ #include &lt;stdint.h&gt;
++#include &lt;stdlib.h&gt;
+ #include &lt;stdbool.h&gt;
+ #include &lt;page.h&gt;
+ #include &lt;elf_common.h&gt;
+ #include &lt;elf32.h&gt;
++#include &lt;errno.h&gt;
+ #include &lt;loader.h&gt;
+ #include &lt;lost/config.h&gt;
++#include &lt;sys/queue.h&gt;
++
+ #define ELF_MAGIC (ELFMAG0 | (ELFMAG1 &lt;&lt; 8) | (ELFMAG2 &lt;&lt; 16) | (ELFMAG3 &lt;&lt; 24))
+ 
+ /**
+@@ -63,38 +67,65 @@ bool loader_is_elf32(vaddr_t image_start, size_t image_size)
+     return true;
+ }
+ 
++#if CONFIG_ARCH == ARCH_AMD64
+ 
+-/**
+- * Laedt ein ELF-32-Image
+- */
+ bool loader_elf32_load_image(pid_t process, vaddr_t image_start,
+     size_t image_size)
+ {
+-
+-#if CONFIG_ARCH == ARCH_AMD64
+ 	return false;
++}
++
+ #else
+-    Elf32_Ehdr* elf_header = (Elf32_Ehdr*) image_start;
+ 
+-    // Nur gueltige ELF-Images laden
+-    if (elf_header-&gt;e_magic != ELF_MAGIC) {
+-        return false;
+-    }
++struct elf32_image {
++    Elf32_Ehdr*                 header;
++    size_t                      size;
+ 
+-    // Hauptthread erstellen
+-    loader_create_thread(process, (vaddr_t) elf_header-&gt;e_entry);
++    uintptr_t                   min_addr;
++    size_t                      num_pages;
++    uint8_t*                    child_mem;
++
++    SLIST_ENTRY(elf32_image)    next;
++};
+ 
+-    // Pointer auf den ersten Program-Header, dieser wird von e_phnum weiteren
+-    // PHs gefolgt
+-    Elf32_Phdr* program_header = (Elf32_Phdr*) (((uintptr_t) elf_header) +
+-        elf_header-&gt;e_phoff);
++struct elf32_loader_state {
++    pid_t                       process;
++    SLIST_HEAD(, elf32_image)   images;
++    struct elf32_image*         last;
++};
+ 
+-    // Groesse des gesamten Zielspeichers bestimmen
++static int queue_image(struct elf32_loader_state* s,
++                       uint8_t* image_start, size_t image_size, int type)
++{
++    Elf32_Ehdr* elf_header = (Elf32_Ehdr*) image_start;
++    Elf32_Phdr* program_header;
++    struct elf32_image* im;
+     uintptr_t min_addr = -1;
+     uintptr_t max_addr = 0;
+-    size_t num_pages;
+     int i;
+ 
++    /* Nur gültige ELF-Images vom richtigen Typ laden */
++    if (elf_header-&gt;e_magic != ELF_MAGIC || elf_header-&gt;e_type != ET_EXEC) {
++        return -EINVAL;
++    }
++
++    /* In die Liste einfügen */
++    im = malloc(sizeof(*im));
++
++    if (im == NULL) {
++        return -ENOMEM;
++    }
++    *im = (struct elf32_image) {
++        .header = elf_header,
++        .size   = image_size,
++    };
++    SLIST_INSERT_HEAD(&amp;s-&gt;images, im, next);
++    s-&gt;last = im;
++
++    /* Erster Program Header, dieser wird von e_phnum weiteren PHs gefolgt */
++    program_header = (Elf32_Phdr*) (image_start + elf_header-&gt;e_phoff);
++
++    /* Größe des gesamten Zielspeichers bestimmen */
+     for (i = 0; i &lt; elf_header-&gt;e_phnum; i++) {
+         if (program_header[i].p_type != PT_LOAD) {
+             continue;
+@@ -107,32 +138,107 @@ bool loader_elf32_load_image(pid_t process, vaddr_t image_start,
+         }
+     }
+ 
+-    num_pages = (max_addr &gt;&gt; PAGE_SHIFT) - (min_addr &gt;&gt; PAGE_SHIFT) + 1;
+-    min_addr &amp;= PAGE_MASK;
++    im-&gt;num_pages = (max_addr &gt;&gt; PAGE_SHIFT) - (min_addr &gt;&gt; PAGE_SHIFT) + 1;
++    im-&gt;min_addr = min_addr &amp; PAGE_MASK;
+ 
+-    // Jetzt werden die einzelnen Program-Header geladen
+-    uint8_t* src_mem = image_start;
+-    uint8_t* child_mem = loader_allocate_mem(num_pages * PAGE_SIZE);
+-    memset(child_mem, 0, num_pages * PAGE_SIZE);
++    return 0;
++}
+ 
+-    for (i = 0; i &lt; elf_header-&gt;e_phnum; i++) {
+-        // Nur ladbare PHs laden ;-)
++static int create_flat_image(struct elf32_loader_state* s,
++                             struct elf32_image* im)
++{
++    Elf32_Phdr* program_header;
++    uint8_t* src_mem = (uint8_t*) im-&gt;header;
++    uint8_t* child_mem;
++    int i;
++
++    /* Speicher für dieses Image anfordern */
++    child_mem = loader_allocate_mem(im-&gt;num_pages * PAGE_SIZE);
++    if (child_mem == NULL) {
++        return -ENOMEM;
++    }
++    memset(child_mem, 0, im-&gt;num_pages * PAGE_SIZE);
++
++    /* Jetzt werden die einzelnen Program-Header geladen */
++    program_header = (Elf32_Phdr*) (src_mem + im-&gt;header-&gt;e_phoff);
++    for (i = 0; i &lt; im-&gt;header-&gt;e_phnum; i++) {
++        /* Nur ladbare PHs laden ;-) */
+         if (program_header-&gt;p_type == PT_LOAD) {
+             memcpy(
+-                &amp;child_mem[program_header-&gt;p_vaddr - min_addr],
++                &amp;child_mem[program_header-&gt;p_vaddr - im-&gt;min_addr],
+                 &amp;src_mem[program_header-&gt;p_offset],
+                 program_header-&gt;p_filesz);
+         }
+         program_header++;
+     }
+ 
++    im-&gt;child_mem = child_mem;
++    return 0;
++}
++
++static int assign_flat_image(struct elf32_loader_state* s,
++                             struct elf32_image* im)
++{
++    int ret;
++
+     // Den geladenen Speicher in den Adressraum des Prozesses
+     // verschieben
+-    loader_assign_mem(process, (void*) min_addr, child_mem,
+-        num_pages * PAGE_SIZE);
++    ret = loader_assign_mem(s-&gt;process, (void*) im-&gt;min_addr, im-&gt;child_mem,
++                            im-&gt;num_pages * PAGE_SIZE);
++    if (!ret) {
++        /* FIXME child_mem wird geleakt */
++        return -EFAULT;
++    }
+ 
+-    return true;
+-#endif
++    return 0;
+ }
+ 
++/**
++ * Laedt ein ELF-32-Image
++ */
++bool loader_elf32_load_image(pid_t process, vaddr_t image_start,
++    size_t image_size)
++{
++    Elf32_Ehdr* elf_header = (Elf32_Ehdr*) image_start;
++    struct elf32_loader_state s = {
++        .process    = process,
++        .images     = SLIST_HEAD_INITIALIZER(&amp;images),
++        .last       = NULL,
++    };
++    struct elf32_image* im;
++    int ret;
++
++    /* Das Hauptimage selber in die Liste eintragen */
++    ret = queue_image(&amp;s, image_start, image_size, ET_EXEC);
++    if (ret &lt; 0) {
++        return false;
++    }
++
++    /* Hauptthread erstellen */
++    loader_create_thread(process, (vaddr_t) elf_header-&gt;e_entry);
++
++    /* Und jetzt alles laden */
++    SLIST_FOREACH(im, &amp;s.images, next) {
++        ret = create_flat_image(&amp;s, im);
++        if (ret &lt; 0) {
++            /* FIXME Der komplette neue Prozess wird geleakt */
++            goto fail;
++        }
++
++        ret = assign_flat_image(&amp;s, im);
++        if (ret &lt; 0) {
++            /* FIXME Der komplette neue Prozess wird geleakt */
++            goto fail;
++        }
++    }
++
++    ret = 0;
++fail:
++    SLIST_FOREACH_SAFE(im, &amp;s.images, next) {
++        free(im);
++    }
+ 
++    return (ret == 0);
++}
++
++#endif
+-- 
+2.1.4
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002607.html">[tyndur-devel] [PATCH 1/7] libc: SLIST-Makros aus sys/queue.h
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002609.html">[tyndur-devel] [PATCH 3/7] init: loader_get_library() implementiert
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2608">[ Datum ]</a>
+              <a href="thread.html#2608">[ Thema ]</a>
+              <a href="subject.html#2608">[ Betreff (Subject)]</a>
+              <a href="author.html#2608">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

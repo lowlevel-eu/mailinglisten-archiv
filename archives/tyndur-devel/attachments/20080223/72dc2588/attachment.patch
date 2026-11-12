@@ -1,0 +1,85 @@
+Index: src/modules/lib/stdlibc/file.c
+===================================================================
+--- src/modules/lib/stdlibc/file.c	(Revision 703)
++++ src/modules/lib/stdlibc/file.c	(Arbeitskopie)
+@@ -70,6 +71,9 @@
+         switch (mode[i]) {
+             case 'r':
+                 *attr |= IO_OPEN_MODE_READ;
++                if (mode[i + 1] == '+') {
++                    *attr |= IO_OPEN_MODE_WRITE;
++                }
+                 break;
+ 
+             case 'w':
+Index: src/modules/include/fcntl.h
+===================================================================
+--- src/modules/include/fcntl.h	(Revision 703)
++++ src/modules/include/fcntl.h	(Arbeitskopie)
+@@ -39,12 +39,12 @@
+ 
+ #define O_RDONLY 1
+ #define O_WRONLY 2
+-#define O_RDWR 3
+-#define O_APPEND 4
+-#define O_CREAT 8
+-#define O_EXCL 16
+-#define O_TRUNC 32
+-#define O_BINARY 64
++#define O_RDWR 4
++#define O_APPEND 8
++#define O_CREAT 16
++#define O_EXCL 32
++#define O_TRUNC 64
++#define O_BINARY 128
+ 
+ /// Emulierter Unix-Syscall zum oeffnen von Dateien
+ int open(const char* filename, int flags, ...);
+Index: src/modules/lib/posix/posix_files.c
+===================================================================
+--- src/modules/lib/posix/posix_files.c	(Revision 703)
++++ src/modules/lib/posix/posix_files.c	(Arbeitskopie)
+@@ -150,6 +151,35 @@
+     char* fopen_flags = "   ";
+     size_t flags_size = 0;
+ 
++    // Wenn O_CREAT und O_EXCL gleichzeitig gesetzt ist, muessen wir abbrechen
++    // wenn die Datei existiert.
++    if ((flags & O_CREAT) && (flags & O_EXCL)) {
++        FILE* f = fopen(filename, "r");
++        if (f != NULL) {
++            fclose(f);
++            errno = EEXIST;
++            return -1;
++        }
++    } else if ((flags & O_CREAT) == 0) {
++        // Wenn die Datei nicht existiert und nicht angelegt werden soll, ist
++        // der Fall auch klar.
++        FILE* f = fopen(filename, "r");
++        if (f == NULL) {
++            errno = ENOENT;
++            return -1;
++        }
++        fclose(f);
++    }
++    
++    if (flags & O_CREAT) {
++        // Sicherstellen, dass die Datei existiert
++        FILE* f = fopen(filename, "r");
++        if (f == NULL) {
++            f = fopen(filename, "w");
++        }
++        fclose(f);
++    }
++
+     // Open-Flags auf fopen-Kompatible uebersetzen
+     if ((flags & O_RDONLY)) {
+         fopen_flags[flags_size++] = 'r';
+@@ -159,7 +189,6 @@
+         fopen_flags[flags_size++] = 'r';
+         fopen_flags[flags_size++] = '+';
+     } else if ((flags & O_RDWR)) {
+-        // FIXME
+         fopen_flags[flags_size++] = 'r';
+         fopen_flags[flags_size++] = '+';
+     }

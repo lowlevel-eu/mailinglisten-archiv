@@ -1,0 +1,351 @@
+Index: include/dns.h
+===================================================================
+--- include/dns.h	(Revision 0)
++++ include/dns.h	(Revision 0)
+@@ -0,0 +1,98 @@
++/*  
++ * Copyright (c) 2007 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS 
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR 
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, 
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, 
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; 
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR 
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef _DNS_H_
++#define _DNS_H_
++
++#include <stdint.h>
++
++#define DNS_PORT 53
++
++struct dns_header {
++    uint16_t    id;
++    uint16_t    flags;
++    uint16_t    qd_count;
++    uint16_t    an_count;
++    uint16_t    ns_count;
++    uint16_t    ar_count;
++} __attribute__((packed));
++
++
++// Konstanten für die Header-Flags
++
++/// 0 = Query; 1 = Response
++#define DNS_QR 0x80
++
++/// Authoritative Answer? (Nur in Antwort)
++#define DNS_AA 0x04
++
++/// Truncation - Nachricht ist abgeschnitten
++#define DNS_TC 0x02
++
++/// Recursion Desired
++#define DNS_RD 0x01
++
++/// Recursion Available
++#define DNS_RA 0x8000
++
++/// Opcode aus einem DNS-Header
++#define dns_get_opde(x) (((x) >> 3) & 0x0F)
++
++/// Opcode in einem DNS-Header setzen
++static inline void dns_set_opcode(struct dns_header* header, uint8_t opcode)
++{
++    header->flags &= ~0x78;
++    header->flags |= (opcode << 3);
++}
++
++// Opcodes
++#define DNS_OPCODE_QUERY    0x00
++#define DNS_OPCODE_IQUERY   0x01
++#define DNS_OPCODE_STATUS   0x02
++
++// Response Codes
++#define DNS_RCODE_OK        0x00
++#define DNS_RCODE_EFORMAT   0x01
++#define DNS_RCODE_ESERVER   0x02
++#define DNS_RCODE_ENAME     0x03
++#define DNS_RCODE_EIMPL     0x04
++#define DNS_RCODE_EREFUSED  0x05
++
++/// Reponse Code aus einem DNS-Header
++#define dns_get_rcode(x) (((x) >> 8) & 0x0F)
++
++dword dns_request(char* domain);
++
++#endif
+
+Eigenschaftsänderungen: include/dns.h
+___________________________________________________________________
+Name: svn:eol-style
+   + native
+
+Index: dns.c
+===================================================================
+--- dns.c	(Revision 0)
++++ dns.c	(Revision 0)
+@@ -0,0 +1,203 @@
++/*  
++ * Copyright (c) 2007 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS 
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR 
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, 
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, 
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; 
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR 
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <types.h>
++#include <string.h>
++#include <network.h>
++#include <stdio.h>
++
++#include "dns.h"
++#include "tcp.h"
++
++static dword dns_ip = 
++//    big_endian_dword(0xc0a80103);
++    0x7cad61c2;
++
++dword dns_request(char* domain)
++{
++    // TODO Caching
++
++    printf("DNS: Oeffne Verbindung\n");
++    struct tcp_connection* conn = tcp_open_connection(dns_ip, DNS_PORT);
++    if (conn == NULL) {
++        printf("DNS: Konnte Verbindung nicht aufbauen.\n");
++        return 0;
++    }
++
++    size_t domain_len = strlen(domain);
++    char data[2 + sizeof(struct dns_header) + domain_len + 6];
++
++    // 2 Bytes Präfix für TCP-Transport
++    *((word*) data) = 
++        big_endian_word(sizeof(struct dns_header) + domain_len + 6);
++    
++    // DNS-Header
++    struct dns_header* header = (struct dns_header*) &data[2];
++    header->id = 0;
++    header->flags = DNS_RD;
++    header->qd_count = big_endian_word(1);
++    header->an_count = 0;
++    header->ns_count = 0;
++    header->ar_count = 0;
++    
++    // Question Section
++    // Die Question Section besteht aus einzelnen Labels, d.h. Bestandteilen
++    // einer Domain (www.xyz.de hat die drei Labels www, xyz und de).
++    // Vor jedem Label gibt ein Byte die Länge dieses Labels an. Daher von
++    // hinten durchgehen und mitzählen und bei jedem Punkt den aktuellen
++    // Zählerstand setzen.
++    char* qname = &data[2 + sizeof(struct dns_header)];
++    size_t label_len = 0;
++    int i;
++
++    for (i = domain_len; i; i--) {
++        if (domain[i - 1] != '.') {
++            qname[i] = domain[i - 1];
++            label_len++;
++        } else {
++            qname[i] = label_len;
++            label_len = 0;
++        }
++    }
++    qname[0] = label_len;
++
++    // Das Ende wird durch ein Label der Laenge 0 markiert
++    qname[domain_len + 1] = '\0';
++
++    // QTYPE = A und QCLASS = IN
++    *((word*) &data[2 + sizeof(struct dns_header) + domain_len + 2]) =
++        big_endian_word(1);
++    *((word*) &data[2 + sizeof(struct dns_header) + domain_len + 4]) =
++        big_endian_word(1);
++
++    // Senden 
++    struct tcp_out_buffer out_buffer = {
++        .size = 2 + sizeof(struct dns_header) + domain_len + 6,
++        .data = data
++    };
++    list_insert(conn->out_buffer, list_size(conn->out_buffer), &out_buffer);
++    tcp_send_ack(conn);
++
++    // Auf Antwort warten
++    printf("DNS: Warte auf Antwort\n");
++    struct tcp_in_buffer* in_buffer;
++    while(1) {
++        if ((in_buffer = list_pop(conn->to_lostio))) {
++            void* reply = in_buffer->data;
++/*            
++            {
++                int j;
++                for (j = 0; j < in_buffer->size; j++) {
++                    printf(" %02hhx", *((byte*) reply + j));
++                }
++            }
++*/            
++
++            // 2 Bytes TCP-Präfix
++            reply += 2;
++
++            // Header ignorieren
++            int qd_count = 
++                big_endian_word(((struct dns_header*) reply)->qd_count);
++            int an_count = 
++                big_endian_word(((struct dns_header*) reply)->an_count);
++            reply += sizeof(struct dns_header);
++
++/*
++            printf("Ignoriere Header. qd = %d, an = %d\n", qd_count, an_count);
++            printf("[a] reply = %08x\n", (dword) reply);
++*/
++
++            // Question Section ignorieren
++            for (i = 0; i < qd_count; i++) {                
++                // QNAMEs
++                int label_len;
++                while ((label_len = *((byte*) reply))) {
++                    reply += label_len + 1;
++                }
++
++                // Null-Label, QTYPE und QCLASS
++//                printf("   *reply = %08x\n", big_endian_dword(*((dword*) reply)));
++                reply += 5;
++//                printf("[b] reply = %08x\n", (dword) reply);
++            }
++
++            // Hier kommt die Antwort - alles ignorieren, was den falschen
++            // Typ hat, und beim ersten Treffer die IP zurückgeben.
++            for (i = 0; i < an_count; i++) 
++            {
++                // QNAMEs - interessieren nicht
++                int label_len;
++                while ((label_len = *((byte*) reply))) {
++                    
++                    if (label_len & 0xC0) {
++                        // Pointer
++                        reply += 2;
++//                        printf("\n[c] reply = %08x\n", (dword) reply);
++                        break;
++                    } else {
++//                        printf("    0x%x Bytes Label:\n", label_len);
++                        int j;
++                        for (j = 0; j < label_len; j++) {
++                            printf(" %02hhx", *((byte*) reply + j));
++                        }
++                        reply += label_len + 1;
++//                        printf("\n[c] reply = %08x\n", (dword) reply);
++                    }
++                }
++
++                // QTYPE - Hostadressen (A = 0x1 big-endian)  interessieren
++                size_t answer_len = 
++                    10 + big_endian_word(*((word*) (reply + 8)));
++/*                printf("[d] reply = %08x; answer_len = 0x%x\n", (dword) reply,
++                    answer_len);*/
++
++                if (*((word*) reply) == 0x100) {
++                    return *((dword*) (reply + 10));
++                } else {
++                    reply += answer_len;
++                }
++            }
++            
++            break;
++        }
++        wait_for_rpc();
++    }
++    printf("DNS: Antwort erhalten\n");
++
++    // TODO Verbindung schliessen
++
++    return 0;
++}
+
+Eigenschaftsänderungen: dns.c
+___________________________________________________________________
+Name: svn:eol-style
+   + native
+
+Index: lostio_if.c
+===================================================================
+--- lostio_if.c	(Revision 636)
++++ lostio_if.c	(Arbeitskopie)
+@@ -44,6 +44,7 @@
+ #include "network.h"
+ #include "ip.h"
+ #include "tcp.h"
++#include "dns.h"
+ 
+ //Hier koennen die Debug-Nachrichten aktiviert werden
+ #define DEBUG 0
+@@ -129,6 +130,15 @@
+ 
+     *delim = '\0';
+     dword ip = string_to_ip(*path + 1);
++    if (!ip) {
++        ip = dns_request(*path + 1);
++    }
++
++    if (!ip) {
++        DEBUG_MSG("Konnte Adresse nicht aufloesen");
++        return FALSE;
++    }
++
+     *delim = ':';
+ 
+     char* port_string = delim + 1;

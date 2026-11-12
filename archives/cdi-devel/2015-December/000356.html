@@ -1,0 +1,157 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH 10/10] ehci: Use __attribute__((aligned()))
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%2010/10%5D%20ehci%3A%20Use%20__attribute__%28%28aligned%28%29%29%29&In-Reply-To=%3C1451346799-23335-11-git-send-email-max%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000355.html">
+   <LINK REL="Next"  HREF="000363.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH 10/10] ehci: Use __attribute__((aligned()))</H1>
+    <B>Max Reitz</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%2010/10%5D%20ehci%3A%20Use%20__attribute__%28%28aligned%28%29%29%29&In-Reply-To=%3C1451346799-23335-11-git-send-email-max%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH 10/10] ehci: Use __attribute__((aligned()))">max at tyndur.org
+       </A><BR>
+    <I>Tue Dec 29 00:53:19 CET 2015</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000355.html">[cdi-devel] [PATCH 09/10] usb-storage: Drop bulk_only_reset()'s	return value
+</A></li>
+        <LI>Next message: <A HREF="000363.html">[cdi-devel] [PATCH 00/10] usb: Some fixes
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#356">[ date ]</a>
+              <a href="thread.html#356">[ thread ]</a>
+              <a href="subject.html#356">[ subject ]</a>
+              <a href="author.html#356">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>* Using that attribute is a bit nicer than trying to do the alignment
+  manually. It will blow up the QH size to 256 bytes, but we can
+  probably live with that.
+* Use the same attribute for fat QHs and qTDs; we will need this (at
+  least for QHs) when creating an array of QHs/qTDs so that they are
+  properly aligned.
+
+Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+---
+ ehci/ehci.h | 33 +++++++++++++++++----------------
+ 1 file changed, 17 insertions(+), 16 deletions(-)
+
+diff --git a/ehci/ehci.h b/ehci/ehci.h
+index d37f141..fb8dd9e 100644
+--- a/ehci/ehci.h
++++ b/ehci/ehci.h
+@@ -23,6 +23,7 @@
+ #ifndef EHCI_H
+ #define EHCI_H
+ 
++#include &lt;assert.h&gt;
+ #include &lt;stddef.h&gt;
+ #include &lt;stdint.h&gt;
+ 
+@@ -62,43 +63,40 @@ struct ehci_qtd {
+ 
+     // 64-bit structures
+     uint32_t ext_buffer[5];
+-} __attribute__((packed));
++} __attribute__((packed, aligned(128)));
++
++static_assert(!(sizeof(struct ehci_qtd) % 128),
++              &quot;sizeof(ehci_qtd) must be a multiple of 128&quot;);
+ 
+ struct ehci_qh {
+     uint32_t next_qh;
+     uint32_t ep_state[2];
+     uint32_t current_qtd;
+     struct ehci_qtd overlay;
+-} __attribute__((packed));
++} __attribute__((packed, aligned(128)));
++
++static_assert(!(sizeof(struct ehci_qh) % 128),
++              &quot;sizeof(ehci_qh) must be a multiple of 128&quot;);
+ 
+ typedef struct ehci_fat_qh ehci_fat_qh_t;
+ typedef struct ehci_fat_qtd ehci_fat_qtd_t;
+ 
+-#define DIFF_TO_MULTIPLE(value, divisor) \
+-    ((divisor) - ((((value) + (divisor) - 1) % (divisor)) + 1))
+-
+ struct ehci_fat_qh {
+     volatile struct ehci_qh qh;
+ 
+-    // Align the QH to 128 bytes (something with cache lines?). Otherwise,
+-    // there may be conflicts between data we are writing to our very own
+-    // fields provided by ehci_fat_qh_t and writes done by the HC to this
+-    // structure.
+-    uint8_t alignment[DIFF_TO_MULTIPLE(sizeof(struct ehci_qh), 128)];
+-
+     struct cdi_mem_area *cdi_mem_area;
+     uintptr_t paddr;
+ 
+     ehci_fat_qh_t *next, *previous;
+     ehci_fat_qtd_t *first_qtd, *last_qtd;
+-};
++} __attribute__((aligned(64)));
++
++static_assert(!(sizeof(struct ehci_fat_qh) % 64),
++              &quot;sizeof(ehci_fat_qh) must be a multiple of 64&quot;);
+ 
+ struct ehci_fat_qtd {
+     volatile struct ehci_qtd qtd;
+ 
+-    // Align the qTD to a multiple of 128 bytes.
+-    uint8_t alignment[DIFF_TO_MULTIPLE(sizeof(struct ehci_qtd), 128)];
+-
+     struct cdi_mem_area *cdi_mem_area;
+     uintptr_t paddr;
+ 
+@@ -111,7 +109,10 @@ struct ehci_fat_qtd {
+     size_t write_back_size;
+ 
+     cdi_usb_transmission_result_t *result;
+-};
++} __attribute__((aligned(64)));
++
++static_assert(!(sizeof(struct ehci_fat_qtd) % 64),
++              &quot;sizeof(ehci_fat_qtd) must be a multiple of 64&quot;);
+ 
+ struct ehci {
+     struct cdi_usb_hc hc;
+-- 
+2.6.4
+
+</PRE>
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000355.html">[cdi-devel] [PATCH 09/10] usb-storage: Drop bulk_only_reset()'s	return value
+</A></li>
+	<LI>Next message: <A HREF="000363.html">[cdi-devel] [PATCH 00/10] usb: Some fixes
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#356">[ date ]</a>
+              <a href="thread.html#356">[ thread ]</a>
+              <a href="subject.html#356">[ subject ]</a>
+              <a href="author.html#356">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

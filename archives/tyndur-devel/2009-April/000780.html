@@ -1,0 +1,197 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 3/3] cdi/core: Funktionen um auf IRQs zu	warten
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%203/3%5D%20cdi/core%3A%20Funktionen%20um%20auf%20IRQs%20zu%0A%09warten&In-Reply-To=%3C1240672054-18390-4-git-send-email-toni%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="000800.html">
+   <LINK REL="Next"  HREF="000801.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 3/3] cdi/core: Funktionen um auf IRQs zu	warten</H1>
+    <B>Antoine Kaufmann</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%203/3%5D%20cdi/core%3A%20Funktionen%20um%20auf%20IRQs%20zu%0A%09warten&In-Reply-To=%3C1240672054-18390-4-git-send-email-toni%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 3/3] cdi/core: Funktionen um auf IRQs zu	warten">toni at tyndur.org
+                  </A><BR>
+    <I>Sa Apr 25 17:07:34 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="000800.html">[tyndur-devel] [PATCH 2/3] cdi/core: Mehrere IRQ-Handler pro	Treiber
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="000801.html">[tyndur-devel] [PATCH 3/3] cdi/core: Funktionen um auf IRQs zu	warten
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#780">[ Datum ]</a>
+              <a href="thread.html#780">[ Thema ]</a>
+              <a href="subject.html#780">[ Betreff (Subject) ]</a>
+              <a href="author.html#780">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ cdi/core: Zwei neue Funktionen um effizient auf IRQs zu warten
+---
+ src/modules/cdi/include/cdi/misc.h |   24 +++++++++++-
+ src/modules/cdi/lib/misc.c         |   73 +++++++++++++++++++++++++++++++++++-
+ 2 files changed, 95 insertions(+), 2 deletions(-)
+
+diff --git a/src/modules/cdi/include/cdi/misc.h b/src/modules/cdi/include/cdi/misc.h
+index dc9e277..2a130f6 100644
+--- a/src/modules/cdi/include/cdi/misc.h
++++ b/src/modules/cdi/include/cdi/misc.h
+@@ -24,7 +24,29 @@
+  */
+ void cdi_register_irq(uint8_t irq, void (*handler)(struct cdi_device*), 
+     struct cdi_device* device);
+-    
++
++/**
++ * Setzt den IRQ-Zaehler fuer cdi_wait_irq zurueck.
++ *
++ * @param irq Nummer des IRQ
++ *
++ * @return 0 bei Erfolg, -1 im Fehlerfall
++ */
++int cdi_reset_wait_irq(uint8_t irq);
++
++/**
++ * Wartet bis der IRQ aufgerufen wurde. Der interne Zaehler muss zuerst mit
++ * cdi_reset_wait_irq zurueckgesetzt werden, damit auch die IRQs abgefangen
++ * werden koennen, die kurz vor dem Aufruf von dieser Funktion aufgerufen
++ * werden.
++ *
++ * @param irq       Nummer des IRQ auf den gewartet werden soll
++ * @param timeout   Anzahl der Millisekunden, die maximal gewartet werden sollen
++ *
++ * @return 0 wenn der irq aufgerufen wurde, -1 sonst.
++ */
++int cdi_wait_irq(uint8_t irq, uint32_t timeout);
++
+ /**
+  * Reserviert physisch zusammenhaengenden Speicher.
+  *
+diff --git a/src/modules/cdi/lib/misc.c b/src/modules/cdi/lib/misc.c
+index ae66a9e..4f2c19d 100644
+--- a/src/modules/cdi/lib/misc.c
++++ b/src/modules/cdi/lib/misc.c
+@@ -21,6 +21,7 @@
+ 
+ static void (*driver_irq_handler[IRQ_COUNT])(struct cdi_device*) = { NULL };
+ static struct cdi_device* driver_irq_device[IRQ_COUNT] = { NULL };
++static uint8_t driver_irq_count[IRQ_COUNT] = { 0 };
+ 
+ /**
+  * Interner IRQ-Handler, der den IRQ-Handler des Treibers aufruft
+@@ -33,6 +34,7 @@ static void irq_handler(uint8_t irq)
+     }
+ 
+     irq -= LOST_IRQ_OFFSET;
++    driver_irq_count[irq]++;
+     if (driver_irq_handler[irq]) {
+         driver_irq_handler[irq](driver_irq_device[irq]);
+     }
+@@ -59,7 +61,76 @@ void cdi_register_irq(uint8_t irq, void (*handler)(struct cdi_device*),
+ 
+     register_intr_handler(LOST_IRQ_OFFSET + irq, irq_handler);
+ }
+-    
++
++/**
++ * Setzt den IRQ-Zaehler fuer cdi_wait_irq zurueck.
++ *
++ * @param irq Nummer des IRQ
++ *
++ * @return 0 bei Erfolg, -1 im Fehlerfall
++ */
++int cdi_reset_wait_irq(uint8_t irq)
++{
++    if (irq &gt; IRQ_COUNT) {
++        return -1;
++    }
++
++    driver_irq_count[irq] = 0;
++    return 0;
++}
++
++// Dummy-Callback fuer den timer_register-Aufruf in cdi_wait_irq
++static void wait_irq_dummy_callback(void) { }
++
++/**
++ * Wartet bis der IRQ aufgerufen wurde. Der interne Zaehler muss zuerst mit
++ * cdi_reset_wait_irq zurueckgesetzt werden, damit auch die IRQs abgefangen
++ * werden koennen, die kurz vor dem Aufruf von dieser Funktion aufgerufen
++ * werden.
++ *
++ * @param irq       Nummer des IRQ auf den gewartet werden soll
++ * @param timeout   Anzahl der Millisekunden, die maximal gewartet werden sollen
++ *
++ * @return 0 wenn der irq aufgerufen wurde, -1 wenn eine ungueltige IRQ-Nummer
++ * angegeben wurde, -2 wenn eine nicht registrierte IRQ-Nummer angegeben wurde,
++ * und -3 im Falle eines Timeouts.
++ */
++int cdi_wait_irq(uint8_t irq, uint32_t timeout)
++{
++    uint64_t timeout_ticks;
++
++    if (irq &gt; IRQ_COUNT) {
++        return -1;
++    }
++
++    if (!driver_irq_handler[irq]) {
++        return -2;
++    }
++
++    // Wenn der IRQ bereits gefeuert wurde, koennen wir uns ein paar Syscalls
++    // sparen
++    if (driver_irq_count [irq]) {
++        return 0;
++    }
++
++    timeout_ticks = get_tick_count() + (uint64_t) timeout * 1000;
++    timer_register(wait_irq_dummy_callback, timeout * 1000);
++
++    p();
++    while (!driver_irq_count [irq]) {
++        v_and_wait_for_rpc();
++
++        if (timeout_ticks &lt; get_tick_count()) {
++            return -3;
++        }
++        p();
++    }
++    v();
++
++    return 0;
++}
++
++
+ /**
+  * Reserviert physisch zusammenhaengenden Speicher.
+  *
+-- 
+1.6.0.6
+
+
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="000800.html">[tyndur-devel] [PATCH 2/3] cdi/core: Mehrere IRQ-Handler pro	Treiber
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="000801.html">[tyndur-devel] [PATCH 3/3] cdi/core: Funktionen um auf IRQs zu	warten
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#780">[ Datum ]</a>
+              <a href="thread.html#780">[ Thema ]</a>
+              <a href="subject.html#780">[ Betreff (Subject)]</a>
+              <a href="author.html#780">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

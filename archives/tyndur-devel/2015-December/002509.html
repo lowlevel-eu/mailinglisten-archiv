@@ -1,0 +1,291 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 02/11] kernel2: Neuer Syscall	lio_probe_service
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%2002/11%5D%20kernel2%3A%20Neuer%20Syscall%0A%09lio_probe_service&In-Reply-To=%3C1449959291-24784-3-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002508.html">
+   <LINK REL="Next"  HREF="002542.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 02/11] kernel2: Neuer Syscall	lio_probe_service</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%2002/11%5D%20kernel2%3A%20Neuer%20Syscall%0A%09lio_probe_service&In-Reply-To=%3C1449959291-24784-3-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 02/11] kernel2: Neuer Syscall	lio_probe_service">kevin at tyndur.org
+                  </A><BR>
+    <I>Sa Dez 12 23:28:02 CET 2015</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002508.html">[tyndur-devel] [PATCH 01/11] kernel2: BUILD_BUG_ON()
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002542.html">[tyndur-devel] [PATCH 02/11] kernel2: Neuer Syscall lio_probe_service
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2509">[ Datum ]</a>
+              <a href="thread.html#2509">[ Thema ]</a>
+              <a href="subject.html#2509">[ Betreff (Subject) ]</a>
+              <a href="author.html#2509">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ kernel2: Unterstützung für einen neuen Syscall, der zu einer gegebenen
+  Ressource einen Service verwendet, der sie als Pipequelle benutzen
+  kann.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/include/syscall_structs.h               |  6 +++++
+ src/include/syscallno.h                     |  1 +
+ src/kernel2/include/lostio/client.h         |  4 ++++
+ src/kernel2/include/syscall.h               |  4 ++++
+ src/kernel2/src/lostio/include/lostio_int.h |  4 ++++
+ src/kernel2/src/lostio/tree.c               | 34 +++++++++++++++++++++++++++++
+ src/kernel2/src/syscall.c                   |  1 +
+ src/kernel2/src/syscalls/lostio.c           | 14 ++++++++++++
+ src/modules/include/syscall.h               |  9 ++++++++
+ src/modules/lib/syscalls/lostio.c           | 21 ++++++++++++++++++
+ 10 files changed, 98 insertions(+)
+
+diff --git a/src/include/syscall_structs.h b/src/include/syscall_structs.h
+index 0d5892c..3ba12b9 100644
+--- a/src/include/syscall_structs.h
++++ b/src/include/syscall_structs.h
+@@ -86,6 +86,12 @@ typedef int64_t lio_usp_resource_t;
+ /** ID eines LostIO-Verzeichnisbaums */
+ typedef int64_t lio_usp_tree_t;
+ 
++
++struct lio_probe_service_result {
++    char service[32];
++    char volname[32];
++} __attribute__((packed));
++
+ /**
+  * Beschreibt als Bitmaske den Modus, in dem ein Stream arbeiten soll.
+  */
+diff --git a/src/include/syscallno.h b/src/include/syscallno.h
+index 47ab453..5fa5cf1 100644
+--- a/src/include/syscallno.h
++++ b/src/include/syscallno.h
+@@ -108,6 +108,7 @@
+ #define SYSCALL_LIO_UNLINK      98
+ #define SYSCALL_LIO_SYNC_ALL    99
+ #define SYSCALL_LIO_PASS_FD     100
++#define SYSCALL_LIO_PROBE_SERVICE 101
+ 
+ #define SYSCALL_LIO_SRV_SERVICE_REGISTER            110
+ #define SYSCALL_LIO_SRV_TREE_SET_RING               111
+diff --git a/src/kernel2/include/lostio/client.h b/src/kernel2/include/lostio/client.h
+index c7b3795..8880e62 100644
+--- a/src/kernel2/include/lostio/client.h
++++ b/src/kernel2/include/lostio/client.h
+@@ -52,6 +52,10 @@ struct lio_dir_entry {
+  */
+ struct lio_resource* lio_get_resource(const char* path, int follow_symlinks);
+ 
++/** Service finden, der die Ressource als Pipequelle akzeptiert */
++int lio_probe_service(struct lio_resource* res,
++                      struct lio_probe_service_result* probe_data);
++
+ /**
+  * Oeffnet einen Stream zu einer Ressource
+  *
+diff --git a/src/kernel2/include/syscall.h b/src/kernel2/include/syscall.h
+index 9ff28f6..e23656e 100644
+--- a/src/kernel2/include/syscall.h
++++ b/src/kernel2/include/syscall.h
+@@ -253,6 +253,10 @@ int syscall_lio_unlink(lio_usp_resource_t* parent, const char* name,
+ /// Alle Blocks rausschreiben, die sich im Cache befinden
+ int syscall_lio_sync_all(int soft);
+ 
++/// Service finden, der die Ressource als Pipequelle akzeptiert
++int syscall_lio_probe_service(lio_usp_resource_t* res,
++                              struct lio_probe_service_result* probe_data);
++
+ // LIO-Server
+ /// Neuen lio-Service registrieren
+ int syscall_lio_srv_service_register(const char* name, size_t name_len,
+diff --git a/src/kernel2/src/lostio/include/lostio_int.h b/src/kernel2/src/lostio/include/lostio_int.h
+index 33c055c..18518d6 100644
+--- a/src/kernel2/src/lostio/include/lostio_int.h
++++ b/src/kernel2/src/lostio/include/lostio_int.h
+@@ -50,6 +50,10 @@
+ 
+ struct lio_service;
+ struct lio_driver {
++    /** Prüfen, ob die Ressource als Pipequelle benutzt werden kann */
++    int (*probe)(struct lio_service* service, struct lio_stream* source,
++                 struct lio_probe_service_result* probe_data);
++
+     /**
+      * Root-Ressource eines Dateisystems laden, das root-Feld in tree ist also
+      * noch NULL.
+diff --git a/src/kernel2/src/lostio/tree.c b/src/kernel2/src/lostio/tree.c
+index 3fcd2c7..fbc36fd 100644
+--- a/src/kernel2/src/lostio/tree.c
++++ b/src/kernel2/src/lostio/tree.c
+@@ -35,6 +35,7 @@
+ 
+ #include &lt;string.h&gt;
+ #include &lt;stdlib.h&gt;
++#include &lt;errno.h&gt;
+ 
+ #include &quot;kernel.h&quot;
+ #include &quot;kprintf.h&quot;
+@@ -273,6 +274,39 @@ void lio_add_service(struct lio_service* service)
+ }
+ 
+ /**
++ * Service finden, der die Ressource als Pipequelle akzeptiert
++ */
++int lio_probe_service(struct lio_resource* res,
++                      struct lio_probe_service_result* probe_data)
++{
++    struct lio_service* service;
++    struct lio_stream *stream;
++    int ret;
++    int i;
++
++    stream = lio_open(res, LIO_READ);
++    if (stream == NULL) {
++        return -EIO;
++    }
++
++    for (i = 0; (service = list_get_element_at(lio_services, i)); i++) {
++        if (!service-&gt;lio_ops.probe) {
++            continue;
++        }
++
++        ret = service-&gt;lio_ops.probe(service, stream, probe_data);
++        if (ret == 0) {
++            goto out;
++        }
++    }
++
++    ret = -ENOENT;
++out:
++    lio_close(stream);
++    return ret;
++}
++
++/**
+  * Neue Ressource initialisieren.
+  * Vom Aufrufer initialisiert werden muessen (werden alle auf 0 initialisiert):
+  *   - blocksize
+diff --git a/src/kernel2/src/syscall.c b/src/kernel2/src/syscall.c
+index e0bd7bb..8d4da44 100644
+--- a/src/kernel2/src/syscall.c
++++ b/src/kernel2/src/syscall.c
+@@ -129,6 +129,7 @@ void syscall_init()
+     syscall_register(SYSCALL_LIO_UNLINK, &amp;syscall_lio_unlink, 3);
+     syscall_register(SYSCALL_LIO_SYNC_ALL, &amp;syscall_lio_sync_all, 0);
+     syscall_register(SYSCALL_LIO_PASS_FD, &amp;syscall_lio_pass_fd, 2);
++    syscall_register(SYSCALL_LIO_PROBE_SERVICE, &amp;syscall_lio_probe_service, 2);
+ 
+     syscall_register(SYSCALL_LIO_SRV_SERVICE_REGISTER,
+         &amp;syscall_lio_srv_service_register, 4);
+diff --git a/src/kernel2/src/syscalls/lostio.c b/src/kernel2/src/syscalls/lostio.c
+index 32efd4b..9fde44d 100644
+--- a/src/kernel2/src/syscalls/lostio.c
++++ b/src/kernel2/src/syscalls/lostio.c
+@@ -378,3 +378,17 @@ int syscall_lio_sync_all(int soft)
+ {
+     return lio_sync_all(soft);
+ }
++
++/// Service finden, der die Ressource als Pipequelle akzeptiert
++int syscall_lio_probe_service(lio_usp_resource_t* usp_res,
++                              struct lio_probe_service_result* probe_data)
++{
++    struct lio_resource* res;
++
++    res = lio_usp_get_resource(*usp_res);
++    if (res == NULL) {
++        return -EINVAL;
++    }
++
++    return lio_probe_service(res, probe_data);
++}
+diff --git a/src/modules/include/syscall.h b/src/modules/include/syscall.h
+index 1528b12..7ab42a4 100644
+--- a/src/modules/include/syscall.h
++++ b/src/modules/include/syscall.h
+@@ -357,6 +357,15 @@ int lio_unlink(lio_resource_t parent, const char* name);
+  */
+ int lio_sync_all(void);
+ 
++/**
++ * Versucht einen Service zu finden, der die angegebene Ressource als
++ * Pipequelle verwenden kann (z.B. passendes Dateisystem für Image)
++ *
++ * @return 0 bei Erfolg, negativ im Fehlerfall
++ */
++int lio_probe_service(lio_resource_t res,
++                      struct lio_probe_service_result* ret);
++
+ // LIO2-Server
+ 
+ /**
+diff --git a/src/modules/lib/syscalls/lostio.c b/src/modules/lib/syscalls/lostio.c
+index c702084..81658b7 100644
+--- a/src/modules/lib/syscalls/lostio.c
++++ b/src/modules/lib/syscalls/lostio.c
+@@ -526,3 +526,24 @@ int lio_sync_all(void)
+     return result;
+ }
+ 
++/**
++ * Versucht einen Service zu finden, der die angegebene Ressource als
++ * Pipequelle verwenden kann (z.B. passendes Dateisystem für Image)
++ *
++ * @return 0 bei Erfolg, negativ im Fehlerfall
++ */
++int lio_probe_service(lio_resource_t res, struct lio_probe_service_result* ret)
++{
++    int result;
++
++    asm(
++        &quot;pushl %3;&quot;
++        &quot;pushl %2;&quot;
++        &quot;mov %1, %%eax;&quot;
++        &quot;int $0x30;&quot;
++        &quot;add $0x8, %%esp;&quot;
++    : &quot;=a&quot; (result) : &quot;i&quot; (SYSCALL_LIO_PROBE_SERVICE), &quot;r&quot; (&amp;res), &quot;r&quot; (ret)
++    : &quot;memory&quot;);
++
++    return result;
++}
+-- 
+2.1.4
+
+</PRE>
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002508.html">[tyndur-devel] [PATCH 01/11] kernel2: BUILD_BUG_ON()
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002542.html">[tyndur-devel] [PATCH 02/11] kernel2: Neuer Syscall lio_probe_service
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2509">[ Datum ]</a>
+              <a href="thread.html#2509">[ Thema ]</a>
+              <a href="subject.html#2509">[ Betreff (Subject)]</a>
+              <a href="author.html#2509">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

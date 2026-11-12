@@ -1,0 +1,6112 @@
+From max at tyndur.org  Mon Nov  2 16:31:42 2009
+From: max at tyndur.org (max at tyndur.org)
+Date: Mon,  2 Nov 2009 16:31:42 +0100
+Subject: [tyndur-devel] [PATCH] pci: Konfigurationsspeicherzugriff
+Message-ID: <1257175902-6390-1-git-send-email-max@tyndur.org>
+
+From: Max Reitz <max at tyndur.org>
+
+* Für den Zugriff auf den Konfigurationsraum muss man das Register
+  nicht zweimal an DWord-Grenzen ausrichten
+
+Signed-off-by: Max Reitz <max at tyndur.org>
+---
+ src/modules/pci/pcihw.c |    3 ---
+ 1 files changed, 0 insertions(+), 3 deletions(-)
+
+diff --git a/src/modules/pci/pcihw.c b/src/modules/pci/pcihw.c
+index be61251..12cbc0a 100644
+--- a/src/modules/pci/pcihw.c
++++ b/src/modules/pci/pcihw.c
+@@ -65,7 +65,6 @@ void pci_request_io_ports()
+ static dword pci_config_read(dword bus, dword device, dword func, dword reg)
+ {
+     dword offset = reg % 0x04;
+-    reg &= ~0x3;
+ 
+     outl(PCI_CONFIG_ADDR, 
+         0x1 << 31
+@@ -119,8 +118,6 @@ static inline byte pci_config_read_byte
+ static void pci_config_write_dword
+     (dword bus, dword device, dword func, dword reg, dword value)
+ {
+-    reg &= ~0x3;
+-
+     outl(PCI_CONFIG_ADDR, 
+         0x1 << 31
+         | ((bus     & 0xFF) << 16) 
+-- 
+1.6.5
+
+
+From max at tyndur.org  Mon Nov  2 21:08:57 2009
+From: max at tyndur.org (max at tyndur.org)
+Date: Mon,  2 Nov 2009 21:08:57 +0100
+Subject: [tyndur-devel] [PATCH] Multiple IRQs, USB-Image
+Message-ID: <1257192537-2181-1-git-send-email-max@tyndur.org>
+
+From: Max Reitz <max at tyndur.org>
+
+* Mit dem Makro MAX_INTERRUPTS in intr.c kann man jetzt die
+  maximale Anzahl von Handlern pro IRQ definieren
++ MÃ¶glichkeit zur Erstellung eines Diskettenimages, das dann
+  (unter QEMU) per USB gebootet werden kann
+
+Signed-off-by: Max Reitz <max at tyndur.org>
+---
+ Makefile                  |    8 +++--
+ build/config/grub_usb.cfg |    9 +++++
+ build/config/image_usb.sh |    1 +
+ build/scripts/image_usb   |   86 +++++++++++++++++++++++++++++++++++++++++++++
+ buildmk.sh                |    3 ++
+ src/kernel/src/intr.c     |   79 ++++++++++++++++++++++++++++++++---------
+ 6 files changed, 165 insertions(+), 21 deletions(-)
+ create mode 100644 build/config/grub_usb.cfg
+ create mode 100644 build/config/image_usb.sh
+ create mode 100755 build/scripts/image_usb
+
+diff --git a/Makefile b/Makefile
+index 9b63409..251450a 100644
+--- a/Makefile
++++ b/Makefile
+@@ -5,7 +5,7 @@ PPC=fpc -n -Cn -CX -Ttyndur  -Fu../lib/units -Fu../units
+ ASM_ELF=nasm -felf -O99 
+ ASM_BIN=nasm -fbin -O99
+ 
+-BUILD_ROOT=/home/kevin/entwicklung/tyndur/build/output
++BUILD_ROOT=/home/lfs/tyndur/build/output
+ BUILD_DIR=$(BUILD_ROOT)
+ 
+ AS=as -32
+@@ -22,11 +22,10 @@ obj:
+ 
+ subdirs:
+ 	$(MAKE) --no-print-directory -sC doc
+-	$(MAKE) --no-print-directory -sC patches
+ 	$(MAKE) --no-print-directory -sC src
+ 
+ clean:
+-	rm -f *.o *.a *.mod
++	rm -f *.o *.a *.mod *.ppu link.res ppas.sh tyndur
+ 	for file in *; do if [ -f "$$file/Makefile" -a \( ! -f "$$file/.nobuild" -o -f "$$file/.ignorenobuild" \) ]; then $(MAKE) -sC "$$file" clean; rm "$$file/Makefile"; fi done  
+ 
+ .SILENT: all makefiles subdirs obj clean clean_root updateroot image-floppy image-hd test-qemu test-qemu-hd
+@@ -49,6 +48,9 @@ image-hd: updateroot
+ image-cdrom: updateroot
+ 	build/scripts/image_cdrom
+ 
++image-usb: updateroot
++	build/scripts/image_usb
++
+ test-qemu: image-floppy
+ 	qemu -serial stdio -fda build/images/floppy.img -boot a -net user -net nic,model=rtl8139 | tee qemu-serial.log
+ 
+diff --git a/build/config/grub_usb.cfg b/build/config/grub_usb.cfg
+new file mode 100644
+index 0000000..0b2adcb
+--- /dev/null
++++ b/build/config/grub_usb.cfg
+@@ -0,0 +1,9 @@
++title tyndur
++kernel /boot/tyndur debug=s
++module /modules/init boot=file:/
++module /modules/pci
++module /modules/usb
++module /modules/fat
++module /modules/console servmgr:/term servmgr:/term
++module /modules/servmgr usb-msc:/msd0|fat:/ vterm:/vterm8/out pci usb-msc fat console
++boot
+diff --git a/build/config/image_usb.sh b/build/config/image_usb.sh
+new file mode 100644
+index 0000000..984dac2
+--- /dev/null
++++ b/build/config/image_usb.sh
+@@ -0,0 +1 @@
++IMAGE_PATH="build/images/usb-floppy.img"
+diff --git a/build/scripts/image_usb b/build/scripts/image_usb
+new file mode 100755
+index 0000000..8ad3725
+--- /dev/null
++++ b/build/scripts/image_usb
+@@ -0,0 +1,86 @@
++#!/bin/bash
++
++# Copyright (c) 2008 The tyndur Project. All rights reserved.
++#
++# This code is derived from software contributed to the tyndur Project
++# by Antoine Kaufmann.
++#
++# Redistribution and use in source and binary forms, with or without
++# modification, are permitted provided that the following conditions
++# are met:
++# 1. Redistributions of source code must retain the above copyright
++#    notice, this list of conditions and the following disclaimer.
++# 2. Redistributions in binary form must reproduce the above copyright
++#    notice, this list of conditions and the following disclaimer in the
++#    documentation and/or other materials provided with the distribution.
++# 3. All advertising materials mentioning features or use of this software
++#    must display the following acknowledgement:
++#     This product includes software developed by the tyndur Project
++#     and its contributors.
++# 4. Neither the name of the tyndur Project nor the names of its
++#    contributors may be used to endorse or promote products derived
++#    from this software without specific prior written permission.
++#
++# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++# ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++# TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++# PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++# CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++# EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++# PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++# OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++# WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++# OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++# ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++
++ROOT=build/root
++ROOT_COMMON=build/root-common
++ROOT_FLOPPY=build/root-floppy
++ROOT_LOCAL=build/root-local
++
++export PATH=$PATH:/usr/local/sbin:/usr/sbin:/sbin
++
++source build/config/image_usb.sh
++export LOST_BUILDMK_ROOT="`pwd`"
++source config.sh
++
++
++export MTOOLSRC=lostmtools.conf
++
++# Konfigurationsdatei fuer mtools generieren
++cat << EOF > $MTOOLSRC
++drive l:
++    file="$IMAGE_PATH" cylinders=80 heads=2 sectors=18 filter
++EOF
++
++# Wenn das Image neu erstellt werden muss, kommen noch ein paar schritte mehr
++# dazu.
++NEW=0
++if ! [ -f $IMAGE_PATH ]; then
++    # Leeres Image erstellen und formatieren
++    dd if=/dev/zero of=$IMAGE_PATH bs=1024 count=1440
++    mformat l:
++    NEW=1
++fi
++
++
++mcopy -D o -s $ROOT/* $ROOT_COMMON/* $ROOT_FLOPPY/* l:/
++mcopy -D o -s $ROOT_LOCAL/* l:/
++
++# Grub-Konfiguration kopieren
++mcopy -D o build/config/grub_usb.cfg l:/boot/grub/menu.lst
++
++if [ $NEW -ne 0 ]; then
++    # Grub kopieren und installieren
++    mmd -D s l:/boot/grub
++    mcopy -D o $LOST_GRUB_STAGESDIR/stage? l:/boot/grub/
++
++    $LOST_TOOLS_GRUB --batch <<EOF
++    device (fd0) $IMAGE_PATH
++    root (fd0)
++    setup (fd0)
++EOF
++fi
++
++# Konfigurationsdatei fuer mtools wieder loeschen
++rm -f $MTOOLSRC
+diff --git a/buildmk.sh b/buildmk.sh
+index 4e3cd85..0315c12 100644
+--- a/buildmk.sh
++++ b/buildmk.sh
+@@ -249,6 +249,9 @@ image-hd: updateroot
+ image-cdrom: updateroot
+ 	build/scripts/image_cdrom
+ 
++image-usb: updateroot
++	build/scripts/image_usb
++
+ test-qemu: image-floppy
+ 	$LOST_TOOLS_QEMU -serial stdio -fda build/images/floppy.img -boot a -net user -net nic,model=rtl8139 | tee qemu-serial.log
+ 
+diff --git a/src/kernel/src/intr.c b/src/kernel/src/intr.c
+index 9fa3ff3..30566db 100644
+--- a/src/kernel/src/intr.c
++++ b/src/kernel/src/intr.c
+@@ -55,6 +55,8 @@
+ #include "vm86.h"
+ #include "tss.h"
+ 
++#define MAX_INTERRUPTS 4
++
+ typedef struct {
+   word lsb_handler;
+   word selector;
+@@ -65,8 +67,8 @@ typedef struct {
+ 
+ gate_descriptor idt[IDT_SIZE];
+ 
+-pfIrqHandler irq_handlers[16] = { 0 }; // für jeden IRQ genau ein Handler. Wenn es keinen Handler gibt, ist der entsprechende Wert 0.
+-struct task * intr_handling_task[256] = { NULL };
++pfIrqHandler irq_handlers[16] = { 0 }; // fï¿½r jeden IRQ genau ein Handler. Wenn es keinen Handler gibt, ist der entsprechende Wert 0.
++static struct task * intr_handling_task[256][MAX_INTERRUPTS] = { { NULL } };
+ 
+ void handle_irq(int irq, dword* esp);
+ 
+@@ -120,7 +122,7 @@ dword irqs_to_send[16];
+ extern dword kernel_pd_id;
+ 
+ /*
+- * gibt einen neuen Wert für esp zurck
++ * gibt einen neuen Wert fï¿½r esp zurck
+  */
+ dword handle_int(dword esp)
+ {
+@@ -146,7 +148,7 @@ dword handle_int(dword esp)
+     }
+     else
+     {
+-        // TODO: Abstürzen, denn diese Interrupts dürften nicht aufgerufen werden
++        // TODO: Abstï¿½rzen, denn diese Interrupts dï¿½rften nicht aufgerufen werden
+     }
+ 
+     send_irqs(&esp);
+@@ -186,8 +188,8 @@ dword handle_int(dword esp)
+ 
+ /**
+  * Legt eine IDT an und installiert die Exception Handler. Nicht genutzte
+- * Einträge werden mit Verweisen auf den Null-Handler initalisiert.
+- * Anschließend wird die IDT geladen.
++ * Eintrï¿½ge werden mit Verweisen auf den Null-Handler initalisiert.
++ * Anschlieï¿½end wird die IDT geladen.
+  */
+ void init_idt() {
+   int i;
+@@ -265,9 +267,9 @@ void init_idt() {
+   outb_wait(PIC1_DATA, 0x00);
+   outb_wait(PIC2_DATA, 0x00);
+ 
+-  // Handler für den System Call installieren
++  // Handler fï¿½r den System Call installieren
+   // TODO: SOllte eigentlich ein IDT_TRAP_GATE sein, aber irgendwo ist da 
+-  // noch ein Problem, das dann für einen Page Fault sorgt, wenn ich zu
++  // noch ein Problem, das dann fï¿½r einen Page Fault sorgt, wenn ich zu
+   // schnell tippe...
+   set_intr(SYSCALL_INTERRUPT, 0x08, syscall_stub, 3, IDT_INTERRUPT_GATE);
+   //set_intr(SYSCALL_INTERRUPT, 0x08, syscall_stub, 3, IDT_TRAP_GATE);
+@@ -348,6 +350,8 @@ int release_irq(int irq)
+ 
+ void handle_irq(int irq, dword* esp)
+ {
++    int i;
++
+     //if (irq > 0) {
+     //    kprintf("Interrupt 0x%x\n", irq + IRQ_BASE);
+     //}
+@@ -361,7 +365,7 @@ void handle_irq(int irq, dword* esp)
+         }
+     }*/
+         
+-    // IRQs 7 und 15 können unabsichtlich aufgerufen werden
++    // IRQs 7 und 15 kï¿½nnen unabsichtlich aufgerufen werden
+     // In diesem Fall beim PIC nachschauen, ob wirklich was zu verarbeiten 
+     // ist, ansonsten gleich wieder abbrechen.
+     if ((irq == 7) || (irq == 15))
+@@ -378,7 +382,13 @@ void handle_irq(int irq, dword* esp)
+         }
+     }
+             
+-    if (intr_handling_task[irq + IRQ_BASE] != NULL)  
++    for (i = 0; i < MAX_INTERRUPTS; i++) {
++        if (intr_handling_task[irq + IRQ_BASE][i] != NULL) {
++            i = -1;
++            break;
++        }
++    }
++    if (i == -1)
+     {
+         //kprintf("IRQ-Verarbeitung durch ein Modul\n");
+         irqs_to_send[irq]++;
+@@ -401,8 +411,17 @@ send_eoi:
+ 
+ void set_intr_handling_task(byte intr, struct task * task)
+ {
++    int i;
++
+     //kprintf("Interrupt %d wird jetzt von Task %d behandelt\n", intr, task->pid);
+-    intr_handling_task[intr] = task;
++    for (i = 0; i < MAX_INTERRUPTS; i++) {
++        if ((intr_handling_task[intr][i] == NULL) ||
++            (i == MAX_INTERRUPTS - 1))
++        {
++            intr_handling_task[intr][i] = task;
++            break;
++        }
++    }
+ }
+ 		
+ void handle_exception(dword* esp)
+@@ -426,7 +445,7 @@ void handle_exception(dword* esp)
+         case 14:
+             cr2 = read_cr2();
+             diff = (cr2 >> PAGE_SHIFT) - (isf->esp >> PAGE_SHIFT);
+-            // Ueberprüfen ob der Pagefault durch einen Stackoverflow
++            // Ueberprï¿½fen ob der Pagefault durch einen Stackoverflow
+             // hervorgerufen wurde
+             if ((diff >= -2) && (diff <= 2)
+                 && (current_task != NULL)
+@@ -440,7 +459,7 @@ void handle_exception(dword* esp)
+             break;
+     }
+     
+-    // Prüfen, ob ein VM86-Task die Exception ausgelöst hat, und evtl reagieren
++    // Prï¿½fen, ob ein VM86-Task die Exception ausgelï¿½st hat, und evtl reagieren
+     if (isf->eflags & 0x20000) {
+         if (vm86_exception(esp)) {
+             return;
+@@ -513,15 +532,39 @@ void handle_exception(dword* esp)
+ void send_irqs(dword* esp) 
+ {
+     dword irq;
++    int tsk = 0, may[4], gen;
++
+     for (irq = 0; irq < 16; irq++)
+     {
+         dword rpc_data = irq + IRQ_BASE;
++        for (tsk = 0; tsk < MAX_INTERRUPTS; tsk++) {
++            if (intr_handling_task[irq + IRQ_BASE][tsk] == NULL) {
++                may[tsk] = 0;
++            } else {
++                may[tsk] = 1;
++            }
++        }
+         while (irqs_to_send[irq] > 0) {
+-            schedule_to_task(intr_handling_task[irq + IRQ_BASE], esp);
+-            if (!fastrpc_irq(intr_handling_task[irq + IRQ_BASE], 0, 0, 4, 
+-                (char*) &rpc_data, irq)) 
+-            {
+-                //kprintf("SYSCALL_RPC = FALSE");
++            for (tsk = 0; tsk < MAX_INTERRUPTS; tsk++) {
++                if (!may[tsk]) {
++                    continue;
++                }
++                schedule_to_task(intr_handling_task[irq + IRQ_BASE][tsk], esp);
++                if (!fastrpc_irq(intr_handling_task[irq + IRQ_BASE][tsk], 0, 0, 4, 
++                    (char*) &rpc_data, irq)) 
++                {
++                    //kprintf("SYSCALL_RPC = FALSE");
++                    may[tsk] = 0;
++                }
++            }
++            gen = 0;
++            for (tsk = 0; tsk < MAX_INTERRUPTS; tsk++) {
++                if (may[tsk]) {
++                    gen = 1;
++                    break;
++                }
++            }
++            if (!gen) {
+                 break;
+             }
+             //kprintf("IRQ-Handler aufgerufen");
+-- 
+1.6.5
+
+
+From shyxormz at asxsoft.de  Wed Nov  4 15:38:01 2009
+From: shyxormz at asxsoft.de (Patrick Pokatilo)
+Date: Wed,  4 Nov 2009 15:38:01 +0100
+Subject: [tyndur-devel] [PATCH] !kernel2: kprintf included <stdarg.h> statt
+	#defines
+Message-ID: <1257345481-31929-1-git-send-email-shyxormz@asxsoft.de>
+
+---
+ src/kernel2/include/kprintf.h |    9 +++++----
+ 1 files changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/src/kernel2/include/kprintf.h b/src/kernel2/include/kprintf.h
+index 93062ac..c102453 100644
+--- a/src/kernel2/include/kprintf.h
++++ b/src/kernel2/include/kprintf.h
+@@ -2,11 +2,12 @@
+ #define KPRINTF_H
+ 
+ #include <stdint.h>
++#include <stdarg.h>
+ 
+-typedef __builtin_va_list va_list;
+-#define va_start(ap, f) __builtin_stdarg_start((ap),f)
+-#define va_arg __builtin_va_arg
+-#define va_end __builtin_va_end
++//typedef __builtin_va_list va_list;
++//#define va_start(ap, f) __builtin_stdarg_start((ap),f)
++//#define va_arg __builtin_va_arg
++//#define va_end __builtin_va_end
+ 
+ void kprintf(char* format, ...);
+ void kaprintf(char* format, va_list args);
+-- 
+1.6.3.3
+
+
+From shyxormz at asxsoft.de  Wed Nov  4 15:50:01 2009
+From: shyxormz at asxsoft.de (Patrick Pokatilo)
+Date: Wed,  4 Nov 2009 15:50:01 +0100
+Subject: [tyndur-devel] [PATCH] kprintf: include <stdarg.h>
+Message-ID: <1257346201-32240-1-git-send-email-shyxormz@asxsoft.de>
+
+Signed-off-by: Patrick Pokatilo <shyxormz at asxsoft.de>
+---
+ src/kernel2/include/kprintf.h |    9 +++++----
+ 1 files changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/src/kernel2/include/kprintf.h b/src/kernel2/include/kprintf.h
+index 93062ac..c102453 100644
+--- a/src/kernel2/include/kprintf.h
++++ b/src/kernel2/include/kprintf.h
+@@ -2,11 +2,12 @@
+ #define KPRINTF_H
+ 
+ #include <stdint.h>
++#include <stdarg.h>
+ 
+-typedef __builtin_va_list va_list;
+-#define va_start(ap, f) __builtin_stdarg_start((ap),f)
+-#define va_arg __builtin_va_arg
+-#define va_end __builtin_va_end
++//typedef __builtin_va_list va_list;
++//#define va_start(ap, f) __builtin_stdarg_start((ap),f)
++//#define va_arg __builtin_va_arg
++//#define va_end __builtin_va_end
+ 
+ void kprintf(char* format, ...);
+ void kaprintf(char* format, va_list args);
+-- 
+1.6.3.3
+
+
+From max at tyndur.org  Wed Nov  4 18:32:54 2009
+From: max at tyndur.org (max at tyndur.org)
+Date: Wed,  4 Nov 2009 18:32:54 +0100
+Subject: [tyndur-devel] [PATCH] USB-Image
+Message-ID: <1257355974-10673-1-git-send-email-max@tyndur.org>
+
+From: Max Reitz <max at tyndur.org>
+
++ Möglichkeit zur Erstellung eines Diskettenimages, das dann
+  (unter QEMU) per USB gebootet werden kann
+
+Signed-off-by: Max Reitz <max at tyndur.org>
+---
+ Makefile   |    3 +++
+ buildmk.sh |    3 +++
+ 2 files changed, 6 insertions(+), 0 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index 9b63409..9272f47 100644
+--- a/Makefile
++++ b/Makefile
+@@ -49,6 +49,9 @@ image-hd: updateroot
+ image-cdrom: updateroot
+ 	build/scripts/image_cdrom
+ 
++image-usb: updateroot
++	build/scripts/image_usb
++
+ test-qemu: image-floppy
+ 	qemu -serial stdio -fda build/images/floppy.img -boot a -net user -net nic,model=rtl8139 | tee qemu-serial.log
+ 
+diff --git a/buildmk.sh b/buildmk.sh
+index 4e3cd85..0315c12 100644
+--- a/buildmk.sh
++++ b/buildmk.sh
+@@ -249,6 +249,9 @@ image-hd: updateroot
+ image-cdrom: updateroot
+ 	build/scripts/image_cdrom
+ 
++image-usb: updateroot
++	build/scripts/image_usb
++
+ test-qemu: image-floppy
+ 	$LOST_TOOLS_QEMU -serial stdio -fda build/images/floppy.img -boot a -net user -net nic,model=rtl8139 | tee qemu-serial.log
+ 
+-- 
+1.6.5
+
+
+From max at tyndur.org  Wed Nov  4 18:36:10 2009
+From: max at tyndur.org (max at tyndur.org)
+Date: Wed,  4 Nov 2009 18:36:10 +0100
+Subject: [tyndur-devel] [PATCH v2] USB-Image
+Message-ID: <1257356170-10730-1-git-send-email-max@tyndur.org>
+
+From: Max Reitz <max at tyndur.org>
+
++ Möglichkeit zur Erstellung eines Diskettenimages, das dann
+  (unter QEMU) per USB gebootet werden kann
+
+Signed-off-by: Max Reitz <max at tyndur.org>
+---
+ Makefile                  |    3 ++
+ build/config/grub_usb.cfg |    9 +++++
+ build/config/image_usb.sh |    1 +
+ build/scripts/image_usb   |   86 +++++++++++++++++++++++++++++++++++++++++++++
+ buildmk.sh                |    3 ++
+ 5 files changed, 102 insertions(+), 0 deletions(-)
+ create mode 100644 build/config/grub_usb.cfg
+ create mode 100644 build/config/image_usb.sh
+ create mode 100755 build/scripts/image_usb
+
+diff --git a/Makefile b/Makefile
+index 9b63409..9272f47 100644
+--- a/Makefile
++++ b/Makefile
+@@ -49,6 +49,9 @@ image-hd: updateroot
+ image-cdrom: updateroot
+ 	build/scripts/image_cdrom
+ 
++image-usb: updateroot
++	build/scripts/image_usb
++
+ test-qemu: image-floppy
+ 	qemu -serial stdio -fda build/images/floppy.img -boot a -net user -net nic,model=rtl8139 | tee qemu-serial.log
+ 
+diff --git a/build/config/grub_usb.cfg b/build/config/grub_usb.cfg
+new file mode 100644
+index 0000000..0b2adcb
+--- /dev/null
++++ b/build/config/grub_usb.cfg
+@@ -0,0 +1,9 @@
++title tyndur
++kernel /boot/tyndur debug=s
++module /modules/init boot=file:/
++module /modules/pci
++module /modules/usb
++module /modules/fat
++module /modules/console servmgr:/term servmgr:/term
++module /modules/servmgr usb-msc:/msd0|fat:/ vterm:/vterm8/out pci usb-msc fat console
++boot
+diff --git a/build/config/image_usb.sh b/build/config/image_usb.sh
+new file mode 100644
+index 0000000..984dac2
+--- /dev/null
++++ b/build/config/image_usb.sh
+@@ -0,0 +1 @@
++IMAGE_PATH="build/images/usb-floppy.img"
+diff --git a/build/scripts/image_usb b/build/scripts/image_usb
+new file mode 100755
+index 0000000..8ad3725
+--- /dev/null
++++ b/build/scripts/image_usb
+@@ -0,0 +1,86 @@
++#!/bin/bash
++
++# Copyright (c) 2008 The tyndur Project. All rights reserved.
++#
++# This code is derived from software contributed to the tyndur Project
++# by Antoine Kaufmann.
++#
++# Redistribution and use in source and binary forms, with or without
++# modification, are permitted provided that the following conditions
++# are met:
++# 1. Redistributions of source code must retain the above copyright
++#    notice, this list of conditions and the following disclaimer.
++# 2. Redistributions in binary form must reproduce the above copyright
++#    notice, this list of conditions and the following disclaimer in the
++#    documentation and/or other materials provided with the distribution.
++# 3. All advertising materials mentioning features or use of this software
++#    must display the following acknowledgement:
++#     This product includes software developed by the tyndur Project
++#     and its contributors.
++# 4. Neither the name of the tyndur Project nor the names of its
++#    contributors may be used to endorse or promote products derived
++#    from this software without specific prior written permission.
++#
++# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++# ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++# TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++# PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++# CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++# EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++# PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++# OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++# WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++# OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++# ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++
++ROOT=build/root
++ROOT_COMMON=build/root-common
++ROOT_FLOPPY=build/root-floppy
++ROOT_LOCAL=build/root-local
++
++export PATH=$PATH:/usr/local/sbin:/usr/sbin:/sbin
++
++source build/config/image_usb.sh
++export LOST_BUILDMK_ROOT="`pwd`"
++source config.sh
++
++
++export MTOOLSRC=lostmtools.conf
++
++# Konfigurationsdatei fuer mtools generieren
++cat << EOF > $MTOOLSRC
++drive l:
++    file="$IMAGE_PATH" cylinders=80 heads=2 sectors=18 filter
++EOF
++
++# Wenn das Image neu erstellt werden muss, kommen noch ein paar schritte mehr
++# dazu.
++NEW=0
++if ! [ -f $IMAGE_PATH ]; then
++    # Leeres Image erstellen und formatieren
++    dd if=/dev/zero of=$IMAGE_PATH bs=1024 count=1440
++    mformat l:
++    NEW=1
++fi
++
++
++mcopy -D o -s $ROOT/* $ROOT_COMMON/* $ROOT_FLOPPY/* l:/
++mcopy -D o -s $ROOT_LOCAL/* l:/
++
++# Grub-Konfiguration kopieren
++mcopy -D o build/config/grub_usb.cfg l:/boot/grub/menu.lst
++
++if [ $NEW -ne 0 ]; then
++    # Grub kopieren und installieren
++    mmd -D s l:/boot/grub
++    mcopy -D o $LOST_GRUB_STAGESDIR/stage? l:/boot/grub/
++
++    $LOST_TOOLS_GRUB --batch <<EOF
++    device (fd0) $IMAGE_PATH
++    root (fd0)
++    setup (fd0)
++EOF
++fi
++
++# Konfigurationsdatei fuer mtools wieder loeschen
++rm -f $MTOOLSRC
+diff --git a/buildmk.sh b/buildmk.sh
+index 4e3cd85..0315c12 100644
+--- a/buildmk.sh
++++ b/buildmk.sh
+@@ -249,6 +249,9 @@ image-hd: updateroot
+ image-cdrom: updateroot
+ 	build/scripts/image_cdrom
+ 
++image-usb: updateroot
++	build/scripts/image_usb
++
+ test-qemu: image-floppy
+ 	$LOST_TOOLS_QEMU -serial stdio -fda build/images/floppy.img -boot a -net user -net nic,model=rtl8139 | tee qemu-serial.log
+ 
+-- 
+1.6.5
+
+
+From max at tyndur.org  Wed Nov  4 18:59:11 2009
+From: max at tyndur.org (max at tyndur.org)
+Date: Wed,  4 Nov 2009 18:59:11 +0100
+Subject: [tyndur-devel] [PATCH v2] IRQ-Sharing
+Message-ID: <1257357551-23399-1-git-send-email-max@tyndur.org>
+
+From: Max Reitz <max at tyndur.org>
+
+* Mit dem Makro MAX_INTERRUPTS in intr.c kann man jetzt die
+  maximale Anzahl von Handlern pro IRQ definieren
+
+Signed-off-by: Max Reitz <max at tyndur.org>
+---
+ src/kernel/src/intr.c |   99 ++++++++++++++++++++++++++++++++-----------------
+ 1 files changed, 65 insertions(+), 34 deletions(-)
+
+diff --git a/src/kernel/src/intr.c b/src/kernel/src/intr.c
+index 9fa3ff3..2a56e64 100644
+--- a/src/kernel/src/intr.c
++++ b/src/kernel/src/intr.c
+@@ -55,6 +55,8 @@
+ #include "vm86.h"
+ #include "tss.h"
+ 
++#define MAX_INTERRUPTS 4
++
+ typedef struct {
+   word lsb_handler;
+   word selector;
+@@ -65,8 +67,8 @@ typedef struct {
+ 
+ gate_descriptor idt[IDT_SIZE];
+ 
+-pfIrqHandler irq_handlers[16] = { 0 }; // für jeden IRQ genau ein Handler. Wenn es keinen Handler gibt, ist der entsprechende Wert 0.
+-struct task * intr_handling_task[256] = { NULL };
++pfIrqHandler irq_handlers[16] = { 0 }; // fï¿½r jeden IRQ genau ein Handler. Wenn es keinen Handler gibt, ist der entsprechende Wert 0.
++static struct task * intr_handling_task[256][MAX_INTERRUPTS] = { { NULL } };
+ 
+ void handle_irq(int irq, dword* esp);
+ 
+@@ -116,17 +118,17 @@ extern void stack_backtrace_ebp(dword start_ebp, dword start_eip);
+ void handle_exception(dword* esp);
+ 
+ void send_irqs(dword* esp);
+-dword irqs_to_send[16];
++static dword irqs_to_send[16][MAX_INTERRUPTS];
+ extern dword kernel_pd_id;
+ 
+ /*
+- * gibt einen neuen Wert für esp zurck
++ * gibt einen neuen Wert fï¿½r esp zurck
+  */
+ dword handle_int(dword esp)
+ {
+     struct int_stack_frame * isf = (struct int_stack_frame *)esp;
+     struct task* old_task = current_task;
+-    
++
+ //	kprintf("\nTask switch!  esp alter Task:0x%08x", isf->esp);
+ 	
+ 	if(isf->interrupt_number <= 31)
+@@ -146,7 +148,7 @@ dword handle_int(dword esp)
+     }
+     else
+     {
+-        // TODO: Abstürzen, denn diese Interrupts dürften nicht aufgerufen werden
++        // TODO: Abstï¿½rzen, denn diese Interrupts dï¿½rften nicht aufgerufen werden
+     }
+ 
+     send_irqs(&esp);
+@@ -158,7 +160,7 @@ dword handle_int(dword esp)
+         //tss.esp = current_task->kernel_stack;
+         isf = (struct int_stack_frame *)esp;
+         //kprintf("  esp neuer Task:0x%08x", isf->esp);
+-        
++
+         tss.esp0 = current_task->kernel_stack;
+         // sicherstellen, dass der Kernel Adressraum im Page Directory des Tasks korrekt gemappt ist
+         //kprintf("PID=%d  cr3=0x%08x  kernel_pd=0x%08x eip=0x%08x\n", 
+@@ -186,8 +188,8 @@ dword handle_int(dword esp)
+ 
+ /**
+  * Legt eine IDT an und installiert die Exception Handler. Nicht genutzte
+- * Einträge werden mit Verweisen auf den Null-Handler initalisiert.
+- * Anschließend wird die IDT geladen.
++ * Eintrï¿½ge werden mit Verweisen auf den Null-Handler initalisiert.
++ * Anschlieï¿½end wird die IDT geladen.
+  */
+ void init_idt() {
+   int i;
+@@ -265,9 +267,9 @@ void init_idt() {
+   outb_wait(PIC1_DATA, 0x00);
+   outb_wait(PIC2_DATA, 0x00);
+ 
+-  // Handler für den System Call installieren
++  // Handler fï¿½r den System Call installieren
+   // TODO: SOllte eigentlich ein IDT_TRAP_GATE sein, aber irgendwo ist da 
+-  // noch ein Problem, das dann für einen Page Fault sorgt, wenn ich zu
++  // noch ein Problem, das dann fï¿½r einen Page Fault sorgt, wenn ich zu
+   // schnell tippe...
+   set_intr(SYSCALL_INTERRUPT, 0x08, syscall_stub, 3, IDT_INTERRUPT_GATE);
+   //set_intr(SYSCALL_INTERRUPT, 0x08, syscall_stub, 3, IDT_TRAP_GATE);
+@@ -348,10 +350,12 @@ int release_irq(int irq)
+ 
+ void handle_irq(int irq, dword* esp)
+ {
++    int i;
++
+     //if (irq > 0) {
+     //    kprintf("Interrupt 0x%x\n", irq + IRQ_BASE);
+     //}
+-        
++
+     /*if (irq > 0)
+     {
+         byte pic = (irq < 8 ? PIC1 : PIC2);
+@@ -360,8 +364,8 @@ void handle_irq(int irq, dword* esp)
+             kprintf("Spurious IRQ %d\n", irq);
+         }
+     }*/
+-        
+-    // IRQs 7 und 15 können unabsichtlich aufgerufen werden
++
++    // IRQs 7 und 15 kï¿½nnen unabsichtlich aufgerufen werden
+     // In diesem Fall beim PIC nachschauen, ob wirklich was zu verarbeiten 
+     // ist, ansonsten gleich wieder abbrechen.
+     if ((irq == 7) || (irq == 15))
+@@ -377,12 +381,22 @@ void handle_irq(int irq, dword* esp)
+             goto send_eoi;
+         }
+     }
+-            
+-    if (intr_handling_task[irq + IRQ_BASE] != NULL)  
++
++    for (i = 0; i < MAX_INTERRUPTS; i++) {
++        if (intr_handling_task[irq + IRQ_BASE][i] != NULL) {
++            i = -1;
++            break;
++        }
++    }
++    if (i == -1)
+     {
+         //kprintf("IRQ-Verarbeitung durch ein Modul\n");
+-        irqs_to_send[irq]++;
+-    
++        for (i = 0; i < MAX_INTERRUPTS; i++) {
++            if (intr_handling_task[irq + IRQ_BASE][i] != NULL) {
++                irqs_to_send[irq][i]++;
++            }
++        }
++
+         //printf("disable IRQ %d\n", irq);
+         disable_irq(irq);
+     } 
+@@ -401,10 +415,20 @@ send_eoi:
+ 
+ void set_intr_handling_task(byte intr, struct task * task)
+ {
++    int i;
++
+     //kprintf("Interrupt %d wird jetzt von Task %d behandelt\n", intr, task->pid);
+-    intr_handling_task[intr] = task;
++    for (i = 0; i < MAX_INTERRUPTS; i++) {
++        if ((intr_handling_task[intr][i] == NULL) ||
++            (i == MAX_INTERRUPTS - 1))
++        {
++            intr_handling_task[intr][i] = task;
++            irqs_to_send[intr - IRQ_BASE][i] = 0;
++            break;
++        }
++    }
+ }
+-		
++
+ void handle_exception(dword* esp)
+ {
+     struct int_stack_frame * isf = *((struct int_stack_frame **)esp);
+@@ -426,7 +450,7 @@ void handle_exception(dword* esp)
+         case 14:
+             cr2 = read_cr2();
+             diff = (cr2 >> PAGE_SHIFT) - (isf->esp >> PAGE_SHIFT);
+-            // Ueberprüfen ob der Pagefault durch einen Stackoverflow
++            // Ueberprï¿½fen ob der Pagefault durch einen Stackoverflow
+             // hervorgerufen wurde
+             if ((diff >= -2) && (diff <= 2)
+                 && (current_task != NULL)
+@@ -439,8 +463,8 @@ void handle_exception(dword* esp)
+             kprintf("\033[1;37m\033[41mPage Fault: 0x%x\033[0;37m\033[40m", cr2);
+             break;
+     }
+-    
+-    // Prüfen, ob ein VM86-Task die Exception ausgelöst hat, und evtl reagieren
++
++    // Prï¿½fen, ob ein VM86-Task die Exception ausgelï¿½st hat, und evtl reagieren
+     if (isf->eflags & 0x20000) {
+         if (vm86_exception(esp)) {
+             return;
+@@ -472,7 +496,7 @@ void handle_exception(dword* esp)
+             kprintf("\n");
+         }
+         #endif 
+-        
++
+         if(debug_test_flag(DEBUG_FLAG_STACK_BACKTRACE))
+         {
+             stack_backtrace_ebp(isf->ebp, isf->eip);
+@@ -508,24 +532,31 @@ void handle_exception(dword* esp)
+ 
+         abort_task("Unbehandelte Ausnahme.");
+     }
+-}        
++}
+ 
+ void send_irqs(dword* esp) 
+ {
+     dword irq;
++    int task;
++
+     for (irq = 0; irq < 16; irq++)
+     {
+         dword rpc_data = irq + IRQ_BASE;
+-        while (irqs_to_send[irq] > 0) {
+-            schedule_to_task(intr_handling_task[irq + IRQ_BASE], esp);
+-            if (!fastrpc_irq(intr_handling_task[irq + IRQ_BASE], 0, 0, 4, 
+-                (char*) &rpc_data, irq)) 
+-            {
+-                //kprintf("SYSCALL_RPC = FALSE");
+-                break;
++        for (task = 0; task < MAX_INTERRUPTS; task++) {
++            if (intr_handling_task[irq + IRQ_BASE][task] == NULL) {
++                continue;
++            }
++            while (irqs_to_send[irq][task] > 0) {
++                schedule_to_task(intr_handling_task[irq + IRQ_BASE][task], esp);
++                if (!fastrpc_irq(intr_handling_task[irq + IRQ_BASE][task], 0, 0, 4, 
++                    (char*) &rpc_data, irq)) 
++                {
++                    //kprintf("SYSCALL_RPC = FALSE");
++                    break;
++                }
++                //kprintf("IRQ-Handler aufgerufen");
++                irqs_to_send[irq][task]--;
+             }
+-            //kprintf("IRQ-Handler aufgerufen");
+-            irqs_to_send[irq]--;
+         }
+     }
+ }
+-- 
+1.6.5
+
+
+From hartmut at tyndur.org  Tue Nov 10 17:29:11 2009
+From: hartmut at tyndur.org (Alexander Hartmut Kluth)
+Date: Tue, 10 Nov 2009 17:29:11 +0100
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH=5D_Verbindung_nach_DNS-Request_?=
+	=?utf-8?q?schlie=C3=9Fen?=
+Message-ID: <1257870551-10448-1-git-send-email-hartmut@tyndur.org>
+
++ dns.c: Nach Request wird die Verbindung nun geschlossen
+
+Signed-off-by: Alexander Hartmut Kluth <hartmut at tyndur.org>
+---
+ src/modules/tcpip/dns.c |    5 +++--
+ 1 files changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/src/modules/tcpip/dns.c b/src/modules/tcpip/dns.c
+index 0f6e18d..df36fd8 100644
+--- a/src/modules/tcpip/dns.c
++++ b/src/modules/tcpip/dns.c
+@@ -274,7 +274,8 @@ dword dns_request(char* domain)
+                     result = *((dword*) (reply + 10));
+                     dns_cache_add(domain, result);
+                     
+-                    // TODO Verbindung schliessen
++                    tcp_close_connection(conn);
++
+                     return result;
+                 } else {
+                     reply += answer_len;
+@@ -286,7 +287,7 @@ dword dns_request(char* domain)
+         wait_for_rpc();
+     }
+ 
+-    // TODO Verbindung schliessen
++    tcp_close_connection(conn);
+ 
+     return 0;
+ }
+-- 
+1.6.3.3
+
+
+From kevin at tyndur.org  Tue Nov 10 21:05:26 2009
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Tue, 10 Nov 2009 21:05:26 +0100
+Subject: [tyndur-devel]
+	=?iso-8859-1?q?=5BPATCH=5D_Verbindung_nach_DNS-Req?=
+	=?iso-8859-1?q?uest_schlie=DFen?=
+In-Reply-To: <1257870551-10448-1-git-send-email-hartmut@tyndur.org>
+References: <1257870551-10448-1-git-send-email-hartmut@tyndur.org>
+Message-ID: <20091110200526.GA5511@silvanus>
+
+On Tue, Nov 10, 2009 at 05:29:11PM +0100, Alexander Hartmut Kluth wrote:
+> + dns.c: Nach Request wird die Verbindung nun geschlossen
+> 
+> Signed-off-by: Alexander Hartmut Kluth <hartmut at tyndur.org>
+> ---
+>  src/modules/tcpip/dns.c |    5 +++--
+>  1 files changed, 3 insertions(+), 2 deletions(-)
+> 
+> diff --git a/src/modules/tcpip/dns.c b/src/modules/tcpip/dns.c
+> index 0f6e18d..df36fd8 100644
+> --- a/src/modules/tcpip/dns.c
+> +++ b/src/modules/tcpip/dns.c
+> @@ -274,7 +274,8 @@ dword dns_request(char* domain)
+>                      result = *((dword*) (reply + 10));
+>                      dns_cache_add(domain, result);
+>                      
+> -                    // TODO Verbindung schliessen
+> +                    tcp_close_connection(conn);
+> +
+>                      return result;
+>                  } else {
+>                      reply += answer_len;
+> @@ -286,7 +287,7 @@ dword dns_request(char* domain)
+>          wait_for_rpc();
+>      }
+>  
+> -    // TODO Verbindung schliessen
+> +    tcp_close_connection(conn);
+>  
+>      return 0;
+>  }
+
+Weiter oben gibt es noch ein return mehr, dort sollte man die Verbindung
+auch schliessen.
+
+Das richtige Problem mit dem Patch ist aber, dass das Auflösen eines
+Domainnamens jetzt ewig dauert. Ich nehme an, er bleibt beim Schließen
+in der Schleife hängen und kommt nur durch einen Timeout wieder raus.
+Das müsste man auf jeden Fall debuggen, bevor ich den Patch reinschieben
+kann.
+
+From kevin at tyndur.org  Tue Nov 10 21:25:55 2009
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Tue, 10 Nov 2009 21:25:55 +0100
+Subject: [tyndur-devel] [PATCH v2] IRQ-Sharing
+In-Reply-To: <1257357551-23399-1-git-send-email-max@tyndur.org>
+References: <1257357551-23399-1-git-send-email-max@tyndur.org>
+Message-ID: <20091110202554.GB5511@silvanus>
+
+On Wed, Nov 04, 2009 at 06:59:11PM +0100, max at tyndur.org wrote:
+> From: Max Reitz <max at tyndur.org>
+> 
+> * Mit dem Makro MAX_INTERRUPTS in intr.c kann man jetzt die
+>   maximale Anzahl von Handlern pro IRQ definieren
+> 
+> Signed-off-by: Max Reitz <max at tyndur.org>
+> ---
+>  src/kernel/src/intr.c |   99 ++++++++++++++++++++++++++++++++-----------------
+>  1 files changed, 65 insertions(+), 34 deletions(-)
+
+Danke, ist drin
+
+From kevin at tyndur.org  Fri Nov 13 23:49:13 2009
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Fri, 13 Nov 2009 23:49:13 +0100
+Subject: [tyndur-devel] [PATCH 0/2] init: Umgebungsvariablen per Multiboot
+	setzen
+Message-ID: <1258152555-6535-1-git-send-email-kevin@tyndur.org>
+
+Fuer die 0.2.2 schwebt mir ein GRUB-Menue vor, in dem man die Sprache
+auswaehlen kann. Damit das funktionieren kann, muessen wir die Sprache
+an das System uebergeben - am besten als Multibootparameter fuer init.
+
+Nach diesen Patches geht z.B. 'init boot=file:/ env.LANG=en'
+
+Kevin Wolf (2):
+  init: parse_cmdline() auslagern
+  init: Umgebungsvariablen initialisieren
+
+ src/modules/init/init.c |   81 ++++++++++++++++++++++++++++++++++------------
+ 1 files changed, 60 insertions(+), 21 deletions(-)
+
+
+From kevin at tyndur.org  Fri Nov 13 23:49:14 2009
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Fri, 13 Nov 2009 23:49:14 +0100
+Subject: [tyndur-devel] [PATCH 1/2] init: parse_cmdline() auslagern
+In-Reply-To: <1258152555-6535-1-git-send-email-kevin@tyndur.org>
+References: <1258152555-6535-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1258152555-6535-2-git-send-email-kevin@tyndur.org>
+
+* init: Allgemeinen Parser fuer init-Optionen hinzugefuegt und das Parsen
+  von boot=... darauf umgestellt
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/init/init.c |   67 ++++++++++++++++++++++++++++++++--------------
+ 1 files changed, 46 insertions(+), 21 deletions(-)
+
+diff --git a/src/modules/init/init.c b/src/modules/init/init.c
+index 8a7c30d..1627054 100644
+--- a/src/modules/init/init.c
++++ b/src/modules/init/init.c
+@@ -87,7 +87,50 @@ extern void init_envvars(void);
+ 
+ list_t* service_list;
+ 
+-        
++/**
++ * Verarbeitet die Kommandozeilenoptionen fuer init
++ */
++void parse_cmdline(void)
++{
++    char* cmdline = get_cmdline();
++    char* s;
++
++    // Defaultwerte setzen
++    setenv("CWD", "floppy:/devices/fd0|fat:/", 1);
++    setenv("PATH", "floppy:/devices/fd0|fat:/apps", 1);
++
++    // Den Programmnamen ('init') wegschneiden
++    s = strtok(cmdline, " ");
++
++    // Der Rest sind durch Leezeichen getrennte Optionen
++    while ((s = strtok(NULL, " "))) {
++        char* key = s;
++        char* value = strchr(s, '=');
++
++        if (value) {
++            *value = '\0';
++            value++;
++        }
++
++        if (!strcmp(key, "boot")) {
++
++            if (!value) {
++                printf("init: boot= benoetigt einen Wert\n");
++                continue;
++            }
++
++            setenv("CWD", value, 1);
++
++            // Fuer $PATH wird noch apps angehaengt
++            size_t boot_size = strlen(value);
++            char path[boot_size + 5];
++            memcpy(path, value, boot_size);
++            memcpy(path + boot_size, "apps", 5);
++            setenv("PATH", path, 1);
++        }
++    }
++}
++
+ void _start(dword modules)
+ {
+     puts("\n\033[1;33mtyndur-Init $Rev$ \033[0;37m\n");
+@@ -99,26 +142,8 @@ void _start(dword modules)
+     service_list = list_create();
+     init_envvars();
+ 
+-    char* cmdline = get_cmdline();
+-    char* boot = strstr(cmdline, "boot=");
+-    if (boot == NULL) {
+-        setenv("CWD", "floppy:/devices/fd0|fat:/", 1);
+-        setenv("PATH", "floppy:/devices/fd0|fat:/apps", 1);
+-    } else {
+-        boot += 5;
+-        
+-        setenv("CWD", boot, 1);
+-
+-        // Fuer $PATH wird noch apps angehaengt
+-        size_t boot_size = strlen(boot);
+-        char path[boot_size + 5];
+-        memcpy(path, boot, boot_size);
+-        memcpy(path + boot_size, "apps", 5);
+-        setenv("PATH", path, 1);
+-        
+-        boot -= 5;
+-    }
+-    
++    parse_cmdline();
++
+     register_message_handler("SERV_REG", &rpc_service_register);
+     register_message_handler("SERV_GET", &rpc_service_get);
+     register_message_handler("SERV_NAM", &rpc_service_get_name);
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Fri Nov 13 23:49:15 2009
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Fri, 13 Nov 2009 23:49:15 +0100
+Subject: [tyndur-devel] [PATCH 2/2] init: Umgebungsvariablen initialisieren
+In-Reply-To: <1258152555-6535-1-git-send-email-kevin@tyndur.org>
+References: <1258152555-6535-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1258152555-6535-3-git-send-email-kevin@tyndur.org>
+
++ init: Ueber Parameter env.<name>=<value> koennen Umgebungsvariablen
+  ueber die Modulkommandozeile initialisiert werden
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/init/init.c |   14 ++++++++++++++
+ 1 files changed, 14 insertions(+), 0 deletions(-)
+
+diff --git a/src/modules/init/init.c b/src/modules/init/init.c
+index 1627054..9ca081d 100644
+--- a/src/modules/init/init.c
++++ b/src/modules/init/init.c
+@@ -127,6 +127,20 @@ void parse_cmdline(void)
+             memcpy(path, value, boot_size);
+             memcpy(path + boot_size, "apps", 5);
+             setenv("PATH", path, 1);
++
++        } else if (!strncmp(key, "env.", 4)) {
++
++            if (key[4] == '\0') {
++                printf("init: Umgebungsvariable benoetigt einen Namen\n");
++                continue;
++            }
++            if (!value || !*value) {
++                printf("init: %s= benoetigt einen Wert\n", key);
++                continue;
++            }
++
++            setenv(key + 4, value, 1);
++
+         }
+     }
+ }
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sat Nov 14 14:28:25 2009
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 14 Nov 2009 14:28:25 +0100
+Subject: [tyndur-devel] [PATCH 0/4] setup
+Message-ID: <1258205309-11452-1-git-send-email-kevin@tyndur.org>
+
+Ein kleines TUI-Tool, um die Tastaturbelegung und die lpt-Quelle
+auszuwÃ¤hlen. Beim erstern Start wird automatisch erstmal die
+Tastaturbelegung abgefragt und bei zukÃ¼nftigen Starts entsprechend
+der getroffenen Wahl initialisiert.
+
+Kevin Wolf (4):
+  getterm: --once und --auto
+  Pascal-RTL: Units zum Pinseln von TUIs
+  setup: Konfigurationsprogramm
+  Tastaturbelegung beim ersten Start abfragen
+
+ build/root-common/config/servmgr/config/cmd     |    1 +
+ build/root-common/config/servmgr/config/conf    |    1 +
+ build/root-common/config/servmgr/config/deps    |    2 +
+ build/root-common/config/servmgr/config/workdir |    1 +
+ build/root-common/config/servmgr/getterm1/deps  |    1 +
+ build/root-floppy/config/keyboard.lsh           |    3 +
+ build/root-hd/config/keyboard.lsh               |    3 +
+ src/modules/c/getterm/main.c                    |   35 ++-
+ src/modules/pas/lib/tui/Makefile.all            |    1 +
+ src/modules/pas/lib/tui/tui.pas                 |  533 +++++++++++++++++++++++
+ src/modules/pas/setup/Makefile.all              |    4 +
+ src/modules/pas/setup/menu.pas                  |   96 ++++
+ src/modules/pas/setup/setup.pas                 |   52 +++
+ src/modules/pas/setup/setup_keyboard.pas        |  153 +++++++
+ src/modules/pas/setup/setup_lpt.pas             |  136 ++++++
+ 15 files changed, 1014 insertions(+), 8 deletions(-)
+ create mode 100644 build/root-common/config/servmgr/config/cmd
+ create mode 100644 build/root-common/config/servmgr/config/conf
+ create mode 100644 build/root-common/config/servmgr/config/deps
+ create mode 100644 build/root-common/config/servmgr/config/workdir
+ create mode 100644 build/root-floppy/config/keyboard.lsh
+ create mode 100644 build/root-hd/config/keyboard.lsh
+ create mode 100644 src/modules/pas/lib/tui/Makefile.all
+ create mode 100644 src/modules/pas/lib/tui/tui.pas
+ create mode 100644 src/modules/pas/setup/Makefile.all
+ create mode 100644 src/modules/pas/setup/menu.pas
+ create mode 100644 src/modules/pas/setup/setup.pas
+ create mode 100644 src/modules/pas/setup/setup_keyboard.pas
+ create mode 100644 src/modules/pas/setup/setup_lpt.pas
+
+
+From kevin at tyndur.org  Sat Nov 14 14:28:26 2009
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 14 Nov 2009 14:28:26 +0100
+Subject: [tyndur-devel] [PATCH 1/4] getterm: --once und --auto
+In-Reply-To: <1258205309-11452-1-git-send-email-kevin@tyndur.org>
+References: <1258205309-11452-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1258205309-11452-2-git-send-email-kevin@tyndur.org>
+
++ getterm: Mit --once wird das Programm nicht neugestartet, nachdem es
+  sich beendet hat
++ getterm: Mit --auto wird nicht darauf gewartet, dass der Benutzer
+  Enter drueckt
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/c/getterm/main.c |   35 +++++++++++++++++++++++++++--------
+ 1 files changed, 27 insertions(+), 8 deletions(-)
+
+diff --git a/src/modules/c/getterm/main.c b/src/modules/c/getterm/main.c
+index 4218f30..aa210e6 100644
+--- a/src/modules/c/getterm/main.c
++++ b/src/modules/c/getterm/main.c
+@@ -84,10 +84,27 @@ static void console_set_handle(console_handle_t handle, const char* path)
+ int main(int argc, char* argv[])
+ {
+     const char* program;
++    int respawn = 1;
++    int wait_for_key = 1;
++
++    // Mit --once wird das Programm nicht neugestartet
++    // Mit --auto wird nicht auf einen Tastendruck gewartet
++    while (argc > 2) {
++        if (!strcmp(argv[1], "--once")) {
++            respawn = 0;
++        } else if (!strcmp(argv[1], "--auto")) {
++            wait_for_key = 0;
++        } else {
++            break;
++        }
++        argv++;
++        argc--;
++    }
+ 
+     // Wenn die Anzahl der Argumente nicht stimmt wird abgebrochen
+     if (argc != 5) {
+-        puts("Aufruf: getterm <stdin> <stdout> <stderr> <Programm>");
++        puts("Aufruf: getterm [--once] [--auto] "
++            "<stdin> <stdout> <stderr> <Programm>");
+         return -1;
+     }
+     program = argv[4];
+@@ -100,12 +117,14 @@ int main(int argc, char* argv[])
+     // Lokale Ein- und Ausgabehandles auch anpassen
+     stdio_init();
+ 
+-    while (TRUE) {
+-        char input = 0;
+-        printf("\n\nEingabetaste druecken um %s zu starten...\n", program);
+-        // Auf Druecken der Eingabetaste warten
+-        while((fread(&input, 1, 1, stdin) != 1) || (input != '\n')) {
+-            yield();
++    do {
++        if (wait_for_key) {
++            char input = 0;
++            printf("\n\nEingabetaste druecken um %s zu starten...\n", program);
++            // Auf Druecken der Eingabetaste warten
++            while((fread(&input, 1, 1, stdin) != 1) || (input != '\n')) {
++                yield();
++            }
+         }
+ 
+         pid_t pid = init_execute(program);
+@@ -118,7 +137,7 @@ int main(int argc, char* argv[])
+ 
+         // Jetzt wird gewartet, bis der Prozess terminiert
+         waitpid(pid, NULL, 0);
+-    }
++    } while (respawn);
+ 
+     return 0;
+ }
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sat Nov 14 14:28:27 2009
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 14 Nov 2009 14:28:27 +0100
+Subject: [tyndur-devel] [PATCH 2/4] Pascal-RTL: Units zum Pinseln von TUIs
+In-Reply-To: <1258205309-11452-1-git-send-email-kevin@tyndur.org>
+References: <1258205309-11452-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1258205309-11452-3-git-send-email-kevin@tyndur.org>
+
++ Pascal-RTL: Unit tui
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/pas/lib/tui/Makefile.all |    1 +
+ src/modules/pas/lib/tui/tui.pas      |  533 ++++++++++++++++++++++++++++++++++
+ 2 files changed, 534 insertions(+), 0 deletions(-)
+ create mode 100644 src/modules/pas/lib/tui/Makefile.all
+ create mode 100644 src/modules/pas/lib/tui/tui.pas
+
+diff --git a/src/modules/pas/lib/tui/Makefile.all b/src/modules/pas/lib/tui/Makefile.all
+new file mode 100644
+index 0000000..a645d3e
+--- /dev/null
++++ b/src/modules/pas/lib/tui/Makefile.all
+@@ -0,0 +1 @@
++cp libptui.a tui.ppu ../units
+diff --git a/src/modules/pas/lib/tui/tui.pas b/src/modules/pas/lib/tui/tui.pas
+new file mode 100644
+index 0000000..a130f81
+--- /dev/null
++++ b/src/modules/pas/lib/tui/tui.pas
+@@ -0,0 +1,533 @@
++unit tui;
++{$MODE ObjFPC}
++{$H+}
++{$COPERATORS ON}
++
++interface
++
++type
++    TUIObject = class
++        public
++            color: byte;
++            bgcolor: byte;
++
++        protected
++            f_w, f_h: integer;
++
++        public
++            constructor create;
++            procedure align(w, h: integer); virtual;
++            procedure draw(x, y: integer); virtual;
++
++            property width: integer read f_w write f_w;
++            property height: integer read f_h write f_h;
++    end;
++    PTUIObject = ^TUIObject;
++
++    TUIRowColContainer = class(TUIObject)
++        public
++            constructor create(num: integer);
++            destructor free;
++
++        protected
++            cols: integer;
++            children: PTUIObject;
++
++            f_fixed: PInteger;
++            f_prop: PInteger;
++
++        public
++            spacer: boolean;
++
++        protected
++            procedure SetChild(i: integer; obj: TUIObject);
++            procedure SetFixedWidth(i: integer; w: integer);
++            procedure SetPropWidth(i: integer; w: integer);
++
++        public
++            property _children[i: integer]: TUIObject write SetChild; default;
++            property fixed[i: integer]: integer write SetFixedWidth;
++            property prop[i: integer]: integer write SetPropWidth;
++    end;
++
++    TUIColContainer = class(TUIRowColContainer)
++        public
++            procedure align(w, h: integer); override;
++            procedure draw(x, y: integer); override;
++    end;
++
++    TUIRowContainer = class(TUIRowColContainer)
++        public
++            procedure align(w, h: integer); override;
++            procedure draw(x, y: integer); override;
++    end;
++
++    TUIFrame = class(TUIObject)
++        protected
++            f_obj: TUIObject;
++            f_obj_w: integer;
++            f_obj_h: integer;
++
++        public
++            constructor create(obj: TUIObject; w, h: integer);
++            procedure align(w, h: integer); override;
++            procedure draw(x, y: integer); override;
++
++            property obj: TUIObject read f_obj write f_obj;
++    end;
++
++    TUILabel = class(TUIObject)
++        protected
++            f_content: UnicodeString;
++
++        public
++            procedure draw(x, y: integer); override;
++            property content: UnicodeString read f_content write f_content;
++    end;
++
++    TUIButton = class(TUILabel)
++        public
++            procedure draw(x, y: integer); override;
++    end;
++
++    TMenuItem = record
++        s: UnicodeString;
++        opaque: Pointer;
++    end;
++    PMenuItem = ^TMenuItem;
++
++    TUIMenu = class(TUIObject)
++        protected
++            f_num: integer;
++            f_cur: integer;
++            f_selected: integer;
++            f_items: PMenuItem;
++
++        public
++            sel_color: byte;
++            sel_bgcolor: byte;
++
++        public
++            constructor create(num: integer);
++            destructor free;
++
++            procedure draw(x, y: integer); override;
++            procedure AddItem(s: UnicodeString; opaque: Pointer);
++            property selected: integer read f_selected write f_selected;
++    end;
++
++implementation
++
++uses crt, sysutils, strutils;
++
++procedure FillRect(x, y, w, h: integer);
++var
++    i: integer;
++begin
++    for i := y to y + h - 1 do begin
++        GotoXY(x, i);
++        Write(StringOfChar(' ', w));
++    end;
++end;
++
++procedure WritePadded(s: UnicodeString; w: integer);
++begin
++    if Length(s) >= w then begin
++        Write(Copy(s, 1, w));
++    end else begin
++        Write(Utf8Encode(s));
++        Write(StringOfChar(' ', w - Length(s)));
++    end;
++end;
++
++
++constructor TUIObject.create;
++begin
++    color := 7;
++    bgcolor := 0;
++end;
++
++procedure TUIObject.align(w, h: integer);
++begin
++    f_w := w;
++    f_h := h;
++end;
++
++procedure TUIObject.draw(x, y: integer);
++begin
++    TextColor(color);
++    TextBackground(bgcolor);
++    FillRect(x, y, f_w, f_h);
++end;
++
++constructor TUIRowColContainer.create(num: integer);
++var
++    i: integer;
++begin
++    if num < 1 then begin
++        raise Exception.create('TUIColContainer: num < 1');
++    end;
++
++    spacer := false;
++
++    cols := num;
++    children := GetMem(sizeof(PTUIObject) * num);
++    f_fixed := GetMem(sizeof(integer) * num);
++    f_prop := GetMem(sizeof(integer) * num);
++
++    FillByte(children^, sizeof(PTUIObject) * num, 0);
++    FillByte(f_fixed^, sizeof(integer) * num, 0);
++    FillByte(f_prop^, sizeof(integer) * num, 0);
++
++    for i := 0 to cols - 1 do begin
++        children[i] := nil;
++        f_fixed[i] := 0;
++        f_prop[i] := 0;
++    end;
++end;
++
++destructor TUIRowColContainer.free;
++var
++    i: integer;
++begin
++    for i := 0 to cols - 1 do begin
++        if children[i] <> nil then begin
++            children[i].free;
++        end;
++    end;
++
++    FreeMem(children);
++    FreeMem(f_fixed);
++    FreeMem(f_prop);
++end;
++
++procedure TUIRowColContainer.SetChild(i: integer; obj: TUIObject);
++begin
++    children[i] := obj;
++end;
++
++procedure TUIRowColContainer.SetFixedWidth(i: integer; w: integer);
++begin
++    f_fixed[i] := w;
++end;
++
++procedure TUIRowColContainer.SetPropWidth(i: integer; w: integer);
++begin
++    f_prop[i] := w;
++end;
++
++procedure TUIColContainer.align(w, h: integer);
++var
++    i: integer;
++    prop_space: integer;
++    cur_w: integer;
++begin
++    f_w := w;
++    f_h := h;
++
++    prop_space := 0;
++    for i := 0 to cols - 1 do begin
++        if f_fixed[i] > 0 then begin
++            if w >= f_fixed[i] then begin
++                w -= f_fixed[i];
++            end else begin
++                f_fixed[i] := w;
++                w := 0;
++            end;
++
++            children[i].align(f_fixed[i], h);
++        end else begin
++            prop_space += f_prop[i];
++        end;
++
++        if spacer and (w > 0) and (i < cols - 1) then begin
++            Dec(w);
++        end;
++    end;
++
++    for i := 0 to cols - 1 do begin
++        if f_fixed[i] = 0 then begin
++            if prop_space = 0 then begin
++                children[i].align(0, h);
++            end else begin
++                cur_w := (w * f_prop[i]) div prop_space;
++                children[i].align(cur_w, h);
++                prop_space -= f_prop[i];
++                w -= cur_w;
++            end;
++        end;
++    end;
++end;
++
++procedure TUIColContainer.draw(x, y: integer);
++var
++    i: integer;
++    w: integer;
++begin
++    w := 0;
++    for i := 0 to cols - 1 do begin
++        children[i].draw(x + w, y);
++        w += children[i].width;
++
++        if spacer then begin
++            Inc(w);
++        end;
++    end;
++
++    if w < f_w then begin
++        TextColor(color);
++        TextBackground(bgcolor);
++        FillRect(x + w, y, f_w - w, f_h);
++    end;
++end;
++
++procedure TUIRowContainer.align(w, h: integer);
++var
++    i: integer;
++    prop_space: integer;
++    cur_h: integer;
++begin
++    f_w := w;
++    f_h := h;
++
++    prop_space := 0;
++    for i := 0 to cols - 1 do begin
++        if f_fixed[i] > 0 then begin
++            if w >= f_fixed[i] then begin
++                h -= f_fixed[i];
++            end else begin
++                f_fixed[i] := h;
++                h := 0;
++            end;
++
++            children[i].align(w, f_fixed[i]);
++        end else begin
++            prop_space += f_prop[i];
++        end;
++
++        if spacer and (h > 0) and (i <> cols - 1) then begin
++            Dec(h);
++        end;
++    end;
++
++    for i := 0 to cols - 1 do begin
++        if f_fixed[i] = 0 then begin
++            if prop_space = 0 then begin
++                children[i].align(w, 0);
++            end else begin
++                cur_h := (h * f_prop[i]) div prop_space;
++                children[i].align(w, cur_h);
++                prop_space -= f_prop[i];
++                h -= cur_h;
++            end;
++        end;
++    end;
++end;
++
++procedure TUIRowContainer.draw(x, y: integer);
++var
++    i: integer;
++    h: integer;
++begin
++    h := 0;
++    for i := 0 to cols - 1 do begin
++        children[i].draw(x, y + h);
++        h += children[i].height;
++
++        if spacer then begin
++            Inc(h);
++        end;
++    end;
++
++    if h < f_h then begin
++        TextColor(color);
++        TextBackground(bgcolor);
++        FillRect(x, y + h, f_w, f_h - h);
++    end;
++end;
++
++constructor TUIFrame.create(obj: TUIObject; w, h: integer);
++begin
++    f_obj := obj;
++    f_obj_w := w;
++    f_obj_h := h;
++end;
++
++procedure TUIFrame.align(w, h: integer);
++begin
++    f_w := w;
++    f_h := h;
++
++    if f_obj_w < w then begin
++        w := f_obj_w;
++    end;
++
++    if f_obj_h < h then begin
++        h := f_obj_h;
++    end;
++
++    f_obj.align(w, h);
++end;
++
++procedure TUIFrame.draw(x, y: integer);
++var
++    w, h: integer;
++begin
++    w := f_w;
++    h := f_h;
++
++    TextColor(color);
++    TextBackground(bgcolor);
++    FillRect(x, y, w, h);
++
++    if f_obj_w < w then begin
++        w := f_obj_w;
++    end;
++
++    if f_obj_h < h then begin
++        h := f_obj_h;
++    end;
++
++    f_obj.draw(x + ((f_w - w) div 2), y + ((f_h - h) div 2));
++end;
++
++procedure TUILabel.draw(x, y: integer);
++var
++    s: UnicodeString;
++    pos: integer;
++    cnt: integer;
++    row: integer;
++    line_start_pos: integer;
++begin
++    if f_h > 0 then begin
++        TextColor(color);
++        TextBackground(bgcolor);
++        FillRect(x, y, f_w, f_h);
++
++        pos := 0;
++        row := 0;
++        cnt := 1;
++        line_start_pos := 1;
++
++        while (pos < Length(f_content)) and (row < f_h) do begin
++
++            s := ExtractWordPos(cnt, f_content, [' '], pos);
++            Inc(cnt);
++            if s = '' then begin
++                break;
++            end;
++
++            if pos - line_start_pos + Length(s) > f_w then begin
++                Inc(row);
++                line_start_pos := pos;
++                if row >= f_h then begin
++                    break;
++                end;
++            end;
++
++            GotoXY(x + pos - line_start_pos, y + row);
++            Write(Utf8Encode(s));
++        end;
++    end;
++end;
++
++procedure TUIButton.draw(x, y: integer);
++var
++    s: UnicodeString;
++    diff: integer;
++begin
++    if f_w > 2 then begin
++        TextColor(color);
++        TextBackground(bgcolor);
++        FillRect(x, y, f_w, f_h);
++
++        if Length(content) > f_w - 2 then begin
++            s := '<' + Copy(content, 1, f_w - 2) + '>';
++        end else begin
++            diff := f_w - 2 - Length(content);
++            s := '<' + StringOfChar(' ', diff div 2) + content +
++                StringOfChar(' ', diff - (diff div 2)) + '>';
++        end;
++
++        GotoXY(x, y);
++        Write(Utf8Encode(s));
++    end;
++end;
++
++constructor TUIMenu.create(num: integer);
++var
++    i: integer;
++begin
++    if num < 1 then begin
++        raise Exception.create('TUIColContainer: num < 1');
++    end;
++
++    sel_color := 14;
++    sel_bgcolor := 1;
++
++    f_cur := 0;
++    f_selected := 0;
++    f_num := num;
++    f_items := GetMem(sizeof(TMenuItem) * num);
++    FillByte(f_items^, sizeof(TMenuItem) * num, 0);
++
++    for i := 0 to f_num - 1 do begin
++        f_items[i].s := '';
++        f_items[i].opaque := nil;
++    end;
++end;
++
++destructor TUIMenu.free;
++begin
++    FreeMem(f_items);
++end;
++
++procedure TUIMenu.draw(x, y: integer);
++var
++    i: integer;
++    last: integer;
++begin
++    TextColor(color);
++    TextBackground(bgcolor);
++    FillRect(x, y, f_w, f_h);
++
++    last := f_cur - 1;
++    if last >= f_h then begin
++        last := f_h - 1;
++    end;
++
++    for i := 0 to last do begin
++        GotoXY(x, y + i);
++        if f_selected = i then begin
++            TextColor(sel_color);
++            TextBackground(sel_bgcolor);
++        end;
++        WritePadded(f_items[i].s, f_w);
++        if f_selected = i then begin
++            TextColor(color);
++            TextBackground(bgcolor);
++        end;
++    end;
++end;
++
++procedure TUIMenu.AddItem(s: UnicodeString; opaque: Pointer);
++begin
++    if f_cur < f_num then begin
++        f_items[f_cur].s := s;
++        f_items[f_cur].opaque := opaque;
++        Inc(f_cur);
++    end;
++end;
++
++
++initialization
++
++    ClrScr;
++
++finalization
++
++    TextBackground(0);
++    TextColor(7);
++    WriteLn;
++
++end.
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sat Nov 14 14:28:28 2009
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 14 Nov 2009 14:28:28 +0100
+Subject: [tyndur-devel] [PATCH 3/4] setup: Konfigurationsprogramm
+In-Reply-To: <1258205309-11452-1-git-send-email-kevin@tyndur.org>
+References: <1258205309-11452-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1258205309-11452-4-git-send-email-kevin@tyndur.org>
+
++ setup: Ein tolles Konfigurationsprogramm, das im Moment so gut wie
+  gar nichts kann
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/pas/setup/Makefile.all       |    4 +
+ src/modules/pas/setup/menu.pas           |   96 ++++++++++++++++++++
+ src/modules/pas/setup/setup.pas          |   52 +++++++++++
+ src/modules/pas/setup/setup_keyboard.pas |  146 ++++++++++++++++++++++++++++++
+ src/modules/pas/setup/setup_lpt.pas      |  136 ++++++++++++++++++++++++++++
+ 5 files changed, 434 insertions(+), 0 deletions(-)
+ create mode 100644 src/modules/pas/setup/Makefile.all
+ create mode 100644 src/modules/pas/setup/menu.pas
+ create mode 100644 src/modules/pas/setup/setup.pas
+ create mode 100644 src/modules/pas/setup/setup_keyboard.pas
+ create mode 100644 src/modules/pas/setup/setup_lpt.pas
+
+diff --git a/src/modules/pas/setup/Makefile.all b/src/modules/pas/setup/Makefile.all
+new file mode 100644
+index 0000000..febfb1e
+--- /dev/null
++++ b/src/modules/pas/setup/Makefile.all
+@@ -0,0 +1,4 @@
++shopt -s extglob
++echo "LD   $1/setup"
++"$COMPILER_PREFIX"ld -m elf_i386 -osetup -Ttext=0x40000000 *.o --start-group ../lib/units/*.a $2 --end-group `gcc -print-libgcc-file-name`
++strip -s setup -o $1/apps/setup
+diff --git a/src/modules/pas/setup/menu.pas b/src/modules/pas/setup/menu.pas
+new file mode 100644
+index 0000000..89b537d
+--- /dev/null
++++ b/src/modules/pas/setup/menu.pas
+@@ -0,0 +1,96 @@
++unit menu;
++
++interface
++uses tui;
++
++procedure MainMenu(screen: TUIObject; frame: TUIFrame);
++function StartModule(module: String; back: boolean): boolean;
++
++implementation
++
++uses tyndur, crt, setup_keyboard, setup_lpt;
++
++function StartModule(module: String; back: boolean): boolean;
++begin
++    if module = 'keyboard' then begin
++        SetupKeyboard(back);
++    end else if module = 'lpt' then begin
++        SetupLPT(back);
++    end else begin
++        exit(false);
++    end;
++
++    exit(true);
++end;
++
++procedure MainMenu(screen: TUIObject; frame: TUIFrame);
++var
++    mainw: TUIRowContainer;
++
++    a: TUIMenu;
++    b: TUILabel;
++
++    buttons: TUIColContainer;
++    btnOk: TUIButton;
++    btnCancel: TUIButton;
++begin
++    mainw := TUIRowContainer.create(2);
++    mainw.spacer := true;
++    frame.obj := mainw;
++
++    a := TUIMenu.create(4);
++    with a do begin
++        bgcolor := 0;
++        color := 14;
++
++        AddItem('Tastaturbelegung', nil);
++        AddItem('lpt-Quellen', nil);
++        AddItem('', nil);
++        AddItem('Beenden', nil);
++    end;
++    mainw[1] := a;
++    mainw.fixed[1] := 4;
++
++    b := TUILabel.create;
++    b.content := Utf8Decode('Bitte wÃ¤hle aus dem MenÃ¼ das gewÃ¼nschte Konfigurationsprogramm aus.');
++    mainw[0] := b;
++    mainw.prop[0] := 30;
++
++    a.selected := 0;
++    repeat
++        // Zeichnen
++        screen.align(80, 24);
++        screen.draw(1, 1);
++
++        case readkey of
++            #27:
++                case ReadEscapeSequence of
++                    SK_UP:
++                        begin
++                            a.selected := (a.selected + 4 - 1) mod 4;
++                            if a.selected = 2 then begin
++                                a.selected := 1;
++                            end;
++                        end;
++                    SK_DOWN:
++                        begin
++                            a.selected := (a.selected + 1) mod 4;
++                            if a.selected = 2 then begin
++                                a.selected := 3;
++                            end;
++                        end;
++                end;
++            #10:
++                case a.selected of
++                    0:  StartModule('keyboard', true);
++                    1:  StartModule('lpt', true);
++                    3:  break;
++                end;
++        end;
++    until false;
++
++    frame.obj := nil;
++    mainw.free;
++end;
++
++end.
+diff --git a/src/modules/pas/setup/setup.pas b/src/modules/pas/setup/setup.pas
+new file mode 100644
+index 0000000..e50a90a
+--- /dev/null
++++ b/src/modules/pas/setup/setup.pas
+@@ -0,0 +1,52 @@
++program setup;
++{$MODE ObjFPC}
++{$H+}
++
++uses
++    crt, tui,
++    menu;
++
++var
++    screen: TUIRowContainer;
++    title: TUILabel;
++    f: TUIFrame;
++    s: string;
++    show_menu: boolean;
++    i: integer;
++begin
++    s := '';
++    WriteLn(HexStr(dword(@s), 8));
++
++    screen := TUIRowContainer.create(2);
++    screen.bgcolor := 2;
++    screen.color := 1;
++
++    title := TUILabel.create;
++    title.content := 'tyndur-Konfiguration';
++    title.bgcolor := 1;
++    title.color := 15;
++    screen[0] := title;
++    screen.fixed[0] := 1;
++
++    f := TUIFrame.create(nil, 60, 12);
++    screen[1] := f;
++    screen.prop[1] := 1;
++
++    show_menu := true;
++    for i := 1 to system.ParamCount do begin
++        if not StartModule(system.ParamStr(i), false) then begin
++            show_menu := false;
++            break;
++        end;
++    end;
++
++    if show_menu then begin
++        MainMenu(screen, f);
++    end;
++
++    screen.free;
++
++    TextBackground(0);
++    TextColor(7);
++    ClrScr;
++end.
+diff --git a/src/modules/pas/setup/setup_keyboard.pas b/src/modules/pas/setup/setup_keyboard.pas
+new file mode 100644
+index 0000000..879ca88
+--- /dev/null
++++ b/src/modules/pas/setup/setup_keyboard.pas
+@@ -0,0 +1,146 @@
++unit setup_keyboard;
++
++interface
++
++procedure SetupKeyboard(back: boolean);
++
++implementation
++
++uses sysutils, tyndur, crt, tui;
++
++procedure SetLayout(layout: String);
++var
++    f: File of byte;
++    buf: Array [1..2048] of byte;
++    path: String;
++
++    cfg: text;
++begin
++    path := 'file:/system/keymaps/' + layout + '.kbd';
++
++    if not FileExists(path) then begin
++        exit;
++    end;
++
++    Assign(f, path);
++    Reset(f, 2048);
++    BlockRead(f, buf, 1);
++    Close(f);
++
++    Assign(f, 'vterm:/keymap');
++    Rewrite(f, 2048);
++    BlockWrite(f, buf, 1);
++    Close(f);
++end;
++
++procedure SetupKeyboard(back: boolean);
++var
++    mainw: TUIRowContainer;
++
++    a: TUIMenu;
++    b: TUILabel;
++
++    buttons: TUIColContainer;
++    btnOk: TUIButton;
++    btnCancel: TUIButton;
++    screen: TUIRowContainer;
++    title: TUILabel;
++    f: TUIFrame;
++    s: string;
++    num_items: integer;
++begin
++    s := '';
++    WriteLn(HexStr(dword(@s), 8));
++
++    screen := TUIRowContainer.create(2);
++    screen.bgcolor := 2;
++    screen.color := 1;
++
++    title := TUILabel.create;
++    title.content := 'tyndur-Konfiguration: Tastaturbelegung';
++    title.bgcolor := 1;
++    title.color := 15;
++    screen[0] := title;
++    screen.fixed[0] := 1;
++
++    f := TUIFrame.create(nil, 60, 12);
++    screen[1] := f;
++    screen.prop[1] := 1;
++
++    mainw := TUIRowContainer.create(2);
++    mainw.spacer := true;
++    f.obj := mainw;
++
++    if back then begin
++        num_items := 4;
++    end else begin
++        num_items := 2;
++    end;
++
++    a := TUIMenu.create(num_items);
++    with a do begin
++        bgcolor := 0;
++        color := 14;
++
++        AddItem('Deutsch', nil);
++        AddItem('US-Amerikanisch', nil);
++        if back then begin
++            AddItem('', nil);
++            AddItem(Utf8Decode('ZurÃ¼ck'), nil);
++        end;
++    end;
++    mainw[1] := a;
++    mainw.fixed[1] := num_items;
++
++    b := TUILabel.create;
++    b.content := Utf8Decode('Bitte wÃ¤hle aus dem MenÃ¼ die richtige Tastaturbelegung aus.');
++    mainw[0] := b;
++    mainw.prop[0] := 30;
++
++    a.selected := 0;
++    repeat
++        // Zeichnen
++        screen.align(80, 24);
++        screen.draw(1, 1);
++
++        case readkey of
++            #27:
++                case ReadEscapeSequence of
++                    SK_UP:
++                        begin
++                            a.selected := (a.selected + num_items - 1) mod num_items;
++                            if a.selected = 2 then begin
++                                a.selected := 1;
++                            end;
++                        end;
++                    SK_DOWN:
++                        begin
++                            a.selected := (a.selected + 1) mod num_items;
++                            if a.selected = 2 then begin
++                                a.selected := 3;
++                            end;
++                        end;
++                end;
++            #10:
++                case a.selected of
++                    0:
++                        begin
++                            SetLayout('de');
++                            break;
++                        end;
++                    1:
++                        begin
++                            SetLayout('us');
++                            break;
++                        end;
++                    3:  break;
++                end;
++        end;
++    until false;
++
++    f.obj := nil;
++    mainw.free;
++    screen.free;
++end;
++
++end.
+diff --git a/src/modules/pas/setup/setup_lpt.pas b/src/modules/pas/setup/setup_lpt.pas
+new file mode 100644
+index 0000000..e4207ab
+--- /dev/null
++++ b/src/modules/pas/setup/setup_lpt.pas
+@@ -0,0 +1,136 @@
++unit setup_lpt;
++
++interface
++
++procedure SetupLPT(back: boolean);
++
++implementation
++
++uses sysutils, dos, tyndur, crt, tui;
++
++procedure SetRepo(repo: String);
++var
++    cfg: text;
++begin
++    Assign(cfg, 'file:/config/lpt/pkgsrc');
++    Rewrite(cfg);
++    WriteLn(cfg, 'lpt ', repo);
++    Close(cfg);
++
++    TextBackground(0);
++    TextColor(7);
++    ClrScr;
++    Exec('lpt', 'scan');
++
++    WriteLn;
++    WriteLn('Bitte eine beliebige Taste drÃ¼cken');
++    readkey;
++end;
++
++procedure SetupLPT(back: boolean);
++var
++    mainw: TUIRowContainer;
++
++    a: TUIMenu;
++    b: TUILabel;
++
++    buttons: TUIColContainer;
++    btnOk: TUIButton;
++    btnCancel: TUIButton;
++    screen: TUIRowContainer;
++    title: TUILabel;
++    f: TUIFrame;
++    num_items: integer;
++begin
++    screen := TUIRowContainer.create(2);
++    screen.bgcolor := 2;
++    screen.color := 1;
++
++    title := TUILabel.create;
++    title.content := Utf8Decode('tyndur-Konfiguration: Quelle fÃ¼r lpt');
++    title.bgcolor := 1;
++    title.color := 15;
++    screen[0] := title;
++    screen.fixed[0] := 1;
++
++    f := TUIFrame.create(nil, 60, 12);
++    screen[1] := f;
++    screen.prop[1] := 1;
++
++    mainw := TUIRowContainer.create(2);
++    mainw.spacer := true;
++    f.obj := mainw;
++
++    if back then begin
++        num_items := 4;
++    end else begin
++        num_items := 2;
++    end;
++
++    a := TUIMenu.create(num_items);
++    with a do begin
++        bgcolor := 0;
++        color := 14;
++
++        AddItem('Stabile Version (gothmog)', nil);
++        AddItem('Entwicklerversion (current)', nil);
++        if back then begin
++            AddItem('', nil);
++            AddItem(Utf8Decode('ZurÃ¼ck'), nil);
++        end;
++    end;
++    mainw[1] := a;
++    mainw.fixed[1] := num_items;
++
++    b := TUILabel.create;
++    b.content := Utf8Decode('Bitte wÃ¤hle aus dem MenÃ¼ die Quelle fÃ¼r lpt aus.');
++    mainw[0] := b;
++    mainw.prop[0] := 30;
++
++    a.selected := 0;
++    repeat
++        // Zeichnen
++        screen.align(80, 24);
++        screen.draw(1, 1);
++
++        case readkey of
++            #27:
++                case ReadEscapeSequence of
++                    SK_UP:
++                        begin
++                            a.selected := (a.selected + num_items - 1) mod num_items;
++                            if a.selected = 2 then begin
++                                a.selected := 1;
++                            end;
++                        end;
++                    SK_DOWN:
++                        begin
++                            a.selected := (a.selected + 1) mod num_items;
++                            if a.selected = 2 then begin
++                                a.selected := 3;
++                            end;
++                        end;
++                end;
++            #10:
++                case a.selected of
++                    0:
++                        begin
++                            SetRepo('http://lpt.tyndur.org/gothmog/');
++                            break;
++                        end;
++                    1:
++                        begin
++                            SetRepo('http://lpt.tyndur.org/current/');
++                            break;
++                        end;
++                    3:  break;
++                end;
++        end;
++    until false;
++
++    f.obj := nil;
++    mainw.free;
++    screen.free;
++end;
++
++end.
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Sat Nov 14 14:28:29 2009
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 14 Nov 2009 14:28:29 +0100
+Subject: [tyndur-devel] [PATCH 4/4] Tastaturbelegung beim ersten Start
+	abfragen
+In-Reply-To: <1258205309-11452-1-git-send-email-kevin@tyndur.org>
+References: <1258205309-11452-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1258205309-11452-5-git-send-email-kevin@tyndur.org>
+
++ setup: Beim Auswaehler der Tastaturbelegung die Wahl in
+  config/keyboard.lsh abspeichern (als Skript, das die Belegung
+  aktiviert)
++ root-common: keyboard.lsh vor getterm1 starten
++ keyboard.lsh: Konfiguration der Tastaturbelegung aufrufen, wodurch
+  sich das Skript selbst ueberschreibt und beim naechsten Mal die
+  richtige Tastaturbelegung laedt.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ build/root-common/config/servmgr/config/cmd     |    1 +
+ build/root-common/config/servmgr/config/conf    |    1 +
+ build/root-common/config/servmgr/config/deps    |    2 ++
+ build/root-common/config/servmgr/config/workdir |    1 +
+ build/root-common/config/servmgr/getterm1/deps  |    1 +
+ build/root-floppy/config/keyboard.lsh           |    3 +++
+ build/root-hd/config/keyboard.lsh               |    3 +++
+ src/modules/pas/setup/setup_keyboard.pas        |    7 +++++++
+ 8 files changed, 19 insertions(+), 0 deletions(-)
+ create mode 100644 build/root-common/config/servmgr/config/cmd
+ create mode 100644 build/root-common/config/servmgr/config/conf
+ create mode 100644 build/root-common/config/servmgr/config/deps
+ create mode 100644 build/root-common/config/servmgr/config/workdir
+ create mode 100644 build/root-floppy/config/keyboard.lsh
+ create mode 100644 build/root-hd/config/keyboard.lsh
+
+diff --git a/build/root-common/config/servmgr/config/cmd b/build/root-common/config/servmgr/config/cmd
+new file mode 100644
+index 0000000..410e9da
+--- /dev/null
++++ b/build/root-common/config/servmgr/config/cmd
+@@ -0,0 +1 @@
++/apps/getterm --once --auto vterm:/vterm0/in vterm:/vterm0/out vterm:/vterm0/out /config/keyboard.lsh
+diff --git a/build/root-common/config/servmgr/config/conf b/build/root-common/config/servmgr/config/conf
+new file mode 100644
+index 0000000..319afcd
+--- /dev/null
++++ b/build/root-common/config/servmgr/config/conf
+@@ -0,0 +1 @@
++waitterminate
+diff --git a/build/root-common/config/servmgr/config/deps b/build/root-common/config/servmgr/config/deps
+new file mode 100644
+index 0000000..5d3c62c
+--- /dev/null
++++ b/build/root-common/config/servmgr/config/deps
+@@ -0,0 +1,2 @@
++vterm
++mount
+diff --git a/build/root-common/config/servmgr/config/workdir b/build/root-common/config/servmgr/config/workdir
+new file mode 100644
+index 0000000..db5802b
+--- /dev/null
++++ b/build/root-common/config/servmgr/config/workdir
+@@ -0,0 +1 @@
++file:/
+diff --git a/build/root-common/config/servmgr/getterm1/deps b/build/root-common/config/servmgr/getterm1/deps
+index 884bf14..4b6e1dd 100644
+--- a/build/root-common/config/servmgr/getterm1/deps
++++ b/build/root-common/config/servmgr/getterm1/deps
+@@ -1,3 +1,4 @@
+ vterm
+ cmos
+ mount
++config
+diff --git a/build/root-floppy/config/keyboard.lsh b/build/root-floppy/config/keyboard.lsh
+new file mode 100644
+index 0000000..22eaf78
+--- /dev/null
++++ b/build/root-floppy/config/keyboard.lsh
+@@ -0,0 +1,3 @@
++#!file:/apps/sh
++
++setup keyboard quit
+diff --git a/build/root-hd/config/keyboard.lsh b/build/root-hd/config/keyboard.lsh
+new file mode 100644
+index 0000000..22eaf78
+--- /dev/null
++++ b/build/root-hd/config/keyboard.lsh
+@@ -0,0 +1,3 @@
++#!file:/apps/sh
++
++setup keyboard quit
+diff --git a/src/modules/pas/setup/setup_keyboard.pas b/src/modules/pas/setup/setup_keyboard.pas
+index 879ca88..1dedf06 100644
+--- a/src/modules/pas/setup/setup_keyboard.pas
++++ b/src/modules/pas/setup/setup_keyboard.pas
+@@ -31,6 +31,13 @@ begin
+     Rewrite(f, 2048);
+     BlockWrite(f, buf, 1);
+     Close(f);
++
++    Assign(cfg, 'file:/config/keyboard.lsh');
++    Rewrite(cfg);
++    WriteLn(cfg, '#!file:/apps/sh');
++    WriteLn(cfg);
++    WriteLn(cfg, 'cp ', path, ' vterm:/keymap');
++    Close(cfg);
+ end;
+ 
+ procedure SetupKeyboard(back: boolean);
+-- 
+1.6.0.2
+
+
+From matheeguru at gmx.de  Mon Nov 16 18:25:48 2009
+From: matheeguru at gmx.de (Paul Lange)
+Date: Mon, 16 Nov 2009 18:25:48 +0100
+Subject: [tyndur-devel] [PATCH] FPC-Patch
+Message-ID: <1258392348-15173-1-git-send-email-matheeguru@gmx.de>
+
+!fpc: Der Patch vom Patch vom Patch usw.. Korrektur damit es unter Ubuntu funktioniert.
+
+Signed-off-by: Paul Lange <matheeguru at gmx.de>
+---
+ patches/fpc/2.3.x/fpc-2.3.x.patch |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/patches/fpc/2.3.x/fpc-2.3.x.patch b/patches/fpc/2.3.x/fpc-2.3.x.patch
+index 6479d7f..a5f9466 100644
+--- a/patches/fpc/2.3.x/fpc-2.3.x.patch
++++ b/patches/fpc/2.3.x/fpc-2.3.x.patch
+@@ -1072,7 +1072,7 @@ Index: fpc/utils/fpcm/fpcmake.inc
+ -const fpcmakeini : array[0..218] of string[240]=(
+ +const fpcmakeini : array[0..220] of string[240]=(
+  {$else Delphi}
+--const fpcmakeini : array[0..218,1..240] of char=(
++-const fpcmakeini : array[0..219,1..240] of char=(
+ +const fpcmakeini : array[0..220,1..240] of char=(
+  {$endif Delphi}
+    ';'#010+
+-- 
+1.6.3.3
+
+
+From toni at tyndur.org  Fri Nov 20 23:11:49 2009
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Fri, 20 Nov 2009 23:11:49 +0100
+Subject: [tyndur-devel] [PATCH 1/2] init: parse_cmdline() auslagern
+In-Reply-To: <1258152555-6535-2-git-send-email-kevin@tyndur.org>
+References: <1258152555-6535-1-git-send-email-kevin@tyndur.org>
+	<1258152555-6535-2-git-send-email-kevin@tyndur.org>
+Message-ID: <20091120221149.GA7740@neo.geekcave.lan>
+
+On Fri, Nov 13 23:49, Kevin Wolf wrote:
+> * init: Allgemeinen Parser fuer init-Optionen hinzugefuegt und das Parsen
+>   von boot=... darauf umgestellt
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+> -        
+> +/**
+> + * Verarbeitet die Kommandozeilenoptionen fuer init
+> + */
+> +void parse_cmdline(void)
+Spricht hier was gegen ein static?
+
+Ansonsten sieht das gut aus.
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20091120/bdee8979/attachment.pgp>
+
+From toni at tyndur.org  Fri Nov 20 23:15:51 2009
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Fri, 20 Nov 2009 23:15:51 +0100
+Subject: [tyndur-devel] [PATCH 2/2] init: Umgebungsvariablen
+ initialisieren
+In-Reply-To: <1258152555-6535-3-git-send-email-kevin@tyndur.org>
+References: <1258152555-6535-1-git-send-email-kevin@tyndur.org>
+	<1258152555-6535-3-git-send-email-kevin@tyndur.org>
+Message-ID: <20091120221550.GB7740@neo.geekcave.lan>
+
+On Fri, Nov 13 23:49, Kevin Wolf wrote:
+> + init: Ueber Parameter env.<name>=<value> koennen Umgebungsvariablen
+>   ueber die Modulkommandozeile initialisiert werden
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20091120/b97e4fa3/attachment.pgp>
+
+From toni at tyndur.org  Fri Nov 20 23:18:30 2009
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Fri, 20 Nov 2009 23:18:30 +0100
+Subject: [tyndur-devel] [PATCH 1/4] getterm: --once und --auto
+In-Reply-To: <1258205309-11452-2-git-send-email-kevin@tyndur.org>
+References: <1258205309-11452-1-git-send-email-kevin@tyndur.org>
+	<1258205309-11452-2-git-send-email-kevin@tyndur.org>
+Message-ID: <20091120221830.GC7740@neo.geekcave.lan>
+
+On Sat, Nov 14 14:28, Kevin Wolf wrote:
+> + getterm: Mit --once wird das Programm nicht neugestartet, nachdem es
+>   sich beendet hat
+> + getterm: Mit --auto wird nicht darauf gewartet, dass der Benutzer
+>   Enter drueckt
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+Sieht vernünftig aus.
+
+Acked-by: Antoine Kaufmann <toni at tyndur.org>
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20091120/24b215a3/attachment.pgp>
+
+From kevin at tyndur.org  Sun Nov 22 14:34:49 2009
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 22 Nov 2009 14:34:49 +0100
+Subject: [tyndur-devel] [PATCH] shell: Fixes fuer bincat
+Message-ID: <1258896889-19242-1-git-send-email-kevin@tyndur.org>
+
+! shell: bincat soll die angegebene Laenge auch dann respektieren, wenn
+  sie nicht auf 1024 Bytes ausgerichtet ist
+! shell: Offsets in bincat waren um 8 Bytes verrutscht
+! shell: An jedem Blockanfang wird rechts das Offset angezeigt. Das war
+  bisher ebenfalls verrutscht und das erste ist auf einer eigenen Zeile
+  gelandet.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/c/shell/cmds/bincat.c |   11 ++++++++---
+ 1 files changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/src/modules/c/shell/cmds/bincat.c b/src/modules/c/shell/cmds/bincat.c
+index 825e81e..639f066 100644
+--- a/src/modules/c/shell/cmds/bincat.c
++++ b/src/modules/c/shell/cmds/bincat.c
+@@ -129,7 +129,7 @@ void bincat_display_usage(void);
+     FILE* file = fopen(path, "r");
+ 
+     lio_seek(file, start, SEEK_SET);
+-    m = start / 8;
++    m = start - 8;
+ 
+     if (file == NULL) {
+         printf("Konnte '%s' nicht zum lesen oeffnen!\n", path);
+@@ -143,15 +143,20 @@ void bincat_display_usage(void);
+ 
+             total_read += size;
+ 
+-            printf("0x%08x: ", m);
++            if (total_read > length) {
++                size -= total_read - length;
++            }
+ 
+             for (n=0; n < size; n++) {
+                 if ((n % 8) == 0) {
++                    if (n == 8) {
++                        printf("0x%08x", m);
++                    }
+                     m += 8;
+                     printf("\n");
+                     printf("0x%08x: ", m);
+                 }
+-                
++
+                 printf("0x%02x ", ((dword) buffer[n]) & 0xFF);
+             }
+         }
+-- 
+1.6.0.2
+
+
+From fmnssun at gmail.com  Mon Nov 23 20:33:33 2009
+From: fmnssun at gmail.com (Roman Muentener)
+Date: Mon, 23 Nov 2009 20:33:33 +0100
+Subject: [tyndur-devel] [PATCH] + getip: hostname2ip
+Message-ID: <1259004813-9482-1-git-send-email-fmnssun@gmail.com>
+
+---
+ src/modules/c/getip/Makefile.all |    7 ++++
+ src/modules/c/getip/main.c       |   69 ++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 76 insertions(+), 0 deletions(-)
+ create mode 100644 src/modules/c/getip/Makefile.all
+ create mode 100644 src/modules/c/getip/main.c
+
+diff --git a/src/modules/c/getip/Makefile.all b/src/modules/c/getip/Makefile.all
+new file mode 100644
+index 0000000..59d796e
+--- /dev/null
++++ b/src/modules/c/getip/Makefile.all
+@@ -0,0 +1,7 @@
++shopt -s extglob
++source $LOST_BUILDMK_ROOT/config.sh
++
++echo "LD   $1/apps/getip"
++$LOST_TOOLS_LD -ogetip -Ttext=0x40000000 *.o --start-group $2 --end-group
++
++mv getip $1/apps/
+diff --git a/src/modules/c/getip/main.c b/src/modules/c/getip/main.c
+new file mode 100644
+index 0000000..754ccd7
+--- /dev/null
++++ b/src/modules/c/getip/main.c
+@@ -0,0 +1,69 @@
++/*  
++ * Copyright (c) 2007 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Roman Muentener.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the tyndur Project
++ *     and its contributors.
++ * 4. Neither the name of the tyndur Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS 
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR 
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, 
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, 
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; 
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR 
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++
++#include "stdlib.h"
++#include "string.h"
++#include "netdb.h"
++#include "stdio.h"
++#include "arpa/inet.h"
++
++
++
++int
++ main ( int argc , char* argv[] )
++{
++  printf( "getip\n-----\n\n" );
++
++  if( argc != 2 )
++  {
++    printf ( "Incorrect usage!\n" );
++    return 0;
++  }
++
++  struct in_addr addr;
++
++  struct hostent* info;
++  info = gethostbyname( argv[1] );
++  int i = 0;
++  while ( info->h_addr_list[i] != 0 )
++  {
++    addr.s_addr = *( unsigned long *) info->h_addr_list[i++];
++
++    printf( "IP Address: %s \n" , inet_ntoa( addr ) );
++  }
++
++  return 0;
++}
+-- 
+1.6.0.4
+
+
+From fmnssun at gmail.com  Mon Nov 23 21:20:16 2009
+From: fmnssun at gmail.com (Roman Muentener)
+Date: Mon, 23 Nov 2009 21:20:16 +0100
+Subject: [tyndur-devel] [PATCH] * geandert wegen codestil.txt
+Message-ID: <1259007616-24586-1-git-send-email-fmnssun@gmail.com>
+
+---
+ src/modules/c/getip/main.c |   34 ++++++++++++++++------------------
+ 1 files changed, 16 insertions(+), 18 deletions(-)
+
+diff --git a/src/modules/c/getip/main.c b/src/modules/c/getip/main.c
+index 754ccd7..865e586 100644
+--- a/src/modules/c/getip/main.c
++++ b/src/modules/c/getip/main.c
+@@ -42,28 +42,26 @@
+ 
+ 
+ 
+-int
+- main ( int argc , char* argv[] )
++int main(int argc, char* argv[])
+ {
+-  printf( "getip\n-----\n\n" );
++    printf("getip\n-----\n\n");
+ 
+-  if( argc != 2 )
+-  {
+-    printf ( "Incorrect usage!\n" );
+-    return 0;
+-  }
++    if(argc != 2) {
++        printf("Incorrect usage!\n");
++        printf("Correct usage:\tgetip <hostname>\n");
++        return 0;
++    }
+ 
+-  struct in_addr addr;
++    struct in_addr addr;
+ 
+-  struct hostent* info;
+-  info = gethostbyname( argv[1] );
+-  int i = 0;
+-  while ( info->h_addr_list[i] != 0 )
+-  {
+-    addr.s_addr = *( unsigned long *) info->h_addr_list[i++];
++    struct hostent* info;
++    info = gethostbyname(argv[1]);
++    int i = 0;
++    while (info->h_addr_list[i] != 0) {
++        addr.s_addr = *(unsigned long *)info->h_addr_list[i++];
+ 
+-    printf( "IP Address: %s \n" , inet_ntoa( addr ) );
+-  }
++        printf("IP Address: %s\n" , inet_ntoa(addr));
++    }
+ 
+-  return 0;
++    return 0;
+ }
+-- 
+1.6.0.4
+
+
+From fmnssun at gmail.com  Tue Nov 24 21:51:55 2009
+From: fmnssun at gmail.com (Roman Muentener)
+Date: Tue, 24 Nov 2009 21:51:55 +0100
+Subject: [tyndur-devel] [PATCH] + dns requests geben nun mehrere ip adresen
+	zurueck
+Message-ID: <1259095915-15820-1-git-send-email-fmnssun@gmail.com>
+
+---
+ src/modules/c/getip/main.c      |   14 ++++++++-
+ src/modules/tcpip/dns.c         |   56 ++++++++++++++++++++++++++------------
+ src/modules/tcpip/include/dns.h |    7 ++++-
+ src/modules/tcpip/lostio_if.c   |   21 +++++++++++---
+ 4 files changed, 72 insertions(+), 26 deletions(-)
+
+diff --git a/src/modules/c/getip/main.c b/src/modules/c/getip/main.c
+index 865e586..163407e 100644
+--- a/src/modules/c/getip/main.c
++++ b/src/modules/c/getip/main.c
+@@ -39,7 +39,8 @@
+ #include "netdb.h"
+ #include "stdio.h"
+ #include "arpa/inet.h"
+-
++#include "errno.h"
++#include "network.h"
+ 
+ 
+ int main(int argc, char* argv[])
+@@ -52,16 +53,25 @@ int main(int argc, char* argv[])
+         return 0;
+     }
+ 
++    
++
+     struct in_addr addr;
+ 
+     struct hostent* info;
+     info = gethostbyname(argv[1]);
++
++
++    if(info == NULL) {
++        printf("ERROR: %s\n",hstrerror(h_errno));
++        return 2;
++    }
++
+     int i = 0;
+     while (info->h_addr_list[i] != 0) {
+         addr.s_addr = *(unsigned long *)info->h_addr_list[i++];
+ 
+         printf("IP Address: %s\n" , inet_ntoa(addr));
+     }
+-
++    
+     return 0;
+ }
+diff --git a/src/modules/tcpip/dns.c b/src/modules/tcpip/dns.c
+index 0f6e18d..72ff33c 100644
+--- a/src/modules/tcpip/dns.c
++++ b/src/modules/tcpip/dns.c
+@@ -66,7 +66,7 @@
+ 
+ struct dns_cache_entry {
+     char*   name;
+-    dword   ip;
++    struct dns_request_result* result;
+ };
+ 
+ static list_t* dns_cache = NULL;
+@@ -77,7 +77,7 @@ static list_t* dns_cache = NULL;
+  * @return Zum gegebenen Domainnamen passende IP-Adresse oder 0, wenn die
+  * Domain nicht im Cache ist.
+  */
+-static dword dns_cache_get(char* domain)
++static struct dns_request_result* dns_cache_get(char* domain)
+ {
+     struct dns_cache_entry* entry;
+     int i;
+@@ -87,12 +87,12 @@ static dword dns_cache_get(char* domain)
+     for (i = 0; (entry = list_get_element_at(dns_cache, i)); i++) {
+         if (strcmp(domain, entry->name) == 0) {
+             DEBUG_MSG1(" -- %s: Treffer\n", entry->name);
+-            return entry->ip;
++            return entry->result;
+         }
+         DEBUG_MSG1(" -- %s: Treffer\n", entry->name);
+     }
+-
+-    return 0;
++    DEBUG_MSG1(" -- %s: Keine Treffer\n",domain);
++    return NULL;
+ }
+ 
+ /**
+@@ -100,17 +100,17 @@ static dword dns_cache_get(char* domain)
+  * ein alter Eintrag geloescht, um den Cache auf einer ertraeglichen Groesse zu
+  * halten.
+  */
+-static void dns_cache_add(char* domain, dword ip)
++static void dns_cache_add(char* domain, struct dns_request_result* result)
+ {
+     struct dns_cache_entry* entry = malloc(sizeof(*entry));
+     size_t domain_len = strlen(domain);
+ 
+-    entry->ip = ip;
++    entry->result = result;
+     entry->name = malloc(domain_len + 1);
+     strncpy(entry->name, domain, domain_len);
+     entry->name[domain_len] = '\0';
+ 
+-    DEBUG_MSG2("dns: cache_add: %s => %08x\n", entry->name, entry->ip);
++    DEBUG_MSG1("dns: cache_add: %s\n", entry->name);
+ 
+     list_push(dns_cache, entry);
+ 
+@@ -120,24 +120,31 @@ static void dns_cache_add(char* domain, dword ip)
+ }
+ 
+ /**
+- * Loest einen Domainnamen in eine IP-Adresse auf.
++ * Loest einen Domainnamen in eine IP-Adressen auf.
+  * 
+  * @param domain Der aufzuloesende Domainname als nullterminierter String,
+  * wobei die Labels durch Punkte getrennt sind
+  */
+-dword dns_request(char* domain)
++
++struct dns_request_result* dns_request(char* domain)
+ {
++    // Resultat
++    struct dns_request_result* dns_result = dns_cache_get(domain);
++    dword result;
++
+     // Cache anlegen, falls noch keiner da ist
+     if (dns_cache == NULL) {
++        DEBUG_MSG("DNS: Erzeuge Cache\n");
+         dns_cache = list_create();
+     }
+ 
+-    // Wenn es im Cache ist, daraus nehmen
+-    dword result = dns_cache_get(domain);
+-    if (result) {
+-        return result;
++    
++    if(dns_cache_get(domain) != NULL) {
++      return dns_result;
+     }
+ 
++    dns_result = (struct dns_request_result*)malloc(sizeof(struct dns_request_result));
++
+     // Ansonsten brauchen wir eine Verbindung zum DNS-Server
+     dword dns_ip = options.nameserver;
+ 
+@@ -145,7 +152,7 @@ dword dns_request(char* domain)
+     struct tcp_connection* conn = tcp_open_connection(dns_ip, DNS_PORT);
+     if (conn == NULL) {
+         DEBUG_MSG("DNS: Konnte Verbindung nicht aufbauen.\n");
+-        return 0;
++        return NULL;
+     }
+ 
+     // Puffer fuer die Nachricht reservieren:
+@@ -219,6 +226,8 @@ dword dns_request(char* domain)
+     // Auf Antwort warten
+     DEBUG_MSG("DNS: Warte auf Antwort\n");
+     struct tcp_in_buffer* in_buffer;
++    // Index fuer dns_result
++    int dns_result_index = 0;
+     while(1) {
+         if ((in_buffer = list_pop(conn->to_lostio))) {
+             void* reply = in_buffer->data;
+@@ -233,6 +242,11 @@ dword dns_request(char* domain)
+                 big_endian_word(((struct dns_header*) reply)->an_count);
+             reply += sizeof(struct dns_header);
+ 
++            // Speicher fuer die IPs holen
++            dns_result->ip_address = (dword*)malloc(sizeof(dword) * an_count);
++            // Menge speichern
++            dns_result->ip_count = an_count;
++
+             // Question Section ignorieren
+             for (i = 0; i < qd_count; i++) {                
+                 // QNAMEs
+@@ -272,13 +286,17 @@ dword dns_request(char* domain)
+ 
+                 if (*((word*) reply) == 0x100) {
+                     result = *((dword*) (reply + 10));
+-                    dns_cache_add(domain, result);
++                    
+                     
+                     // TODO Verbindung schliessen
+-                    return result;
++                    reply += answer_len;
+                 } else {
++                    result = 0;
+                     reply += answer_len;
+                 }
++
++                dns_result->ip_address[dns_result_index] = result;
++                dns_result_index++;
+             }
+             
+             break;
+@@ -288,5 +306,7 @@ dword dns_request(char* domain)
+ 
+     // TODO Verbindung schliessen
+ 
+-    return 0;
++    dns_cache_add(domain,dns_result);
++
++    return dns_result;
+ }
+diff --git a/src/modules/tcpip/include/dns.h b/src/modules/tcpip/include/dns.h
+index cc4281f..e9b6368 100644
+--- a/src/modules/tcpip/include/dns.h
++++ b/src/modules/tcpip/include/dns.h
+@@ -49,6 +49,11 @@ struct dns_header {
+     uint16_t    ar_count;
+ } __attribute__((packed));
+ 
++struct dns_request_result {
++    dword* ip_address;
++    dword ip_count;
++};
++
+ 
+ // Konstanten für die Header-Flags
+ 
+@@ -96,6 +101,6 @@ static inline void dns_set_opcode(struct dns_header* header, uint8_t opcode)
+ #define QTYPE_A big_endian_word(1)
+ #define QCLASS_IN big_endian_word(1)
+ 
+-dword dns_request(char* domain);
++struct dns_request_result* dns_request(char* domain);
+ 
+ #endif
+diff --git a/src/modules/tcpip/lostio_if.c b/src/modules/tcpip/lostio_if.c
+index a849f18..f48953f 100644
+--- a/src/modules/tcpip/lostio_if.c
++++ b/src/modules/tcpip/lostio_if.c
+@@ -164,12 +164,18 @@ void lostio_add_device(struct device *device)
+ bool lostio_tcp_not_found(char** path, byte flags, pid_t pid, io_resource_t* ps)
+ {
+     DEBUG_MSG("Knoten anlegen");
+-    
++   
+     if (strncmp(*path, "/dns/", 5) == 0) {
+-        dword ip = dns_request(strrchr(*path, '/') + 1);
+-        if (ip == 0)
++        struct dns_request_result* result = dns_request(strrchr(*path, '/') + 1);
++        if (result == NULL)
+             return FALSE;
+-        char* data = ip_to_string(ip);
++        char* data = calloc(16 * result->ip_count,sizeof(char));
++        
++        int i=0;
++        for(;i < result->ip_count;i++) {
++            strcat(data,ip_to_string(result->ip_address[i]));
++        }
++
+         return vfstree_create_node(*path, LOSTIO_TYPES_RAMFILE, strlen(data), data, 0);
+     } else {
+         return vfstree_create_node(*path, LOSTIO_TYPES_TCPPORT, 0, NULL, 0);
+@@ -195,7 +201,12 @@ bool lostio_tcp_pre_open(char** path, byte flags, pid_t pid, io_resource_t* ps)
+     *delim = '\0';
+     dword ip = string_to_ip(*path + 1);
+     if (!ip) {
+-        ip = dns_request(*path + 1);
++        struct dns_request_result* result = dns_request(*path + 1);
++        if(result != NULL) {
++            if(result->ip_count > 0) {
++              ip = result->ip_address[0];
++            }
++        }
+     }
+ 
+     if (!ip) {
+-- 
+1.6.0.4
+
+
+From fmnssun at gmail.com  Tue Nov 24 22:23:03 2009
+From: fmnssun at gmail.com (Roman Muentener)
+Date: Tue, 24 Nov 2009 22:23:03 +0100
+Subject: [tyndur-devel] [PATCH] ! memleaks gestopft. + dns_free_result.
+Message-ID: <1259097783-21535-1-git-send-email-fmnssun@gmail.com>
+
+---
+ src/modules/tcpip/dns.c         |   13 ++++++++++++-
+ src/modules/tcpip/include/dns.h |    2 ++
+ src/modules/tcpip/lostio_if.c   |   15 +++++++++++++++
+ 3 files changed, 29 insertions(+), 1 deletions(-)
+
+diff --git a/src/modules/tcpip/dns.c b/src/modules/tcpip/dns.c
+index 72ff33c..56d7dc1 100644
+--- a/src/modules/tcpip/dns.c
++++ b/src/modules/tcpip/dns.c
+@@ -119,13 +119,24 @@ static void dns_cache_add(char* domain, struct dns_request_result* result)
+     }
+ }
+ 
++
++/**
++ * Gibt die Ressourcen eines dns_request_result wieder frei
++ * @param result Das freizugebene Resultat
++ */
++void dns_free_result(struct dns_request_result* result) {
++    // Speicher fuer IP-Adressen freigeben.
++    free(result->ip_address);
++    // Speicher fuer das Resultat freigeben.
++    free(result);
++}
++
+ /**
+  * Loest einen Domainnamen in eine IP-Adressen auf.
+  * 
+  * @param domain Der aufzuloesende Domainname als nullterminierter String,
+  * wobei die Labels durch Punkte getrennt sind
+  */
+-
+ struct dns_request_result* dns_request(char* domain)
+ {
+     // Resultat
+diff --git a/src/modules/tcpip/include/dns.h b/src/modules/tcpip/include/dns.h
+index e9b6368..d715ce2 100644
+--- a/src/modules/tcpip/include/dns.h
++++ b/src/modules/tcpip/include/dns.h
+@@ -103,4 +103,6 @@ static inline void dns_set_opcode(struct dns_header* header, uint8_t opcode)
+ 
+ struct dns_request_result* dns_request(char* domain);
+ 
++void dns_free_result(struct dns_request_result* result);
++
+ #endif
+diff --git a/src/modules/tcpip/lostio_if.c b/src/modules/tcpip/lostio_if.c
+index f48953f..e55bce4 100644
+--- a/src/modules/tcpip/lostio_if.c
++++ b/src/modules/tcpip/lostio_if.c
+@@ -166,9 +166,16 @@ bool lostio_tcp_not_found(char** path, byte flags, pid_t pid, io_resource_t* ps)
+     DEBUG_MSG("Knoten anlegen");
+    
+     if (strncmp(*path, "/dns/", 5) == 0) {
++        // DNS Request absetzen
+         struct dns_request_result* result = dns_request(strrchr(*path, '/') + 1);
++
++        // Keine IP-Adresse erhalten?
+         if (result == NULL)
+             return FALSE;
++        if (result->ip_count == 0) {
++            return FALSE;
++        }
++
+         char* data = calloc(16 * result->ip_count,sizeof(char));
+         
+         int i=0;
+@@ -176,6 +183,11 @@ bool lostio_tcp_not_found(char** path, byte flags, pid_t pid, io_resource_t* ps)
+             strcat(data,ip_to_string(result->ip_address[i]));
+         }
+ 
++        // Das Resultat wieder freigeben
++        dns_free_result(result);
++
++        // TODO: Was passiert mit data???
++
+         return vfstree_create_node(*path, LOSTIO_TYPES_RAMFILE, strlen(data), data, 0);
+     } else {
+         return vfstree_create_node(*path, LOSTIO_TYPES_TCPPORT, 0, NULL, 0);
+@@ -201,12 +213,15 @@ bool lostio_tcp_pre_open(char** path, byte flags, pid_t pid, io_resource_t* ps)
+     *delim = '\0';
+     dword ip = string_to_ip(*path + 1);
+     if (!ip) {
++        // DNS Request absetzen
+         struct dns_request_result* result = dns_request(*path + 1);
+         if(result != NULL) {
+             if(result->ip_count > 0) {
+               ip = result->ip_address[0];
+             }
+         }
++        // Resultat freigeben nicht vergessen
++        dns_free_result(result);
+     }
+ 
+     if (!ip) {
+-- 
+1.6.0.4
+
+
+From fmnssun at gmail.com  Tue Nov 24 22:55:46 2009
+From: fmnssun at gmail.com (Roman Muentener)
+Date: Tue, 24 Nov 2009 22:55:46 +0100
+Subject: [tyndur-devel] [PATCH] ! ausgabe fuer gethostbyname gefixt
+Message-ID: <1259099746-3363-1-git-send-email-fmnssun@gmail.com>
+
+---
+ src/modules/tcpip/lostio_if.c |    3 ++-
+ 1 files changed, 2 insertions(+), 1 deletions(-)
+
+diff --git a/src/modules/tcpip/lostio_if.c b/src/modules/tcpip/lostio_if.c
+index e55bce4..a068fba 100644
+--- a/src/modules/tcpip/lostio_if.c
++++ b/src/modules/tcpip/lostio_if.c
+@@ -180,8 +180,9 @@ bool lostio_tcp_not_found(char** path, byte flags, pid_t pid, io_resource_t* ps)
+         
+         int i=0;
+         for(;i < result->ip_count;i++) {
+-            strcat(data,ip_to_string(result->ip_address[i]));
++            memcpy((char*)(data+(i*16)),ip_to_string(result->ip_address[i]),16);
+         }
++        
+ 
+         // Das Resultat wieder freigeben
+         dns_free_result(result);
+-- 
+1.6.0.4
+
+
+From fmnssun at gmail.com  Wed Nov 25 19:07:59 2009
+From: fmnssun at gmail.com (Roman Muentener)
+Date: Wed, 25 Nov 2009 19:07:59 +0100
+Subject: [tyndur-devel] [PATCH] dns_request loest nun Namen in mehrere
+	IP-Adressen auf.
+Message-ID: <1259172479-24308-1-git-send-email-fmnssun@gmail.com>
+
++ in dns.c: dns_request_result; dns_free_result;
+* in dns.c: cache handling angepasst
+* in lostio_if.c: Interface angepasst, damit die neue Aufloesung klappt.
++ getip: Ein Programm dass einen Namen in mehrere IP-Adressen aufloest
+  und in der Shell ausgibt
+
+Signed-off-by: Roman Muentener <fmnssun at gmail.com>
+---
+ src/modules/c/getip/Makefile.all |    7 +++
+ src/modules/c/getip/main.c       |   80 ++++++++++++++++++++++++++++++++++++++
+ src/modules/tcpip/dns.c          |   68 +++++++++++++++++++++++--------
+ src/modules/tcpip/include/dns.h  |    9 ++++-
+ src/modules/tcpip/lostio_if.c    |   35 ++++++++++++++---
+ 5 files changed, 174 insertions(+), 25 deletions(-)
+ create mode 100644 src/modules/c/getip/Makefile.all
+ create mode 100644 src/modules/c/getip/main.c
+
+diff --git a/src/modules/c/getip/Makefile.all b/src/modules/c/getip/Makefile.all
+new file mode 100644
+index 0000000..59d796e
+--- /dev/null
++++ b/src/modules/c/getip/Makefile.all
+@@ -0,0 +1,7 @@
++shopt -s extglob
++source $LOST_BUILDMK_ROOT/config.sh
++
++echo "LD   $1/apps/getip"
++$LOST_TOOLS_LD -ogetip -Ttext=0x40000000 *.o --start-group $2 --end-group
++
++mv getip $1/apps/
+diff --git a/src/modules/c/getip/main.c b/src/modules/c/getip/main.c
+new file mode 100644
+index 0000000..4a1f411
+--- /dev/null
++++ b/src/modules/c/getip/main.c
+@@ -0,0 +1,80 @@
++/*  
++ * Copyright (c) 2007 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Roman Muentener.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the tyndur Project
++ *     and its contributors.
++ * 4. Neither the name of the tyndur Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS 
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR 
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, 
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, 
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; 
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR 
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++
++#include "stdlib.h"
++#include "string.h"
++#include "netdb.h"
++#include "stdio.h"
++#include "arpa/inet.h"
++#include "errno.h"
++#include "network.h"
++
++
++int main(int argc, char* argv[])
++{
++    printf("getip\n-----\n\n");
++    if(argc != 2) {
++        printf("Incorrect usage!\n");
++        printf("Correct usage:\tgetip <hostname>\n");
++        return 1;
++    }
++    long count = 0;
++    char* path;
++    FILE* f;
++    asprintf(&path,"tcpip:/dns/%s",argv[1]);
++    f=fopen(path,"r");
++    fseek(f,0,SEEK_END);
++    count = ftell(f);
++    if(count == 0) {
++        printf("Error: Abfrage gescheitert!\n");
++        return 2;
++    }
++    rewind(f);
++    char* buffer = calloc(count,sizeof(char));
++    fread(buffer,1,count,f);
++    count /= 16;
++    fclose(f);
++    if(count == 0) {
++        printf("Error: Abfrage gescheitert!\n");
++        return 3;
++    }
++    int i=0;
++    for(;i < count; i++) {
++      char* ip = (char*)(buffer+(i*16));
++      printf("IP Adresse: %s\n",ip);
++    }
++    return 0;
++}
+diff --git a/src/modules/tcpip/dns.c b/src/modules/tcpip/dns.c
+index 0f6e18d..0899fdc 100644
+--- a/src/modules/tcpip/dns.c
++++ b/src/modules/tcpip/dns.c
+@@ -66,7 +66,7 @@
+ 
+ struct dns_cache_entry {
+     char*   name;
+-    dword   ip;
++    struct dns_request_result* result;
+ };
+ 
+ static list_t* dns_cache = NULL;
+@@ -77,7 +77,7 @@ static list_t* dns_cache = NULL;
+  * @return Zum gegebenen Domainnamen passende IP-Adresse oder 0, wenn die
+  * Domain nicht im Cache ist.
+  */
+-static dword dns_cache_get(char* domain)
++static struct dns_request_result* dns_cache_get(char* domain)
+ {
+     struct dns_cache_entry* entry;
+     int i;
+@@ -87,12 +87,12 @@ static dword dns_cache_get(char* domain)
+     for (i = 0; (entry = list_get_element_at(dns_cache, i)); i++) {
+         if (strcmp(domain, entry->name) == 0) {
+             DEBUG_MSG1(" -- %s: Treffer\n", entry->name);
+-            return entry->ip;
++            return entry->result;
+         }
+         DEBUG_MSG1(" -- %s: Treffer\n", entry->name);
+     }
+-
+-    return 0;
++    DEBUG_MSG1(" -- %s: Keine Treffer\n",domain);
++    return NULL;
+ }
+ 
+ /**
+@@ -100,44 +100,63 @@ static dword dns_cache_get(char* domain)
+  * ein alter Eintrag geloescht, um den Cache auf einer ertraeglichen Groesse zu
+  * halten.
+  */
+-static void dns_cache_add(char* domain, dword ip)
++static void dns_cache_add(char* domain, struct dns_request_result* result)
+ {
+     struct dns_cache_entry* entry = malloc(sizeof(*entry));
+     size_t domain_len = strlen(domain);
+ 
+-    entry->ip = ip;
++    entry->result = result;
+     entry->name = malloc(domain_len + 1);
+     strncpy(entry->name, domain, domain_len);
+     entry->name[domain_len] = '\0';
+ 
+-    DEBUG_MSG2("dns: cache_add: %s => %08x\n", entry->name, entry->ip);
++    DEBUG_MSG1("dns: cache_add: %s\n", entry->name);
+ 
+     list_push(dns_cache, entry);
+ 
+     if (list_size(dns_cache) > DNS_CACHE_SIZE) {
++        dns_free_result(list_get_element_at(dns_cache,DNS_CACHE_SIZE));
+         list_remove(dns_cache, DNS_CACHE_SIZE);
+     }
+ }
+ 
++
+ /**
+- * Loest einen Domainnamen in eine IP-Adresse auf.
++ * Gibt die Ressourcen eines dns_request_result wieder frei
++ * @param result Das freizugebene Resultat
++ */
++void dns_free_result(struct dns_request_result* result) {
++    // Speicher fuer IP-Adressen freigeben.
++    free(result->ip_address);
++    // Speicher fuer das Resultat freigeben.
++    free(result);
++}
++
++/**
++ * Loest einen Domainnamen in eine IP-Adressen auf.
+  * 
+  * @param domain Der aufzuloesende Domainname als nullterminierter String,
+  * wobei die Labels durch Punkte getrennt sind
+  */
+-dword dns_request(char* domain)
++struct dns_request_result* dns_request(char* domain)
+ {
++    // Resultat
++    struct dns_request_result* dns_result = dns_cache_get(domain);
++    dword result;
++
+     // Cache anlegen, falls noch keiner da ist
+     if (dns_cache == NULL) {
++        DEBUG_MSG("DNS: Erzeuge Cache\n");
+         dns_cache = list_create();
+     }
+ 
+-    // Wenn es im Cache ist, daraus nehmen
+-    dword result = dns_cache_get(domain);
+-    if (result) {
+-        return result;
++    
++    if(dns_cache_get(domain) != NULL) {
++      return dns_result;
+     }
+ 
++    dns_result = (struct dns_request_result*)malloc(sizeof(struct dns_request_result));
++
+     // Ansonsten brauchen wir eine Verbindung zum DNS-Server
+     dword dns_ip = options.nameserver;
+ 
+@@ -145,7 +164,7 @@ dword dns_request(char* domain)
+     struct tcp_connection* conn = tcp_open_connection(dns_ip, DNS_PORT);
+     if (conn == NULL) {
+         DEBUG_MSG("DNS: Konnte Verbindung nicht aufbauen.\n");
+-        return 0;
++        return NULL;
+     }
+ 
+     // Puffer fuer die Nachricht reservieren:
+@@ -219,6 +238,8 @@ dword dns_request(char* domain)
+     // Auf Antwort warten
+     DEBUG_MSG("DNS: Warte auf Antwort\n");
+     struct tcp_in_buffer* in_buffer;
++    // Index fuer dns_result
++    int dns_result_index = 0;
+     while(1) {
+         if ((in_buffer = list_pop(conn->to_lostio))) {
+             void* reply = in_buffer->data;
+@@ -233,6 +254,11 @@ dword dns_request(char* domain)
+                 big_endian_word(((struct dns_header*) reply)->an_count);
+             reply += sizeof(struct dns_header);
+ 
++            // Speicher fuer die IPs holen
++            dns_result->ip_address = (dword*)malloc(sizeof(dword) * an_count);
++            // Menge speichern
++            dns_result->ip_count = an_count;
++
+             // Question Section ignorieren
+             for (i = 0; i < qd_count; i++) {                
+                 // QNAMEs
+@@ -272,13 +298,17 @@ dword dns_request(char* domain)
+ 
+                 if (*((word*) reply) == 0x100) {
+                     result = *((dword*) (reply + 10));
+-                    dns_cache_add(domain, result);
++                    
+                     
+                     // TODO Verbindung schliessen
+-                    return result;
++                    reply += answer_len;
+                 } else {
++                    result = 0;
+                     reply += answer_len;
+                 }
++
++                dns_result->ip_address[dns_result_index] = result;
++                dns_result_index++;
+             }
+             
+             break;
+@@ -288,5 +318,7 @@ dword dns_request(char* domain)
+ 
+     // TODO Verbindung schliessen
+ 
+-    return 0;
++    dns_cache_add(domain,dns_result);
++
++    return dns_result;
+ }
+diff --git a/src/modules/tcpip/include/dns.h b/src/modules/tcpip/include/dns.h
+index cc4281f..d715ce2 100644
+--- a/src/modules/tcpip/include/dns.h
++++ b/src/modules/tcpip/include/dns.h
+@@ -49,6 +49,11 @@ struct dns_header {
+     uint16_t    ar_count;
+ } __attribute__((packed));
+ 
++struct dns_request_result {
++    dword* ip_address;
++    dword ip_count;
++};
++
+ 
+ // Konstanten für die Header-Flags
+ 
+@@ -96,6 +101,8 @@ static inline void dns_set_opcode(struct dns_header* header, uint8_t opcode)
+ #define QTYPE_A big_endian_word(1)
+ #define QCLASS_IN big_endian_word(1)
+ 
+-dword dns_request(char* domain);
++struct dns_request_result* dns_request(char* domain);
++
++void dns_free_result(struct dns_request_result* result);
+ 
+ #endif
+diff --git a/src/modules/tcpip/lostio_if.c b/src/modules/tcpip/lostio_if.c
+index a849f18..7e32b0c 100644
+--- a/src/modules/tcpip/lostio_if.c
++++ b/src/modules/tcpip/lostio_if.c
+@@ -164,13 +164,30 @@ void lostio_add_device(struct device *device)
+ bool lostio_tcp_not_found(char** path, byte flags, pid_t pid, io_resource_t* ps)
+ {
+     DEBUG_MSG("Knoten anlegen");
+-    
++   
+     if (strncmp(*path, "/dns/", 5) == 0) {
+-        dword ip = dns_request(strrchr(*path, '/') + 1);
+-        if (ip == 0)
++        // DNS Request absetzen
++        struct dns_request_result* result = dns_request(strrchr(*path, '/') + 1);
++
++        // Keine IP-Adresse erhalten?
++        if (result == NULL)
++            return FALSE;
++        if (result->ip_count == 0) {
+             return FALSE;
+-        char* data = ip_to_string(ip);
+-        return vfstree_create_node(*path, LOSTIO_TYPES_RAMFILE, strlen(data), data, 0);
++        }
++
++        char* data = calloc(16 * result->ip_count,sizeof(char));
++        
++        int i=0;
++        for(;i < result->ip_count;i++) {
++            memcpy((char*)(data+(i*16)),ip_to_string(result->ip_address[i]),16);
++        }
++        
++
++
++        // TODO: Was passiert mit data???
++
++        return vfstree_create_node(*path, LOSTIO_TYPES_RAMFILE, 16 * result->ip_count * sizeof(char), data, 0);
+     } else {
+         return vfstree_create_node(*path, LOSTIO_TYPES_TCPPORT, 0, NULL, 0);
+     }
+@@ -195,7 +212,13 @@ bool lostio_tcp_pre_open(char** path, byte flags, pid_t pid, io_resource_t* ps)
+     *delim = '\0';
+     dword ip = string_to_ip(*path + 1);
+     if (!ip) {
+-        ip = dns_request(*path + 1);
++        // DNS Request absetzen
++        struct dns_request_result* result = dns_request(*path + 1);
++        if(result != NULL) {
++            if(result->ip_count > 0) {
++              ip = result->ip_address[0];
++            }
++        }
+     }
+ 
+     if (!ip) {
+-- 
+1.6.0.4
+
+
+From kevin at tyndur.org  Wed Nov 25 20:18:51 2009
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Wed, 25 Nov 2009 20:18:51 +0100
+Subject: [tyndur-devel] [PATCH] dns_request loest nun Namen in mehrere
+ IP-Adressen auf.
+In-Reply-To: <1259172479-24308-1-git-send-email-fmnssun@gmail.com>
+References: <1259172479-24308-1-git-send-email-fmnssun@gmail.com>
+Message-ID: <20091125191847.GA7406@silvanus>
+
+On Wed, Nov 25, 2009 at 07:07:59PM +0100, Roman Muentener wrote:
+> + in dns.c: dns_request_result; dns_free_result;
+> * in dns.c: cache handling angepasst
+> * in lostio_if.c: Interface angepasst, damit die neue Aufloesung klappt.
+
+Die Beschreibung ist viel zu detailliert, damit kann niemand mehr was
+anfangen, wenn er es in einem Jahr liet. Besser sowas:
+
++ tcpip: DNS-Abfragen geben jetzt alle IP-Adressen zurueck
+
+> + getip: Ein Programm dass einen Namen in mehrere IP-Adressen aufloest
+>   und in der Shell ausgibt
+> 
+> Signed-off-by: Roman Muentener <fmnssun at gmail.com>
+
+Schreibst du dich tatsächlich mit ue oder ist das nur wegen ASCII? git
+kann mit UTF-8 ganz gut umgehen.
+
+> ---
+>  src/modules/c/getip/Makefile.all |    7 +++
+>  src/modules/c/getip/main.c       |   80 ++++++++++++++++++++++++++++++++++++++
+>  src/modules/tcpip/dns.c          |   68 +++++++++++++++++++++++--------
+>  src/modules/tcpip/include/dns.h  |    9 ++++-
+>  src/modules/tcpip/lostio_if.c    |   35 ++++++++++++++---
+>  5 files changed, 174 insertions(+), 25 deletions(-)
+>  create mode 100644 src/modules/c/getip/Makefile.all
+>  create mode 100644 src/modules/c/getip/main.c
+> 
+> diff --git a/src/modules/c/getip/Makefile.all b/src/modules/c/getip/Makefile.all
+> new file mode 100644
+> index 0000000..59d796e
+> --- /dev/null
+> +++ b/src/modules/c/getip/Makefile.all
+> @@ -0,0 +1,7 @@
+> +shopt -s extglob
+> +source $LOST_BUILDMK_ROOT/config.sh
+> +
+> +echo "LD   $1/apps/getip"
+> +$LOST_TOOLS_LD -ogetip -Ttext=0x40000000 *.o --start-group $2 --end-group
+> +
+> +mv getip $1/apps/
+
+Wie gesagt, idealerweise wird getip durch cat tcpip:/dns/foo
+überflüssig. Ich werden trotzdem ein paar allgemein gültige Anmerkungen
+einschieben. Übrigens wäre sonst auch zu überlegen, ob man das nicht als
+zusätzlichen Befehl in die Shell integriert, um Platz zu sparen. Einfach
+genug wäre es.
+
+> diff --git a/src/modules/c/getip/main.c b/src/modules/c/getip/main.c
+> new file mode 100644
+> index 0000000..4a1f411
+> --- /dev/null
+> +++ b/src/modules/c/getip/main.c
+> @@ -0,0 +1,80 @@
+> +/*  
+> + * Copyright (c) 2007 The tyndur Project. All rights reserved.
+
+Wir haben 2009. ;-) Der zweite Fehler beim Kopieren von existierendem
+älteren Code ist, dass er häufig Leerzeichen am Zeilenende enthält, das
+ist auch in diesem Kommentar so.
+
+> + *
+> + * This code is derived from software contributed to the tyndur Project
+> + * by Roman Muentener.
+> + *
+> + * Redistribution and use in source and binary forms, with or without
+> + * modification, are permitted provided that the following conditions
+> + * are met:
+> + * 1. Redistributions of source code must retain the above copyright
+> + *    notice, this list of conditions and the following disclaimer.
+> + * 2. Redistributions in binary form must reproduce the above copyright
+> + *    notice, this list of conditions and the following disclaimer in the
+> + *    documentation and/or other materials provided with the distribution.
+> + * 3. All advertising materials mentioning features or use of this software
+> + *    must display the following acknowledgement:
+> + *     This product includes software developed by the tyndur Project
+> + *     and its contributors.
+> + * 4. Neither the name of the tyndur Project nor the names of its
+> + *    contributors may be used to endorse or promote products derived
+> + *    from this software without specific prior written permission.
+> + *
+> + * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS 
+> + * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+> + * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+> + * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR 
+> + * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, 
+> + * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, 
+> + * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; 
+> + * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
+> + * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR 
+> + * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
+> + * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+> + */
+> +
+> +
+> +#include "stdlib.h"
+> +#include "string.h"
+> +#include "netdb.h"
+> +#include "stdio.h"
+> +#include "arpa/inet.h"
+> +#include "errno.h"
+> +#include "network.h"
+
+Sind alles Systemheader, also #include <stdlib.h> usw.
+
+> +
+> +
+> +int main(int argc, char* argv[])
+> +{
+> +    printf("getip\n-----\n\n");
+> +    if(argc != 2) {
+> +        printf("Incorrect usage!\n");
+> +        printf("Correct usage:\tgetip <hostname>\n");
+
+Sofern ein Programm nicht mehrere Sprachen unterstützt, sind alle
+Meldungen deutsch.
+
+> +        return 1;
+> +    }
+> +    long count = 0;
+> +    char* path;
+> +    FILE* f;
+> +    asprintf(&path,"tcpip:/dns/%s",argv[1]);
+
+path wird nirgends freigegeben, asprintf macht intern ein malloc
+
+> +    f=fopen(path,"r");
+> +    fseek(f,0,SEEK_END);
+> +    count = ftell(f);
+> +    if(count == 0) {
+> +        printf("Error: Abfrage gescheitert!\n");
+
+Nettes Denglisch hier ;-)
+
+> +        return 2;
+> +    }
+> +    rewind(f);
+> +    char* buffer = calloc(count,sizeof(char));
+
+sizeof(char) == 1 per Definition. Gibt es einen Grund, warum kein
+malloc? Auf 0 initialisieren ist hier ja nicht sonderlich sinnvoll.
+
+> +    fread(buffer,1,count,f);
+
+Rückgabewert prüfen ist nie eine schlechte Idee.
+
+> +    count /= 16;
+> +    fclose(f);
+> +    if(count == 0) {
+> +        printf("Error: Abfrage gescheitert!\n");
+> +        return 3;
+> +    }
+> +    int i=0;
+> +    for(;i < count; i++) {
+> +      char* ip = (char*)(buffer+(i*16));
+> +      printf("IP Adresse: %s\n",ip);
+> +    }
+> +    return 0;
+> +}
+> diff --git a/src/modules/tcpip/dns.c b/src/modules/tcpip/dns.c
+> index 0f6e18d..0899fdc 100644
+> --- a/src/modules/tcpip/dns.c
+> +++ b/src/modules/tcpip/dns.c
+> @@ -66,7 +66,7 @@
+>  
+>  struct dns_cache_entry {
+>      char*   name;
+> -    dword   ip;
+> +    struct dns_request_result* result;
+>  };
+>  
+>  static list_t* dns_cache = NULL;
+> @@ -77,7 +77,7 @@ static list_t* dns_cache = NULL;
+>   * @return Zum gegebenen Domainnamen passende IP-Adresse oder 0, wenn die
+>   * Domain nicht im Cache ist.
+>   */
+> -static dword dns_cache_get(char* domain)
+> +static struct dns_request_result* dns_cache_get(char* domain)
+>  {
+>      struct dns_cache_entry* entry;
+>      int i;
+> @@ -87,12 +87,12 @@ static dword dns_cache_get(char* domain)
+>      for (i = 0; (entry = list_get_element_at(dns_cache, i)); i++) {
+>          if (strcmp(domain, entry->name) == 0) {
+>              DEBUG_MSG1(" -- %s: Treffer\n", entry->name);
+> -            return entry->ip;
+> +            return entry->result;
+>          }
+>          DEBUG_MSG1(" -- %s: Treffer\n", entry->name);
+>      }
+> -
+> -    return 0;
+> +    DEBUG_MSG1(" -- %s: Keine Treffer\n",domain);
+
+Hinter das Komma kommt ein Leerzeichen
+
+> +    return NULL;
+>  }
+>  
+>  /**
+> @@ -100,44 +100,63 @@ static dword dns_cache_get(char* domain)
+>   * ein alter Eintrag geloescht, um den Cache auf einer ertraeglichen Groesse zu
+>   * halten.
+>   */
+> -static void dns_cache_add(char* domain, dword ip)
+> +static void dns_cache_add(char* domain, struct dns_request_result* result)
+>  {
+>      struct dns_cache_entry* entry = malloc(sizeof(*entry));
+>      size_t domain_len = strlen(domain);
+>  
+> -    entry->ip = ip;
+> +    entry->result = result;
+>      entry->name = malloc(domain_len + 1);
+>      strncpy(entry->name, domain, domain_len);
+>      entry->name[domain_len] = '\0';
+>  
+> -    DEBUG_MSG2("dns: cache_add: %s => %08x\n", entry->name, entry->ip);
+> +    DEBUG_MSG1("dns: cache_add: %s\n", entry->name);
+>  
+>      list_push(dns_cache, entry);
+>  
+>      if (list_size(dns_cache) > DNS_CACHE_SIZE) {
+> +        dns_free_result(list_get_element_at(dns_cache,DNS_CACHE_SIZE));
+>          list_remove(dns_cache, DNS_CACHE_SIZE);
+>      }
+>  }
+>  
+> +
+>  /**
+> - * Loest einen Domainnamen in eine IP-Adresse auf.
+> + * Gibt die Ressourcen eines dns_request_result wieder frei
+> + * @param result Das freizugebene Resultat
+> + */
+> +void dns_free_result(struct dns_request_result* result) {
+> +    // Speicher fuer IP-Adressen freigeben.
+> +    free(result->ip_address);
+> +    // Speicher fuer das Resultat freigeben.
+> +    free(result);
+> +}
+> +
+> +/**
+> + * Loest einen Domainnamen in eine IP-Adressen auf.
+>   * 
+>   * @param domain Der aufzuloesende Domainname als nullterminierter String,
+>   * wobei die Labels durch Punkte getrennt sind
+>   */
+> -dword dns_request(char* domain)
+> +struct dns_request_result* dns_request(char* domain)
+>  {
+> +    // Resultat
+> +    struct dns_request_result* dns_result = dns_cache_get(domain);
+> +    dword result;
+
+Für neuen Code bevorzugen wir die Typen aus dem C-Standard, also
+uint32_t statt dword.
+
+> +
+>      // Cache anlegen, falls noch keiner da ist
+>      if (dns_cache == NULL) {
+> +        DEBUG_MSG("DNS: Erzeuge Cache\n");
+>          dns_cache = list_create();
+>      }
+>  
+> -    // Wenn es im Cache ist, daraus nehmen
+> -    dword result = dns_cache_get(domain);
+> -    if (result) {
+> -        return result;
+> +    
+> +    if(dns_cache_get(domain) != NULL) {
+> +      return dns_result;
+>      }
+>  
+> +    dns_result = (struct dns_request_result*)malloc(sizeof(struct dns_request_result));
+
+Überflüssiger Cast.
+
+> +
+>      // Ansonsten brauchen wir eine Verbindung zum DNS-Server
+>      dword dns_ip = options.nameserver;
+>  
+> @@ -145,7 +164,7 @@ dword dns_request(char* domain)
+>      struct tcp_connection* conn = tcp_open_connection(dns_ip, DNS_PORT);
+>      if (conn == NULL) {
+>          DEBUG_MSG("DNS: Konnte Verbindung nicht aufbauen.\n");
+> -        return 0;
+> +        return NULL;
+>      }
+>  
+>      // Puffer fuer die Nachricht reservieren:
+> @@ -219,6 +238,8 @@ dword dns_request(char* domain)
+>      // Auf Antwort warten
+>      DEBUG_MSG("DNS: Warte auf Antwort\n");
+>      struct tcp_in_buffer* in_buffer;
+> +    // Index fuer dns_result
+> +    int dns_result_index = 0;
+>      while(1) {
+>          if ((in_buffer = list_pop(conn->to_lostio))) {
+>              void* reply = in_buffer->data;
+> @@ -233,6 +254,11 @@ dword dns_request(char* domain)
+>                  big_endian_word(((struct dns_header*) reply)->an_count);
+>              reply += sizeof(struct dns_header);
+>  
+> +            // Speicher fuer die IPs holen
+> +            dns_result->ip_address = (dword*)malloc(sizeof(dword) * an_count);
+
+Auch wieder überflüssiger Cast
+
+> +            // Menge speichern
+> +            dns_result->ip_count = an_count;
+> +
+>              // Question Section ignorieren
+>              for (i = 0; i < qd_count; i++) {                
+>                  // QNAMEs
+> @@ -272,13 +298,17 @@ dword dns_request(char* domain)
+>  
+>                  if (*((word*) reply) == 0x100) {
+>                      result = *((dword*) (reply + 10));
+> -                    dns_cache_add(domain, result);
+> +                    
+>                      
+>                      // TODO Verbindung schliessen
+> -                    return result;
+> +                    reply += answer_len;
+>                  } else {
+> +                    result = 0;
+>                      reply += answer_len;
+>                  }
+> +
+> +                dns_result->ip_address[dns_result_index] = result;
+> +                dns_result_index++;
+>              }
+>              
+>              break;
+> @@ -288,5 +318,7 @@ dword dns_request(char* domain)
+>  
+>      // TODO Verbindung schliessen
+>  
+> -    return 0;
+> +    dns_cache_add(domain,dns_result);
+> +
+> +    return dns_result;
+>  }
+> diff --git a/src/modules/tcpip/include/dns.h b/src/modules/tcpip/include/dns.h
+> index cc4281f..d715ce2 100644
+> --- a/src/modules/tcpip/include/dns.h
+> +++ b/src/modules/tcpip/include/dns.h
+> @@ -49,6 +49,11 @@ struct dns_header {
+>      uint16_t    ar_count;
+>  } __attribute__((packed));
+>  
+> +struct dns_request_result {
+> +    dword* ip_address;
+> +    dword ip_count;
+> +};
+> +
+>  
+>  // Konstanten f?r die Header-Flags
+>  
+> @@ -96,6 +101,8 @@ static inline void dns_set_opcode(struct dns_header* header, uint8_t opcode)
+>  #define QTYPE_A big_endian_word(1)
+>  #define QCLASS_IN big_endian_word(1)
+>  
+> -dword dns_request(char* domain);
+> +struct dns_request_result* dns_request(char* domain);
+> +
+> +void dns_free_result(struct dns_request_result* result);
+>  
+>  #endif
+> diff --git a/src/modules/tcpip/lostio_if.c b/src/modules/tcpip/lostio_if.c
+> index a849f18..7e32b0c 100644
+> --- a/src/modules/tcpip/lostio_if.c
+> +++ b/src/modules/tcpip/lostio_if.c
+> @@ -164,13 +164,30 @@ void lostio_add_device(struct device *device)
+>  bool lostio_tcp_not_found(char** path, byte flags, pid_t pid, io_resource_t* ps)
+>  {
+>      DEBUG_MSG("Knoten anlegen");
+> -    
+> +   
+>      if (strncmp(*path, "/dns/", 5) == 0) {
+> -        dword ip = dns_request(strrchr(*path, '/') + 1);
+> -        if (ip == 0)
+> +        // DNS Request absetzen
+> +        struct dns_request_result* result = dns_request(strrchr(*path, '/') + 1);
+> +
+> +        // Keine IP-Adresse erhalten?
+> +        if (result == NULL)
+> +            return FALSE;
+> +        if (result->ip_count == 0) {
+>              return FALSE;
+> -        char* data = ip_to_string(ip);
+> -        return vfstree_create_node(*path, LOSTIO_TYPES_RAMFILE, strlen(data), data, 0);
+> +        }
+> +
+> +        char* data = calloc(16 * result->ip_count,sizeof(char));
+> +        
+> +        int i=0;
+> +        for(;i < result->ip_count;i++) {
+> +            memcpy((char*)(data+(i*16)),ip_to_string(result->ip_address[i]),16);
+
+data ist doch schon char*?
+
+Und soweit ich weiß, macht ip_to_string intern auch wieder ein malloc,
+der Rückgabewert müsste also irgendwo freigegeben werden.
+
+> +        }
+> +        
+> +
+> +
+> +        // TODO: Was passiert mit data???
+
+Das hängt im Verzeichnisbaum und da hängt es erstmal gut. ;-) Ich
+glaube, im Moment löschen wir aus dem DNS-Verzeichnis nie was raus. Wenn
+doch, müsste man es an der Stelle wieder freigeben.
+
+> +
+> +        return vfstree_create_node(*path, LOSTIO_TYPES_RAMFILE, 16 * result->ip_count * sizeof(char), data, 0);
+>      } else {
+>          return vfstree_create_node(*path, LOSTIO_TYPES_TCPPORT, 0, NULL, 0);
+>      }
+> @@ -195,7 +212,13 @@ bool lostio_tcp_pre_open(char** path, byte flags, pid_t pid, io_resource_t* ps)
+>      *delim = '\0';
+>      dword ip = string_to_ip(*path + 1);
+>      if (!ip) {
+> -        ip = dns_request(*path + 1);
+> +        // DNS Request absetzen
+> +        struct dns_request_result* result = dns_request(*path + 1);
+> +        if(result != NULL) {
+> +            if(result->ip_count > 0) {
+
+if (result && (result->ipcount > 0)) ist übersichtlicher
+
+
+From fmnssun at gmail.com  Wed Nov 25 21:02:06 2009
+From: fmnssun at gmail.com (Roman Muentener)
+Date: Wed, 25 Nov 2009 21:02:06 +0100
+Subject: [tyndur-devel] [PATCH] dns_request loest nun Namen in mehrere
+	IP-Adressen auf. IPs werden
+Message-ID: <1259179326-16838-1-git-send-email-fmnssun@gmail.com>
+
+Signed-off-by: Roman Muentener <fmnssun at gmail.com>
+---
+ src/modules/c/getip/Makefile.all |    7 ++
+ src/modules/c/getip/main.c       |  116 ++++++++++++++++++++++++++++++++++++++
+ src/modules/lib/posix/net.c      |   13 ++++
+ src/modules/tcpip/dns.c          |   75 ++++++++++++++++++-------
+ src/modules/tcpip/include/dns.h  |   10 +++-
+ src/modules/tcpip/lostio_if.c    |   38 ++++++++++--
+ 6 files changed, 232 insertions(+), 27 deletions(-)
+ create mode 100644 src/modules/c/getip/Makefile.all
+ create mode 100644 src/modules/c/getip/main.c
+
+diff --git a/src/modules/c/getip/Makefile.all b/src/modules/c/getip/Makefile.all
+new file mode 100644
+index 0000000..59d796e
+--- /dev/null
++++ b/src/modules/c/getip/Makefile.all
+@@ -0,0 +1,7 @@
++shopt -s extglob
++source $LOST_BUILDMK_ROOT/config.sh
++
++echo "LD   $1/apps/getip"
++$LOST_TOOLS_LD -ogetip -Ttext=0x40000000 *.o --start-group $2 --end-group
++
++mv getip $1/apps/
+diff --git a/src/modules/c/getip/main.c b/src/modules/c/getip/main.c
+new file mode 100644
+index 0000000..57ebc32
+--- /dev/null
++++ b/src/modules/c/getip/main.c
+@@ -0,0 +1,116 @@
++/*  
++ * Copyright (c) 2009 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Roman Muentener.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the tyndur Project
++ *     and its contributors.
++ * 4. Neither the name of the tyndur Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS 
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR 
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, 
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, 
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; 
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR 
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++
++#include "stdlib.h"
++#include "string.h"
++#include "netdb.h"
++#include "stdio.h"
++#include "arpa/inet.h"
++#include "errno.h"
++#include "network.h"
++
++int main(int argc, char* argv[])
++{
++    printf("getip\n-----\n\n");
++
++    if( argc != 2 )
++    {
++        printf("Falsche Parameter!\n");
++        return 1;
++    }
++
++    struct in_addr addr;
++
++    struct hostent* info;
++    info = gethostbyname(argv[1]);
++
++    if (info == NULL) {
++        printf("Fehler: %s!\n",hstrerror(h_errno));
++        return 2;
++    }
++
++    int i = 0;
++    while (info->h_addr_list[i] != 0)
++    {
++        addr.s_addr = *(unsigned long*) info->h_addr_list[i++];
++
++        printf("IP Adresse: %s \n", inet_ntoa(addr));
++    }
++
++  return 0;
++}
++
++/*
++int main(int argc, char* argv[])
++{
++    printf("getip\n-----\n\n");
++    if(argc != 2) {
++        printf("Incorrect usage!\n");
++        printf("Correct usage:\tgetip <hostname>\n");
++        return 1;
++    }
++    long count = 0;
++    char* path;
++    FILE* f;
++    asprintf(&path,"tcpip:/dns/%s",argv[1]);
++    f=fopen(path,"r");
++    if(!f) {
++       printf("Error: Abfrage gescheitert!\n");
++       return 3;
++    }
++    fseek(f,0,SEEK_END);
++    count = ftell(f);
++    if(count == 0) {
++        printf("Error: Abfrage gescheitert!\n");
++        return 2;
++    }
++    rewind(f);
++    char* buffer = calloc(count,sizeof(char));
++    fread(buffer,1,count,f);
++    count /= 16;
++    fclose(f);
++    if(count == 0) {
++        printf("Error: Abfrage gescheitert!\n");
++        return 3;
++    }
++    int i=0;
++    for(;i < count; i++) {
++      char* ip = (char*)(buffer+(i*16));
++      printf("IP Adresse: %s\n",ip);
++    }
++    return 0;
++}
++*/
+diff --git a/src/modules/lib/posix/net.c b/src/modules/lib/posix/net.c
+index f009585..0772977 100644
+--- a/src/modules/lib/posix/net.c
++++ b/src/modules/lib/posix/net.c
+@@ -203,7 +203,20 @@ struct hostent* gethostbyname(const char* name)
+         fread(ip_str, 1, 16, f);
+         fclose(f);
+ 
++        // \n beachten
++        char* ptr = ip_str;
++        while(*ptr) {
++            if (*ptr == '\n') {
++                ptr = '\0';
++                break;
++            }
++            ptr++;
++        }
++
+         ip = string_to_ip(ip_str);
++
++        // Speicher wieder freigeben
++        free(path);
+     }
+ 
+     // hostent aktualisieren
+diff --git a/src/modules/tcpip/dns.c b/src/modules/tcpip/dns.c
+index 0f6e18d..5b2c691 100644
+--- a/src/modules/tcpip/dns.c
++++ b/src/modules/tcpip/dns.c
+@@ -66,7 +66,7 @@
+ 
+ struct dns_cache_entry {
+     char*   name;
+-    dword   ip;
++    struct dns_request_result* result;
+ };
+ 
+ static list_t* dns_cache = NULL;
+@@ -77,7 +77,7 @@ static list_t* dns_cache = NULL;
+  * @return Zum gegebenen Domainnamen passende IP-Adresse oder 0, wenn die
+  * Domain nicht im Cache ist.
+  */
+-static dword dns_cache_get(char* domain)
++static struct dns_request_result* dns_cache_get(char* domain)
+ {
+     struct dns_cache_entry* entry;
+     int i;
+@@ -87,12 +87,12 @@ static dword dns_cache_get(char* domain)
+     for (i = 0; (entry = list_get_element_at(dns_cache, i)); i++) {
+         if (strcmp(domain, entry->name) == 0) {
+             DEBUG_MSG1(" -- %s: Treffer\n", entry->name);
+-            return entry->ip;
++            return entry->result;
+         }
+         DEBUG_MSG1(" -- %s: Treffer\n", entry->name);
+     }
+-
+-    return 0;
++    DEBUG_MSG1(" -- %s: Keine Treffer\n",domain);
++    return NULL;
+ }
+ 
+ /**
+@@ -100,52 +100,71 @@ static dword dns_cache_get(char* domain)
+  * ein alter Eintrag geloescht, um den Cache auf einer ertraeglichen Groesse zu
+  * halten.
+  */
+-static void dns_cache_add(char* domain, dword ip)
++static void dns_cache_add(char* domain, struct dns_request_result* result)
+ {
+     struct dns_cache_entry* entry = malloc(sizeof(*entry));
+     size_t domain_len = strlen(domain);
+ 
+-    entry->ip = ip;
++    entry->result = result;
+     entry->name = malloc(domain_len + 1);
+     strncpy(entry->name, domain, domain_len);
+     entry->name[domain_len] = '\0';
+ 
+-    DEBUG_MSG2("dns: cache_add: %s => %08x\n", entry->name, entry->ip);
++    DEBUG_MSG1("dns: cache_add: %s\n", entry->name);
+ 
+     list_push(dns_cache, entry);
+ 
+     if (list_size(dns_cache) > DNS_CACHE_SIZE) {
++        dns_free_result(list_get_element_at(dns_cache,DNS_CACHE_SIZE));
+         list_remove(dns_cache, DNS_CACHE_SIZE);
+     }
+ }
+ 
++
++/**
++ * Gibt die Ressourcen eines dns_request_result wieder frei
++ * @param result Das freizugebene Resultat
++ */
++void dns_free_result(struct dns_request_result* result) {
++    // Speicher fuer IP-Adressen freigeben.
++    free(result->ip_address);
++    // Speicher fuer das Resultat freigeben.
++    free(result);
++}
++
+ /**
+- * Loest einen Domainnamen in eine IP-Adresse auf.
++ * Loest einen Domainnamen in eine IP-Adressen auf.
+  * 
+  * @param domain Der aufzuloesende Domainname als nullterminierter String,
+  * wobei die Labels durch Punkte getrennt sind
+  */
+-dword dns_request(char* domain)
++struct dns_request_result* dns_request(char* domain)
+ {
++    // Resultat
++    struct dns_request_result* dns_result = dns_cache_get(domain);
++    uint32_t result;
++
+     // Cache anlegen, falls noch keiner da ist
+     if (dns_cache == NULL) {
++        DEBUG_MSG("DNS: Erzeuge Cache\n");
+         dns_cache = list_create();
+     }
+ 
+-    // Wenn es im Cache ist, daraus nehmen
+-    dword result = dns_cache_get(domain);
+-    if (result) {
+-        return result;
++    
++    if(dns_cache_get(domain) != NULL) {
++      return dns_result;
+     }
+ 
++    dns_result = malloc(sizeof(struct dns_request_result));
++
+     // Ansonsten brauchen wir eine Verbindung zum DNS-Server
+-    dword dns_ip = options.nameserver;
++    uint32_t dns_ip = options.nameserver;
+ 
+     DEBUG_MSG("DNS: Oeffne Verbindung\n");
+     struct tcp_connection* conn = tcp_open_connection(dns_ip, DNS_PORT);
+     if (conn == NULL) {
+         DEBUG_MSG("DNS: Konnte Verbindung nicht aufbauen.\n");
+-        return 0;
++        return NULL;
+     }
+ 
+     // Puffer fuer die Nachricht reservieren:
+@@ -219,6 +238,8 @@ dword dns_request(char* domain)
+     // Auf Antwort warten
+     DEBUG_MSG("DNS: Warte auf Antwort\n");
+     struct tcp_in_buffer* in_buffer;
++    // Index fuer dns_result
++    int dns_result_index = 0;
+     while(1) {
+         if ((in_buffer = list_pop(conn->to_lostio))) {
+             void* reply = in_buffer->data;
+@@ -233,6 +254,14 @@ dword dns_request(char* domain)
+                 big_endian_word(((struct dns_header*) reply)->an_count);
+             reply += sizeof(struct dns_header);
+ 
++            // Speicher fuer die IPs holen
++            //if(an_count == 0) return NULL;
++            dns_result->ip_address = malloc(sizeof(uint32_t) * an_count);
++            // Menge speichern
++            dns_result->ip_count = an_count;
++            
++            
++
+             // Question Section ignorieren
+             for (i = 0; i < qd_count; i++) {                
+                 // QNAMEs
+@@ -271,14 +300,18 @@ dword dns_request(char* domain)
+                     10 + big_endian_word(*((word*) (reply + 8)));
+ 
+                 if (*((word*) reply) == 0x100) {
+-                    result = *((dword*) (reply + 10));
+-                    dns_cache_add(domain, result);
++                    result = *((uint32_t*) (reply + 10));
++                    
+                     
+                     // TODO Verbindung schliessen
+-                    return result;
++                    reply += answer_len;
+                 } else {
++                    result = 0;
+                     reply += answer_len;
+                 }
++
++                dns_result->ip_address[dns_result_index] = result;
++                dns_result_index++;
+             }
+             
+             break;
+@@ -288,5 +321,7 @@ dword dns_request(char* domain)
+ 
+     // TODO Verbindung schliessen
+ 
+-    return 0;
++    dns_cache_add(domain,dns_result);
++
++    return dns_result;
+ }
+diff --git a/src/modules/tcpip/include/dns.h b/src/modules/tcpip/include/dns.h
+index cc4281f..b1cf532 100644
+--- a/src/modules/tcpip/include/dns.h
++++ b/src/modules/tcpip/include/dns.h
+@@ -93,9 +93,17 @@ static inline void dns_set_opcode(struct dns_header* header, uint8_t opcode)
+ /// Reponse Code aus einem DNS-Header
+ #define dns_get_rcode(x) (((x) >> 8) & 0x0F)
+ 
++// Konstanten für die Header-Flags
+ #define QTYPE_A big_endian_word(1)
+ #define QCLASS_IN big_endian_word(1)
+ 
+-dword dns_request(char* domain);
++struct dns_request_result {
++    uint32_t* ip_address;
++    uint32_t ip_count;
++};
++
++struct dns_request_result* dns_request(char* domain);
++
++void dns_free_result(struct dns_request_result* result);
+ 
+ #endif
+diff --git a/src/modules/tcpip/lostio_if.c b/src/modules/tcpip/lostio_if.c
+index a849f18..17e4b09 100644
+--- a/src/modules/tcpip/lostio_if.c
++++ b/src/modules/tcpip/lostio_if.c
+@@ -164,13 +164,35 @@ void lostio_add_device(struct device *device)
+ bool lostio_tcp_not_found(char** path, byte flags, pid_t pid, io_resource_t* ps)
+ {
+     DEBUG_MSG("Knoten anlegen");
+-    
++   
+     if (strncmp(*path, "/dns/", 5) == 0) {
+-        dword ip = dns_request(strrchr(*path, '/') + 1);
+-        if (ip == 0)
++        // DNS Request absetzen
++        struct dns_request_result* result = dns_request(strrchr(*path, '/') + 1);
++
++        // Keine IP-Adresse erhalten?
++        if (result == NULL)
++            return FALSE;
++        if (result->ip_count == 0) {
+             return FALSE;
+-        char* data = ip_to_string(ip);
+-        return vfstree_create_node(*path, LOSTIO_TYPES_RAMFILE, strlen(data), data, 0);
++        }
++
++        char* data = calloc(16 * result->ip_count,sizeof(char));
++        
++        int i=0;
++        for(;i < result->ip_count;i++) {
++            char* ip = ip_to_string(result->ip_address[i]);
++            DEBUG_MSG2("IP =  %s , len = %d\n",ip,strlen(ip));
++            strcat(data,ip); 
++            if((i+1) < result->ip_count) strcat(data,"\n");
++
++            // Speicher wieder freigeben.
++            free(ip);
++        }
++        
++
++        // TODO: Data wird nicht gefreet. (vorerst!)
++
++        return vfstree_create_node(*path, LOSTIO_TYPES_RAMFILE, 16 * result->ip_count * sizeof(char), data, 0);
+     } else {
+         return vfstree_create_node(*path, LOSTIO_TYPES_TCPPORT, 0, NULL, 0);
+     }
+@@ -195,7 +217,11 @@ bool lostio_tcp_pre_open(char** path, byte flags, pid_t pid, io_resource_t* ps)
+     *delim = '\0';
+     dword ip = string_to_ip(*path + 1);
+     if (!ip) {
+-        ip = dns_request(*path + 1);
++        // DNS Request absetzen
++        struct dns_request_result* result = dns_request(*path + 1);
++        if (result && (result->ip_count > 0)) {
++            ip = result->ip_address[0];
++        }
+     }
+ 
+     if (!ip) {
+-- 
+1.6.0.4
+
+
+From fmnssun at gmail.com  Fri Nov 27 18:44:59 2009
+From: fmnssun at gmail.com (Roman Muentener)
+Date: Fri, 27 Nov 2009 18:44:59 +0100
+Subject: [tyndur-devel] [PATCH] dns_request loest nun Namen in mehrere
+	IP-Adressen auf. IPs werden
+Message-ID: <1259343899-13464-1-git-send-email-fmnssun@gmail.com>
+
+gethostbyname gibt nun mehrere IPs zurueck.
+
+Signed-off-by: Roman Muentener <fmnssun at gmail.com>
+---
+ src/modules/c/getip/Makefile.all |    7 ++
+ src/modules/c/getip/main.c       |  116 ++++++++++++++++++++++++++++++++++++++
+ src/modules/lib/posix/net.c      |   58 ++++++++++++++++++-
+ src/modules/tcpip/dns.c          |   75 ++++++++++++++++++-------
+ src/modules/tcpip/include/dns.h  |   10 +++-
+ src/modules/tcpip/lostio_if.c    |   38 ++++++++++--
+ 6 files changed, 273 insertions(+), 31 deletions(-)
+ create mode 100644 src/modules/c/getip/Makefile.all
+ create mode 100644 src/modules/c/getip/main.c
+
+diff --git a/src/modules/c/getip/Makefile.all b/src/modules/c/getip/Makefile.all
+new file mode 100644
+index 0000000..59d796e
+--- /dev/null
++++ b/src/modules/c/getip/Makefile.all
+@@ -0,0 +1,7 @@
++shopt -s extglob
++source $LOST_BUILDMK_ROOT/config.sh
++
++echo "LD   $1/apps/getip"
++$LOST_TOOLS_LD -ogetip -Ttext=0x40000000 *.o --start-group $2 --end-group
++
++mv getip $1/apps/
+diff --git a/src/modules/c/getip/main.c b/src/modules/c/getip/main.c
+new file mode 100644
+index 0000000..57ebc32
+--- /dev/null
++++ b/src/modules/c/getip/main.c
+@@ -0,0 +1,116 @@
++/*  
++ * Copyright (c) 2009 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Roman Muentener.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the tyndur Project
++ *     and its contributors.
++ * 4. Neither the name of the tyndur Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS 
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR 
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, 
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, 
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; 
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR 
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++
++#include "stdlib.h"
++#include "string.h"
++#include "netdb.h"
++#include "stdio.h"
++#include "arpa/inet.h"
++#include "errno.h"
++#include "network.h"
++
++int main(int argc, char* argv[])
++{
++    printf("getip\n-----\n\n");
++
++    if( argc != 2 )
++    {
++        printf("Falsche Parameter!\n");
++        return 1;
++    }
++
++    struct in_addr addr;
++
++    struct hostent* info;
++    info = gethostbyname(argv[1]);
++
++    if (info == NULL) {
++        printf("Fehler: %s!\n",hstrerror(h_errno));
++        return 2;
++    }
++
++    int i = 0;
++    while (info->h_addr_list[i] != 0)
++    {
++        addr.s_addr = *(unsigned long*) info->h_addr_list[i++];
++
++        printf("IP Adresse: %s \n", inet_ntoa(addr));
++    }
++
++  return 0;
++}
++
++/*
++int main(int argc, char* argv[])
++{
++    printf("getip\n-----\n\n");
++    if(argc != 2) {
++        printf("Incorrect usage!\n");
++        printf("Correct usage:\tgetip <hostname>\n");
++        return 1;
++    }
++    long count = 0;
++    char* path;
++    FILE* f;
++    asprintf(&path,"tcpip:/dns/%s",argv[1]);
++    f=fopen(path,"r");
++    if(!f) {
++       printf("Error: Abfrage gescheitert!\n");
++       return 3;
++    }
++    fseek(f,0,SEEK_END);
++    count = ftell(f);
++    if(count == 0) {
++        printf("Error: Abfrage gescheitert!\n");
++        return 2;
++    }
++    rewind(f);
++    char* buffer = calloc(count,sizeof(char));
++    fread(buffer,1,count,f);
++    count /= 16;
++    fclose(f);
++    if(count == 0) {
++        printf("Error: Abfrage gescheitert!\n");
++        return 3;
++    }
++    int i=0;
++    for(;i < count; i++) {
++      char* ip = (char*)(buffer+(i*16));
++      printf("IP Adresse: %s\n",ip);
++    }
++    return 0;
++}
++*/
+diff --git a/src/modules/lib/posix/net.c b/src/modules/lib/posix/net.c
+index f009585..d08b1c8 100644
+--- a/src/modules/lib/posix/net.c
++++ b/src/modules/lib/posix/net.c
+@@ -184,7 +184,13 @@ struct hostent* gethostbyname(const char* name)
+     static struct hostent hostent;
+     static char* aliases[] = { NULL };
+     static uint32_t ip;
+-    static uint32_t* h_addr_list[] = { &ip, NULL };
++    static uint32_t** h_addr_list;
++
++    // Also, falls h_addr_list nicht NULL ist... muessen wir mal bisschen rumfreen
++    while(h_addr_list != NULL) {
++      free(h_addr_list);
++      h_addr_list++;
++    }
+ 
+     // Erstmal schauen, ob es eine IP-Adresse ist
+     ip = string_to_ip(name);
+@@ -193,17 +199,61 @@ struct hostent* gethostbyname(const char* name)
+     if (ip == 0) {
+         char* path;
+         FILE* f;
+-        char ip_str[16];
++        char* ip_str;
++        unsigned long count = 0;
+ 
+         asprintf(&path, "tcpip:/dns/%s", name);
++
++        // Datei oeffnen
+         f = fopen(path, "r");
++
++        // Dateigroesse feststellen
++        fseek(f,0,SEEK_END);
++        count = ftell(f);
++        rewind(f);
++        
++        // Speicher fuer ip_str holen
++        ip_str = calloc(count+1,sizeof(char));
++
+         if (!f) {
+             return NULL;
+         }
+-        fread(ip_str, 1, 16, f);
++
++        // Daten einlesen
++        fread(ip_str, 1, count, f);
+         fclose(f);
+ 
+-        ip = string_to_ip(ip_str);
++        // \n beachten
++        char* p;
++        p = strtok(ip_str,"\n");
++        int i = 0;
++        while (p != NULL)
++        {
++            // Wir reallocen das ganze
++            h_addr_list = realloc(h_addr_list,sizeof(uint32_t*) * (i + 1));
++
++            // Wir brauchen Platz fuer die IP, auf die der Pointer zeigt
++            uint32_t* ip_q = malloc(sizeof(uint32_t));
++
++            // IP zuweisen
++            *ip_q = string_to_ip(p);
++
++            // Pointer zuweisen
++            h_addr_list[i] = ip_q;
++
++            // Inkrementieren
++            i++;
++
++            // Nach \n aufteilen, Teil nehmen
++            p = strtok (NULL, "\n");
++        }
++
++        // Wir muessen mit NULL terminieren
++        h_addr_list[i] = NULL;
++
++        // Speicher wieder freigeben
++        free(path);
++        free(ip_str);
+     }
+ 
+     // hostent aktualisieren
+diff --git a/src/modules/tcpip/dns.c b/src/modules/tcpip/dns.c
+index 0f6e18d..5b2c691 100644
+--- a/src/modules/tcpip/dns.c
++++ b/src/modules/tcpip/dns.c
+@@ -66,7 +66,7 @@
+ 
+ struct dns_cache_entry {
+     char*   name;
+-    dword   ip;
++    struct dns_request_result* result;
+ };
+ 
+ static list_t* dns_cache = NULL;
+@@ -77,7 +77,7 @@ static list_t* dns_cache = NULL;
+  * @return Zum gegebenen Domainnamen passende IP-Adresse oder 0, wenn die
+  * Domain nicht im Cache ist.
+  */
+-static dword dns_cache_get(char* domain)
++static struct dns_request_result* dns_cache_get(char* domain)
+ {
+     struct dns_cache_entry* entry;
+     int i;
+@@ -87,12 +87,12 @@ static dword dns_cache_get(char* domain)
+     for (i = 0; (entry = list_get_element_at(dns_cache, i)); i++) {
+         if (strcmp(domain, entry->name) == 0) {
+             DEBUG_MSG1(" -- %s: Treffer\n", entry->name);
+-            return entry->ip;
++            return entry->result;
+         }
+         DEBUG_MSG1(" -- %s: Treffer\n", entry->name);
+     }
+-
+-    return 0;
++    DEBUG_MSG1(" -- %s: Keine Treffer\n",domain);
++    return NULL;
+ }
+ 
+ /**
+@@ -100,52 +100,71 @@ static dword dns_cache_get(char* domain)
+  * ein alter Eintrag geloescht, um den Cache auf einer ertraeglichen Groesse zu
+  * halten.
+  */
+-static void dns_cache_add(char* domain, dword ip)
++static void dns_cache_add(char* domain, struct dns_request_result* result)
+ {
+     struct dns_cache_entry* entry = malloc(sizeof(*entry));
+     size_t domain_len = strlen(domain);
+ 
+-    entry->ip = ip;
++    entry->result = result;
+     entry->name = malloc(domain_len + 1);
+     strncpy(entry->name, domain, domain_len);
+     entry->name[domain_len] = '\0';
+ 
+-    DEBUG_MSG2("dns: cache_add: %s => %08x\n", entry->name, entry->ip);
++    DEBUG_MSG1("dns: cache_add: %s\n", entry->name);
+ 
+     list_push(dns_cache, entry);
+ 
+     if (list_size(dns_cache) > DNS_CACHE_SIZE) {
++        dns_free_result(list_get_element_at(dns_cache,DNS_CACHE_SIZE));
+         list_remove(dns_cache, DNS_CACHE_SIZE);
+     }
+ }
+ 
++
++/**
++ * Gibt die Ressourcen eines dns_request_result wieder frei
++ * @param result Das freizugebene Resultat
++ */
++void dns_free_result(struct dns_request_result* result) {
++    // Speicher fuer IP-Adressen freigeben.
++    free(result->ip_address);
++    // Speicher fuer das Resultat freigeben.
++    free(result);
++}
++
+ /**
+- * Loest einen Domainnamen in eine IP-Adresse auf.
++ * Loest einen Domainnamen in eine IP-Adressen auf.
+  * 
+  * @param domain Der aufzuloesende Domainname als nullterminierter String,
+  * wobei die Labels durch Punkte getrennt sind
+  */
+-dword dns_request(char* domain)
++struct dns_request_result* dns_request(char* domain)
+ {
++    // Resultat
++    struct dns_request_result* dns_result = dns_cache_get(domain);
++    uint32_t result;
++
+     // Cache anlegen, falls noch keiner da ist
+     if (dns_cache == NULL) {
++        DEBUG_MSG("DNS: Erzeuge Cache\n");
+         dns_cache = list_create();
+     }
+ 
+-    // Wenn es im Cache ist, daraus nehmen
+-    dword result = dns_cache_get(domain);
+-    if (result) {
+-        return result;
++    
++    if(dns_cache_get(domain) != NULL) {
++      return dns_result;
+     }
+ 
++    dns_result = malloc(sizeof(struct dns_request_result));
++
+     // Ansonsten brauchen wir eine Verbindung zum DNS-Server
+-    dword dns_ip = options.nameserver;
++    uint32_t dns_ip = options.nameserver;
+ 
+     DEBUG_MSG("DNS: Oeffne Verbindung\n");
+     struct tcp_connection* conn = tcp_open_connection(dns_ip, DNS_PORT);
+     if (conn == NULL) {
+         DEBUG_MSG("DNS: Konnte Verbindung nicht aufbauen.\n");
+-        return 0;
++        return NULL;
+     }
+ 
+     // Puffer fuer die Nachricht reservieren:
+@@ -219,6 +238,8 @@ dword dns_request(char* domain)
+     // Auf Antwort warten
+     DEBUG_MSG("DNS: Warte auf Antwort\n");
+     struct tcp_in_buffer* in_buffer;
++    // Index fuer dns_result
++    int dns_result_index = 0;
+     while(1) {
+         if ((in_buffer = list_pop(conn->to_lostio))) {
+             void* reply = in_buffer->data;
+@@ -233,6 +254,14 @@ dword dns_request(char* domain)
+                 big_endian_word(((struct dns_header*) reply)->an_count);
+             reply += sizeof(struct dns_header);
+ 
++            // Speicher fuer die IPs holen
++            //if(an_count == 0) return NULL;
++            dns_result->ip_address = malloc(sizeof(uint32_t) * an_count);
++            // Menge speichern
++            dns_result->ip_count = an_count;
++            
++            
++
+             // Question Section ignorieren
+             for (i = 0; i < qd_count; i++) {                
+                 // QNAMEs
+@@ -271,14 +300,18 @@ dword dns_request(char* domain)
+                     10 + big_endian_word(*((word*) (reply + 8)));
+ 
+                 if (*((word*) reply) == 0x100) {
+-                    result = *((dword*) (reply + 10));
+-                    dns_cache_add(domain, result);
++                    result = *((uint32_t*) (reply + 10));
++                    
+                     
+                     // TODO Verbindung schliessen
+-                    return result;
++                    reply += answer_len;
+                 } else {
++                    result = 0;
+                     reply += answer_len;
+                 }
++
++                dns_result->ip_address[dns_result_index] = result;
++                dns_result_index++;
+             }
+             
+             break;
+@@ -288,5 +321,7 @@ dword dns_request(char* domain)
+ 
+     // TODO Verbindung schliessen
+ 
+-    return 0;
++    dns_cache_add(domain,dns_result);
++
++    return dns_result;
+ }
+diff --git a/src/modules/tcpip/include/dns.h b/src/modules/tcpip/include/dns.h
+index cc4281f..b1cf532 100644
+--- a/src/modules/tcpip/include/dns.h
++++ b/src/modules/tcpip/include/dns.h
+@@ -93,9 +93,17 @@ static inline void dns_set_opcode(struct dns_header* header, uint8_t opcode)
+ /// Reponse Code aus einem DNS-Header
+ #define dns_get_rcode(x) (((x) >> 8) & 0x0F)
+ 
++// Konstanten für die Header-Flags
+ #define QTYPE_A big_endian_word(1)
+ #define QCLASS_IN big_endian_word(1)
+ 
+-dword dns_request(char* domain);
++struct dns_request_result {
++    uint32_t* ip_address;
++    uint32_t ip_count;
++};
++
++struct dns_request_result* dns_request(char* domain);
++
++void dns_free_result(struct dns_request_result* result);
+ 
+ #endif
+diff --git a/src/modules/tcpip/lostio_if.c b/src/modules/tcpip/lostio_if.c
+index a849f18..17e4b09 100644
+--- a/src/modules/tcpip/lostio_if.c
++++ b/src/modules/tcpip/lostio_if.c
+@@ -164,13 +164,35 @@ void lostio_add_device(struct device *device)
+ bool lostio_tcp_not_found(char** path, byte flags, pid_t pid, io_resource_t* ps)
+ {
+     DEBUG_MSG("Knoten anlegen");
+-    
++   
+     if (strncmp(*path, "/dns/", 5) == 0) {
+-        dword ip = dns_request(strrchr(*path, '/') + 1);
+-        if (ip == 0)
++        // DNS Request absetzen
++        struct dns_request_result* result = dns_request(strrchr(*path, '/') + 1);
++
++        // Keine IP-Adresse erhalten?
++        if (result == NULL)
++            return FALSE;
++        if (result->ip_count == 0) {
+             return FALSE;
+-        char* data = ip_to_string(ip);
+-        return vfstree_create_node(*path, LOSTIO_TYPES_RAMFILE, strlen(data), data, 0);
++        }
++
++        char* data = calloc(16 * result->ip_count,sizeof(char));
++        
++        int i=0;
++        for(;i < result->ip_count;i++) {
++            char* ip = ip_to_string(result->ip_address[i]);
++            DEBUG_MSG2("IP =  %s , len = %d\n",ip,strlen(ip));
++            strcat(data,ip); 
++            if((i+1) < result->ip_count) strcat(data,"\n");
++
++            // Speicher wieder freigeben.
++            free(ip);
++        }
++        
++
++        // TODO: Data wird nicht gefreet. (vorerst!)
++
++        return vfstree_create_node(*path, LOSTIO_TYPES_RAMFILE, 16 * result->ip_count * sizeof(char), data, 0);
+     } else {
+         return vfstree_create_node(*path, LOSTIO_TYPES_TCPPORT, 0, NULL, 0);
+     }
+@@ -195,7 +217,11 @@ bool lostio_tcp_pre_open(char** path, byte flags, pid_t pid, io_resource_t* ps)
+     *delim = '\0';
+     dword ip = string_to_ip(*path + 1);
+     if (!ip) {
+-        ip = dns_request(*path + 1);
++        // DNS Request absetzen
++        struct dns_request_result* result = dns_request(*path + 1);
++        if (result && (result->ip_count > 0)) {
++            ip = result->ip_address[0];
++        }
+     }
+ 
+     if (!ip) {
+-- 
+1.6.0.4
+
+
+From fmnssun at gmail.com  Fri Nov 27 18:57:34 2009
+From: fmnssun at gmail.com (Roman Muentener)
+Date: Fri, 27 Nov 2009 18:57:34 +0100
+Subject: [tyndur-devel] [PATCH] Memleak fix fuer gethostbyname
+Message-ID: <1259344654-13753-1-git-send-email-fmnssun@gmail.com>
+
+wenn if(!f) wuerde sonst ein Memleak entstehen. Eine Zeile ist mir verrutscht.
+Bitte verzeiht meine vielen Mails, das wird schon noch besser ;)
+
+Signed-off-by: Roman Muentener <fmnssun at gmail.com>
+---
+ src/modules/lib/posix/net.c |    5 +++--
+ 1 files changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/src/modules/lib/posix/net.c b/src/modules/lib/posix/net.c
+index d08b1c8..f6250d5 100644
+--- a/src/modules/lib/posix/net.c
++++ b/src/modules/lib/posix/net.c
+@@ -212,13 +212,14 @@ struct hostent* gethostbyname(const char* name)
+         count = ftell(f);
+         rewind(f);
+         
+-        // Speicher fuer ip_str holen
+-        ip_str = calloc(count+1,sizeof(char));
+ 
+         if (!f) {
+             return NULL;
+         }
+ 
++        // Speicher fuer ip_str holen
++        ip_str = calloc(count+1,sizeof(char));
++
+         // Daten einlesen
+         fread(ip_str, 1, count, f);
+         fclose(f);
+-- 
+1.6.0.4
+
+
+From toni at tyndur.org  Sat Nov 28 11:38:47 2009
+From: toni at tyndur.org (Antoine Kaufmann)
+Date: Sat, 28 Nov 2009 11:38:47 +0100
+Subject: [tyndur-devel] [PATCH 2/4] Pascal-RTL: Units zum Pinseln von
+ TUIs
+In-Reply-To: <1258205309-11452-3-git-send-email-kevin@tyndur.org>
+References: <1258205309-11452-1-git-send-email-kevin@tyndur.org>
+	<1258205309-11452-3-git-send-email-kevin@tyndur.org>
+Message-ID: <20091128103846.GA6140@neo.geekcave.lan>
+
+On Sat, Nov 14 14:28, Kevin Wolf wrote:
+> + Pascal-RTL: Unit tui
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+> ---
+>  src/modules/pas/lib/tui/Makefile.all |    1 +
+>  src/modules/pas/lib/tui/tui.pas      |  533 ++++++++++++++++++++++++++++++++++
+>  2 files changed, 534 insertions(+), 0 deletions(-)
+>  create mode 100644 src/modules/pas/lib/tui/Makefile.all
+>  create mode 100644 src/modules/pas/lib/tui/tui.pas
+> 
+> diff --git a/src/modules/pas/lib/tui/Makefile.all b/src/modules/pas/lib/tui/Makefile.all
+> new file mode 100644
+> index 0000000..a645d3e
+> --- /dev/null
+> +++ b/src/modules/pas/lib/tui/Makefile.all
+> @@ -0,0 +1 @@
+> +cp libptui.a tui.ppu ../units
+> diff --git a/src/modules/pas/lib/tui/tui.pas b/src/modules/pas/lib/tui/tui.pas
+> new file mode 100644
+> index 0000000..a130f81
+> --- /dev/null
+> +++ b/src/modules/pas/lib/tui/tui.pas
+> @@ -0,0 +1,533 @@
+> +unit tui;
+> +{$MODE ObjFPC}
+> +{$H+}
+> +{$COPERATORS ON}
+> +
+> +interface
+> +
+> +type
+> +    TUIObject = class
+> +        public
+> +            color: byte;
+> +            bgcolor: byte;
+> +
+> +        protected
+> +            f_w, f_h: integer;
+> +
+> +        public
+> +            constructor create;
+> +            procedure align(w, h: integer); virtual;
+> +            procedure draw(x, y: integer); virtual;
+> +
+> +            property width: integer read f_w write f_w;
+> +            property height: integer read f_h write f_h;
+> +    end;
+> +    PTUIObject = ^TUIObject;
+> +
+> +    TUIRowColContainer = class(TUIObject)
+
+Bei den nicht so wirklich offensichtlichen Klassen, wäre ich wenigstens
+über einen Kommentar zur Klasse noch dankbar... ;-)
+
+> +        public
+> +            constructor create(num: integer);
+> +            destructor free;
+> +
+> +        protected
+> +            cols: integer;
+
+Das sind in Wahrheit nicht nur cols, oder? ;-) Vielleicht wäre da eine
+etwas allgemeinere Bezeichnung angebrachter.
+
+> +            children: PTUIObject;
+> +
+> +            f_fixed: PInteger;
+> +            f_prop: PInteger;
+> +
+> +        public
+> +            spacer: boolean;
+> +
+> +        protected
+> +            procedure SetChild(i: integer; obj: TUIObject);
+> +            procedure SetFixedWidth(i: integer; w: integer);
+> +            procedure SetPropWidth(i: integer; w: integer);
+> +
+> +        public
+> +            property _children[i: integer]: TUIObject write SetChild; default;
+> +            property fixed[i: integer]: integer write SetFixedWidth;
+> +            property prop[i: integer]: integer write SetPropWidth;
+> +    end;
+> +
+> +    TUIColContainer = class(TUIRowColContainer)
+> +        public
+> +            procedure align(w, h: integer); override;
+> +            procedure draw(x, y: integer); override;
+> +    end;
+> +
+> +    TUIRowContainer = class(TUIRowColContainer)
+> +        public
+> +            procedure align(w, h: integer); override;
+> +            procedure draw(x, y: integer); override;
+> +    end;
+> +
+> +    TUIFrame = class(TUIObject)
+> +        protected
+> +            f_obj: TUIObject;
+> +            f_obj_w: integer;
+> +            f_obj_h: integer;
+> +
+> +        public
+> +            constructor create(obj: TUIObject; w, h: integer);
+> +            procedure align(w, h: integer); override;
+> +            procedure draw(x, y: integer); override;
+> +
+> +            property obj: TUIObject read f_obj write f_obj;
+> +    end;
+> +
+> +    TUILabel = class(TUIObject)
+> +        protected
+> +            f_content: UnicodeString;
+> +
+> +        public
+> +            procedure draw(x, y: integer); override;
+> +            property content: UnicodeString read f_content write f_content;
+> +    end;
+> +
+> +    TUIButton = class(TUILabel)
+> +        public
+> +            procedure draw(x, y: integer); override;
+> +    end;
+> +
+> +    TMenuItem = record
+> +        s: UnicodeString;
+> +        opaque: Pointer;
+> +    end;
+> +    PMenuItem = ^TMenuItem;
+> +
+> +    TUIMenu = class(TUIObject)
+> +        protected
+> +            f_num: integer;
+> +            f_cur: integer;
+> +            f_selected: integer;
+> +            f_items: PMenuItem;
+> +
+> +        public
+> +            sel_color: byte;
+> +            sel_bgcolor: byte;
+> +
+> +        public
+> +            constructor create(num: integer);
+> +            destructor free;
+> +
+> +            procedure draw(x, y: integer); override;
+> +            procedure AddItem(s: UnicodeString; opaque: Pointer);
+> +            property selected: integer read f_selected write f_selected;
+> +    end;
+> +
+> +implementation
+> +
+> +uses crt, sysutils, strutils;
+> +
+> +procedure FillRect(x, y, w, h: integer);
+> +var
+> +    i: integer;
+> +begin
+> +    for i := y to y + h - 1 do begin
+> +        GotoXY(x, i);
+> +        Write(StringOfChar(' ', w));
+> +    end;
+> +end;
+> +
+> +procedure WritePadded(s: UnicodeString; w: integer);
+> +begin
+> +    if Length(s) >= w then begin
+> +        Write(Copy(s, 1, w));
+> +    end else begin
+> +        Write(Utf8Encode(s));
+> +        Write(StringOfChar(' ', w - Length(s)));
+> +    end;
+> +end;
+> +
+> +
+> +constructor TUIObject.create;
+> +begin
+> +    color := 7;
+> +    bgcolor := 0;
+> +end;
+> +
+> +procedure TUIObject.align(w, h: integer);
+> +begin
+> +    f_w := w;
+> +    f_h := h;
+> +end;
+> +
+> +procedure TUIObject.draw(x, y: integer);
+> +begin
+> +    TextColor(color);
+> +    TextBackground(bgcolor);
+> +    FillRect(x, y, f_w, f_h);
+> +end;
+> +
+> +constructor TUIRowColContainer.create(num: integer);
+> +var
+> +    i: integer;
+> +begin
+> +    if num < 1 then begin
+> +        raise Exception.create('TUIColContainer: num < 1');
+> +    end;
+> +
+> +    spacer := false;
+> +
+> +    cols := num;
+> +    children := GetMem(sizeof(PTUIObject) * num);
+> +    f_fixed := GetMem(sizeof(integer) * num);
+> +    f_prop := GetMem(sizeof(integer) * num);
+> +
+> +    FillByte(children^, sizeof(PTUIObject) * num, 0);
+> +    FillByte(f_fixed^, sizeof(integer) * num, 0);
+> +    FillByte(f_prop^, sizeof(integer) * num, 0);
+
+Hm verstehe ich einfach nur das FillByte nicht, oder willst du da auf
+Nummer sicher gehen? ;-)
+
+> +    for i := 0 to cols - 1 do begin
+> +        children[i] := nil;
+> +        f_fixed[i] := 0;
+> +        f_prop[i] := 0;
+> +    end;
+> +end;
+> +
+> +destructor TUIRowColContainer.free;
+> +var
+> +    i: integer;
+> +begin
+> +    for i := 0 to cols - 1 do begin
+> +        if children[i] <> nil then begin
+> +            children[i].free;
+> +        end;
+> +    end;
+> +
+> +    FreeMem(children);
+> +    FreeMem(f_fixed);
+> +    FreeMem(f_prop);
+> +end;
+> +
+> +procedure TUIRowColContainer.SetChild(i: integer; obj: TUIObject);
+> +begin
+> +    children[i] := obj;
+> +end;
+> +
+> +procedure TUIRowColContainer.SetFixedWidth(i: integer; w: integer);
+> +begin
+> +    f_fixed[i] := w;
+
+Hier vielleicht f_prop[i] noch auf 0 setzen? Dann wäre jedenfalls klar
+geregelt, was gilt, wenn beides gemacht wird.
+
+> +end;
+> +
+> +procedure TUIRowColContainer.SetPropWidth(i: integer; w: integer);
+> +begin
+> +    f_prop[i] := w;
+
+Dito, nur anders rum.
+
+> +end;
+> +
+> +procedure TUIColContainer.align(w, h: integer);
+> +var
+> +    i: integer;
+> +    prop_space: integer;
+> +    cur_w: integer;
+> +begin
+> +    f_w := w;
+> +    f_h := h;
+> +
+> +    prop_space := 0;
+> +    for i := 0 to cols - 1 do begin
+> +        if f_fixed[i] > 0 then begin
+> +            if w >= f_fixed[i] then begin
+> +                w -= f_fixed[i];
+> +            end else begin
+> +                f_fixed[i] := w;
+> +                w := 0;
+> +            end;
+> +
+> +            children[i].align(f_fixed[i], h);
+> +        end else begin
+> +            prop_space += f_prop[i];
+> +        end;
+> +
+> +        if spacer and (w > 0) and (i < cols - 1) then begin
+> +            Dec(w);
+> +        end;
+> +    end;
+> +
+> +    for i := 0 to cols - 1 do begin
+> +        if f_fixed[i] = 0 then begin
+> +            if prop_space = 0 then begin
+> +                children[i].align(0, h);
+> +            end else begin
+> +                cur_w := (w * f_prop[i]) div prop_space;
+> +                children[i].align(cur_w, h);
+> +                prop_space -= f_prop[i];
+> +                w -= cur_w;
+> +            end;
+> +        end;
+> +    end;
+> +end;
+> +
+> +procedure TUIColContainer.draw(x, y: integer);
+> +var
+> +    i: integer;
+> +    w: integer;
+> +begin
+> +    w := 0;
+> +    for i := 0 to cols - 1 do begin
+> +        children[i].draw(x + w, y);
+> +        w += children[i].width;
+> +
+> +        if spacer then begin
+> +            Inc(w);
+
+Die Lücken sollen nicht irgendwie noch bunt gemacht werden oder so?
+
+> +        end;
+> +    end;
+> +
+> +    if w < f_w then begin
+> +        TextColor(color);
+> +        TextBackground(bgcolor);
+> +        FillRect(x + w, y, f_w - w, f_h);
+> +    end;
+> +end;
+> +
+> +procedure TUIRowContainer.align(w, h: integer);
+> +var
+> +    i: integer;
+> +    prop_space: integer;
+> +    cur_h: integer;
+> +begin
+> +    f_w := w;
+> +    f_h := h;
+> +
+> +    prop_space := 0;
+> +    for i := 0 to cols - 1 do begin
+> +        if f_fixed[i] > 0 then begin
+> +            if w >= f_fixed[i] then begin
+> +                h -= f_fixed[i];
+> +            end else begin
+> +                f_fixed[i] := h;
+> +                h := 0;
+> +            end;
+> +
+> +            children[i].align(w, f_fixed[i]);
+> +        end else begin
+> +            prop_space += f_prop[i];
+> +        end;
+> +
+> +        if spacer and (h > 0) and (i <> cols - 1) then begin
+> +            Dec(h);
+> +        end;
+> +    end;
+> +
+> +    for i := 0 to cols - 1 do begin
+> +        if f_fixed[i] = 0 then begin
+> +            if prop_space = 0 then begin
+> +                children[i].align(w, 0);
+> +            end else begin
+> +                cur_h := (h * f_prop[i]) div prop_space;
+> +                children[i].align(w, cur_h);
+> +                prop_space -= f_prop[i];
+> +                h -= cur_h;
+> +            end;
+> +        end;
+> +    end;
+> +end;
+> +
+> +procedure TUIRowContainer.draw(x, y: integer);
+> +var
+> +    i: integer;
+> +    h: integer;
+> +begin
+> +    h := 0;
+> +    for i := 0 to cols - 1 do begin
+> +        children[i].draw(x, y + h);
+> +        h += children[i].height;
+> +
+> +        if spacer then begin
+> +            Inc(h);
+
+Dito.
+
+> +        end;
+> +    end;
+> +
+> +    if h < f_h then begin
+> +        TextColor(color);
+> +        TextBackground(bgcolor);
+> +        FillRect(x, y + h, f_w, f_h - h);
+> +    end;
+> +end;
+> +
+> +constructor TUIFrame.create(obj: TUIObject; w, h: integer);
+> +begin
+> +    f_obj := obj;
+> +    f_obj_w := w;
+> +    f_obj_h := h;
+> +end;
+> +
+> +procedure TUIFrame.align(w, h: integer);
+> +begin
+> +    f_w := w;
+> +    f_h := h;
+> +
+> +    if f_obj_w < w then begin
+> +        w := f_obj_w;
+> +    end;
+> +
+> +    if f_obj_h < h then begin
+> +        h := f_obj_h;
+> +    end;
+> +
+> +    f_obj.align(w, h);
+> +end;
+> +
+> +procedure TUIFrame.draw(x, y: integer);
+> +var
+> +    w, h: integer;
+> +begin
+> +    w := f_w;
+> +    h := f_h;
+> +
+> +    TextColor(color);
+> +    TextBackground(bgcolor);
+> +    FillRect(x, y, w, h);
+> +
+> +    if f_obj_w < w then begin
+> +        w := f_obj_w;
+> +    end;
+> +
+> +    if f_obj_h < h then begin
+> +        h := f_obj_h;
+> +    end;
+> +
+> +    f_obj.draw(x + ((f_w - w) div 2), y + ((f_h - h) div 2));
+> +end;
+> +
+> +procedure TUILabel.draw(x, y: integer);
+> +var
+> +    s: UnicodeString;
+> +    pos: integer;
+> +    cnt: integer;
+> +    row: integer;
+> +    line_start_pos: integer;
+> +begin
+> +    if f_h > 0 then begin
+> +        TextColor(color);
+> +        TextBackground(bgcolor);
+> +        FillRect(x, y, f_w, f_h);
+> +
+> +        pos := 0;
+> +        row := 0;
+> +        cnt := 1;
+> +        line_start_pos := 1;
+> +
+> +        while (pos < Length(f_content)) and (row < f_h) do begin
+> +
+> +            s := ExtractWordPos(cnt, f_content, [' '], pos);
+> +            Inc(cnt);
+> +            if s = '' then begin
+> +                break;
+> +            end;
+> +
+> +            if pos - line_start_pos + Length(s) > f_w then begin
+> +                Inc(row);
+> +                line_start_pos := pos;
+> +                if row >= f_h then begin
+> +                    break;
+> +                end;
+
+Mit Wörtern die länger sind als eine Zeile gibts hier wohl noch ein
+Problem, oder? Das müsste sich doch auch relativ einfach behandeln
+lassen, und sonst halt doch wenigstens ein TODO oder ein FIXME ;-)
+
+> +            end;
+> +
+> +            GotoXY(x + pos - line_start_pos, y + row);
+> +            Write(Utf8Encode(s));
+> +        end;
+> +    end;
+> +end;
+> +
+> +procedure TUIButton.draw(x, y: integer);
+> +var
+> +    s: UnicodeString;
+> +    diff: integer;
+> +begin
+> +    if f_w > 2 then begin
+> +        TextColor(color);
+> +        TextBackground(bgcolor);
+> +        FillRect(x, y, f_w, f_h);
+> +
+> +        if Length(content) > f_w - 2 then begin
+> +            s := '<' + Copy(content, 1, f_w - 2) + '>';
+> +        end else begin
+> +            diff := f_w - 2 - Length(content);
+> +            s := '<' + StringOfChar(' ', diff div 2) + content +
+> +                StringOfChar(' ', diff - (diff div 2)) + '>';
+> +        end;
+> +
+> +        GotoXY(x, y);
+> +        Write(Utf8Encode(s));
+> +    end;
+> +end;
+> +
+> +constructor TUIMenu.create(num: integer);
+> +var
+> +    i: integer;
+> +begin
+> +    if num < 1 then begin
+> +        raise Exception.create('TUIColContainer: num < 1');
+> +    end;
+> +
+> +    sel_color := 14;
+> +    sel_bgcolor := 1;
+> +
+> +    f_cur := 0;
+> +    f_selected := 0;
+> +    f_num := num;
+> +    f_items := GetMem(sizeof(TMenuItem) * num);
+> +    FillByte(f_items^, sizeof(TMenuItem) * num, 0);
+
+Hm, hier auch wieder... Sollte ich vielleicht lieber mal in die Doku
+sehen, was das genau macht? ;-)
+
+> +
+> +    for i := 0 to f_num - 1 do begin
+> +        f_items[i].s := '';
+> +        f_items[i].opaque := nil;
+> +    end;
+> +end;
+> +
+> +destructor TUIMenu.free;
+> +begin
+> +    FreeMem(f_items);
+> +end;
+> +
+> +procedure TUIMenu.draw(x, y: integer);
+> +var
+> +    i: integer;
+> +    last: integer;
+> +begin
+> +    TextColor(color);
+> +    TextBackground(bgcolor);
+> +    FillRect(x, y, f_w, f_h);
+> +
+> +    last := f_cur - 1;
+> +    if last >= f_h then begin
+> +        last := f_h - 1;
+> +    end;
+> +
+> +    for i := 0 to last do begin
+> +        GotoXY(x, y + i);
+> +        if f_selected = i then begin
+> +            TextColor(sel_color);
+> +            TextBackground(sel_bgcolor);
+> +        end;
+> +        WritePadded(f_items[i].s, f_w);
+> +        if f_selected = i then begin
+> +            TextColor(color);
+> +            TextBackground(bgcolor);
+> +        end;
+> +    end;
+> +end;
+> +
+> +procedure TUIMenu.AddItem(s: UnicodeString; opaque: Pointer);
+> +begin
+> +    if f_cur < f_num then begin
+> +        f_items[f_cur].s := s;
+> +        f_items[f_cur].opaque := opaque;
+> +        Inc(f_cur);
+
+Hm hier vielleicht in einem Else-Zweig noch eine Exception werfen?
+
+> +    end;
+> +end;
+> +
+> +
+> +initialization
+> +
+> +    ClrScr;
+> +
+> +finalization
+> +
+> +    TextBackground(0);
+> +    TextColor(7);
+> +    WriteLn;
+> +
+> +end.
+
+-- 
+Antoine Kaufmann
+<toni at famkaufmann.info>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : <http://list.tyndur.org/pipermail/tyndur-devel/attachments/20091128/86fe7388/attachment-0001.pgp>
+
+From kevin at tyndur.org  Sat Nov 28 12:38:05 2009
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 28 Nov 2009 12:38:05 +0100
+Subject: [tyndur-devel] [PATCH] tcpip: Kein FIN ohne ACK
+Message-ID: <1259408285-14408-1-git-send-email-kevin@tyndur.org>
+
+! tcpip: Wenn ein FIN-Paket gesendet wird, das nicht gleichzeitig auch
+  ACK gesetzt hat, wird das FIN ignoriert.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/tcpip/tcp.c |    9 +++++----
+ 1 files changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/src/modules/tcpip/tcp.c b/src/modules/tcpip/tcp.c
+index 92378dc..0cc2aec 100644
+--- a/src/modules/tcpip/tcp.c
++++ b/src/modules/tcpip/tcp.c
+@@ -176,9 +176,10 @@ static void tcp_send_reset(struct tcp_connection* conn)
+     tcp_send_packet(conn, NULL, 0, TCPF_RST);
+ }
+ 
+-static void tcp_send_fin(struct tcp_connection* conn, bool ack)
++static void tcp_send_fin(struct tcp_connection* conn)
+ {
+-    tcp_send_packet(conn, NULL, 0, TCPF_FIN | (ack ? TCPF_ACK : 0));
++    // Ein FIN ist nur gueltig, wenn auch ein ACK gesendet wird
++    tcp_send_packet(conn, NULL, 0, TCPF_FIN | TCPF_ACK);
+     conn->seq++;
+ }
+ 
+@@ -278,7 +279,7 @@ void tcp_close_connection(struct tcp_connection* conn)
+     } else {
+         DEBUG_MSG("tcp_send_fin_ack");
+         conn->status = TCPS_WAIT_FOR_FIN_ACK;
+-        tcp_send_fin(conn, FALSE);
++        tcp_send_fin(conn);
+     }
+ 
+     timeout = get_tick_count() + 9 * 1000000;
+@@ -531,7 +532,7 @@ void tcp_receive(dword source_ip, void* data, dword data_size)
+                 conn->status = TCPS_WAIT_FOR_LAST_ACK;
+                 conn->ack++;
+                 DEBUG_MSG("Sende FIN ACK.");
+-                tcp_send_fin(conn, TRUE);
++                tcp_send_fin(conn);
+             }
+ 
+ 
+-- 
+1.6.0.2
+
+
+From dickhuuhn at googlemail.com  Sat Nov 28 16:25:27 2009
+From: dickhuuhn at googlemail.com (DickHuuhn)
+Date: Sat, 28 Nov 2009 16:25:27 +0100
+Subject: [tyndur-devel] [PATCH] calc-Build gefixt
+Message-ID: <56d177a20911280725p2835d47an33006f6927d20b0a@mail.gmail.com>
+
+! calc/main.c baut jetzt.
+
+Signed-off-by: David Kolossa <dickhuuhn at googlemail.com>
+---
+ src/modules/c/calc/main.c |   24 ++++++++++++++++--------
+ 1 files changed, 16 insertions(+), 8 deletions(-)
+
+diff --git a/src/modules/c/calc/main.c b/src/modules/c/calc/main.c
+index 3276729..abd77ab 100644
+--- a/src/modules/c/calc/main.c
++++ b/src/modules/c/calc/main.c
+@@ -33,19 +33,26 @@
+  * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+
+-#include "types.h"
+-#include "stdio.h"
+-#include "lostio.h"
+-#include "gui/gui.h"
+-#include "gui/widgets.h"
++#include <types.h>
++#include <stdio.h>
++#include <string.h>
+
+-#include "video/bitmap.h"
++#include <lostio.h>
++#include <syscall.h>
++#include <gui/gui.h>
++#include <gui/widgets.h>
+
+-#define _USE_START_
+-#include "init.h"
++#include <video/bitmap.h>
++
++// Compiler gibt ne Warnung für das #define hier aus.
++// Wirds noch gebraucht?
++//#define _USE_START_
++#include <init.h>
+
+ void guicb(event_t event);
+
++void clear_screen(void);
++
+ window_t *window = 0;
+
+ widget_t *addition = 0;
+@@ -162,6 +169,7 @@ int main(int argc, char* argv[])
+         yield();
+     }
+     close_gui();
++    return 0;
+ }
+
+ void guicb(event_t event)
+-- 
+1.5.6.3
+
+From dickhuuhn at googlemail.com  Sat Nov 28 18:50:31 2009
+From: dickhuuhn at googlemail.com (DickHuuhn)
+Date: Sat, 28 Nov 2009 18:50:31 +0100
+Subject: [tyndur-devel] [PATCH] Kleines Memleak gefixt
+Message-ID: <56d177a20911280950m59c3964alfb72543a5b0a5301@mail.gmail.com>
+
+! free() in Syscall 42 dazu
+
+Signed-off-by: David Kolossa <dickhuuhn at googlemail.com>
+---
+ src/kernel/src/syscall.c |    1 +
+ 1 files changed, 1 insertions(+), 0 deletions(-)
+
+diff --git a/src/kernel/src/syscall.c b/src/kernel/src/syscall.c
+index 87911fa..b405740 100644
+--- a/src/kernel/src/syscall.c
++++ b/src/kernel/src/syscall.c
+@@ -751,6 +751,7 @@ void syscall(struct int_stack_frame ** esp)
+             char* forty_two = malloc(61);
+             memcpy(forty_two, "\nThe Answer to Life, the Universe,
+and Everything is ... 42\n", 61);
+             kprintf("%s", forty_two);
++            free(forty_two);
+             break;
+         }
+
+-- 
+1.5.6.3
+
+From hartmut at tyndur.org  Sat Nov 28 20:46:12 2009
+From: hartmut at tyndur.org (Alexander Hartmut Kluth)
+Date: Sat, 28 Nov 2009 20:46:12 +0100
+Subject: [tyndur-devel] [PATCH] Command-Abfrage erweitert
+Message-ID: <1259437572-3552-1-git-send-email-hartmut@tyndur.org>
+
++ kirc.pas: Gängige Kürzel wie /cs, /voice etc. werden nun verarbeitet
+! kirc.pas: Standardserver auf "irc.euirc.eu" geändert
+
+Signed-off-by: Alexander Hartmut Kluth <hartmut at tyndur.org>
+---
+ src/modules/pas/kirc/kirc.pas |   63 +++++++++++++++++++++++++++++++++++++----
+ 1 files changed, 57 insertions(+), 6 deletions(-)
+
+diff --git a/src/modules/pas/kirc/kirc.pas b/src/modules/pas/kirc/kirc.pas
+index 7b6ad9b..2c52c5a 100644
+--- a/src/modules/pas/kirc/kirc.pas
++++ b/src/modules/pas/kirc/kirc.pas
+@@ -2,7 +2,7 @@ program kirc;
+ {$MODE ObjFPC}
+ {$H+}
+ 
+-uses sysutils, crt, ircwindow;
++uses sysutils, crt, ircwindow, classes;
+ 
+ var
+     theIRCWindow: TIRCWindow;
+@@ -57,10 +57,10 @@ var
+     server: String;
+     port: String;
+ begin
+-    Write('Server [217.26.49.12]: ');
++    Write('Server [irc.euirc.net]: ');
+     ReadLn(server);
+     if server = '' then begin
+-        server := '217.26.49.12';
++        server := 'irc.euirc.net';
+     end;
+ 
+     Write('Port [6667]: ');
+@@ -160,10 +160,10 @@ begin
+         theIRCWindow.Incoming(line, 8);
+         theIRCWindow.Incoming('PONG :'+parameter+#10, 8);
+         WriteConn(conn, 'PONG :'+parameter+#10);
+-    end 
++    end
+     else if command = 'JOIN' then begin
+         theIRCWindow.Incoming(prefix + ' hat den Kanal betreten', 2);
+-    end 
++    end
+     else if command = 'PART' then begin
+         theIRCWindow.Incoming(GetNickFromPrefix(prefix) 
+             + ' hat den Kanal verlassen (' 
+@@ -222,6 +222,11 @@ begin
+ end;
+ 
+ procedure EvaluateIRCCommand(const line: String);
++var
++    linearr: Array[1..255] of String;
++    command: String;
++    i: Integer;
++    space: Integer;
+ begin
+     // Bei Leerzeilen machen wir gleich mal gar nichts
+     // Vor allem keinen Zugriff auf line[1], sonst ist kirc weg
+@@ -239,7 +244,53 @@ begin
+         end;
+     end else begin
+         if line[1] = '/' then begin
+-            WriteConn(conn, Copy(line, 2, length(line)) + #10);
++            // Wir brauchen so etwas wie TStringList in der RTL
++            // Höhö, das kennen wir doch aus kedit: Wir prüfen
++            // per LeftStr, ob es ein (uns bekanntest) Kommando ist
++            if LeftStr(line, 3) = '/ns' then begin
++                command := 'PRIVMSG NickServ :' + Copy(line, 5, length(line))
++                + #10;
++            end else if LeftStr(line, 3) = '/cs' then begin
++                command := 'PRIVMSG ChanServ :' + Copy(line, 5, length(line)) +
++                #10;
++            end else if LeftStr(line, 6) = '/voice' then begin
++                // mit Copy(line, 7...) spare ich mir ein zusätzliches + " " +
++                command := 'MODE ' + channel + ' +v ' + Copy(line, 8,
++                length(line)) + #10;
++            end else if LeftStr(line, 8) = '/devoice' then begin
++                command := 'MODE ' + channel + ' -v ' + Copy(line, 8,
++                length(line)) + #10;
++            end else if LeftStr(line, 3) = '/op' then begin
++                command := 'MODE ' + channel + ' +o ' + Copy(line, 8,
++                length(line)) + #10;
++            end else if LeftStr(line, 5) = '/deop' then begin
++                command := 'MODE ' + channel + ' -o ' + Copy(line, 8,
++                length(line)) + #10;
++            end else if LeftStr(line, 6) = '/admin' then begin
++                command := 'MODE ' + channel + ' +a ' + Copy(line, 8,
++                length(line)) + #10;
++            end else if LeftStr(line, 8) = '/deadmin' then begin
++                command := 'MODE ' + channel + ' -a ' + Copy(line, 8,
++                length(line)) + #10;
++            end else if LeftStr(line, 5) = '/kick' then begin
++                space := Pos(' ', Copy(line, 7, length(line)));
++
++                command := 'KICK ' + channel + ' ' + Copy(line, 7, space-1) +
++                ' :' + Copy(line, space+1, length(line)) + #10;
++            end else if LeftStr(line, 4) = '/ban' then begin
++                command := 'MODE ' + channel + ' +b ' + Copy(line, 6,
++                length(line)) + '!*@*' + #10;
++            end else if LeftStr(line, 6) = '/unban' then begin
++                command := 'MODE ' + channel + ' -b ' + Copy(line, 8,
++                length(line)) + '!*@*' + #10;
++            end else if LeftStr(line, 6) = '/42' then begin
++                theIRCWindow.title := 'The Answer to Life, the Universe, and Everything is ... 42';
++            end else begin
++                WriteConn(conn, (Copy(line, 2, length(line)) + #10));
++            end;
++
++            WriteConn(conn, command);
++
+         end else begin
+             theIRCWindow.Incoming('<' + nick + '> ' + line+#10, 7);
+             WriteConn(conn, 'PRIVMSG '+channel+' :'+line+#10);
+-- 
+1.6.3.3
+
+
+From hartmut at tyndur.org  Sat Nov 28 23:55:36 2009
+From: hartmut at tyndur.org (Alexander Hartmut Kluth)
+Date: Sat, 28 Nov 2009 23:55:36 +0100
+Subject: [tyndur-devel] [PATCH] kirc: Channel-Vorgabe
+Message-ID: <1259448936-7469-1-git-send-email-hartmut@tyndur.org>
+
++ kirc: #lost als Vorgabekanal hinzugefügt
+
+Signed-off-by: Alexander Hartmut Kluth <hartmut at tyndur.org>
+---
+ src/modules/pas/kirc/kirc.pas |   15 ++++++++++++---
+ 1 files changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/src/modules/pas/kirc/kirc.pas b/src/modules/pas/kirc/kirc.pas
+index 2c52c5a..5a49262 100644
+--- a/src/modules/pas/kirc/kirc.pas
++++ b/src/modules/pas/kirc/kirc.pas
+@@ -69,6 +69,12 @@ begin
+         port := '6667';
+     end;
+     
++    Write('Kanal [#lost]: ');
++    ReadLn(channel);
++    if channel = '' then begin
++        channel := '#lost';
++    end;
++
+     repeat
+         Write('Nickname: ');
+         ReadLn(nick);
+@@ -215,8 +221,10 @@ begin
+     end 
+     else if command = 'ERROR' then begin
+         theIRCWindow.Incoming(line, 12);
+-    end 
+-    else begin
++    end else if command = '376' then begin
++        WriteConn(conn, 'JOIN ' + channel + #10);
++        theIRCWindow.title := channel;
++    end else begin
+         theIRCWindow.Incoming(line, 8);
+     end;
+ end;
+@@ -315,10 +323,11 @@ begin
+ 
+     inBuffer := '';
+     outBuffer := '';
++
+     while not FileEof(conn) do begin
+         ReadConn(conn, s);
+         inBuffer := inBuffer + s;
+-       
++
+         lineEnd := Pos(#10, inBuffer);
+         if lineEnd > 0 then begin
+             EvaluateIRCInput(conn, Copy(inBuffer, 1, lineEnd-1));
+-- 
+1.6.3.3
+
+
+From max at tyndur.org  Sun Nov 29 17:47:28 2009
+From: max at tyndur.org (Max Reitz)
+Date: Sun, 29 Nov 2009 17:47:28 +0100
+Subject: [tyndur-devel] [PATCH] tcpip: Kein FIN ohne ACK
+In-Reply-To: <1259408285-14408-1-git-send-email-kevin@tyndur.org>
+References: <1259408285-14408-1-git-send-email-kevin@tyndur.org>
+Message-ID: <4B12A5A0.4020805@tyndur.org>
+
+Kevin Wolf schrieb:
+> ! tcpip: Wenn ein FIN-Paket gesendet wird, das nicht gleichzeitig auch
+>   ACK gesetzt hat, wird das FIN ignoriert.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+> ---
+>  src/modules/tcpip/tcp.c |    9 +++++----
+>  1 files changed, 5 insertions(+), 4 deletions(-)
+> 
+> diff --git a/src/modules/tcpip/tcp.c b/src/modules/tcpip/tcp.c
+> index 92378dc..0cc2aec 100644
+> --- a/src/modules/tcpip/tcp.c
+> +++ b/src/modules/tcpip/tcp.c
+> @@ -176,9 +176,10 @@ static void tcp_send_reset(struct tcp_connection* conn)
+>      tcp_send_packet(conn, NULL, 0, TCPF_RST);
+>  }
+>  
+> -static void tcp_send_fin(struct tcp_connection* conn, bool ack)
+> +static void tcp_send_fin(struct tcp_connection* conn)
+>  {
+> -    tcp_send_packet(conn, NULL, 0, TCPF_FIN | (ack ? TCPF_ACK : 0));
+> +    // Ein FIN ist nur gueltig, wenn auch ein ACK gesendet wird
+> +    tcp_send_packet(conn, NULL, 0, TCPF_FIN | TCPF_ACK);
+>      conn->seq++;
+>  }
+>  
+> @@ -278,7 +279,7 @@ void tcp_close_connection(struct tcp_connection* conn)
+>      } else {
+>          DEBUG_MSG("tcp_send_fin_ack");
+>          conn->status = TCPS_WAIT_FOR_FIN_ACK;
+> -        tcp_send_fin(conn, FALSE);
+> +        tcp_send_fin(conn);
+>      }
+>  
+>      timeout = get_tick_count() + 9 * 1000000;
+> @@ -531,7 +532,7 @@ void tcp_receive(dword source_ip, void* data, dword data_size)
+>                  conn->status = TCPS_WAIT_FOR_LAST_ACK;
+>                  conn->ack++;
+>                  DEBUG_MSG("Sende FIN ACK.");
+> -                tcp_send_fin(conn, TRUE);
+> +                tcp_send_fin(conn);
+>              }
+>  
+>  
+Acked-by: Max Reitz <max at tyndur.org>
+

@@ -1,0 +1,155 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] ! memleaks gestopft. + dns_free_result.
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20%21%20memleaks%20gestopft.%20%2B%20dns_free_result.&In-Reply-To=%3C1259097783-21535-1-git-send-email-fmnssun%40gmail.com%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001483.html">
+   <LINK REL="Next"  HREF="001485.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] ! memleaks gestopft. + dns_free_result.</H1>
+    <B>Roman Muentener</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20%21%20memleaks%20gestopft.%20%2B%20dns_free_result.&In-Reply-To=%3C1259097783-21535-1-git-send-email-fmnssun%40gmail.com%3E"
+           TITLE="[tyndur-devel] [PATCH] ! memleaks gestopft. + dns_free_result.">fmnssun at gmail.com
+                  </A><BR>
+    <I>Di Nov 24 22:23:03 CET 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001483.html">[tyndur-devel] [PATCH] + dns requests geben nun mehrere ip adresen	zurueck
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001485.html">[tyndur-devel] [PATCH] ! ausgabe fuer gethostbyname gefixt
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1484">[ Datum ]</a>
+              <a href="thread.html#1484">[ Thema ]</a>
+              <a href="subject.html#1484">[ Betreff (Subject) ]</a>
+              <a href="author.html#1484">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>---
+ src/modules/tcpip/dns.c         |   13 ++++++++++++-
+ src/modules/tcpip/include/dns.h |    2 ++
+ src/modules/tcpip/lostio_if.c   |   15 +++++++++++++++
+ 3 files changed, 29 insertions(+), 1 deletions(-)
+
+diff --git a/src/modules/tcpip/dns.c b/src/modules/tcpip/dns.c
+index 72ff33c..56d7dc1 100644
+--- a/src/modules/tcpip/dns.c
++++ b/src/modules/tcpip/dns.c
+@@ -119,13 +119,24 @@ static void dns_cache_add(char* domain, struct dns_request_result* result)
+     }
+ }
+ 
++
++/**
++ * Gibt die Ressourcen eines dns_request_result wieder frei
++ * @param result Das freizugebene Resultat
++ */
++void dns_free_result(struct dns_request_result* result) {
++    // Speicher fuer IP-Adressen freigeben.
++    free(result-&gt;ip_address);
++    // Speicher fuer das Resultat freigeben.
++    free(result);
++}
++
+ /**
+  * Loest einen Domainnamen in eine IP-Adressen auf.
+  * 
+  * @param domain Der aufzuloesende Domainname als nullterminierter String,
+  * wobei die Labels durch Punkte getrennt sind
+  */
+-
+ struct dns_request_result* dns_request(char* domain)
+ {
+     // Resultat
+diff --git a/src/modules/tcpip/include/dns.h b/src/modules/tcpip/include/dns.h
+index e9b6368..d715ce2 100644
+--- a/src/modules/tcpip/include/dns.h
++++ b/src/modules/tcpip/include/dns.h
+@@ -103,4 +103,6 @@ static inline void dns_set_opcode(struct dns_header* header, uint8_t opcode)
+ 
+ struct dns_request_result* dns_request(char* domain);
+ 
++void dns_free_result(struct dns_request_result* result);
++
+ #endif
+diff --git a/src/modules/tcpip/lostio_if.c b/src/modules/tcpip/lostio_if.c
+index f48953f..e55bce4 100644
+--- a/src/modules/tcpip/lostio_if.c
++++ b/src/modules/tcpip/lostio_if.c
+@@ -166,9 +166,16 @@ bool lostio_tcp_not_found(char** path, byte flags, pid_t pid, io_resource_t* ps)
+     DEBUG_MSG(&quot;Knoten anlegen&quot;);
+    
+     if (strncmp(*path, &quot;/dns/&quot;, 5) == 0) {
++        // DNS Request absetzen
+         struct dns_request_result* result = dns_request(strrchr(*path, '/') + 1);
++
++        // Keine IP-Adresse erhalten?
+         if (result == NULL)
+             return FALSE;
++        if (result-&gt;ip_count == 0) {
++            return FALSE;
++        }
++
+         char* data = calloc(16 * result-&gt;ip_count,sizeof(char));
+         
+         int i=0;
+@@ -176,6 +183,11 @@ bool lostio_tcp_not_found(char** path, byte flags, pid_t pid, io_resource_t* ps)
+             strcat(data,ip_to_string(result-&gt;ip_address[i]));
+         }
+ 
++        // Das Resultat wieder freigeben
++        dns_free_result(result);
++
++        // TODO: Was passiert mit data???
++
+         return vfstree_create_node(*path, LOSTIO_TYPES_RAMFILE, strlen(data), data, 0);
+     } else {
+         return vfstree_create_node(*path, LOSTIO_TYPES_TCPPORT, 0, NULL, 0);
+@@ -201,12 +213,15 @@ bool lostio_tcp_pre_open(char** path, byte flags, pid_t pid, io_resource_t* ps)
+     *delim = '\0';
+     dword ip = string_to_ip(*path + 1);
+     if (!ip) {
++        // DNS Request absetzen
+         struct dns_request_result* result = dns_request(*path + 1);
+         if(result != NULL) {
+             if(result-&gt;ip_count &gt; 0) {
+               ip = result-&gt;ip_address[0];
+             }
+         }
++        // Resultat freigeben nicht vergessen
++        dns_free_result(result);
+     }
+ 
+     if (!ip) {
+-- 
+1.6.0.4
+
+</PRE>
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001483.html">[tyndur-devel] [PATCH] + dns requests geben nun mehrere ip adresen	zurueck
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001485.html">[tyndur-devel] [PATCH] ! ausgabe fuer gethostbyname gefixt
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1484">[ Datum ]</a>
+              <a href="thread.html#1484">[ Thema ]</a>
+              <a href="subject.html#1484">[ Betreff (Subject)]</a>
+              <a href="author.html#1484">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

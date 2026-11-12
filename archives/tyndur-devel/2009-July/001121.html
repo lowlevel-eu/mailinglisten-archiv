@@ -1,0 +1,129 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] tcpip: SYN-ACK-Timeout-TODO +	Clientportoverflow
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20tcpip%3A%20SYN-ACK-Timeout-TODO%20%2B%0A%09Clientportoverflow&In-Reply-To=%3C1246978375-23235-1-git-send-email-xanclic%40googlemail.com%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001118.html">
+   <LINK REL="Next"  HREF="001122.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] tcpip: SYN-ACK-Timeout-TODO +	Clientportoverflow</H1>
+    <B>Max Reitz</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20tcpip%3A%20SYN-ACK-Timeout-TODO%20%2B%0A%09Clientportoverflow&In-Reply-To=%3C1246978375-23235-1-git-send-email-xanclic%40googlemail.com%3E"
+           TITLE="[tyndur-devel] [PATCH] tcpip: SYN-ACK-Timeout-TODO +	Clientportoverflow">xanclic at googlemail.com
+                  </A><BR>
+    <I>Di Jul  7 16:52:55 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001118.html">[tyndur-devel] [PATCH] tcpip: Fix fuer Erkennung von SYN ACK
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001122.html">[tyndur-devel] [PATCH] tcpip: tcp_free_connection()
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1121">[ Datum ]</a>
+              <a href="thread.html#1121">[ Thema ]</a>
+              <a href="subject.html#1121">[ Betreff (Subject) ]</a>
+              <a href="author.html#1121">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ tcpip: Verbindung wird bei SYN-ACK-Timeout
+         getrennt.
++ tcpip: Die if-Abfrage in tcp_get_free_port()
+         soll ein Overflow der Clientports
+         verhindern (damit Ports wie 80 oder 21
+         nicht aus Versehen belegt werden).
+---
+ src/modules/tcpip/tcp.c |   22 +++++++++++++++++++---
+ 1 files changed, 19 insertions(+), 3 deletions(-)
+
+diff --git a/src/modules/tcpip/tcp.c b/src/modules/tcpip/tcp.c
+index 84d272a..061ceb9 100644
+--- a/src/modules/tcpip/tcp.c
++++ b/src/modules/tcpip/tcp.c
+@@ -81,6 +81,9 @@ static word tcp_get_free_port(void)
+ {
+     // FIXME
+     static word source_port = 32768;
++    if (source_port &gt; 65500) { //Bisschen Platz lassen
++        source_port = 32768;
++    }
+     return source_port++;
+ }
+ 
+@@ -183,6 +186,7 @@ struct tcp_connection* tcp_open_connection(dword ip, word port)
+ {
+     struct routing_entry* route = get_routing_entry(ip);
+     uint64_t timeout;
++    int tcp_list_size, i;
+ 
+     if (route == NULL) {
+         return NULL;
+@@ -218,7 +222,19 @@ struct tcp_connection* tcp_open_connection(dword ip, word port)
+     }
+ 
+     if (conn-&gt;status == TCPS_WAIT_FOR_SYN_ACK) {
+-        // TODO Verbindung abbrechen und wieder freigeben
++        tcp_send_reset(conn);
++        tcp_list_size = list_size(tcp_connections);
++        for (i = 0; i &lt; tcp_list_size; i++) //Geht alle Elemente durch, es kÃ¶nnte ja sein, dass conn jetzt nicht mehr das erste Element ist
++        {
++            if (list_get_element_at(tcp_connections, i) == conn) {
++                list_remove(tcp_connections, i); //Hoffen wir mal, dass in der Zwischenzeit (von list_get_element_at() bis hier) nichts gepusht wurde
++                break;
++            }
++        }
++        list_destroy(conn-&gt;out_buffer);
++        list_destroy(conn-&gt;in_buffer);
++        list_destroy(conn-&gt;to_lostio);
++        free(conn);
+         DEBUG_MSG(&quot;Timeout beim Verbindungsaufbau&quot;);
+         return NULL;
+     }
+@@ -290,7 +306,7 @@ dword tcp_check_in_data_order(struct tcp_connection* conn)
+     }
+     v();
+ 
+-    DEBUG_MSG1(&quot;Verbleibende Segemnte im in-Buffer: %d&quot;,
++    DEBUG_MSG1(&quot;Verbleibende Segmente im in-Buffer: %d&quot;,
+         list_size(conn-&gt;in_buffer));
+ 
+ 
+@@ -378,7 +394,7 @@ void tcp_receive(dword source_ip, void* data, dword data_size)
+         
+         printf(&quot;\033[1;31mTCP-Checksumme ungueltig\n\033[0;37m\n\n&quot;);
+ 
+-        printf(&quot;\033[1;31mTCP-Checksumme ungueltig\n\033[0;37m\n\n&quot;);
++        //printf(&quot;\033[1;31mTCP-Checksumme ungueltig\n\033[0;37m\n\n&quot;);
+ 
+ #if 0
+         debug_checksum = TRUE;
+-- 
+1.6.0.2
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001118.html">[tyndur-devel] [PATCH] tcpip: Fix fuer Erkennung von SYN ACK
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001122.html">[tyndur-devel] [PATCH] tcpip: tcp_free_connection()
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1121">[ Datum ]</a>
+              <a href="thread.html#1121">[ Thema ]</a>
+              <a href="subject.html#1121">[ Betreff (Subject)]</a>
+              <a href="author.html#1121">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

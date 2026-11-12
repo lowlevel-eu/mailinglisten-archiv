@@ -1,0 +1,345 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] kernel2: GDT für AMD64
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH%3D5D_kernel2%3D3A_GDT_f%3DC3%3DBCr_AMD6%3F%3D%0A%09%3D%3Futf-8%3Fq%3F4%3F%3D&In-Reply-To=%3C1356899380-16105-1-git-send-email-m.nemo%40gmx.net%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002401.html">
+   
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] kernel2: GDT für AMD64</H1>
+    <B>Andreas Freimuth</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH%3D5D_kernel2%3D3A_GDT_f%3DC3%3DBCr_AMD6%3F%3D%0A%09%3D%3Futf-8%3Fq%3F4%3F%3D&In-Reply-To=%3C1356899380-16105-1-git-send-email-m.nemo%40gmx.net%3E"
+           TITLE="[tyndur-devel] [PATCH] kernel2: GDT für AMD64">m.nemo at gmx.net
+                  </A><BR>
+    <I>So Dez 30 21:29:40 CET 2012</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002401.html">[tyndur-devel] [PATCH 4/4] kernel2: GDT für AMD64
+</A></li>
+        
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2403">[ Datum ]</a>
+              <a href="thread.html#2403">[ Thema ]</a>
+              <a href="subject.html#2403">[ Betreff (Subject) ]</a>
+              <a href="author.html#2403">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE> + amd64/gdt.c: ordentliche GDT angelegt und init-Funktionen implementiert
+ * amd64/loader/startup.S: die SYSCALL- und SYSRET-Instruktion geht von einer
+   bestimmten Reihenfolge der Segmente aus, deshalb sollte das
+   64-Bit-Code-Segment auf der 0x18 hinter dem Data-Segment landen.
+ - amd64/header.S: das Laden der GDT entfernt, da das in der init-Funktion
+   geschieht
+ * amd64/smp/trampoline.S: das richtige Segment nach CS laden
+
+Signed-off-by: Andreas Freimuth &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">m.nemo at gmx.net</A>&gt;
+---
+ src/kernel2/src/arch/amd64/gdt.c            | 89 +++++++++++++++++++++++++++++
+ src/kernel2/src/arch/amd64/header.S         | 29 ----------
+ src/kernel2/src/arch/amd64/loader/startup.S | 42 ++++----------
+ src/kernel2/src/arch/amd64/smp/trampoline.S | 32 +----------
+ 4 files changed, 102 insertions(+), 90 deletions(-)
+ create mode 100644 src/kernel2/src/arch/amd64/gdt.c
+
+diff --git a/src/kernel2/src/arch/amd64/gdt.c b/src/kernel2/src/arch/amd64/gdt.c
+new file mode 100644
+index 0000000..f4117e1
+--- /dev/null
++++ b/src/kernel2/src/arch/amd64/gdt.c
+@@ -0,0 +1,89 @@
++/*
++ * Copyright © 2012 The týndur Project. All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include &lt;stdint.h&gt;
++
++#include &quot;gdt.h&quot;
++
++#define SEGMENT_DATA    0x0000120000000000ULL
++#define SEGMENT_CODE    0x0000180000000000ULL
++#define SEGMENT_TSS     0x0000090000000000ULL
++#define SEGMENT_USER    0x0000600000000000ULL
++#define SEGMENT_PRESENT 0x0000800000000000ULL
++#define SEGMENT_LM      0x0020000000000000ULL
++#define SEGMENT_32BIT   0x0040000000000000ULL
++#define SEGMENT_GRAN    0x0080000000000000ULL
++#define SEGMENT_BASE(x)   (((x &amp; 0xffffULL) &lt;&lt; 16) | ((x &amp; 0xff0000ULL) &lt;&lt; 16) | ((x &amp; 0xff000000ULL) &lt;&lt; 32))
++#define SEGMENT_BASE64(x) ((x &gt;&gt; 32) &amp; 0xffffffffULL)
++#define SEGMENT_SIZE(x)   ((x &amp; 0xffffULL) | ((x &amp; 0xf0000ULL) &lt;&lt; 32))
++
++struct {
++    uint16_t limit;
++    uintptr_t base;
++} gdtr;
++
++///&#8201;Global Descritpor Table
++uint64_t gdt[9] = {
++    // NULL Deskriptor
++    0,
++
++    // Kernel Code-Segment 32Bit
++    SEGMENT_BASE(0LL) | SEGMENT_SIZE(0xfffffLL) | SEGMENT_GRAN | SEGMENT_CODE |
++            SEGMENT_32BIT | SEGMENT_PRESENT,
++
++    // Kernel Data-Segment
++    SEGMENT_BASE(0LL) | SEGMENT_SIZE(0xfffffLL) | SEGMENT_GRAN | SEGMENT_DATA |
++            SEGMENT_32BIT | SEGMENT_PRESENT,
++
++    // Kernel Code-Segment 64Bit
++    SEGMENT_CODE | SEGMENT_LM | SEGMENT_PRESENT,
++
++    // User Code-Segment 32Bit
++    SEGMENT_BASE(0LL) | SEGMENT_SIZE(0xfffffLL) | SEGMENT_GRAN | SEGMENT_CODE |
++            SEGMENT_32BIT | SEGMENT_USER | SEGMENT_PRESENT,
++
++    // User Data-Segment
++    SEGMENT_BASE(0LL) | SEGMENT_SIZE(0xfffffLL) | SEGMENT_GRAN | SEGMENT_DATA |
++            SEGMENT_32BIT | SEGMENT_USER | SEGMENT_PRESENT,
++
++    // User Code-Segment 64Bit
++    SEGMENT_CODE | SEGMENT_LM | SEGMENT_USER | SEGMENT_PRESENT,
++
++    // Task State - Segment
++    SEGMENT_BASE((uintptr_t) 0 /*TODO*/) |
++            SEGMENT_SIZE(0x67) | SEGMENT_TSS | SEGMENT_PRESENT,
++    SEGMENT_BASE64((uintptr_t) 0 /*TODO*/)
++};
++
++void gdt_init()
++{
++    gdtr.base = (uintptr_t) gdt;
++    gdtr.limit = sizeof(gdt) - 1;
++}
++
++void gdt_init_local()
++{
++    asm volatile (&quot;lgdt %0\n&quot; : : &quot;m&quot;(gdtr));
++}
+diff --git a/src/kernel2/src/arch/amd64/header.S b/src/kernel2/src/arch/amd64/header.S
+index e272487..9dc6240 100644
+--- a/src/kernel2/src/arch/amd64/header.S
++++ b/src/kernel2/src/arch/amd64/header.S
+@@ -40,7 +40,6 @@
+ 
+ .section .text
+ _start:
+-    lgdt gdtr64
+ 	// Stack initalisieren
+ 	lea kernelstack, %rsp
+ 
+@@ -67,31 +66,3 @@ _start:
+     .space  16384
+ kernelstack:
+ 
+-.section .data
+-    gdt64:
+-        // Der Nulldeskriptor
+-        .word 0x0000
+-        .word 0x0000
+-        .word 0x0000
+-        .word 0x0000
+-
+-        // Der Code-Deskriptor
+-        .word 0x0000
+-        .word 0x0000
+-        .word 0x9800
+-        .word 0x0020
+-
+-        // Der Daten-Deskriptor:
+-        .word 0x0000
+-        .word 0x0000
+-        .word 0x9000
+-        .word 0x0000
+-
+-    // Struktur um die GDT laden zu koennen
+-    .globl gdtr64
+-    gdtr64:
+-        // Wir haben 3 Eintraege
+-        .word 3 * 8
+-        .quad gdt64
+-
+-
+diff --git a/src/kernel2/src/arch/amd64/loader/startup.S b/src/kernel2/src/arch/amd64/loader/startup.S
+index 6a620de..c08d067 100644
+--- a/src/kernel2/src/arch/amd64/loader/startup.S
++++ b/src/kernel2/src/arch/amd64/loader/startup.S
+@@ -151,8 +151,8 @@
+         movl %eax, %cr0
+         
+         // Die neue GDT laden
+-        lgdt gdtr64
+-        jmp  $0x8, $longmode
++        lgdt init_gdtr
++        jmp  $0x18, $longmode
+ 
+     .code64
+     longmode:
+@@ -226,13 +226,13 @@
+     stack_space:
+ 
+ .section .data
+-.code16
+-    // Die GDT besteht nur aus 3 Deskriptoren: Null, Code und Daten
+-    gdt32:
++    // Die GDT besteht nur aus 4 Deskriptoren: Null, 32-Bit-Code, Daten und
++    // 64-Bit-Code
++    init_gdt:
+         // Null-Deskriptor
+         .quad 0
+ 
+-        // Code-Deskriptor
++        // 32-Bit-Code-Deskriptor
+         .word 0xFFFF
+         .word 0x0000
+         .byte 0x00
+@@ -247,38 +247,16 @@
+         .byte 0x92
+         .byte 0xCF
+         .byte 0x00
+-        
+-    gdtr32:
+-        .word 3 * 8
+-        .int gdt32
+-
+-.code32
+-    // Die GDT besteht nur aus 3 Deskriptoren: Null, Code und Daten
+-    .globl gdt64
+-    gdt64:
+-        // Der Nulldeskriptor
+-        .quad 0
+ 
+-        // Der Code-Deskriptor
++        // 64-Bit-Code-Deskriptor
+         .int 0
+         .byte 0
+         .byte 0x98
+         .byte 0x20
+         .byte 0
+ 
+-        // Der Daten-Deskriptor:
+-        .int 0
+-        .byte 0
+-        .byte 0x92
+-        .byte 0
+-        .byte 0
+-
+-    // Struktur um die GDT laden zu koennen
+-    .globl gdtr64
+-    gdtr64:
+-        // Wir haben 3 Eintraege
+-        .word 3 * 8
+-        .quad gdt64
+-
++    init_gdtr:
++        .word 4 * 8
++        .int init_gdt
+ 
+ 
+diff --git a/src/kernel2/src/arch/amd64/smp/trampoline.S b/src/kernel2/src/arch/amd64/smp/trampoline.S
+index be87b58..18929cb 100644
+--- a/src/kernel2/src/arch/amd64/smp/trampoline.S
++++ b/src/kernel2/src/arch/amd64/smp/trampoline.S
+@@ -76,9 +76,9 @@ smp_entry_lock_loop:
+     movl %eax, %cr0
+         
+     // Die neue GDT laden
+-    .extern gdtr64
+-    lgdt gdtr64
+-    jmp  $0x8, $smp_entry_longmode
++    .extern gdtr
++    lgdt gdtr
++    jmp  $0x18, $smp_entry_longmode
+ 
+ .code64
+ smp_entry_longmode:
+@@ -119,32 +119,6 @@ smp_entry_longmode:
+     // Geschieht nie
+     hlt
+ 
+-/*.section .data
+-    gdt64:
+-        // Der Nulldeskriptor
+-        .word 0x0000
+-        .word 0x0000
+-        .word 0x0000
+-        .word 0x0000
+-
+-        // Der Code-Deskriptor
+-        .word 0x0000
+-        .word 0x0000
+-        .word 0x9800
+-        .word 0x0020
+-
+-        // Der Daten-Deskriptor:
+-        .word 0x0000
+-        .word 0x0000
+-        .word 0x9000
+-        .word 0x0000
+-
+-    // Struktur um die GDT laden zu koennen
+-    gdtr64:
+-        // Wir haben 3 Eintraege
+-        .word 3 * 8
+-        .quad gdt64
+-*/
+ .section .bss
+ 
+ // Wird fuer den Stack waehrend der SMP-Initialisierung benutzt, solange noch
+-- 
+1.7.11.7
+
+</PRE>
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002401.html">[tyndur-devel] [PATCH 4/4] kernel2: GDT für AMD64
+</A></li>
+	
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2403">[ Datum ]</a>
+              <a href="thread.html#2403">[ Thema ]</a>
+              <a href="subject.html#2403">[ Betreff (Subject)]</a>
+              <a href="author.html#2403">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

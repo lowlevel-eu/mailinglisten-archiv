@@ -1,0 +1,430 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH 8/8] usb-storage: Add USB mass storage driver
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%208/8%5D%20usb-storage%3A%20Add%20USB%20mass%20storage%20driver&In-Reply-To=%3C55174378.30102%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000285.html">
+   <LINK REL="Next"  HREF="000287.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH 8/8] usb-storage: Add USB mass storage driver</H1>
+    <B>Max Reitz</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%208/8%5D%20usb-storage%3A%20Add%20USB%20mass%20storage%20driver&In-Reply-To=%3C55174378.30102%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH 8/8] usb-storage: Add USB mass storage driver">max at tyndur.org
+       </A><BR>
+    <I>Sun Mar 29 01:12:40 CET 2015</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000285.html">[cdi-devel] [PATCH 8/8] usb-storage: Add USB mass storage driver
+</A></li>
+        <LI>Next message: <A HREF="000287.html">[cdi-devel] [PATCH 8/8] usb-storage: Add USB mass storage driver
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#286">[ date ]</a>
+              <a href="thread.html#286">[ thread ]</a>
+              <a href="subject.html#286">[ subject ]</a>
+              <a href="author.html#286">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>On 29.03.2015 00:35, Max Reitz wrote:
+&gt;<i> From: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+</I>&gt;<i>
+</I>&gt;<i> + This adds a USB mass storage device driver. It is missing proper error
+</I>&gt;<i>    handling (e.g. for STALLed endpoints) and support for any USB MSD
+</I>&gt;<i>    class other than bulk-only (e.g. control-bulk-interrupt for USB floppy
+</I>&gt;<i>    drives).
+</I>&gt;<i>
+</I>&gt;<i> Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+</I>&gt;<i> ---
+</I>&gt;<i>   usb-storage/main.c        |  76 ++++++++++++++++
+</I>&gt;<i>   usb-storage/usb-storage.c | 216 ++++++++++++++++++++++++++++++++++++++++++++++
+</I>&gt;<i>   usb-storage/usb-storage.h |  34 ++++++++
+</I>&gt;<i>   3 files changed, 326 insertions(+)
+</I>&gt;<i>   create mode 100644 usb-storage/main.c
+</I>&gt;<i>   create mode 100644 usb-storage/usb-storage.c
+</I>&gt;<i>   create mode 100644 usb-storage/usb-storage.h
+</I>&gt;<i>
+</I>&gt;<i> diff --git a/usb-storage/main.c b/usb-storage/main.c
+</I>&gt;<i> new file mode 100644
+</I>&gt;<i> index 0000000..76d783e
+</I>&gt;<i> --- /dev/null
+</I>&gt;<i> +++ b/usb-storage/main.c
+</I>&gt;<i> @@ -0,0 +1,76 @@
+</I>&gt;<i> +/******************************************************************************
+</I>&gt;<i> + * Copyright (c) 2015 Max Reitz                                               *
+</I>&gt;<i> + *                                                                            *
+</I>&gt;<i> + * Permission is hereby granted,  free of charge,  to any person  obtaining a *
+</I>&gt;<i> + * copy of this software and associated documentation files (the &quot;Software&quot;), *
+</I>&gt;<i> + * to deal in the Software without restriction,  including without limitation *
+</I>&gt;<i> + * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
+</I>&gt;<i> + * and/or  sell copies of the  Software,  and to permit  persons to whom  the *
+</I>&gt;<i> + * Software is furnished to do so, subject to the following conditions:       *
+</I>&gt;<i> + *                                                                            *
+</I>&gt;<i> + * The above copyright notice and this permission notice shall be included in *
+</I>&gt;<i> + * all copies or substantial portions of the Software.                        *
+</I>&gt;<i> + *                                                                            *
+</I>&gt;<i> + * THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
+</I>&gt;<i> + * IMPLIED,  INCLUDING BUT NOT LIMITED TO THE WARRANTIES  OF MERCHANTABILITY, *
+</I>&gt;<i> + * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
+</I>&gt;<i> + * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
+</I>&gt;<i> + * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
+</I>&gt;<i> + * FROM,  OUT OF  OR IN CONNECTION  WITH  THE SOFTWARE  OR THE  USE OR  OTHER *
+</I>&gt;<i> + * DEALINGS IN THE SOFTWARE.                                                  *
+</I>&gt;<i> + ******************************************************************************/
+</I>&gt;<i> +
+</I>&gt;<i> +#include &lt;cdi.h&gt;
+</I>&gt;<i> +#include &lt;cdi/scsi.h&gt;
+</I>&gt;<i> +#include &lt;cdi/usb.h&gt;
+</I>&gt;<i> +
+</I>&gt;<i> +#include &quot;usb-storage.h&quot;
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +#define DRIVER_NAME &quot;usb-storage&quot;
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +static struct cdi_scsi_driver drv;
+</I>&gt;<i> +static struct cdi_usb_bus_device_pattern bus_pattern;
+</I>&gt;<i> +
+</I>&gt;<i> +static int drv_init(void)
+</I>&gt;<i> +{
+</I>&gt;<i> +    cdi_scsi_driver_init(&amp;drv);
+</I>&gt;<i> +    cdi_handle_bus_device(&amp;drv.drv, &amp;bus_pattern.pattern);
+</I>&gt;<i> +    return 0;
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +static int drv_destroy(void)
+</I>&gt;<i> +{
+</I>&gt;<i> +    cdi_driver_destroy(&amp;drv.drv);
+</I>&gt;<i> +    return 0;
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +static struct cdi_scsi_driver drv = {
+</I>&gt;<i> +    .drv = {
+</I>&gt;<i> +        .name               = DRIVER_NAME,
+</I>&gt;<i> +        .type               = CDI_SCSI,
+</I>&gt;<i> +        .bus                = CDI_USB,
+</I>&gt;<i> +        .init               = drv_init,
+</I>&gt;<i> +        .destroy            = drv_destroy,
+</I>&gt;<i> +        .init_device        = init_usb_device,
+</I>&gt;<i> +    },
+</I>&gt;<i> +
+</I>&gt;<i> +    .request    = usb_storage_request,
+</I>&gt;<i> +};
+</I>&gt;<i> +
+</I>&gt;<i> +static struct cdi_usb_bus_device_pattern bus_pattern = {
+</I>&gt;<i> +    .pattern = {
+</I>&gt;<i> +        .bus_type = CDI_USB,
+</I>&gt;<i> +    },
+</I>&gt;<i> +
+</I>&gt;<i> +    .vendor_id  = -1,
+</I>&gt;<i> +    .product_id = -1,
+</I>&gt;<i> +
+</I>&gt;<i> +    .class_id       = 0x08,
+</I>&gt;<i> +    .subclass_id    = -1,
+</I>&gt;<i> +    .protocol_id    = -1,
+</I>&gt;<i> +};
+</I>&gt;<i> +
+</I>&gt;<i> +CDI_DRIVER(DRIVER_NAME, drv)
+</I>&gt;<i> diff --git a/usb-storage/usb-storage.c b/usb-storage/usb-storage.c
+</I>&gt;<i> new file mode 100644
+</I>&gt;<i> index 0000000..f6d126c
+</I>&gt;<i> --- /dev/null
+</I>&gt;<i> +++ b/usb-storage/usb-storage.c
+</I>&gt;<i> @@ -0,0 +1,216 @@
+</I>&gt;<i> +/******************************************************************************
+</I>&gt;<i> + * Copyright (c) 2015 Max Reitz                                               *
+</I>&gt;<i> + *                                                                            *
+</I>&gt;<i> + * Permission is hereby granted,  free of charge,  to any person  obtaining a *
+</I>&gt;<i> + * copy of this software and associated documentation files (the &quot;Software&quot;), *
+</I>&gt;<i> + * to deal in the Software without restriction,  including without limitation *
+</I>&gt;<i> + * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
+</I>&gt;<i> + * and/or  sell copies of the  Software,  and to permit  persons to whom  the *
+</I>&gt;<i> + * Software is furnished to do so, subject to the following conditions:       *
+</I>&gt;<i> + *                                                                            *
+</I>&gt;<i> + * The above copyright notice and this permission notice shall be included in *
+</I>&gt;<i> + * all copies or substantial portions of the Software.                        *
+</I>&gt;<i> + *                                                                            *
+</I>&gt;<i> + * THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
+</I>&gt;<i> + * IMPLIED,  INCLUDING BUT NOT LIMITED TO THE WARRANTIES  OF MERCHANTABILITY, *
+</I>&gt;<i> + * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
+</I>&gt;<i> + * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
+</I>&gt;<i> + * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
+</I>&gt;<i> + * FROM,  OUT OF  OR IN CONNECTION  WITH  THE SOFTWARE  OR THE  USE OR  OTHER *
+</I>&gt;<i> + * DEALINGS IN THE SOFTWARE.                                                  *
+</I>&gt;<i> + ******************************************************************************/
+</I>&gt;<i> +
+</I>&gt;<i> +#include &lt;errno.h&gt;
+</I>&gt;<i> +#include &lt;stdint.h&gt;
+</I>&gt;<i> +#include &lt;stdio.h&gt;
+</I>&gt;<i> +#include &lt;stdlib.h&gt;
+</I>&gt;<i> +#include &lt;string.h&gt;
+</I>&gt;<i> +#include &lt;cdi.h&gt;
+</I>&gt;<i> +#include &lt;cdi/misc.h&gt;
+</I>&gt;<i> +#include &lt;cdi/scsi.h&gt;
+</I>&gt;<i> +#include &lt;cdi/usb.h&gt;
+</I>&gt;<i> +
+</I>&gt;<i> +#include &quot;usb-storage.h&quot;
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +#define CBW_IN  0x80
+</I>&gt;<i> +#define CBW_OUT 0x00
+</I>&gt;<i> +
+</I>&gt;<i> +#define CBW_SIGNATURE 0x43425355 // 'USBC' =&gt; USB command
+</I>&gt;<i> +#define CSW_SIGNATURE 0x53425355 // 'USBS' =&gt; USB status
+</I>&gt;<i> +
+</I>&gt;<i> +struct msd_bo_cbw {
+</I>&gt;<i> +    uint32_t signature;
+</I>&gt;<i> +    uint32_t tag;
+</I>&gt;<i> +    uint32_t data_length;
+</I>&gt;<i> +    uint8_t flags;
+</I>&gt;<i> +    uint8_t lun;
+</I>&gt;<i> +    uint8_t cb_length;
+</I>&gt;<i> +    uint8_t cb[16];
+</I>&gt;<i> +} __attribute__((packed));
+</I>&gt;<i> +
+</I>&gt;<i> +struct msd_bo_csw {
+</I>&gt;<i> +    uint32_t signature;
+</I>&gt;<i> +    uint32_t tag;
+</I>&gt;<i> +    uint32_t data_residue;
+</I>&gt;<i> +    uint8_t status;
+</I>&gt;<i> +} __attribute__((packed));
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +typedef enum usb_mass_storage_type {
+</I>&gt;<i> +    USBMS_BULK_ONLY,
+</I>&gt;<i> +} usb_mass_storage_type_t;
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +typedef struct usb_mass_storage_device {
+</I>&gt;<i> +    struct cdi_scsi_device dev;
+</I>&gt;<i> +    struct cdi_usb_device *usb;
+</I>&gt;<i> +
+</I>&gt;<i> +    usb_mass_storage_type_t type;
+</I>&gt;<i> +    int luns;
+</I>&gt;<i> +
+</I>&gt;<i> +    // FIXME: put into own class
+</I>&gt;<i> +    int bulk_in, bulk_out;
+</I>&gt;<i> +} usb_mass_storage_device_t;
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +static int bulk_only_reset(usb_mass_storage_device_t *dev)
+</I>&gt;<i> +{
+</I>&gt;<i> +    cdi_usb_transmission_result_t res;
+</I>&gt;<i> +
+</I>&gt;<i> +    res = cdi_usb_control_transfer(dev-&gt;usb, 0, &amp;(struct cdi_usb_setup_packet){
+</I>&gt;<i> +            .bm_request_type    = CDI_USB_CREQ_CLASS | CDI_USB_CREQ_INTERFACE
+</I>&gt;<i> +                                | CDI_USB_CREQ_OUT,
+</I>&gt;<i> +            .b_request          = 0xff,
+</I>&gt;<i> +            .w_index            = dev-&gt;usb-&gt;interface
+</I>&gt;<i> +        }, NULL);
+</I>&gt;<i> +    if (res != CDI_USB_OK) {
+</I>&gt;<i> +        printf(&quot;bulk reset fail: %x\n&quot;, res);
+</I>
+And this is what happens if you don't check your code thorougly before 
+sending it. All the printf()s in this patch should be removed.
+
+Max
+
+&gt;<i> +        return -EIO;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    if (dev-&gt;luns &gt; 0) {
+</I>&gt;<i> +        return 0;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    uint8_t lun_count;
+</I>&gt;<i> +    res = cdi_usb_control_transfer(dev-&gt;usb, 0, &amp;(struct cdi_usb_setup_packet) {
+</I>&gt;<i> +            .bm_request_type    = CDI_USB_CREQ_CLASS | CDI_USB_CREQ_INTERFACE
+</I>&gt;<i> +                                | CDI_USB_CREQ_IN,
+</I>&gt;<i> +            .b_request          = 0xfe,
+</I>&gt;<i> +            .w_index            = dev-&gt;usb-&gt;interface,
+</I>&gt;<i> +            .w_length           = 1
+</I>&gt;<i> +        }, &amp;lun_count);
+</I>&gt;<i> +    if (res == CDI_USB_OK) {
+</I>&gt;<i> +        dev-&gt;luns = lun_count + 1;
+</I>&gt;<i> +    } else {
+</I>&gt;<i> +        dev-&gt;luns = 1;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    return 0;
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +struct cdi_device *init_usb_device(struct cdi_bus_data *bus_data)
+</I>&gt;<i> +{
+</I>&gt;<i> +    static int dev_counter = 0;
+</I>&gt;<i> +    usb_mass_storage_device_t *dev = calloc(1, sizeof(*dev));
+</I>&gt;<i> +    dev-&gt;usb = CDI_UPCAST(bus_data, bus_data, struct cdi_usb_device);
+</I>&gt;<i> +
+</I>&gt;<i> +    if ((dev-&gt;usb-&gt;subclass_id == 0x00 || dev-&gt;usb-&gt;subclass_id == 0x06)
+</I>&gt;<i> +        &amp;&amp; dev-&gt;usb-&gt;protocol_id == 0x50)
+</I>&gt;<i> +    {
+</I>&gt;<i> +        dev-&gt;type = USBMS_BULK_ONLY;
+</I>&gt;<i> +    } else {
+</I>&gt;<i> +        free(dev);
+</I>&gt;<i> +        return NULL;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    if (dev-&gt;type == USBMS_BULK_ONLY) {
+</I>&gt;<i> +        if (bulk_only_reset(dev) &lt; 0) {
+</I>&gt;<i> +            free(dev);
+</I>&gt;<i> +            return NULL;
+</I>&gt;<i> +        }
+</I>&gt;<i> +
+</I>&gt;<i> +        struct cdi_usb_endpoint_descriptor ep_desc;
+</I>&gt;<i> +        for (int ep = 1; ep &lt; dev-&gt;usb-&gt;endpoint_count; ep++) {
+</I>&gt;<i> +            cdi_usb_get_endpoint_descriptor(dev-&gt;usb, ep, &amp;ep_desc);
+</I>&gt;<i> +
+</I>&gt;<i> +            if ((ep_desc.bm_attributes &amp; 0x3) == 0x2) {
+</I>&gt;<i> +                // Bulk
+</I>&gt;<i> +                bool is_in = ep_desc.b_endpoint_address &amp; 0x80;
+</I>&gt;<i> +                if (!dev-&gt;bulk_in &amp;&amp; is_in) {
+</I>&gt;<i> +                    dev-&gt;bulk_in = ep;
+</I>&gt;<i> +                } else if (dev-&gt;bulk_in &amp;&amp; !is_in) {
+</I>&gt;<i> +                    dev-&gt;bulk_out = ep;
+</I>&gt;<i> +                }
+</I>&gt;<i> +            }
+</I>&gt;<i> +        }
+</I>&gt;<i> +
+</I>&gt;<i> +        if (!dev-&gt;bulk_in || !dev-&gt;bulk_out) {
+</I>&gt;<i> +            free(dev);
+</I>&gt;<i> +            return NULL;
+</I>&gt;<i> +        }
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    dev-&gt;dev.dev.name = malloc(5);
+</I>&gt;<i> +    sprintf((char *)dev-&gt;dev.dev.name, &quot;msd%c&quot;, 'a' + dev_counter++);
+</I>&gt;<i> +
+</I>&gt;<i> +    dev-&gt;dev.type = CDI_STORAGE;
+</I>&gt;<i> +    dev-&gt;dev.lun_count = dev-&gt;luns;
+</I>&gt;<i> +
+</I>&gt;<i> +    return &amp;dev-&gt;dev.dev;
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +int usb_storage_request(struct cdi_scsi_device *device,
+</I>&gt;<i> +                        struct cdi_scsi_packet *packet)
+</I>&gt;<i> +{
+</I>&gt;<i> +    cdi_usb_transmission_result_t res;
+</I>&gt;<i> +    usb_mass_storage_device_t *dev = CDI_UPCAST(device, dev,
+</I>&gt;<i> +                                                usb_mass_storage_device_t);
+</I>&gt;<i> +
+</I>&gt;<i> +    struct msd_bo_cbw cbw = {
+</I>&gt;<i> +        .signature      = CBW_SIGNATURE,
+</I>&gt;<i> +        .tag            = 42,
+</I>&gt;<i> +        .data_length    = packet-&gt;bufsize,
+</I>&gt;<i> +        .flags          = packet-&gt;direction == CDI_SCSI_READ ? CBW_IN : CBW_OUT,
+</I>&gt;<i> +        .lun            = packet-&gt;command[1] &amp; 0x7,
+</I>&gt;<i> +        .cb_length      = packet-&gt;cmdsize
+</I>&gt;<i> +    };
+</I>&gt;<i> +    memcpy(cbw.cb, packet-&gt;command, sizeof(cbw.cb));
+</I>&gt;<i> +
+</I>&gt;<i> +    res = cdi_usb_bulk_transfer(dev-&gt;usb, dev-&gt;bulk_out, &amp;cbw, sizeof(cbw));
+</I>&gt;<i> +    if (res != CDI_USB_OK) {
+</I>&gt;<i> +        printf(&quot;bulk cbw fail %x\n&quot;, res);
+</I>&gt;<i> +        bulk_only_reset(dev);
+</I>&gt;<i> +        return -1;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    if (packet-&gt;direction == CDI_SCSI_READ) {
+</I>&gt;<i> +        res = cdi_usb_bulk_transfer(dev-&gt;usb, dev-&gt;bulk_in,
+</I>&gt;<i> +                                    packet-&gt;buffer, packet-&gt;bufsize);
+</I>&gt;<i> +    } else if (packet-&gt;direction == CDI_SCSI_WRITE) {
+</I>&gt;<i> +        res = cdi_usb_bulk_transfer(dev-&gt;usb, dev-&gt;bulk_out,
+</I>&gt;<i> +                                    packet-&gt;buffer, packet-&gt;bufsize);
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    if (res != CDI_USB_OK) {
+</I>&gt;<i> +        printf(&quot;bulk cmd fail %x\n&quot;, res);
+</I>&gt;<i> +        bulk_only_reset(dev);
+</I>&gt;<i> +        return -1;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    struct msd_bo_csw csw;
+</I>&gt;<i> +    res = cdi_usb_bulk_transfer(dev-&gt;usb, dev-&gt;bulk_in, &amp;csw, sizeof(csw));
+</I>&gt;<i> +
+</I>&gt;<i> +    if (res != CDI_USB_OK || csw.signature != CSW_SIGNATURE || csw.tag != 42 ||
+</I>&gt;<i> +        csw.data_residue || csw.status)
+</I>&gt;<i> +    {
+</I>&gt;<i> +        printf(&quot;bulk csw fail %x\n&quot;, res);
+</I>&gt;<i> +        bulk_only_reset(dev);
+</I>&gt;<i> +        return -1;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    return 0;
+</I>&gt;<i> +}
+</I>&gt;<i> diff --git a/usb-storage/usb-storage.h b/usb-storage/usb-storage.h
+</I>&gt;<i> new file mode 100644
+</I>&gt;<i> index 0000000..13d717f
+</I>&gt;<i> --- /dev/null
+</I>&gt;<i> +++ b/usb-storage/usb-storage.h
+</I>&gt;<i> @@ -0,0 +1,34 @@
+</I>&gt;<i> +/******************************************************************************
+</I>&gt;<i> + * Copyright (c) 2015 Max Reitz                                               *
+</I>&gt;<i> + *                                                                            *
+</I>&gt;<i> + * Permission is hereby granted,  free of charge,  to any person  obtaining a *
+</I>&gt;<i> + * copy of this software and associated documentation files (the &quot;Software&quot;), *
+</I>&gt;<i> + * to deal in the Software without restriction,  including without limitation *
+</I>&gt;<i> + * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
+</I>&gt;<i> + * and/or  sell copies of the  Software,  and to permit  persons to whom  the *
+</I>&gt;<i> + * Software is furnished to do so, subject to the following conditions:       *
+</I>&gt;<i> + *                                                                            *
+</I>&gt;<i> + * The above copyright notice and this permission notice shall be included in *
+</I>&gt;<i> + * all copies or substantial portions of the Software.                        *
+</I>&gt;<i> + *                                                                            *
+</I>&gt;<i> + * THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
+</I>&gt;<i> + * IMPLIED,  INCLUDING BUT NOT LIMITED TO THE WARRANTIES  OF MERCHANTABILITY, *
+</I>&gt;<i> + * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
+</I>&gt;<i> + * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
+</I>&gt;<i> + * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
+</I>&gt;<i> + * FROM,  OUT OF  OR IN CONNECTION  WITH  THE SOFTWARE  OR THE  USE OR  OTHER *
+</I>&gt;<i> + * DEALINGS IN THE SOFTWARE.                                                  *
+</I>&gt;<i> + ******************************************************************************/
+</I>&gt;<i> +
+</I>&gt;<i> +#ifndef USB_STORAGE_H
+</I>&gt;<i> +#define USB_STORAGE_H
+</I>&gt;<i> +
+</I>&gt;<i> +#include &lt;cdi.h&gt;
+</I>&gt;<i> +#include &lt;cdi/scsi.h&gt;
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +struct cdi_device *init_usb_device(struct cdi_bus_data *bus_data);
+</I>&gt;<i> +int usb_storage_request(struct cdi_scsi_device *device,
+</I>&gt;<i> +                        struct cdi_scsi_packet *packet);
+</I>&gt;<i> +
+</I>&gt;<i> +#endif
+</I>
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000285.html">[cdi-devel] [PATCH 8/8] usb-storage: Add USB mass storage driver
+</A></li>
+	<LI>Next message: <A HREF="000287.html">[cdi-devel] [PATCH 8/8] usb-storage: Add USB mass storage driver
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#286">[ date ]</a>
+              <a href="thread.html#286">[ thread ]</a>
+              <a href="subject.html#286">[ subject ]</a>
+              <a href="author.html#286">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

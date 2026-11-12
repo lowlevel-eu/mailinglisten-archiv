@@ -1,0 +1,174 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH] usb: uhci_do_packet interface rework
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%5D%20usb%3A%20uhci_do_packet%20interface%20rework&In-Reply-To=%3C1250966519-22486-1-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000012.html">
+   <LINK REL="Next"  HREF="000014.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH] usb: uhci_do_packet interface rework</H1>
+    <B>Kevin Wolf</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%5D%20usb%3A%20uhci_do_packet%20interface%20rework&In-Reply-To=%3C1250966519-22486-1-git-send-email-kevin%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH] usb: uhci_do_packet interface rework">kevin at tyndur.org
+       </A><BR>
+    <I>Sat Aug 22 20:41:59 CEST 2009</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000012.html">[cdi-devel] [PATCH] Reformatting of the reformatting
+</A></li>
+        <LI>Next message: <A HREF="000014.html">[cdi-devel] [PATCH] No STALL
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#13">[ date ]</a>
+              <a href="thread.html#13">[ thread ]</a>
+              <a href="subject.html#13">[ subject ]</a>
+              <a href="author.html#13">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">kevin at tyndur.org</A>&gt;
+---
+ usb/include/usb.h |    5 ++---
+ usb/main.c        |    5 +----
+ usb/uhci.c        |   30 +++++++++++++++---------------
+ 3 files changed, 18 insertions(+), 22 deletions(-)
+
+diff --git a/usb/include/usb.h b/usb/include/usb.h
+index 223ecf7..deb7dd5 100644
+--- a/usb/include/usb.h
++++ b/usb/include/usb.h
+@@ -136,15 +136,14 @@ struct cdi_hci {
+ };
+ 
+ struct usb_device;
++struct usb_packet;
+ 
+ struct hci {
+     struct cdi_pci_device* pcidev;
+     hci_type_t type;
+     cdi_list_t (* find_devices)(struct hci*);
+     void (* activate_device)(struct hci*, struct usb_device*);
+-    int (* do_packet)(struct hci*, int frame, int type, int device,
+-        int endpoint, int low_speed, uintptr_t phys_data, int length,
+-        int datatoggle);
++    int (* do_packet)(struct usb_device*, struct usb_packet* packet);
+     int (* get_frame)(struct hci*);
+ };
+ 
+diff --git a/usb/main.c b/usb/main.c
+index 02079e2..2491343 100644
+--- a/usb/main.c
++++ b/usb/main.c
+@@ -130,10 +130,7 @@ int usb_do_packet(struct usb_device* device, struct usb_packet* packet)
+     }
+ 
+     while (error == USB_NAK) {
+-        error = device-&gt;hci-&gt;do_packet(device-&gt;hci,
+-            (device-&gt;hci-&gt;get_frame(device-&gt;hci) + 3) &amp; 0x3FF,
+-            packet-&gt;type, device-&gt;id, packet-&gt;endpoint, device-&gt;low_speed,
+-            packet-&gt;phys_data, packet-&gt;length, packet-&gt;datatoggle);
++        error = device-&gt;hci-&gt;do_packet(device, packet);
+     }
+ 
+     if (error == USB_STALLED) {
+diff --git a/usb/uhci.c b/usb/uhci.c
+index 208000e..413c7f5 100644
+--- a/usb/uhci.c
++++ b/usb/uhci.c
+@@ -53,9 +53,8 @@ static struct cdi_driver cdi_driver;
+ static cdi_list_t active_transfers;
+ 
+ static void uhci_handler(struct cdi_device* dev);
+-static int enqueue_request(struct hci* gen_hci, int frame, int type, int device,
+-    int endpoint, int low_speed, uintptr_t phys_data, int length,
+-    int datatoggle);
++static int uhci_do_packet(struct usb_device* usbdev,
++    struct usb_packet* packet);
+ static cdi_list_t get_devices(struct hci* gen_hci);
+ static void activate_device(struct hci* gen_hci, struct usb_device* device);
+ static int get_current_frame(struct hci* gen_hci);
+@@ -167,7 +166,7 @@ void uhci_init(struct cdi_device* cdi_hci)
+     dprintf(&quot;  Fertig\n&quot;);
+     gen_hci-&gt;find_devices = &amp;get_devices;
+     gen_hci-&gt;activate_device = &amp;activate_device;
+-    gen_hci-&gt;do_packet = &amp;enqueue_request;
++    gen_hci-&gt;do_packet = &amp;uhci_do_packet;
+     gen_hci-&gt;get_frame = &amp;get_current_frame;
+ 
+     enumerate_hci(gen_hci);
+@@ -228,17 +227,18 @@ static inline int tsl(volatile int* variable)
+ 
+ static volatile int locked = 0;
+ 
+-static int enqueue_request(struct hci* gen_hci, int frame, int type, int device,
+-    int endpoint, int low_speed, uintptr_t phys_data, int length,
+-    int datatoggle)
++static int uhci_do_packet(struct usb_device* usbdev,
++    struct usb_packet* packet)
+ {
+-    struct uhci* uhci = (struct uhci*) gen_hci;
++    struct uhci* uhci = (struct uhci*) usbdev-&gt;hci;
+     struct uhci_td* td;
+     struct uhci_qh* qh;
+     uintptr_t ptd, pqh;
+     struct transfer* addr;
+     int timeout;
+ 
++    int frame = (usbdev-&gt;hci-&gt;get_frame(usbdev-&gt;hci) + 3) &amp; 0x3FF;
++
+     if (cdi_alloc_phys_mem(sizeof(struct uhci_td),
+             (void**) &amp;td, (void**) &amp;ptd) == -1)
+     {
+@@ -263,14 +263,14 @@ static int enqueue_request(struct hci* gen_hci, int frame, int type, int device,
+     td-&gt;next = 1;               //Invalid
+     td-&gt;active = 1;
+     td-&gt;ioc = 1;
+-    td-&gt;data_toggle = datatoggle;
+-    td-&gt;low_speed = low_speed;
++    td-&gt;data_toggle = packet-&gt;datatoggle;
++    td-&gt;low_speed = usbdev-&gt;low_speed;
+     td-&gt;errors = 1;
+-    td-&gt;pid = type;
+-    td-&gt;device = device;
+-    td-&gt;endpoint = endpoint;
+-    td-&gt;maxlen = length ? length - 1 : 0x7FF;
+-    td-&gt;buffer = phys_data;
++    td-&gt;pid = packet-&gt;type;
++    td-&gt;device = usbdev-&gt;id;
++    td-&gt;endpoint = packet-&gt;endpoint;
++    td-&gt;maxlen = packet-&gt;length ? packet-&gt;length - 1 : 0x7FF;
++    td-&gt;buffer = packet-&gt;phys_data;
+     addr = malloc(sizeof(struct transfer));
+     addr-&gt;virt = td;
+     addr-&gt;phys = ptd;
+-- 
+1.6.0.2
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000012.html">[cdi-devel] [PATCH] Reformatting of the reformatting
+</A></li>
+	<LI>Next message: <A HREF="000014.html">[cdi-devel] [PATCH] No STALL
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#13">[ date ]</a>
+              <a href="thread.html#13">[ thread ]</a>
+              <a href="subject.html#13">[ subject ]</a>
+              <a href="author.html#13">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

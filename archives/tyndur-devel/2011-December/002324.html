@@ -1,0 +1,393 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH v2 5/6] kernel2: LIOv2-Clientsyscalls	implementiert
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%205/6%5D%20kernel2%3A%20LIOv2-Clientsyscalls%0A%09implementiert&In-Reply-To=%3C1323549482-1766-6-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002323.html">
+   <LINK REL="Next"  HREF="002325.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH v2 5/6] kernel2: LIOv2-Clientsyscalls	implementiert</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%205/6%5D%20kernel2%3A%20LIOv2-Clientsyscalls%0A%09implementiert&In-Reply-To=%3C1323549482-1766-6-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH v2 5/6] kernel2: LIOv2-Clientsyscalls	implementiert">kevin at tyndur.org
+                  </A><BR>
+    <I>Sa Dez 10 21:38:01 CET 2011</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002323.html">[tyndur-devel] [PATCH v2 4/6] kernel2: LIOv2-Service tmp
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002325.html">[tyndur-devel] [PATCH v2 6/6] kernel2: Beim Prozessende offene	Dateien schliessen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2324">[ Datum ]</a>
+              <a href="thread.html#2324">[ Thema ]</a>
+              <a href="subject.html#2324">[ Betreff (Subject) ]</a>
+              <a href="author.html#2324">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ kernel2: Die bestehenden LIOv2-Stubs durch Funktionen ersetzt, die die
+  richtigen LIOv2-Funktionen aufrufen. Nach diesem Patch sind die
+  LIOv2-Funktionen zum ersten Mal tatsächlich nutzbar (in tmp:/).
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/kernel2/src/syscalls/lostio.c |  228 ++++++++++++++++++++++++++++++++++---
+ 1 files changed, 212 insertions(+), 16 deletions(-)
+
+diff --git a/src/kernel2/src/syscalls/lostio.c b/src/kernel2/src/syscalls/lostio.c
+index b7a3933..aa27ace 100644
+--- a/src/kernel2/src/syscalls/lostio.c
++++ b/src/kernel2/src/syscalls/lostio.c
+@@ -41,72 +41,219 @@
+ #include &quot;syscall.h&quot;
+ #include &lt;syscall_structs.h&gt;
+ 
++#include &quot;lostio/client.h&quot;
++#include &quot;lostio/userspace.h&quot;
++
+ /// Ressource suchen
+ void syscall_lio_resource(const char* path, size_t path_len, int flags,
+     lio_usp_resource_t* res_id)
+ {
+-    *res_id = -1;
++    struct lio_resource* res;
++
++    // TODO: is_userspace
++    if (path[path_len - 1] != '\0') {
++        *res_id = -EINVAL;
++        return;
++    }
++
++    if (!(res = lio_get_resource(path, flags))) {
++        *res_id = -ENOENT;
++        return;
++    }
++
++    *res_id = lio_usp_get_id(res);
+ }
+ 
+ /// Informationen über eine Ressource abfragen
+ int syscall_lio_stat(lio_usp_resource_t* resid, struct lio_stat* sbuf)
+ {
+-    return -ENOSYS;
++    struct lio_resource* res;
++
++    // TODO: is_userspace
++    if (!(res = lio_usp_get_resource(*resid))) {
++        return -EINVAL;
++    }
++
++    // TODO: is_userspace
++    return lio_stat(res, sbuf);
+ }
+ 
+ /// Ressource öffnen
+ void syscall_lio_open(lio_usp_resource_t* resid, int flags,
+     lio_usp_stream_t* stream_id)
+ {
+-    *stream_id = -1;
++    struct lio_usp_stream* fd;
++    struct lio_stream* stream;
++    struct lio_resource* res;
++
++    // TODO: is_userspace
++    if (!(res = lio_usp_get_resource(*resid))) {
++        *stream_id = -EINVAL;
++    }
++    if (!(stream = lio_open(res, flags))) {
++        *stream_id = -EACCES;
++        return;
++    }
++
++    fd = lio_usp_add_stream(current_process, stream);
++    *stream_id = fd-&gt;usp_id;
+ }
+ 
+ /// Stream schließen
+ int syscall_lio_close(lio_usp_stream_t* stream_id)
+ {
+-    return -ENOSYS;
++    struct lio_usp_stream* fd;
++    struct lio_stream* stream;
++    int ret;
++
++    // TODO: is_userspace
++    if (!(fd= lio_usp_get_stream(current_process, *stream_id))) {
++        return -EBADF;
++    }
++
++    // lio_close gibt stream im Erfolgsfall frei, wir koennen es also nicht
++    // erst hinterher aus dem Baum entfernen. Falls close schiefgeht, muessen
++    // wir es wohl oder uebel wieder eintragen.
++    stream = fd-&gt;stream;
++    lio_usp_remove_stream(current_process, fd);
++    ret = lio_close(stream);
++    if (ret &lt; 0) {
++        lio_usp_add_stream(current_process, stream);
++    }
++
++    return ret;
+ }
+ 
+ /// Aus Stream lesen
+ void syscall_lio_read(lio_usp_stream_t* stream_id, uint64_t* offset,
+     size_t bytes, void* buffer, int updatepos, ssize_t* result)
+ {
+-    *result = -1;
++    struct lio_usp_stream* fd;
++
++    // TODO: is_userspace
++    if (!(fd = lio_usp_get_stream(current_process, *stream_id))) {
++        *result = -EBADF;
++        return;
++    }
++
++    if (updatepos) {
++        *result = lio_read(fd-&gt;stream, bytes, buffer);
++    } else {
++        *result = lio_pread(fd-&gt;stream, *offset, bytes, buffer);
++    }
+ }
+ 
+ /// In Stream schreiben
+ void syscall_lio_write(lio_usp_stream_t* stream_id, uint64_t* offset,
+     size_t bytes, const void* buffer, int updatepos, ssize_t* result)
+ {
+-    *result = -1;
++    struct lio_usp_stream* fd;
++
++    // TODO: is_userspace
++    if (!(fd = lio_usp_get_stream(current_process, *stream_id))) {
++        *result = -EBADF;
++        return;
++    }
++
++    if (updatepos) {
++        *result = lio_write(fd-&gt;stream, bytes, buffer);
++    } else {
++        *result = lio_pwrite(fd-&gt;stream, *offset, bytes, buffer);
++    }
+ }
+ 
+ /// Cursorposition in der Datei ändern
+ void syscall_lio_seek(lio_usp_stream_t* stream_id, int64_t* offset,
+     int whence, int64_t* result)
+ {
+-    *result = -1;
++    struct lio_usp_stream* fd;
++
++    // TODO: Ein paar is_userspace
++    if (!(fd = lio_usp_get_stream(current_process, *stream_id))) {
++        *result = -EBADF;
++        return;
++    }
++
++    *result = lio_seek(fd-&gt;stream, *offset, whence);
+ }
+ 
+ /// Verzeichnisinhalt auslesen
+ void syscall_lio_read_dir(lio_usp_resource_t* resid, size_t start, size_t num,
+     struct lio_usp_dir_entry* buf, ssize_t* result)
+ {
+-    *result = -1;
++    // FIXME: Das d00f
++    struct lio_dir_entry* int_buf;
++    struct lio_resource* res;
++    ssize_t i;
++
++    if (!(res = lio_usp_get_resource(*resid))) {
++        *result = -EINVAL;
++        return;
++    }
++
++    int_buf = malloc(num * sizeof(*int_buf));
++    // TODO: is_userspace
++    *result = lio_read_dir(res, start, num, int_buf);
++
++    for (i = 0; i &lt; *result; i++) {
++        buf[i].resource = lio_usp_get_id(int_buf[i].resource);
++        strcpy(buf[i].name, int_buf[i].name);
++        buf[i].stat = int_buf[i].stat;
++    }
++
++    free(int_buf);
+ }
+ 
+ /// Neue Datei anlegen
+ void syscall_lio_mkfile(lio_usp_resource_t* parent, const char* name,
+     size_t name_len, lio_usp_resource_t* result)
+ {
+-    *result = -1;
++    struct lio_resource* parentres;
++    struct lio_resource* res;
++
++    if (!(parentres = lio_usp_get_resource(*parent))) {
++        *result = -EINVAL;
++        return;
++    }
++
++    // TODO: is_userspace
++    if (name[name_len - 1] != '\0') {
++        *result = -EINVAL;
++        return;
++    }
++
++    // TODO: is_userspace
++    if (!(res = lio_mkfile(parentres, name))) {
++        *result = -EIO; // FIXME
++        return;
++    }
++    *result = lio_usp_get_id(res);
+ }
+ 
+ /// Neues Verzeichnis anlegen
+ void syscall_lio_mkdir(lio_usp_resource_t* parent, const char* name,
+     size_t name_len, lio_usp_resource_t* result)
+ {
+-    *result = -1;
++    struct lio_resource* parentres;
++    struct lio_resource* res;
++
++    if (!(parentres = lio_usp_get_resource(*parent))) {
++        *result = -EINVAL;
++        return;
++    }
++
++    // TODO: is_userspace
++    if (name[name_len - 1] != '\0') {
++        *result = -EINVAL;
++        return;
++    }
++
++    // TODO: is_userspace
++    if (!(res = lio_mkdir(parentres, name))) {
++        *result = -EIO; // FIXME
++        return;
++    }
++    *result = lio_usp_get_id(res);
+ }
+ 
+ /// Neuen Symlink anlegen
+@@ -114,31 +261,80 @@ void syscall_lio_mksymlink(lio_usp_resource_t* parent, const char* name,
+     size_t name_len, const char* target, size_t target_len,
+     lio_usp_resource_t* result)
+ {
+-    *result = -1;
++    struct lio_resource* parentres;
++    struct lio_resource* res;
++
++    if (!(parentres = lio_usp_get_resource(*parent))) {
++        *result = -EINVAL;
++        return;
++    }
++
++    // TODO: is_userspace
++    if (name[name_len - 1] != '\0') {
++        *result = -EINVAL;
++        return;
++    }
++
++    // TODO: is_userspace
++    if (target[target_len - 1] != '\0') {
++        *result = -EINVAL;
++        return;
++    }
++
++    if (!(res = lio_mksymlink(parentres, name, target))) {
++        *result = -EIO; // FIXME
++        return;
++    }
++    *result = lio_usp_get_id(res);
+ }
+ 
+ /// Veränderte Blocks schreiben
+ int syscall_lio_sync(lio_usp_stream_t* stream_id)
+ {
+-    return -ENOSYS;
++    struct lio_usp_stream* fd;
++
++    // TODO: is_userspace
++    if (!(fd = lio_usp_get_stream(current_process, *stream_id))) {
++        return -EBADF;
++    }
++
++    return lio_sync(fd-&gt;stream);
+ }
+ 
+ /// Dateigröße ändern
+ int syscall_lio_truncate(lio_usp_stream_t* stream_id, uint64_t* size)
+ {
+-    return -ENOSYS;
++    struct lio_usp_stream* fd;
++
++    // TODO: is_userspace
++    if (!(fd = lio_usp_get_stream(current_process, *stream_id))) {
++        return -EBADF;
++    }
++
++    return lio_truncate(fd-&gt;stream, *size);
+ }
+ 
+ /// Verzeichniseintrag löschen
+ int syscall_lio_unlink(lio_usp_resource_t* parent, const char* name,
+     size_t name_len)
+ {
+-    return -ENOSYS;
++    struct lio_resource* parentres;
++
++    if (!(parentres = lio_usp_get_resource(*parent))) {
++        return -EINVAL;
++    }
++
++    // TODO: is_userspace
++    if (name[name_len - 1] != '\0') {
++        return -EINVAL;
++    }
++
++    // TODO: is_userspace
++    return lio_unlink(parentres, name);
+ }
+ 
+ /// Alle veränderten Blocks im Cache rausschreiben
+ int syscall_lio_sync_all(int soft)
+ {
+-    return -ENOSYS;
++    return lio_sync_all(soft);
+ }
+-
+-- 
+1.6.0.2
+
+</PRE>
+
+
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002323.html">[tyndur-devel] [PATCH v2 4/6] kernel2: LIOv2-Service tmp
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002325.html">[tyndur-devel] [PATCH v2 6/6] kernel2: Beim Prozessende offene	Dateien schliessen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2324">[ Datum ]</a>
+              <a href="thread.html#2324">[ Thema ]</a>
+              <a href="subject.html#2324">[ Betreff (Subject)]</a>
+              <a href="author.html#2324">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

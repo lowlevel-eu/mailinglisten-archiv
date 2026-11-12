@@ -1,0 +1,209 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 2/7] libc: cmdline_get_argc/copy_argv
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%202/7%5D%20libc%3A%20cmdline_get_argc/copy_argv&In-Reply-To=%3C1293628353-11131-3-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001948.html">
+   <LINK REL="Next"  HREF="001950.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 2/7] libc: cmdline_get_argc/copy_argv</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%202/7%5D%20libc%3A%20cmdline_get_argc/copy_argv&In-Reply-To=%3C1293628353-11131-3-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 2/7] libc: cmdline_get_argc/copy_argv">kevin at tyndur.org
+                  </A><BR>
+    <I>Mi Dez 29 14:12:28 CET 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001948.html">[tyndur-devel] [PATCH 1/7] init: init.h benutzen statt lokal	deklarieren
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001950.html">[tyndur-devel] [PATCH 3/7] kernel2: Fixes für SHM in nicht-aktivem Kontext
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1949">[ Datum ]</a>
+              <a href="thread.html#1949">[ Thema ]</a>
+              <a href="subject.html#1949">[ Betreff (Subject) ]</a>
+              <a href="author.html#1949">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ libc: Neue Funktionen cmdline_get_argc und cmdline_copy_argv, die aus
+  einer gegebenen Kommandozeile argc auslesen bzw. ein gegebenes argv
+  aus der Kommandozeile befuellen
+* libc: crt0.c benutzt die neuen Funktionen statt der eigenen
+  Implementierung
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/include/init.h |    2 ++
+ src/modules/lib/crt0.c     |   42 ++++++++++--------------------------------
+ src/modules/lib/init.c     |   38 ++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 50 insertions(+), 32 deletions(-)
+
+diff --git a/src/modules/include/init.h b/src/modules/include/init.h
+index 195511a..d431cee 100644
+--- a/src/modules/include/init.h
++++ b/src/modules/include/init.h
+@@ -43,6 +43,8 @@ char *init_service_get_name(pid_t pid);
+ void init_process_exit(int result);
+ pid_t init_execute(const char* cmd);
+ 
++int cmdline_get_argc(const char* args);
++void cmdline_copy_argv(char* args, const char** argv, size_t argc);
+ 
+ 
+ 
+diff --git a/src/modules/lib/crt0.c b/src/modules/lib/crt0.c
+index 4c3192d..fb42271 100644
+--- a/src/modules/lib/crt0.c
++++ b/src/modules/lib/crt0.c
+@@ -27,8 +27,9 @@
+  */
+ 
+ #include &lt;stdlib.h&gt;
+-#include &quot;syscall.h&quot;
+-#include &quot;rpc.h&quot;
++#include &lt;syscall.h&gt;
++#include &lt;rpc.h&gt;
++#include &lt;init.h&gt;
+ #include &lt;string.h&gt;
+ #include &lt;stdio.h&gt;
+ 
+@@ -56,7 +57,9 @@ static void call_constructors(void)
+ 
+ void __attribute__((weak)) _start(void)
+ {
+-    //v();
++    char* args = NULL;
++    int argc;
++
+     init_memory_manager();
+     init_messaging();
+     init_sync_messages();
+@@ -70,37 +73,12 @@ void __attribute__((weak)) _start(void)
+     //Kommandozeilenargumente Parsen ----
+     //TODO: Das ist alles noch sehr primitiv
+     //Erst den String vom Kernel holen
+-    char* args = get_cmdline();
+-    int argc, pos, f;
+-    argc = 0;
+-    f = 0;
+-    //Jetzt werden die Argumente gezaehlt.
+-    for (pos = 0; pos &lt; strlen(args); pos++) {
+-        if (args[pos] == ' ') {
+-            // mehrere leerzeichen direkt hintereinander nur einmal zï¿½hlen
+-            if(f == 1)
+-            {
+-                argc++;
+-            }
+-            f = 0;
+-        }
+-        else
+-        {
+-            f = 1;
+-        }
+-    }
+-    if(f == 1)
+-    {
+-        argc++;
+-    }
++    args = get_cmdline();
++    argc = cmdline_get_argc(args);
+ 
+     char* argv[argc + 1];
+-    argv[0] = strtok(args, &quot; &quot;);
+-    for(pos = 1; pos &lt; argc; pos++)
+-    {
+-        argv[pos] = strtok(NULL, &quot; &quot;);
+-    }
+-    argv[argc] = NULL;
++
++    cmdline_copy_argv(args, (const char**) argv, argc);
+ 
+     call_constructors();
+     int result = main(argc, argv);
+diff --git a/src/modules/lib/init.c b/src/modules/lib/init.c
+index 3e021c8..ea0a7d2 100644
+--- a/src/modules/lib/init.c
++++ b/src/modules/lib/init.c
+@@ -35,6 +35,7 @@
+ #include &quot;stdlib.h&quot;
+ #include &lt;io.h&gt;
+ #include &lt;unistd.h&gt;
++#include &lt;ctype.h&gt;
+ #include &lt;dir.h&gt;
+ 
+ // Kindprozess eintragen
+@@ -177,6 +178,43 @@ pid_t init_execute(const char* cmd)
+     return pid;
+ }
+ 
++/*
++ * Zaehlt die Argumente in einer Kommandozeile. Mehrere aufeinanderfolgende
++ * Leerzeichen werden als ein einziger Trenner aufgefasst.
++ */
++int cmdline_get_argc(const char* args)
++{
++    bool space = false;
++    int argc = 0;
++    int pos;
++
++    for (pos = 0; pos &lt; strlen(args); pos++) {
++        if (isspace(args[pos]) &amp;&amp; !space) {
++            argc++;
++        }
++
++        space = isspace(args[pos]);
++    }
++
++    if (!space) {
++        argc++;
++    }
++
++    return argc;
++}
++
++void cmdline_copy_argv(char* args, const char** argv, size_t argc)
++{
++    int pos;
++    argv[0] = strtok(args, &quot; &quot;);
++
++    for(pos = 1; pos &lt; argc; pos++) {
++        argv[pos] = strtok(NULL, &quot; &quot;);
++    }
++
++    argv[argc] = NULL;
++}
++
+ int init_dev_register(struct init_dev_desc* dev, size_t size)
+ {
+     return rpc_get_int(1, &quot;DEV_REG &quot;, size, (char*) dev);
+-- 
+1.6.0.2
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001948.html">[tyndur-devel] [PATCH 1/7] init: init.h benutzen statt lokal	deklarieren
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001950.html">[tyndur-devel] [PATCH 3/7] kernel2: Fixes für SHM in nicht-aktivem Kontext
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1949">[ Datum ]</a>
+              <a href="thread.html#1949">[ Thema ]</a>
+              <a href="subject.html#1949">[ Betreff (Subject)]</a>
+              <a href="author.html#1949">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

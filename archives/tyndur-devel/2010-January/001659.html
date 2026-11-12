@@ -1,0 +1,118 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] kernel2: Fix fuer Unmapping beim RPC
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20kernel2%3A%20Fix%20fuer%20Unmapping%20beim%20RPC&In-Reply-To=%3C20100131102225.GA4770%40neo.geekcave.lan%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001658.html">
+   <LINK REL="Next"  HREF="001660.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] kernel2: Fix fuer Unmapping beim RPC</H1>
+    <B>Antoine Kaufmann</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20kernel2%3A%20Fix%20fuer%20Unmapping%20beim%20RPC&In-Reply-To=%3C20100131102225.GA4770%40neo.geekcave.lan%3E"
+           TITLE="[tyndur-devel] [PATCH] kernel2: Fix fuer Unmapping beim RPC">toni at tyndur.org
+                  </A><BR>
+    <I>So Jan 31 11:22:25 CET 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001658.html">[tyndur-devel] [PATCH] kernel2: Fix fuer Unmapping beim RPC
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001660.html">[tyndur-devel] [PATCH] kernel2: Timer duerfen eax nicht kaputtmachen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1659">[ Datum ]</a>
+              <a href="thread.html#1659">[ Thema ]</a>
+              <a href="subject.html#1659">[ Betreff (Subject) ]</a>
+              <a href="author.html#1659">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>On Sun, Jan 31 01:20, Kevin Wolf wrote:
+&gt;<i> ! kernel2: Der aktuelle Speicherkontext muss auch beim Unmappen immer
+</I>&gt;<i>   noch nicht zwingend der Kontext des aktuellen Prozesses sein
+</I>&gt;<i> + kernel2: Panic wenn versucht wird, das Mapping einer Kernelpage in
+</I>&gt;<i>   einem inaktiven Kontext zu aendern
+</I>&gt;<i> 
+</I>&gt;<i> Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+</I>&gt;<i> ---
+</I>&gt;<i>  src/kernel2/src/arch/i386/mm/mm_context.c |   12 +++++++++++-
+</I>&gt;<i>  src/kernel2/src/syscalls/rpc.c            |    2 +-
+</I>&gt;<i>  2 files changed, 12 insertions(+), 2 deletions(-)
+</I>&gt;<i> 
+</I>&gt;<i> diff --git a/src/kernel2/src/arch/i386/mm/mm_context.c b/src/kernel2/src/arch/i386/mm/mm_context.c
+</I>&gt;<i> index 20edcfa..07a5be8 100644
+</I>&gt;<i> --- a/src/kernel2/src/arch/i386/mm/mm_context.c
+</I>&gt;<i> +++ b/src/kernel2/src/arch/i386/mm/mm_context.c
+</I>&gt;<i> @@ -271,7 +271,17 @@ static bool map_page
+</I>&gt;<i>          panic(&quot;Adressen sind nicht 4K-aligned (virt = %x, phys = %x)&quot;, 
+</I>&gt;<i>              vaddr, paddr);
+</I>&gt;<i>      }
+</I>&gt;<i> -    
+</I>&gt;<i> +
+</I>&gt;<i> +    // Kernelpages duerfen immer nur im gerade aktiven Kontext gemappt werden.
+</I>&gt;<i> +    // Ales andere ergibt keinen Sinn, weil diese Bereiche ohnehin zwischen
+</I>&gt;<i> +    // allen Kontexten synchron gehalten werden muessen.
+</I>&gt;<i> +    if ((context != &amp;mmc_current_context()) &amp;&amp;
+</I>&gt;<i> +        ((uintptr_t) vaddr &gt;= KERNEL_MEM_START) &amp;&amp;
+</I>&gt;<i> +        ((uintptr_t) vaddr &lt;  KERNEL_MEM_END))
+</I>&gt;<i> +    {
+</I>&gt;<i> +        panic(&quot;Versuch, Kernelpages in inaktivem Kontext zu mappen&quot;);
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i>      // Falls es sich im den aktuellen Kontext handelt, muss das Page directory
+</I>&gt;<i>      // nicht gemappt werden, sonst schon.
+</I>&gt;<i>  
+</I>&gt;<i> diff --git a/src/kernel2/src/syscalls/rpc.c b/src/kernel2/src/syscalls/rpc.c
+</I>&gt;<i> index 53f5396..70e0920 100644
+</I>&gt;<i> --- a/src/kernel2/src/syscalls/rpc.c
+</I>&gt;<i> +++ b/src/kernel2/src/syscalls/rpc.c
+</I>&gt;<i> @@ -282,7 +282,7 @@ static int do_fastrpc(pid_t callee_pid, size_t metadata_size, void* metadata,
+</I>&gt;<i>      callee_isf-&gt;eip = (uintptr_t) callee-&gt;process-&gt;rpc_handler;
+</I>&gt;<i>  
+</I>&gt;<i>      // Temporaere Mappings wieder aufheben
+</I>&gt;<i> -    mmc_unmap(&amp;current_process-&gt;context, first_stack_page,
+</I>&gt;<i> +    mmc_unmap(&amp;mmc_current_context(), first_stack_page,
+</I>&gt;<i>          NUM_PAGES(rounded_data_size));
+</I>&gt;<i>  
+</I>&gt;<i>      vmm_kernel_unmap(callee_isf, sizeof(*callee_isf));
+</I>
+Wenn du mit der Panic-Meldung so zufrieden bist, dann rein damit. ;-)
+
+Acked-by: Antoine Kaufmann &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">toni at tyndur.org</A>&gt;
+
+-- 
+Antoine Kaufmann
+&lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">toni at famkaufmann.info</A>&gt;
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : &lt;<A HREF="http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100131/c5c9b782/attachment.pgp">http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100131/c5c9b782/attachment.pgp</A>&gt;
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001658.html">[tyndur-devel] [PATCH] kernel2: Fix fuer Unmapping beim RPC
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001660.html">[tyndur-devel] [PATCH] kernel2: Timer duerfen eax nicht kaputtmachen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1659">[ Datum ]</a>
+              <a href="thread.html#1659">[ Thema ]</a>
+              <a href="subject.html#1659">[ Betreff (Subject)]</a>
+              <a href="author.html#1659">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

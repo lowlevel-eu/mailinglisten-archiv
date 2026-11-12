@@ -1,0 +1,217 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH 5/7] e1000: Move a few model-specific things to	e1000_model
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%205/7%5D%20e1000%3A%20Move%20a%20few%20model-specific%20things%20to%0A%09e1000_model&In-Reply-To=%3C1451492843-6394-6-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000368.html">
+   <LINK REL="Next"  HREF="000370.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH 5/7] e1000: Move a few model-specific things to	e1000_model</H1>
+    <B>Kevin Wolf</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%205/7%5D%20e1000%3A%20Move%20a%20few%20model-specific%20things%20to%0A%09e1000_model&In-Reply-To=%3C1451492843-6394-6-git-send-email-kevin%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH 5/7] e1000: Move a few model-specific things to	e1000_model">kevin at tyndur.org
+       </A><BR>
+    <I>Wed Dec 30 17:27:21 CET 2015</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000368.html">[cdi-devel] [PATCH 4/7] e1000: Introduce e1000_model
+</A></li>
+        <LI>Next message: <A HREF="000370.html">[cdi-devel] [PATCH 6/7] e1000: Implement support for 8086:10f5	e1000e chip
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#369">[ date ]</a>
+              <a href="thread.html#369">[ thread ]</a>
+              <a href="subject.html#369">[ subject ]</a>
+              <a href="author.html#369">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>Before we can add another model that works differently, let's move a few
+model-specific things to e1000_model. This patch merely introduces some
+indirection, no semantic change is intended.
+
+It also adds a (commented out) function for e1000e EERD use, which is
+the same as for the previously supported e1000 models except that some
+flags are in different bit positions.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">kevin at tyndur.org</A>&gt;
+---
+ e1000/device.c | 51 ++++++++++++++++++++++++++++++++++++++++-----------
+ e1000/device.h | 16 +++++++++++++---
+ 2 files changed, 53 insertions(+), 14 deletions(-)
+
+diff --git a/e1000/device.c b/e1000/device.c
+index 112f44a..6356721 100644
+--- a/e1000/device.c
++++ b/e1000/device.c
+@@ -213,32 +213,48 @@ static uint32_t e1000_read_uwire(struct e1000_device *device, uint16_t offset)
+     return data;
+ }
+ 
+-static uint32_t e1000_read_eerd(struct e1000_device *device, uint16_t offset)
++static uint32_t do_read_eerd(struct e1000_device *device, uint16_t offset,
++                             uint32_t start_flag, uint32_t done_flag)
+ {
+     uint32_t eerd, i;
+ 
+-    reg_outl(device, REG_EEPROM_READ, (offset &lt;&lt; 8) | EERD_START);
++    reg_outl(device, REG_EEPROM_READ, (offset &lt;&lt; 8) | start_flag);
+     for(i = 0; i &lt; 100; i++)
+     {
+         eerd = reg_inl(device, REG_EEPROM_READ);
+-        if(eerd &amp; EERD_DONE)
++        if (eerd &amp; done_flag) {
+             break;
++        }
+         cdi_sleep_ms(1);
+     }
+ 
+-    if(eerd &amp; EERD_DONE)
++    if (eerd &amp; done_flag) {
+         return (eerd &gt;&gt; 16) &amp; 0xFFFF;
+-    else
++    } else {
+         return (uint32_t) -1;
++    }
++}
++
++static uint32_t e1000_read_eerd(struct e1000_device *device, uint16_t offset)
++{
++    return do_read_eerd(device, offset, EERD_E1000_START, EERD_E1000_DONE);
++}
++
++#if 0
++static uint32_t e1000e_read_eerd(struct e1000_device *device, uint16_t offset)
++{
++    return do_read_eerd(device, offset, EERD_E1000E_START, EERD_E1000E_DONE);
+ }
++#endif
+ 
+ static uint16_t e1000_eeprom_read(struct e1000_device* device, uint16_t offset)
+ {
+     static int eerd_safe = 1;
+ 
+     uint32_t data = 0;
+-    if(eerd_safe)
+-        data = e1000_read_eerd(device, offset);
++    if (eerd_safe) {
++        data = device-&gt;model-&gt;eeprom_read(device, offset);
++    }
+     if(!eerd_safe || (data == ((uint32_t) -1)))
+     {
+         eerd_safe = 0;
+@@ -326,7 +342,7 @@ static void reset_nic(struct e1000_device* netcard)
+     reg_outl(netcard, REG_RX_CTL, RCTL_ENABLE | RCTL_BROADCAST
+         | RCTL_2K_BUFSIZE);
+     reg_outl(netcard, REG_TX_CTL, TCTL_ENABLE | TCTL_PADDING
+-        | TCTL_COLL_TSH | TCTL_COLL_DIST);
++        | TCTL_COLL_TSH | netcard-&gt;model-&gt;tctl_flags);
+ }
+ 
+ 
+@@ -346,9 +362,22 @@ static uint64_t get_mac_address(struct e1000_device* device)
+ #define ARRAY_SIZE(a) (sizeof(a) / sizeof(a[0]))
+ 
+ static struct e1000_model models[] = {
+-    { 0x8086, 0x1004 },
+-    { 0x8086, 0x100f },
+-    { 0x8086, 0x100e },
++    {
++        .vendor_id      = 0x8086,
++        .device_id      = 0x1004,
++        .tctl_flags     = TCTL_COLL_DIST_E1000,
++        .eeprom_read    = e1000_read_eerd,
++    }, {
++        .vendor_id      = 0x8086,
++        .device_id      = 0x100e,
++        .tctl_flags     = TCTL_COLL_DIST_E1000,
++        .eeprom_read    = e1000_read_eerd,
++    }, {
++        .vendor_id      = 0x8086,
++        .device_id      = 0x100f,
++        .tctl_flags     = TCTL_COLL_DIST_E1000,
++        .eeprom_read    = e1000_read_eerd,
++    }
+ };
+ 
+ struct cdi_device* e1000_init_device(struct cdi_bus_data* bus_data)
+diff --git a/e1000/device.h b/e1000/device.h
+index d424f19..2eebf8a 100644
+--- a/e1000/device.h
++++ b/e1000/device.h
+@@ -90,7 +90,9 @@ enum {
+     TCTL_ENABLE     = (1 &lt;&lt;  1),
+     TCTL_PADDING    = (1 &lt;&lt;  3),
+     TCTL_COLL_TSH   = (0x0f &lt;&lt;  4), /* CT - Collision Threshold */
+-    TCTL_COLL_DIST  = (0x40 &lt;&lt; 12), /* COLD - Collision Distance */    
++
++    /* e1000 specific values */
++    TCTL_COLL_DIST_E1000    = (0x40 &lt;&lt; 12), /* COLD - Collision Distance */
+ };
+ 
+ enum {
+@@ -104,8 +106,11 @@ enum {
+ 
+ #define RAH_VALID   (1 &lt;&lt; 31) /* AV */
+ 
+-#define EERD_START  (1 &lt;&lt;  0)
+-#define EERD_DONE   (1 &lt;&lt;  4)
++#define EERD_E1000_START    (1 &lt;&lt;  0)
++#define EERD_E1000_DONE     (1 &lt;&lt;  4)
++
++#define EERD_E1000E_START   (1 &lt;&lt;  0)
++#define EERD_E1000E_DONE    (1 &lt;&lt;  1)
+ 
+ /* EEPROM/Flash Control */
+ #define E1000_EECD_SK        0x00000001 /* EEPROM Clock */
+@@ -161,9 +166,14 @@ struct e1000_rx_descriptor {
+ } __attribute__((packed)) __attribute__((aligned (4)));
+ CDI_BUILD_BUG_ON((sizeof(struct e1000_rx_descriptor) * RX_BUFFER_NUM) % 128);
+ 
++struct e1000_device;
++
+ struct e1000_model {
+     uint16_t vendor_id;
+     uint16_t device_id;
++
++    uint32_t tctl_flags;
++    uint32_t (*eeprom_read)(struct e1000_device *device, uint16_t offset);
+ };
+ 
+ struct e1000_device {
+-- 
+2.1.4
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000368.html">[cdi-devel] [PATCH 4/7] e1000: Introduce e1000_model
+</A></li>
+	<LI>Next message: <A HREF="000370.html">[cdi-devel] [PATCH 6/7] e1000: Implement support for 8086:10f5	e1000e chip
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#369">[ date ]</a>
+              <a href="thread.html#369">[ thread ]</a>
+              <a href="subject.html#369">[ subject ]</a>
+              <a href="author.html#369">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

@@ -1,0 +1,251 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 03/11] LIOv2: lio_probe_service für Userspaceservices
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_03/11%3D5D_LIOv2%3D3A_lio%3D5Fprobe%3F%3D%0A%09%3D%3Futf-8%3Fq%3F%3D5Fservice_f%3DC3%3DBCr_Userspaceservices%3F%3D&In-Reply-To=%3C1449959291-24784-4-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002542.html">
+   <LINK REL="Next"  HREF="002511.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 03/11] LIOv2: lio_probe_service für Userspaceservices</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_03/11%3D5D_LIOv2%3D3A_lio%3D5Fprobe%3F%3D%0A%09%3D%3Futf-8%3Fq%3F%3D5Fservice_f%3DC3%3DBCr_Userspaceservices%3F%3D&In-Reply-To=%3C1449959291-24784-4-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 03/11] LIOv2: lio_probe_service für Userspaceservices">kevin at tyndur.org
+                  </A><BR>
+    <I>Sa Dez 12 23:28:03 CET 2015</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002542.html">[tyndur-devel] [PATCH 02/11] kernel2: Neuer Syscall lio_probe_service
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002511.html">[tyndur-devel] [PATCH 04/11] cdi/fs: Add .fs_probe callback
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2510">[ Datum ]</a>
+              <a href="thread.html#2510">[ Thema ]</a>
+              <a href="subject.html#2510">[ Betreff (Subject) ]</a>
+              <a href="author.html#2510">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ LIOv2: Userspace-LIO-Services können jetzt auch lio_probe_service
+  unterstützen
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/include/syscall_structs.h         | 15 +++++++++
+ src/kernel2/src/syscalls/lio_server.c | 61 +++++++++++++++++++++++++++++++++++
+ src/modules/include/lostio.h          |  6 ++++
+ src/modules/lib/lostio/lio_server.c   | 16 +++++++++
+ 4 files changed, 98 insertions(+)
+
+diff --git a/src/include/syscall_structs.h b/src/include/syscall_structs.h
+index 3ba12b9..d433779 100644
+--- a/src/include/syscall_structs.h
++++ b/src/include/syscall_structs.h
+@@ -303,6 +303,11 @@ enum lio_opcode {
+      * Stream der Ressource wird geschlossen
+      */
+     LIO_OP_CLOSE = 15,
++
++    /**
++     * Prüfen, ob die Ressource als Pipequelle benutzt werden kann
++     */
++    LIO_OP_PROBE = 16,
+ };
+ 
+ /// Flags fuer Operationen
+@@ -547,6 +552,16 @@ struct lio_op_sync {
+     void* opaque;
+ } __attribute__((packed));
+ 
++struct lio_op_probe {
++    struct lio_op op;
++
++    /// Stream fuer die Pipequelle
++    lio_usp_stream_t source;
++
++    /// Rückgabe: Informationen über Dateisystem
++    struct lio_probe_service_result* probe_data;
++} __attribute__((packed));
++
+ 
+ /// Flags fuer Server-Ressourcen
+ enum lio_server_flags {
+diff --git a/src/kernel2/src/syscalls/lio_server.c b/src/kernel2/src/syscalls/lio_server.c
+index 5127d7a..4b1b03d 100644
+--- a/src/kernel2/src/syscalls/lio_server.c
++++ b/src/kernel2/src/syscalls/lio_server.c
+@@ -68,6 +68,8 @@ static struct lio_resource* make_symlink(struct lio_resource* parent,
+     const char* name, const char* target);
+ static int truncate(struct lio_resource* res, uint64_t size);
+ static int unlink(struct lio_resource* parent, const char* name);
++static int probe(struct lio_service* serv, struct lio_stream* source,
++                 struct lio_probe_service_result* probe_data);
+ 
+ struct lio_pending_op {
+     struct tree_item    tinfo;
+@@ -136,6 +138,7 @@ int syscall_lio_srv_service_register(const char* name, size_t name_len,
+ 
+     // TODO: Ein paar is_userspace
+     service-&gt;name = strdup(name);
++    service-&gt;lio_ops.probe= probe;
+     service-&gt;lio_ops.load_root = load_root;
+     service-&gt;lio_ops.load_children = load_children;
+     service-&gt;lio_ops.close = close;
+@@ -831,3 +834,61 @@ static int unlink(struct lio_resource* parent, const char* name)
+     return result;
+ 
+ }
++
++static int probe(struct lio_service* serv, struct lio_stream* source,
++                 struct lio_probe_service_result* probe_data)
++{
++    struct lio_userspace_service* s = serv-&gt;opaque;
++    struct lio_probe_service_result* result;
++    struct lio_usp_stream* usp_fd;
++    struct lio_op_probe* op;
++    void* user_buf;
++    int ret;
++
++    if (s-&gt;provider == NULL) {
++        return -EBADF;
++    }
++
++    op = (struct lio_op_probe*) alloc_ring_op(&amp;s-&gt;ring, sizeof(*op));
++
++    usp_fd = lio_usp_add_stream(s-&gt;provider-&gt;process, source);
++    if (!usp_fd) {
++        return -EBADF;
++    }
++
++    BUILD_BUG_ON(sizeof(*result) &gt; PAGE_SIZE);
++    result = mmc_valloc(&amp;mmc_current_context(), 1, MM_FLAGS_KERNEL_CODE);
++    if (result == NULL) {
++        ret = -ENOMEM;
++        goto fail_alloc_page;
++    }
++    memset(result, 0, PAGE_SIZE);
++
++    user_buf = mmc_automap_user(&amp;s-&gt;provider-&gt;process-&gt;context,
++                                &amp;mmc_current_context(), result, 1,
++                                MM_USER_START, MM_USER_END, MM_FLAGS_USER_DATA);
++    if (user_buf == NULL) {
++        ret = -ENOMEM;
++        goto fail_map;
++    }
++
++    op-&gt;op.opcode = LIO_OP_PROBE;
++    op-&gt;source = usp_fd-&gt;usp_id;
++    op-&gt;probe_data = user_buf;
++
++    ret = commit_ring_op(&amp;s-&gt;ring, s-&gt;provider, &amp;op-&gt;op, NULL);
++    if (ret == 0) {
++        strlcpy(result-&gt;service, serv-&gt;name, sizeof(result-&gt;service));
++        memcpy(probe_data, result, sizeof(*probe_data));
++    }
++
++    mmc_unmap(&amp;s-&gt;provider-&gt;process-&gt;context, user_buf, 1);
++fail_map:
++    mmc_vfree(&amp;mmc_current_context(), result, 1);
++fail_alloc_page:
++    /* Wir dürfen kein close() machen, der Kernel braucht den Stream noch */
++    source-&gt;usp_refcount++;
++    lio_usp_unref_stream(s-&gt;provider-&gt;process, usp_fd);
++    BUG_ON(--source-&gt;usp_refcount != 0);
++    return ret;
++}
+diff --git a/src/modules/include/lostio.h b/src/modules/include/lostio.h
+index 06dafec..9ad8c33 100644
+--- a/src/modules/include/lostio.h
++++ b/src/modules/include/lostio.h
+@@ -252,8 +252,14 @@ int64_t lio_compat_tell(io_resource_t* io_res);
+  */
+ void lio_dispatch(void);
+ 
++struct lio_service;
+ struct lio_tree;
+ struct lio_driver {
++    /// Prüfen, ob die Ressource als Pipequelle benutzt werden kann
++    int (*probe)(struct lio_service* service,
++                 lio_stream_t source,
++                 struct lio_probe_service_result* probe_data);
++
+     /// Root-Ressource eines Baums laden
+     struct lio_resource* (*load_root)(struct lio_tree* tree);
+ 
+diff --git a/src/modules/lib/lostio/lio_server.c b/src/modules/lib/lostio/lio_server.c
+index 64206f5..2f3825d 100644
+--- a/src/modules/lib/lostio/lio_server.c
++++ b/src/modules/lib/lostio/lio_server.c
+@@ -50,6 +50,7 @@ static void tree_dispatch(struct lio_tree* tree);
+ static void process_op(struct lio_service* service, struct lio_op* op);
+ 
+ // Operationen
++static void op_probe(struct lio_service* service, struct lio_op* op);
+ static void op_load_root(struct lio_service* service, struct lio_op* op);
+ static void op_load_children(struct lio_service* service, struct lio_op* op);
+ static void op_close(struct lio_service* service, struct lio_op* op);
+@@ -94,6 +95,10 @@ void lio_dispatch(void)
+                     op_load_root(s, op);
+                     break;
+ 
++                case LIO_OP_PROBE:
++                    op_probe(s, op);
++                    break;
++
+                 default:
+                     printf(&quot;lio_dispatch: Fehler, unerwarteter Opcode 0x%x\n&quot;,
+                         op-&gt;opcode);
+@@ -203,6 +208,17 @@ static void process_op(struct lio_service* service, struct lio_op* op)
+     op-&gt;flags &amp;= ~LIO_OPFL_USP;
+ }
+ 
++static void op_probe(struct lio_service* service, struct lio_op* op)
++{
++    struct lio_op_probe* opr = (struct lio_op_probe*) op;
++    int ret = -EINVAL;
++
++    if (service-&gt;lio_ops.probe) {
++        ret = service-&gt;lio_ops.probe(service, opr-&gt;source, opr-&gt;probe_data);
++    }
++    lio_srv_op_done(op, ret, 0);
++}
++
+ static void op_load_root(struct lio_service* service, struct lio_op* op)
+ {
+     struct lio_op_load_root* olr = (struct lio_op_load_root*) op;
+-- 
+2.1.4
+
+</PRE>
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002542.html">[tyndur-devel] [PATCH 02/11] kernel2: Neuer Syscall lio_probe_service
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002511.html">[tyndur-devel] [PATCH 04/11] cdi/fs: Add .fs_probe callback
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2510">[ Datum ]</a>
+              <a href="thread.html#2510">[ Thema ]</a>
+              <a href="subject.html#2510">[ Betreff (Subject)]</a>
+              <a href="author.html#2510">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

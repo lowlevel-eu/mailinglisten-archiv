@@ -1,0 +1,132 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] kernel: SYSCALL_FASTRPC_WAIT
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20kernel%3A%20SYSCALL_FASTRPC_WAIT&In-Reply-To=%3C20090405180600.GA15081%40einstein.produktiv.lan%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="000707.html">
+   <LINK REL="Next"  HREF="000709.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] kernel: SYSCALL_FASTRPC_WAIT</H1>
+    <B>Antoine Kaufmann</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20kernel%3A%20SYSCALL_FASTRPC_WAIT&In-Reply-To=%3C20090405180600.GA15081%40einstein.produktiv.lan%3E"
+           TITLE="[tyndur-devel] [PATCH] kernel: SYSCALL_FASTRPC_WAIT">toni at tyndur.org
+                  </A><BR>
+    <I>So Apr  5 20:06:01 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="000707.html">[tyndur-devel] [PATCH v3] build hinzugefuegt
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="000709.html">[tyndur-devel] [PATCH] ElTorito-CD-Images
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#708">[ Datum ]</a>
+              <a href="thread.html#708">[ Thema ]</a>
+              <a href="subject.html#708">[ Betreff (Subject) ]</a>
+              <a href="author.html#708">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>On Mon, Mar 30 22:11, Kevin Wolf wrote:
+&gt;<i> + kernel: SYSCALL_FASTRPC_WAIT als Kombination von RPC und wait_for_rpc()
+</I>&gt;<i> * libc: Neuen Syscall fuer Sync-RPC benutzen
+</I>&gt;<i> ---
+</I>&gt;<i>  src/include/syscallno.h        |    1 +
+</I>&gt;<i>  src/kernel/src/syscall.c       |   10 ++++++++++
+</I>&gt;<i>  src/modules/include/syscall.h  |    1 +
+</I>&gt;<i>  src/modules/lib/rpc/sync.c     |    2 +-
+</I>&gt;<i>  src/modules/lib/syscalls/rpc.c |   21 +++++++++++++++++----
+</I>&gt;<i>  5 files changed, 30 insertions(+), 5 deletions(-)
+</I>&gt;<i> 
+</I>&gt;<i> diff --git a/src/modules/lib/syscalls/rpc.c b/src/modules/lib/syscalls/rpc.c
+</I>&gt;<i> index 72d4bbc..68cb394 100644
+</I>&gt;<i> --- a/src/modules/lib/syscalls/rpc.c
+</I>&gt;<i> +++ b/src/modules/lib/syscalls/rpc.c
+</I>&gt;<i> @@ -16,8 +16,9 @@ void rpc(dword pid)
+</I>&gt;<i>      } while (result != 0);
+</I>&gt;<i>  }
+</I>&gt;<i>  
+</I>&gt;<i> -void send_message
+</I>&gt;<i> -    (dword pid, dword function, dword correlation_id, dword len, char* data)
+</I>&gt;<i> +static inline void do_send_message
+</I>&gt;<i> +    (dword pid, dword function, dword correlation_id, dword len, char* data,
+</I>&gt;<i> +    bool wait_for_rpc)
+</I>&gt;<i>  {
+</I>&gt;<i>      dword result = 0;
+</I>&gt;<i>  
+</I>&gt;<i> @@ -38,10 +39,22 @@ void send_message
+</I>&gt;<i>              &quot;mov %1, %%eax;&quot;
+</I>&gt;<i>              &quot;int $0x30;&quot;
+</I>&gt;<i>              &quot;add $0x14, %%esp;&quot;
+</I>&gt;<i> -        : &quot;=a&quot; (result) 
+</I>&gt;<i> -        : &quot;i&quot; (SYSCALL_FASTRPC), &quot;g&quot; (pid), &quot;i&quot; (0x8), &quot;g&quot; (metadata), 
+</I>&gt;<i> +        : &quot;=a&quot; (result)
+</I>&gt;<i> +        : &quot;i&quot; (wait_for_rpc ? SYSCALL_FASTRPC_WAIT : SYSCALL_FASTRPC),
+</I>&gt;<i> +            &quot;g&quot; (pid), &quot;i&quot; (0x8), &quot;g&quot; (metadata),
+</I>&gt;<i>              &quot;g&quot; (len), &quot;g&quot; (data), &quot;0&quot; (result));
+</I>&gt;<i>  
+</I>&gt;<i>      } while (result != 0);
+</I>&gt;<i>  }
+</I>
+Hm wenn ich das mit -O0 kompilieren möchte sagt mir der gcc Folgendes:
+  rpc.c: In function 'do_send_message':
+  rpc.c:33: warning: asm operand 1 probably doesn't match constraints
+  rpc.c:33: error: impossible constraint in 'asm'
+
+
+&gt;<i>  
+</I>&gt;<i> +void send_message
+</I>&gt;<i> +    (dword pid, dword function, dword correlation_id, dword len, char* data)
+</I>&gt;<i> +{
+</I>&gt;<i> +    do_send_message(pid, function, correlation_id, len, data, FALSE);
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +void send_message_and_wait_for_rpc
+</I>&gt;<i> +    (dword pid, dword function, dword correlation_id, dword len, char* data)
+</I>&gt;<i> +{
+</I>&gt;<i> +    do_send_message(pid, function, correlation_id, len, data, TRUE);
+</I>&gt;<i> +}
+</I>&gt;<i> -- 
+</I>&gt;<i> 1.5.6.5
+</I>&gt;<i> 
+</I>
+&gt;<i> _______________________________________________
+</I>&gt;<i> tyndur-devel mailing list
+</I>&gt;<i> <A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">tyndur-devel at tyndur.org</A>
+</I>&gt;<i> <A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">http://list.tyndur.org/mailman/listinfo/tyndur-devel</A>
+</I>
+-- 
+Antoine Kaufmann
+&lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">toni at famkaufmann.info</A>&gt;
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 197 bytes
+Beschreibung: nicht verfügbar
+URL         : &lt;<A HREF="http://list.tyndur.org/pipermail/tyndur-devel/attachments/20090405/d171f9f8/attachment.pgp">http://list.tyndur.org/pipermail/tyndur-devel/attachments/20090405/d171f9f8/attachment.pgp</A>&gt;
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="000707.html">[tyndur-devel] [PATCH v3] build hinzugefuegt
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="000709.html">[tyndur-devel] [PATCH] ElTorito-CD-Images
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#708">[ Datum ]</a>
+              <a href="thread.html#708">[ Thema ]</a>
+              <a href="subject.html#708">[ Betreff (Subject)]</a>
+              <a href="author.html#708">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

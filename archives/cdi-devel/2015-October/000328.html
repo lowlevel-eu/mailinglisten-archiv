@@ -1,0 +1,173 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH v3 08/10] ehci: Add EHCI driver
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%20v3%2008/10%5D%20ehci%3A%20Add%20EHCI%20driver&In-Reply-To=%3C20151011210257.GA3279%40silvanus%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   
+   <LINK REL="Next"  HREF="000329.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH v3 08/10] ehci: Add EHCI driver</H1>
+    <B>Kevin Wolf</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%20v3%2008/10%5D%20ehci%3A%20Add%20EHCI%20driver&In-Reply-To=%3C20151011210257.GA3279%40silvanus%3E"
+       TITLE="[cdi-devel] [PATCH v3 08/10] ehci: Add EHCI driver">kevin at tyndur.org
+       </A><BR>
+    <I>Sun Oct 11 23:03:07 CEST 2015</I>
+    <P><UL>
+        
+        <LI>Next message: <A HREF="000329.html">[cdi-devel] [PATCH v3 09/10] usb: Add USB 2.0 bus driver
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#328">[ date ]</a>
+              <a href="thread.html#328">[ thread ]</a>
+              <a href="subject.html#328">[ subject ]</a>
+              <a href="author.html#328">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>On Mon, May 11, 2015 at 09:59:28PM +0200, Max Reitz wrote:
+&gt;<i> + This adds an EHCI USB host controller driver. It is missing support
+</I>&gt;<i>   for periodic schedule (interrupt and isochronous transfers),
+</I>&gt;<i>   hotplugging, suspend/resume, etc. pp..
+</I>&gt;<i> 
+</I>&gt;<i> Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+</I>&gt;<i> ---
+</I>&gt;<i>  ehci/ehci.c | 643 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+</I>&gt;<i>  ehci/ehci.h | 290 +++++++++++++++++++++++++++
+</I>&gt;<i>  ehci/main.c |  68 +++++++
+</I>&gt;<i>  3 files changed, 1001 insertions(+)
+</I>&gt;<i>  create mode 100644 ehci/ehci.c
+</I>&gt;<i>  create mode 100644 ehci/ehci.h
+</I>&gt;<i>  create mode 100644 ehci/main.c
+</I>
+&gt;<i> +static void retire_qtd(ehci_fat_qtd_t *qtd)
+</I>&gt;<i> +{
+</I>&gt;<i> +    ehci_fat_qh_t *qh = qtd-&gt;qh;
+</I>&gt;<i> +
+</I>&gt;<i> +    uint32_t err_mask = (qh-&gt;qh.ep_state[0] &amp; EHCI_QHES0_EPS_MASK)
+</I>&gt;<i> +                         == EHCI_QHES0_EPS_HS
+</I>&gt;<i> +                        ? EHCI_QTDS_HS_ERR_MASK
+</I>&gt;<i> +                        : EHCI_QTDS_LFS_ERR_MASK;
+</I>&gt;<i> +
+</I>&gt;<i> +    if (qtd-&gt;qtd.status &amp; err_mask) {
+</I>&gt;<i> +        if (qtd-&gt;qtd.status &amp; EHCI_QTDS_BABBLE) {
+</I>&gt;<i> +            *qtd-&gt;result = CDI_USB_BABBLE;
+</I>&gt;<i> +        } else if (qtd-&gt;qtd.status &amp; (EHCI_QTDS_XACTERR | EHCI_QTDS_P_ERR)) {
+</I>&gt;<i> +            *qtd-&gt;result = CDI_USB_BAD_RESPONSE;
+</I>&gt;<i> +        } else if (qtd-&gt;qtd.status &amp; (EHCI_QTDS_BUFERR | EHCI_QTDS_MuF)) {
+</I>&gt;<i> +            *qtd-&gt;result = CDI_USB_HC_ERROR;
+</I>&gt;<i> +        } else if (qtd-&gt;qtd.status &amp; EHCI_QTDS_HALTED) {
+</I>&gt;<i> +            *qtd-&gt;result = CDI_USB_STALL;
+</I>&gt;<i> +        } else {
+</I>&gt;<i> +            *qtd-&gt;result = CDI_USB_HC_ERROR;
+</I>&gt;<i> +        }
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    if (qtd-&gt;write_back) {
+</I>&gt;<i> +        size_t rem = qtd-&gt;write_back_size;
+</I>&gt;<i> +        for (int i = 0; i &lt; 5 &amp;&amp; rem; i++) {
+</I>&gt;<i> +            size_t sz = rem &gt; 4096 ? 4096 : rem;
+</I>&gt;<i> +            memcpy((void *)((uintptr_t)qtd-&gt;write_back + i * 4096),
+</I>&gt;<i> +                   qtd-&gt;buffers[i]-&gt;vaddr, sz);
+</I>&gt;<i> +            rem -= sz;
+</I>&gt;<i> +        }
+</I>&gt;<i> +        assert(!rem);
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    qh-&gt;first_qtd = qtd-&gt;next;
+</I>&gt;<i> +    if (qh-&gt;last_qtd == qtd) {
+</I>&gt;<i> +        qh-&gt;last_qtd = NULL;
+</I>&gt;<i> +    }
+</I>
+Worth an assert(qh-&gt;first_qtd == qtd) before doing this?
+
+&gt;<i> +    for (int i = 0; i &lt; 5; i++) {
+</I>&gt;<i> +        if (qtd-&gt;buffers[i]) {
+</I>&gt;<i> +            cdi_mem_free(qtd-&gt;buffers[i]);
+</I>&gt;<i> +        }
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    cdi_mem_free(qtd-&gt;cdi_mem_area);
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +static void enter_qtd(ehci_fat_qh_t *qh, ehci_fat_qtd_t *qtd)
+</I>&gt;<i> +{
+</I>&gt;<i> +    bool first;
+</I>&gt;<i> +
+</I>&gt;<i> +    qtd-&gt;qh = qh;
+</I>&gt;<i> +    qtd-&gt;qtd.next_qtd = EHCI_T;
+</I>&gt;<i> +    qtd-&gt;qtd.alt_next_qtd = EHCI_T;
+</I>&gt;<i> +
+</I>&gt;<i> +    while (qh-&gt;first_qtd) {
+</I>&gt;<i> +        // Break if an active qTD is encountered
+</I>&gt;<i> +        if (qh-&gt;first_qtd-&gt;qtd.status &amp; EHCI_QTDS_ACTIVE) {
+</I>&gt;<i> +            break;
+</I>&gt;<i> +        }
+</I>&gt;<i> +
+</I>&gt;<i> +        retire_qtd(qh-&gt;first_qtd);
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    first = !qh-&gt;first_qtd;
+</I>&gt;<i> +
+</I>&gt;<i> +    // Note: Race condition (a qTD might retire here and we are thus appending
+</I>&gt;<i> +    // the one to be queued to an inactive qTD); it's fine as long as we are
+</I>&gt;<i> +    // constantly rescanning the queue (here and in ehci_wait_transaction())
+</I>&gt;<i> +
+</I>&gt;<i> +    if (first) {
+</I>&gt;<i> +        qh-&gt;first_qtd = qtd;
+</I>&gt;<i> +    } else {
+</I>&gt;<i> +        qh-&gt;last_qtd-&gt;next = qtd;
+</I>&gt;<i> +    }
+</I>&gt;<i> +    qh-&gt;last_qtd = qtd;
+</I>&gt;<i> +
+</I>&gt;<i> +    if (!first) {
+</I>&gt;<i> +        qh-&gt;last_qtd-&gt;qtd.next_qtd = qtd-&gt;paddr;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    // If the QH is not active, it's done with its queue of qTDs and we should
+</I>&gt;<i> +    // continue from this qTD
+</I>&gt;<i> +    if (!(qh-&gt;qh.overlay.status &amp; EHCI_QTDS_ACTIVE)) {
+</I>&gt;<i> +        qh-&gt;qh.overlay.next_qtd = qh-&gt;first_qtd-&gt;paddr;
+</I>&gt;<i> +    }
+</I>
+Is this racy? If you enter two qTDs and the hardware hasn't copied the
+active bit of the first entered qTD into the overlay yet before the
+second one is entered, it looks to me as if the QH pointed to the second
+one now and the first one got ignored.
+
+&gt;<i> +}
+</I>
+Kevin
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	
+	<LI>Next message: <A HREF="000329.html">[cdi-devel] [PATCH v3 09/10] usb: Add USB 2.0 bus driver
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#328">[ date ]</a>
+              <a href="thread.html#328">[ thread ]</a>
+              <a href="subject.html#328">[ subject ]</a>
+              <a href="author.html#328">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

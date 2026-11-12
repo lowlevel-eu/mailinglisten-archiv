@@ -1,0 +1,1109 @@
+Index: src/modules/cdi/serial/dir.c
+===================================================================
+--- src/modules/cdi/serial/dir.c	(Revision 0)
++++ src/modules/cdi/serial/dir.c	(Revision 0)
+@@ -0,0 +1,72 @@
++/*
++ * Copyright (c) 2008 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Alexander Siol.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++#include <string.h>
++
++#include "cdi/lists.h"
++
++#include "serial_cdi.h"
++
++
++cdi_list_t serial_fs_dir_list(struct cdi_fs_stream* stream)
++{
++    return stream->res->children;
++}
++
++int serial_fs_dir_create_child(struct cdi_fs_stream* stream, const char* name,
++                             struct cdi_fs_res* parent)
++{
++    struct serial_fs_res* res = malloc(sizeof(*res));
++    struct serial_fs_res* parent_res = (struct serial_fs_res*) parent;
++
++    if (parent_res->in_use != 0)
++    {
++        stream->error = CDI_FS_ERROR_ONS;
++        return 0;
++    }
++
++    memset(res, 0, sizeof(*res));
++
++    res->res.loaded = 1;
++    res->res.name = strdup(name);
++    res->res.res = &serial_fs_res;
++    res->res.children = cdi_list_create();
++
++    cdi_list_push(parent_res->res.children, res);
++    res->res.parent = parent;
++    parent_res->in_use++;
++
++    stream->res = (struct cdi_fs_res*) res;
++    return 1;
++}
+Index: src/modules/cdi/serial/serial.c
+===================================================================
+--- src/modules/cdi/serial/serial.c	(Revision 0)
++++ src/modules/cdi/serial/serial.c	(Revision 0)
+@@ -0,0 +1,138 @@
++/*
++ * Copyright (c) 2008 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Alexander Siol.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "serial.h"
++#include "cdi.h"
++#include "cdi/io.h"
++#include "cdi/misc.h"
++
++// Basisadressen.
++uint16_t COM1_BASE = 0x3F8;
++uint16_t COM2_BASE = 0x2F8;
++uint16_t COM3_BASE = 0x3E8;
++uint16_t COM4_BASE = 0x2E8;
++
++/**
++ *  Oeffnet einen Port an der angegeben Basisadresse unter angegeben Optionen.
++ * @param base Basisport (Wird nicht geprueft!)
++ * @param baudrate Baudrate halt. 115200 Maximal.
++ * @param parity Paritaet.
++ * @param bits Anzahl der Datenbits einer Uebertragung. 5-8
++ * @param stopbits Anzahl der Stopbits
++ * @return 0 bei Erfolg, sonst -1
++ */
++int serial_init(uint16_t base, uint32_t baudrate, uint8_t bits, uint8_t parity,
++                uint8_t stopbits)
++{
++    uint16_t divisor = 0;
++    int ports_allocated = -1;
++
++    // Baudrate pruefen
++    if (baudrate > 115200)
++        return -1;
++
++    // Ports holen
++    ports_allocated = cdi_ioports_alloc(base, 8);
++    if (ports_allocated == -1)
++        return -1;
++
++    // Interrupts deaktivieren
++    cdi_outb(base+REG_IER,0x00);
++
++    // DLAB setzen
++    cdi_outb(base+REG_LCR,0x80);
++
++    // Baudrate setzen
++    divisor = 115200 / baudrate;
++    cdi_outw(base, divisor);
++
++    // Anzahl Bits, Paritaet, usw setzen (DLAB zurücksetzen)
++    cdi_outb(base+REG_LCR,((parity&0x7)<<3)|((bits-5)&0x3)|((stopbits&0x1)<<2));
++
++    // Initialisierung abschließen
++    cdi_outb(base+REG_FCR,0xC7);
++    cdi_outb(base+REG_MCR,0x0B);
++
++    return 0;
++}
++
++/**
++ * Sendet ein uint8 an den Port
++ * @param base Der IO-Port der Schnittstelle an die etwas geschickt werden soll.
++ * @param data uint8 an Daten
++ */
++void serial_send(uint16_t base, uint8_t data)
++{
++    cdi_outb(base,data);
++}
++
++/**
++ * Prueft ob gesendet werden kann (1 Byte!)
++ * @param base Der IO-Port der Schnittstelle, auf der gesendet werden soll.
++ */
++int serial_can_send(uint16_t base)
++{
++    if ((cdi_inb(base+REG_LSR)&0x20)==0)
++        return 0;
++    else
++        return 1;
++}
++
++/**
++ * Liest ein uint8 von dem Port
++ * @param base Der IO-Port der Schnittstelle von der gelesen werden soll.
++ */
++uint8_t serial_recv(uint16_t base)
++{
++    return cdi_inb(base);
++}
++
++/**
++ * Prueft, ob ein uint8 von dem Port gelesen werden kann.
++ * @param base Der IO-Port der Schnittstelle von der gelesen werden soll.
++ */
++int serial_can_recv(uint16_t base)
++{
++    return (cdi_inb(base+REG_LSR)&1);
++}
++
++/**
++ * Gibt den Port wieder frei.
++ * @param base Der IO-Port der Schnittstelle die Freigegeben werden soll.
++ */
++void serial_free(uint16_t base)
++{
++    cdi_ioports_free(base, 8);
++}
+Index: src/modules/cdi/serial/file.c
+===================================================================
+--- src/modules/cdi/serial/file.c	(Revision 0)
++++ src/modules/cdi/serial/file.c	(Revision 0)
+@@ -0,0 +1,111 @@
++/*
++ * Copyright (c) 2008 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Alexander Siol.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "serial_cdi.h"
++#include "serial.h"
++#include "stdio.h"
++#include "cdi/misc.h"
++
++size_t serial_fs_file_read(struct cdi_fs_stream* stream, uint64_t start,
++    size_t size, void* data)
++{
++    struct serial_fs_res* res = (struct serial_fs_res*) stream->res;
++    struct serial_fs_res* parent = (struct serial_fs_res*) res->res.parent;
++    size_t ptr = 0;
++    int retry = 0;
++
++    if (parent->baseport != 0)
++    {
++        while (ptr < size)
++        {
++            if (serial_can_recv(parent->baseport))
++            {
++                ((uint8_t*)data)[ptr++] = serial_recv(parent->baseport);
++                retry = 0;
++            }
++            else
++            {
++                // Timeout-Ersatz, bei zu schnellen Rechnern benoetigt um
++                // brauchbar zu lesen.
++                retry++;
++                if (retry > 3)
++                {
++                    stream->error = CDI_FS_ERROR_EOF;
++                    return ptr;
++                }
++                else
++                {
++                    cdi_sleep_ms(1);
++                }
++            }
++        }
++    }
++    else
++    {
++        stream->error = CDI_FS_ERROR_ONS;
++        return 0;
++    }
++    return size;
++}
++
++size_t serial_fs_file_write(struct cdi_fs_stream* stream, uint64_t start,
++    size_t size, const void* data)
++{
++    struct serial_fs_res* res = (struct serial_fs_res*) stream->res;
++    struct serial_fs_res* parent = (struct serial_fs_res*) res->res.parent;
++
++    if (parent->baseport != 0)
++    {
++        size_t ptr = 0;
++        while (ptr < size)
++        {
++            if (serial_can_send(parent->baseport))
++            {
++                serial_send(parent->baseport, *(uint8_t*)(data + ptr++));
++            }
++        }
++    }
++    else
++    {
++        stream->error = CDI_FS_ERROR_ONS;
++        return 0;
++    }
++    return size;
++}
++
++int serial_fs_file_truncate(struct cdi_fs_stream* stream, uint64_t size)
++{
++    return 0;
++}
+Index: src/modules/cdi/serial/Makefile.all
+===================================================================
+--- src/modules/cdi/serial/Makefile.all	(Revision 0)
++++ src/modules/cdi/serial/Makefile.all	(Revision 0)
+@@ -0,0 +1,6 @@
++shopt -s extglob
++source $LOST_BUILDMK_ROOT/config.sh
++
++echo "LD   $1/modules/serial"
++$LOST_TOOLS_LD -oserial.mod -Ttext=0x40000000 *.o --start-group $2 --end-group
++$LOST_TOOLS_STRIP -s serial.mod -o $1/modules/serial
+Index: src/modules/cdi/serial/serial_cdi.h
+===================================================================
+--- src/modules/cdi/serial/serial_cdi.h	(Revision 0)
++++ src/modules/cdi/serial/serial_cdi.h	(Revision 0)
+@@ -0,0 +1,98 @@
++/*
++ * Copyright (c) 2008 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Alexander Siol.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef _SERIAL_CDI_H_
++#define _SERIAL_CDI_H_
++
++#include <stdint.h>
++#include <stdlib.h>
++
++#include "cdi/fs.h"
++
++/**
++ * Dateisystemressource fuer serial
++ */
++struct serial_fs_res {
++    struct cdi_fs_res res;
++
++    // Basisport
++    uint16_t baseport;
++    int in_use;
++};
++
++
++// CDI-IF
++int serial_fs_init(struct cdi_fs_filesystem* fs);
++int serial_fs_destroy(struct cdi_fs_filesystem* fs);
++
++// CDI Res
++int     serial_fs_res_load(struct cdi_fs_stream* stream);
++int     serial_fs_res_unload(struct cdi_fs_stream* stream);
++int     serial_fs_res_remove(struct cdi_fs_stream* stream);
++int     serial_fs_res_rename(struct cdi_fs_stream* stream, const char* name);
++//int     serial_fs_res_move(struct cdi_fs_stream* stream, struct cdi_fs_res* dest);
++int     serial_fs_res_assign_class(struct cdi_fs_stream* stream,
++            cdi_fs_res_class_t class);
++int     serial_fs_res_remove_class(struct cdi_fs_stream* stream,
++            cdi_fs_res_class_t class);
++int64_t serial_fs_res_meta_read(struct cdi_fs_stream* stream, cdi_fs_meta_t meta);
++int     serial_fs_res_meta_write(struct cdi_fs_stream* stream, cdi_fs_meta_t meta,
++    int64_t value);
++int serial_fs_res_destroy(struct serial_fs_res* res);
++
++// CDI File
++size_t  serial_fs_file_read(struct cdi_fs_stream* stream, uint64_t start,
++            size_t size, void* data);
++size_t  serial_fs_file_write(struct cdi_fs_stream* stream, uint64_t start,
++            size_t size, const void* data);
++int     serial_fs_file_truncate(struct cdi_fs_stream* stream, uint64_t size);
++
++// CDI Dir
++cdi_list_t  serial_fs_dir_list(struct cdi_fs_stream* stream);
++int         serial_fs_dir_create_child(struct cdi_fs_stream* stream,
++                const char* name, struct cdi_fs_res* parent);
++
++// CDI Link
++const char* serial_fs_link_read(struct cdi_fs_stream* stream);
++int         serial_fs_link_write(struct cdi_fs_stream* stream, const char* path);
++
++
++// serial-Ressourcen(-Typen)
++extern struct cdi_fs_res_res    serial_fs_res;
++extern struct cdi_fs_res_file   serial_fs_file;
++extern struct cdi_fs_res_dir    serial_fs_dir;
++extern struct cdi_fs_res_link   serial_fs_link;
++
++#endif /* _SERIAL_CDI_H_ */
+Index: src/modules/cdi/serial/init.c
+===================================================================
+--- src/modules/cdi/serial/init.c	(Revision 0)
++++ src/modules/cdi/serial/init.c	(Revision 0)
+@@ -0,0 +1,116 @@
++/*
++ * Copyright (c) 2008 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Alexander Siol.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "serial_cdi.h"
++#include "serial.h"
++#include "cdi/lists.h"
++#include "cdi/misc.h"
++#include <stdio.h>
++
++int serial_fs_init(struct cdi_fs_filesystem* cdi_fs)
++{
++    struct serial_fs_res* root_res;
++    struct serial_fs_res* com1_res;
++    struct serial_fs_res* com2_res;
++    struct serial_fs_res* com3_res;
++    struct serial_fs_res* com4_res;
++
++    // Das FS initialisieren.
++
++    root_res = malloc(sizeof(*root_res));
++    memset(root_res, 0, sizeof(*root_res));
++    root_res->res.name = strdup("/");
++    root_res->res.res = &serial_fs_res;
++    root_res->res.dir = &serial_fs_dir;
++    root_res->res.loaded = 1;
++    root_res->res.children = cdi_list_create();
++    root_res->baseport = 0;
++
++    com1_res = malloc(sizeof(*root_res));
++    memset(com1_res, 0, sizeof(*root_res));
++    com1_res->res.name = strdup("1");
++    com1_res->res.res = &serial_fs_res;
++    com1_res->res.dir = &serial_fs_dir;
++    com1_res->res.loaded = 1;
++    com1_res->res.children = cdi_list_create();
++    com1_res->baseport = COM1_BASE;
++    com1_res->in_use = 0;
++    com1_res->res.parent = (struct cdi_fs_res*) root_res;
++    cdi_list_push(root_res->res.children, com1_res);
++
++    com2_res = malloc(sizeof(*root_res));
++    memset(com2_res, 0, sizeof(*root_res));
++    com2_res->res.name = strdup("2");
++    com2_res->res.res = &serial_fs_res;
++    com2_res->res.dir = &serial_fs_dir;
++    com2_res->res.loaded = 1;
++    com2_res->res.children = cdi_list_create();
++    com2_res->baseport = COM2_BASE;
++    com2_res->in_use = 0;
++    com2_res->res.parent = (struct cdi_fs_res*) root_res;
++    cdi_list_push(root_res->res.children, com2_res);
++
++    com3_res = malloc(sizeof(*root_res));
++    memset(com3_res, 0, sizeof(*root_res));
++    com3_res->res.name = strdup("3");
++    com3_res->res.res = &serial_fs_res;
++    com3_res->res.dir = &serial_fs_dir;
++    com3_res->res.loaded = 1;
++    com3_res->res.children = cdi_list_create();
++    com3_res->baseport = COM3_BASE;
++    com3_res->in_use = 0;
++    com3_res->res.parent = (struct cdi_fs_res*) root_res;
++    cdi_list_push(root_res->res.children, com3_res);
++
++    com4_res = malloc(sizeof(*root_res));
++    memset(com4_res, 0, sizeof(*root_res));
++    com4_res->res.name = strdup("4");
++    com4_res->res.res = &serial_fs_res;
++    com4_res->res.dir = &serial_fs_dir;
++    com4_res->res.loaded = 1;
++    com4_res->res.children = cdi_list_create();
++    com4_res->baseport = COM4_BASE;
++    com4_res->in_use = 0;
++    com4_res->res.parent = (struct cdi_fs_res*) root_res;
++    cdi_list_push(root_res->res.children, com4_res);
++
++    cdi_fs->root_res = (struct cdi_fs_res*) root_res;
++    return 1;
++}
++
++int serial_fs_destroy(struct cdi_fs_filesystem* fs)
++{
++    return serial_fs_res_destroy((struct serial_fs_res*)fs->root_res);
++}
+Index: src/modules/cdi/serial/serial.h
+===================================================================
+--- src/modules/cdi/serial/serial.h	(Revision 0)
++++ src/modules/cdi/serial/serial.h	(Revision 0)
+@@ -0,0 +1,76 @@
++/*
++ * Copyright (c) 2008 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Alexander Siol.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef _SERIAL_H_
++#define _SERIAL_H_
++
++#include <stdint.h>
++
++// Basisadressen.
++uint16_t COM1_BASE;
++uint16_t COM2_BASE;
++uint16_t COM3_BASE;
++uint16_t COM4_BASE;
++
++// Register-Port-Offsets
++#define REG_TR  0x00 // Bei nicht gesetztem DLAB
++#define REG_IER 0x01 // Bei nicht gesetztem DLAB
++#define REG_IIR 0x02
++#define REG_FCR 0x02
++#define REG_LCR 0x03
++#define REG_MCR 0x04
++#define REG_LSR 0x05
++#define REG_MSR 0x06
++#define REG_SCR 0x07
++
++// Parity-Bits
++typedef enum {
++    PARITY_NONE  = 0,
++    PARITY_ODD   = 4,
++    PARITY_EVEN  = 6,
++    PARITY_MARK  = 5,
++    PARITY_SPACE = 7
++} parity_t;
++
++// Funktionen
++int serial_init(uint16_t base, uint32_t baudrate, uint8_t bits, uint8_t parity,
++                uint8_t stopbits);
++void serial_send(uint16_t base, uint8_t data);
++int serial_can_send(uint16_t base);
++uint8_t serial_recv(uint16_t base);
++int serial_can_recv(uint16_t base);
++void serial_free(uint16_t base);
++
++#endif /* _SERIAL_H_ */
+Index: src/modules/cdi/serial/main.c
+===================================================================
+--- src/modules/cdi/serial/main.c	(Revision 0)
++++ src/modules/cdi/serial/main.c	(Revision 0)
+@@ -0,0 +1,98 @@
++/*
++ * Copyright (c) 2008 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Alexander Siol.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <stdint.h>
++#include <stdlib.h>
++#include <stdio.h>
++
++#include "cdi/fs.h"
++#include "cdi/misc.h"
++
++#include "serial_cdi.h"
++
++struct serial_driver {
++    struct cdi_fs_driver fs;
++};
++
++static struct serial_driver serial_driver;
++static const char* driver_name = "serial";
++
++static int serial_driver_init(struct serial_driver* driver);
++static void serial_driver_destroy(struct cdi_driver* driver);
++
++#ifdef CDI_STANDALONE
++int main(void)
++#else
++int init_serial(void)
++#endif
++{
++    cdi_init();
++
++    if (serial_driver_init(&serial_driver) != 0) {
++        return -1;
++    }
++    cdi_fs_driver_register((struct cdi_fs_driver*) &serial_driver);
++
++#ifdef CDI_STANDALONE
++    cdi_run_drivers();
++#endif
++
++    return 0;
++}
++
++/**
++ * Initialisiert die Datenstrukturen fuer den serial-Treiber
++ */
++static int serial_driver_init(struct serial_driver* driver)
++{
++    // Konstruktor der Vaterklasse
++    cdi_fs_driver_init((struct cdi_fs_driver*) driver);
++
++    // Namen setzen
++    driver->fs.drv.name = driver_name;
++    driver->fs.fs_init = serial_fs_init;
++    driver->fs.fs_destroy = serial_fs_destroy;
++
++    driver->fs.drv.destroy = serial_driver_destroy;
++    return 0;
++}
++
++/**
++ * Deinitialisiert die Datenstrukturen fuer den serial-Treiber
++ */
++static void serial_driver_destroy(struct cdi_driver* driver)
++{
++    cdi_fs_driver_destroy((struct cdi_fs_driver*) driver);
++}
+Index: src/modules/cdi/serial/res.c
+===================================================================
+--- src/modules/cdi/serial/res.c	(Revision 0)
++++ src/modules/cdi/serial/res.c	(Revision 0)
+@@ -0,0 +1,221 @@
++/*
++ * Copyright (c) 2008 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Alexander Siol.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "serial_cdi.h"
++#include "serial.h"
++
++int serial_fs_res_load(struct cdi_fs_stream* stream)
++{
++    struct serial_fs_res* res = (struct serial_fs_res*) stream->res;
++
++    if (res->res.loaded) {
++        return 0;
++    }
++
++    res->res.loaded = 1;
++    return 1;
++}
++
++int serial_fs_res_unload(struct cdi_fs_stream* stream)
++{
++    struct serial_fs_res* res = (struct serial_fs_res*) stream->res;
++
++    if (!res->res.loaded) {
++        return 0;
++    }
++
++    res->res.loaded = 0;
++    return 1;
++}
++
++int64_t serial_fs_res_meta_read(struct cdi_fs_stream* stream, cdi_fs_meta_t meta)
++{
++    return 0;
++}
++
++int serial_fs_res_meta_write(struct cdi_fs_stream* stream, cdi_fs_meta_t meta,
++                           int64_t value)
++{
++    return 0;
++}
++
++int serial_fs_res_assign_class(struct cdi_fs_stream* stream,
++                             cdi_fs_res_class_t class)
++{
++    struct serial_fs_res* res = (struct serial_fs_res*) stream->res;
++    struct serial_fs_res* parent = (struct serial_fs_res*) res->res.parent;
++
++
++    if (class == CDI_FS_CLASS_FILE)
++    {
++        res->res.file = &serial_fs_file;
++
++        // Namen auseinandernehmen
++        char* trenner = NULL;
++        uint32_t baudrate;
++        parity_t parity   = PARITY_NONE;
++        uint8_t bits     = 8;
++        uint8_t stopbits = 1;
++
++        trenner = index(res->res.name, ',');
++        if (trenner)
++        {
++            char* baudrate_s = malloc(trenner - res->res.name + 1);
++            if (!baudrate_s)
++            {
++                stream->error = CDI_FS_ERROR_INTERNAL;
++                return 0;
++            }
++            strncpy(baudrate_s, res->res.name, trenner - res->res.name );
++            baudrate_s[(trenner - res->res.name)] = 0;
++            baudrate = atoi(baudrate_s);
++            free(baudrate_s);
++
++            char* buffer = malloc(2);
++            if (!buffer)
++            {
++                stream->error = CDI_FS_ERROR_INTERNAL;
++                return 0;
++            }
++            buffer[1] = 0;
++            buffer[0] = trenner[1];
++            bits = (uint8_t)atoi(buffer);
++            buffer[0] = trenner[3];
++            stopbits = (uint8_t)atoi(buffer);
++            free(buffer);
++
++            // Paritaet feststellen.
++            if (strncmp(trenner+2, "n", 1) == 0)
++            {
++                parity = PARITY_NONE;
++            }
++            else if (strncmp(trenner+2, "o", 1) == 0)
++            {
++                parity = PARITY_ODD;
++            }
++            else if (strncmp(trenner+2, "e", 1) == 0)
++            {
++                parity = PARITY_EVEN;
++            }
++            else if (strncmp(trenner+2, "s", 1) == 0)
++            {
++                parity = PARITY_SPACE;
++            }
++            else if (strncmp(trenner+2, "m", 1) == 0)
++            {
++                parity = PARITY_MARK;
++            }
++        }
++        else
++        {
++            baudrate = atoi(res->res.name);
++        }
++
++        if (parent->baseport)
++        {
++            serial_init(parent->baseport,baudrate,bits,parity,stopbits);
++        }
++        return 1;
++    }
++    else
++    {
++        stream->error = CDI_FS_ERROR_ONS;
++        return 0;
++    }
++}
++
++int serial_fs_res_remove_class(struct cdi_fs_stream* stream,
++            cdi_fs_res_class_t class)
++{
++    struct serial_fs_res* res = (struct serial_fs_res*) stream->res;
++    struct serial_fs_res* parent = (struct serial_fs_res*) res->res.parent;
++
++
++    if (class == CDI_FS_CLASS_FILE && res->baseport == 0)
++    {
++        res->res.file = NULL;
++        serial_free(parent->baseport);
++        return 1;
++    }
++    else
++    {
++        stream->error = CDI_FS_ERROR_ONS;
++        return 0;
++    }
++}
++
++int serial_fs_res_rename(struct cdi_fs_stream* stream, const char* name)
++{
++    stream->error = CDI_FS_ERROR_ONS;
++    return 0;
++}
++
++int serial_fs_res_remove(struct cdi_fs_stream* stream)
++{
++    struct serial_fs_res* res = (struct serial_fs_res*) stream->res;
++    struct serial_fs_res* parent = (struct serial_fs_res*) res->res.parent;
++
++
++    if (res->baseport != 0) {
++        stream->error = CDI_FS_ERROR_ONS;
++        return 0;
++    }
++
++    // Link aus der Liste der Vater-Resource entfernen
++    size_t i;
++    struct serial_fs_res* child;
++    for (i=0;(child = cdi_list_get(res->res.parent->children,i));i++) {
++        if (child==res) {
++            cdi_list_remove(res->res.parent->children,i);
++            break;
++        }
++    }
++
++    parent->in_use--;
++
++    serial_fs_res_destroy(res);
++
++    return 1;
++}
++
++int serial_fs_res_destroy(struct serial_fs_res* res)
++{
++    struct serial_fs_res *child;
++    while ((child = cdi_list_pop(res->res.children))) serial_fs_res_destroy(child);
++    cdi_list_destroy(res->res.children);
++    serial_free(res->baseport);
++    free(res);
++    return 1;
++}
+Index: src/modules/cdi/serial/resources.c
+===================================================================
+--- src/modules/cdi/serial/resources.c	(Revision 0)
++++ src/modules/cdi/serial/resources.c	(Revision 0)
+@@ -0,0 +1,71 @@
++/*
++ * Copyright (c) 2008 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Alexander Siol.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "serial_cdi.h"
++
++struct cdi_fs_res_res   serial_fs_res = {
++    .load = serial_fs_res_load,
++    .unload = serial_fs_res_unload,
++
++    .meta_read = serial_fs_res_meta_read,
++    .meta_write = serial_fs_res_meta_write,
++
++    .assign_class = serial_fs_res_assign_class,
++    .remove_class = serial_fs_res_remove_class,
++
++    .rename = serial_fs_res_rename,
++    .remove = serial_fs_res_remove
++};
++
++struct cdi_fs_res_file  serial_fs_file = {
++    // Prinzipiell haben wir nur ausfuehrbare Dateien, der Rest wird mit den
++    // Berechtigungen geregelt
++    .executable = 1,
++
++    .read = serial_fs_file_read,
++    .write = serial_fs_file_write,
++    .truncate = serial_fs_file_truncate
++};
++
++struct cdi_fs_res_dir   serial_fs_dir = {
++    .list = serial_fs_dir_list,
++    .create_child = serial_fs_dir_create_child
++};
++
++struct cdi_fs_res_link  serial_fs_link = {
++    .read_link = serial_fs_link_read,
++    .write_link = serial_fs_link_write
++};
++
+Index: src/modules/cdi/serial/link.c
+===================================================================
+--- src/modules/cdi/serial/link.c	(Revision 0)
++++ src/modules/cdi/serial/link.c	(Revision 0)
+@@ -0,0 +1,47 @@
++/*
++ * Copyright (c) 2008 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Alexander Siol.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "serial_cdi.h"
++
++const char *serial_fs_link_read(struct cdi_fs_stream *stream)
++{
++    return NULL;
++}
++
++int serial_fs_link_write(struct cdi_fs_stream *stream, const char *path)
++{
++    stream->error = CDI_FS_ERROR_ONS;
++    return 0;
++}

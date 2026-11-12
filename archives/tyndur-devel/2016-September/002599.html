@@ -1,0 +1,585 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 6/7] libc/Pascal-RTL: stdio mit lio_dup() und PPB übergeben
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_6/7%3D5D_libc/Pascal-RTL%3D3A_stdio%3F%3D%0A%09%3D%3Futf-8%3Fq%3F_mit_lio%3D5Fdup%3D28%3D29_und_PPB_%3DC3%3DBCbergeben%3F%3D&In-Reply-To=%3C1472914382-8896-7-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002598.html">
+   <LINK REL="Next"  HREF="002600.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 6/7] libc/Pascal-RTL: stdio mit lio_dup() und PPB übergeben</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_6/7%3D5D_libc/Pascal-RTL%3D3A_stdio%3F%3D%0A%09%3D%3Futf-8%3Fq%3F_mit_lio%3D5Fdup%3D28%3D29_und_PPB_%3DC3%3DBCbergeben%3F%3D&In-Reply-To=%3C1472914382-8896-7-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 6/7] libc/Pascal-RTL: stdio mit lio_dup() und PPB übergeben">kevin at tyndur.org
+                  </A><BR>
+    <I>Sa Sep  3 16:53:01 CEST 2016</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002598.html">[tyndur-devel] [PATCH 5/7] kernel2: syscall_shm_size
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002600.html">[tyndur-devel] [PATCH 7/7] shell: Unterstützung für Ein-/Ausgabeumleitung
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2599">[ Datum ]</a>
+              <a href="thread.html#2599">[ Thema ]</a>
+              <a href="subject.html#2599">[ Betreff (Subject) ]</a>
+              <a href="author.html#2599">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* libc/Pascal-RTL: Anstatt beim console-Service nach dem Dateinamen für
+  die Standardein- und -ausgabe zu fragen und diese dann neu zu öffnen,
+  werden jetzt LIO-Streams übergeben und im PPB eingetragen.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/c/getterm/main.c       |   1 +
+ src/modules/include/init.h         |   5 ++
+ src/modules/include/lostio.h       |   1 +
+ src/modules/include/syscall.h      |   1 +
+ src/modules/init/loader.c          |  11 ++++
+ src/modules/lib/crt0.c             |  10 +++
+ src/modules/lib/param.c            | 128 +++++++++++++++++++++++++++++++++++++
+ src/modules/lib/stdlibc/file.c     |  11 ++++
+ src/modules/lib/stdlibc/stdio.c    | 103 +++++++++++++++--------------
+ src/modules/pas/lib/rtl/system.pas |  41 ++++++------
+ 10 files changed, 243 insertions(+), 69 deletions(-)
+
+diff --git a/src/modules/c/getterm/main.c b/src/modules/c/getterm/main.c
+index 92d755b..ade145c 100644
+--- a/src/modules/c/getterm/main.c
++++ b/src/modules/c/getterm/main.c
+@@ -134,6 +134,7 @@ int main(int argc, char* argv[])
+     console_set_handle(STDERR, argv[3]);
+ 
+     // Lokale Ein- und Ausgabehandles auch anpassen
++    stdin = stdout = stderr = NULL;
+     stdio_init();
+ 
+     do {
+diff --git a/src/modules/include/init.h b/src/modules/include/init.h
+index 2de8092..07d7972 100644
+--- a/src/modules/include/init.h
++++ b/src/modules/include/init.h
+@@ -31,6 +31,7 @@
+ #include &lt;types.h&gt;
+ #include &lt;stdio.h&gt;
+ #include &lt;stdbool.h&gt;
++#include &lt;syscall.h&gt;
+ 
+ #define INIT_PID 1
+ 
+@@ -55,6 +56,10 @@ int ppb_get_argc(struct proc_param_block* ppb, size_t ppb_size);
+ void ppb_copy_argv(struct proc_param_block* ppb, size_t ppb_size,
+     char** argv, int argc);
+ int ppb_extract_env(struct proc_param_block* ppb, size_t ppb_size);
++int ppb_forward_streams(struct proc_param_block* ppb, size_t ppb_size,
++                        pid_t from, pid_t to);
++int ppb_get_streams(lio_stream_t* streams, struct proc_param_block* ppb,
++                    size_t ppb_size, pid_t from, int num);
+ 
+ 
+ #ifdef _USE_START_
+diff --git a/src/modules/include/lostio.h b/src/modules/include/lostio.h
+index b1c56d5..3b79469 100644
+--- a/src/modules/include/lostio.h
++++ b/src/modules/include/lostio.h
+@@ -409,6 +409,7 @@ int lio_request_translated_blocks(struct lio_resource* res, uint64_t offset,
+ /* Interne Funktionen */
+ int __iores_fileno(io_resource_t* io_res);
+ struct lostio_internal_file* __create_file_from_iores(io_resource_t* io_res);
++struct lostio_internal_file* __create_file_from_lio_stream(lio_stream_t s);
+ 
+ #endif
+ 
+diff --git a/src/modules/include/syscall.h b/src/modules/include/syscall.h
+index 5a493bb..017d157 100644
+--- a/src/modules/include/syscall.h
++++ b/src/modules/include/syscall.h
+@@ -61,6 +61,7 @@ void* get_phys_addr(void* address);
+ uint32_t create_shared_memory(uint32_t size);
+ void *open_shared_memory(uint32_t id);
+ void close_shared_memory(uint32_t id);
++ssize_t shared_memory_size(uint32_t id);
+ 
+ bool request_ports(uint32_t port, uint32_t length);
+ bool release_ports(uint32_t port, uint32_t length);
+diff --git a/src/modules/init/loader.c b/src/modules/init/loader.c
+index 3f440ca..58649e2 100644
+--- a/src/modules/init/loader.c
++++ b/src/modules/init/loader.c
+@@ -37,6 +37,7 @@
+ #include &lt;syscall.h&gt;
+ #include &lt;loader.h&gt;
+ #include &lt;lock.h&gt;
++#include &lt;init.h&gt;
+ 
+ static struct {
+     pid_t   pid;
+@@ -112,6 +113,16 @@ pid_t load_single_module(void* image, size_t image_size, char* args,
+     }
+ 
+     if (ppb_shm_id) {
++        void *ppb = open_shared_memory(ppb_shm_id);
++        ssize_t ppb_size = shared_memory_size(ppb_shm_id);
++
++        if (!ppb || ppb_size &lt; 0) {
++            goto fail;
++        }
++
++        ppb_forward_streams(ppb, ppb_size, parent_pid, loader_state.pid);
++        close_shared_memory(ppb_shm_id);
++
+         init_child_ppb(loader_state.pid, ppb_shm_id);
+     }
+ 
+diff --git a/src/modules/lib/crt0.c b/src/modules/lib/crt0.c
+index fa4e2da..94cfa5e 100644
+--- a/src/modules/lib/crt0.c
++++ b/src/modules/lib/crt0.c
+@@ -32,6 +32,7 @@
+ #include &lt;init.h&gt;
+ #include &lt;string.h&gt;
+ #include &lt;stdio.h&gt;
++#include &lt;lostio.h&gt;
+ 
+ //Sollte anders geloest werden
+ extern int main(int argc, char* argv[]);
+@@ -79,6 +80,15 @@ static void __attribute__((used))
+     init_envvars(ppb, ppb_size);
+     init_waitpid();
+ #ifndef _NO_STDIO_
++    if (ppb_shm_id) {
++        lio_stream_t streams[3];
++        int ret = ppb_get_streams(streams, ppb, ppb_size, 1, 3);
++        if (ret == 3) {
++            stdin = streams[0] ? __create_file_from_lio_stream(streams[0]) : NULL;
++            stdout = streams[1] ? __create_file_from_lio_stream(streams[1]) : NULL;
++            stderr = streams[2] ? __create_file_from_lio_stream(streams[2]) : NULL;
++        }
++    }
+     stdio_init();
+ #endif
+ 
+diff --git a/src/modules/lib/param.c b/src/modules/lib/param.c
+index a79be5b..f03dc53 100644
+--- a/src/modules/lib/param.c
++++ b/src/modules/lib/param.c
+@@ -28,15 +28,19 @@
+ 
+ #include &lt;stdlib.h&gt;
+ #include &lt;string.h&gt;
++#include &lt;stdio.h&gt;
+ #include &lt;errno.h&gt;
++#include &lt;assert.h&gt;
+ 
+ #include &lt;syscall.h&gt;
++#include &lt;lostio.h&gt;
+ #include &lt;page.h&gt;
+ #include &lt;env.h&gt;
+ 
+ enum ppb_entry_type {
+     PPB_CMDLINE_ARG = 1,
+     PPB_ENV_VAR,
++    PPB_STREAM,
+ };
+ 
+ struct ppb_entry {
+@@ -171,6 +175,42 @@ static int ppb_builder_finish(struct ppb_builder* b)
+     return shm;
+ }
+ 
++static int ppb_add_cloned_stdio(struct ppb_builder* b,
++                                lio_stream_t *remote, int num)
++{
++    FILE* stdio[] = { stdin, stdout, stderr };
++    int i;
++
++    assert(num &lt;= 3);
++    for (i = 0; i &lt; num; i++) {
++        lio_stream_t orig, copy;
++        int ret;
++
++        orig = file_get_stream(stdio[i]);
++        if (orig &lt; 0) {
++            continue;
++        }
++
++        copy = lio_dup(orig, -1);
++        if (copy &lt; 0) {
++            return copy;
++        }
++
++        remote[i] = lio_pass_fd(copy, 1);
++        if (remote[i] &lt; 0) {
++            lio_close(copy);
++            return remote[i];
++        }
++
++        ret = ppb_add_entry(b, PPB_STREAM, &amp;remote[i], sizeof(remote[i]));
++        if (ret &lt; 0) {
++            return ret;
++        }
++    }
++
++    return 0;
++}
++
+ static int ppb_add_cloned_env(struct ppb_builder* b)
+ {
+     int i, cnt;
+@@ -222,6 +262,11 @@ int ppb_from_argv(const char* const argv[])
+     const char* const* p;
+     int ret;
+ 
++    /* Muss hier deklariert werden statt in ppb_add_cloned_stdio(), sonst ist
++     * der Pointer nicht mehr gültig, wenn er in ppb_builder_finish() benutzt
++     * wird. */
++    lio_stream_t remote_streams[3];
++
+     b = ppb_builder_init();
+     if (b == NULL) {
+         errno = ENOMEM;
+@@ -240,6 +285,12 @@ int ppb_from_argv(const char* const argv[])
+         return -1;
+     }
+ 
++    ret = ppb_add_cloned_stdio(b, remote_streams, 3);
++    if (ret &lt; 0) {
++        errno = -ret;
++        return -1;
++    }
++
+     shm = ppb_builder_finish(b);
+     if (shm &lt; 0) {
+         errno = -shm;
+@@ -363,3 +414,80 @@ int ppb_extract_env(struct proc_param_block* ppb, size_t ppb_size)
+ 
+     return 0;
+ }
++
++int ppb_forward_streams(struct proc_param_block* ppb, size_t ppb_size,
++                        pid_t from, pid_t to)
++{
++    int i;
++
++    if (!ppb_is_valid(ppb, ppb_size)) {
++        return -EINVAL;
++    }
++
++    for (i = 0; i &lt; ppb-&gt;num; i++) {
++        lio_stream_t s, remote;
++
++        if (ppb-&gt;entries[i].type != PPB_STREAM) {
++            continue;
++        }
++
++        if (ppb-&gt;entries[i].len != sizeof(lio_stream_t)) {
++            return -EFAULT;
++        }
++
++        s = *(lio_stream_t*)(((char*) ppb) + ppb-&gt;entries[i].value);
++
++        if (lio_stream_origin(s) != from) {
++            return -EBADF;
++        }
++
++        remote = lio_pass_fd(s, to);
++        if (remote &lt; 0) {
++            return remote;
++        }
++
++        *(lio_stream_t*)(((char*) ppb) + ppb-&gt;entries[i].value) = remote;
++    }
++
++    return 0;
++}
++
++int ppb_get_streams(lio_stream_t* streams, struct proc_param_block* ppb,
++                    size_t ppb_size, pid_t from, int num)
++{
++    int i;
++    int found = 0;
++
++    if (!ppb_is_valid(ppb, ppb_size)) {
++        return -EINVAL;
++    }
++
++    for (i = 0; i &lt; ppb-&gt;num; i++) {
++        lio_stream_t s;
++
++        if (ppb-&gt;entries[i].type != PPB_STREAM) {
++            continue;
++        }
++
++        if (ppb-&gt;entries[i].len != sizeof(lio_stream_t)) {
++            return -EFAULT;
++        }
++
++        s = *(lio_stream_t*)(((char*) ppb) + ppb-&gt;entries[i].value);
++
++        if (lio_stream_origin(s) != from) {
++            return -EBADF;
++        }
++
++        if (found &lt; num) {
++            streams[found++] = s;
++        } else {
++            lio_close(s);
++        }
++    }
++    while (found &lt; num) {
++        streams[found++] = 0;
++    }
++
++    return found;
++}
+diff --git a/src/modules/lib/stdlibc/file.c b/src/modules/lib/stdlibc/file.c
+index b0935bc..513f75b 100644
+--- a/src/modules/lib/stdlibc/file.c
++++ b/src/modules/lib/stdlibc/file.c
+@@ -73,6 +73,17 @@ FILE* __create_file_from_iores(io_resource_t* io_res)
+     return int_res;
+ }
+ 
++FILE* __create_file_from_lio_stream(lio_stream_t s)
++{
++    io_resource_t* iores = malloc(sizeof(*iores));
++    *iores = (io_resource_t) {
++        .lio2_stream    =   s,
++        .lio2_res       =   1, /* XXX Hässlich, aber wird nur auf &gt; 0 geprüft */
++        .flags          =   IO_RES_FLAG_READAHEAD,
++    };
++    return __create_file_from_iores(iores);
++}
++
+ /**
+  * Datei oeffnen
+  *
+diff --git a/src/modules/lib/stdlibc/stdio.c b/src/modules/lib/stdlibc/stdio.c
+index e6a1955..7e0766f 100644
+--- a/src/modules/lib/stdlibc/stdio.c
++++ b/src/modules/lib/stdlibc/stdio.c
+@@ -51,71 +51,80 @@ void stdio_init(void)
+     
+ 
+     // stdin aktualisieren
+-    path_file = fopen(&quot;console:/stdin&quot;,  &quot;r&quot;);
+-    if (path_file == NULL) {
+-        // Kein stdin
+-        stdin = NULL;
+-    } else {
+-        // Pfad einlesen
+-        size = fread(path, 1, 128, path_file);
+-        path[size] = 0;
+-
+-        // Falls stdin schon geoeffnet wurde, wird freopen benutzt, damit siche
+-        // nichts durcheinander kommt
+-        if (stdin) {
+-            freopen(path, &quot;rs&quot;, stdin);
++    if (!stdin) {
++        path_file = fopen(&quot;console:/stdin&quot;,  &quot;r&quot;);
++        if (path_file == NULL) {
++            // Kein stdin
++            stdin = NULL;
+         } else {
+-            stdin  = fopen(path,  &quot;rs&quot;);
++            // Pfad einlesen
++            size = fread(path, 1, 128, path_file);
++            path[size] = 0;
++
++            // Falls stdin schon geoeffnet wurde, wird freopen benutzt, damit siche
++            // nichts durcheinander kommt
++            if (stdin) {
++                freopen(path, &quot;rs&quot;, stdin);
++            } else {
++                stdin  = fopen(path,  &quot;rs&quot;);
++            }
++            fclose(path_file);
+         }
+-        fclose(path_file);
+-
++    }
++    if (stdin) {
+         // stdin muss nicht gepuffert sein
+         setvbuf(stdin, NULL, _IONBF, 0);
+     }
+ 
+     // stdout aktualisieren
+-    path_file = fopen(&quot;console:/stdout&quot;,  &quot;r&quot;);
+-    if (path_file == NULL) {
+-        // Kein stdin
+-        stdout = NULL;
+-    } else {
+-        // Pfad einlesen
+-        size = fread(path, 1, 128, path_file);
+-        path[size] = 0;
+-
+-        // Siehe oben bei stdin
+-        if (stdout) {
+-            freopen(path, &quot;a&quot;, stdout);
++    if (!stdout) {
++        path_file = fopen(&quot;console:/stdout&quot;,  &quot;r&quot;);
++        if (path_file == NULL) {
++            // Kein stdin
++            stdout = NULL;
+         } else {
+-            stdout = fopen(path,  &quot;a&quot;);
++            // Pfad einlesen
++            size = fread(path, 1, 128, path_file);
++            path[size] = 0;
++
++            // Siehe oben bei stdin
++            if (stdout) {
++                freopen(path, &quot;a&quot;, stdout);
++            } else {
++                stdout = fopen(path,  &quot;a&quot;);
++            }
++            fclose(path_file);
+         }
+-        fclose(path_file);
+-
++    }
++    if (stdout) {
+         // Zeilenpuffer fuer stdout aktivieren
+         setvbuf(stdout, stdout_buf, _IOLBF, sizeof(stdout_buf));
+     }
+ 
+     // stderr
+-    path_file = fopen(&quot;console:/stderr&quot;,  &quot;r&quot;);
+-    if (path_file == NULL) {
+-        // Kein stdin
+-        stderr = NULL;
+-    } else {
+-        // Pfad einlesen
+-        size = fread(path, 1, 128, path_file);
+-        path[size] = 0;
+-
+-        // Siehe oben bei stdin
+-        if (stderr) {
+-            freopen(path, &quot;a&quot;, stderr);
++    if (!stderr) {
++        path_file = fopen(&quot;console:/stderr&quot;,  &quot;r&quot;);
++        if (path_file == NULL) {
++            // Kein stdin
++            stderr = NULL;
+         } else {
+-            stderr = fopen(path,  &quot;a&quot;);
+-        }
++            // Pfad einlesen
++            size = fread(path, 1, 128, path_file);
++            path[size] = 0;
++
++            // Siehe oben bei stdin
++            if (stderr) {
++                freopen(path, &quot;a&quot;, stderr);
++            } else {
++                stderr = fopen(path,  &quot;a&quot;);
++            }
+ 
++            fclose(path_file);
++        }
++    }
++    if (stderr) {
+         // stderr soll ungepuffert sein
+         setvbuf(stderr, NULL, _IONBF, 0);
+-
+-        fclose(path_file);
+     }
+ }
+ 
+diff --git a/src/modules/pas/lib/rtl/system.pas b/src/modules/pas/lib/rtl/system.pas
+index c9501c5..378dbd8 100644
+--- a/src/modules/pas/lib/rtl/system.pas
++++ b/src/modules/pas/lib/rtl/system.pas
+@@ -164,6 +164,11 @@ begin
+ end;
+ *)
+ 
++function ppb_get_streams(streams: PInt64; ppb: Pointer;
++                         size, pid, num: integer): integer;
++    cdecl; external name 'ppb_get_streams';
++function file_from_lio(stream: Int64): PDWord;
++    cdecl; external name '__create_file_from_lio_stream';
+ procedure c_stdio_init(); cdecl; external name 'stdio_init';
+ function c_setvbuf(f: Pointer; buf: Pointer; mode: integer; size: TSize):
+     integer; cdecl; external name 'setvbuf';
+@@ -174,30 +179,22 @@ var
+     c_stderr: ^dword; external name 'stderr';
+ 
+ procedure SysInitStdIO;
+-(*
+ var
+-    filename: String;
+-    c_stdin, c_stdout, c_stderr: text;
+-*)    
++    streams: Array [0..2] of Int64;
++    ret: integer;
+ begin
+-(*
+-    TextRec(c_stdin).mode := fmClosed;
+-    TextRec(c_stdout).mode := fmClosed;
+-    TextRec(c_stderr).mode := fmClosed;
+-    
+-    filename := GetRealStdIO('console:/stdin') + #0;
+-    Do_Open(c_stdin,  @filename[1], 0);
+-
+-    filename := GetRealStdIO('console:/stdout') + #0;
+-    Do_Open(c_stdout, @filename[1], 0);
+-    
+-    filename := GetRealStdIO('console:/stderr') + #0;
+-    Do_Open(c_stderr, @filename[1], 0);
+-
+-    StdInputHandle  := TextRec(c_stdin).handle;
+-    StdOutputHandle := TextRec(c_stdout).handle;
+-    StdErrorHandle  := TextRec(c_stderr).handle;
+-*)    
++    ret := ppb_get_streams(@streams[0], ppb_ptr, ppb_size, 1, 3);
++    if ret = 3 then begin
++        if streams[0] &lt;&gt; 0 then begin
++            c_stdin := file_from_lio(streams[0]);
++        end;
++        if streams[1] &lt;&gt; 0 then begin
++            c_stdout := file_from_lio(streams[1]);
++        end;
++        if streams[2] &lt;&gt; 0 then begin
++            c_stderr := file_from_lio(streams[2]);
++        end;
++    end;
+ 
+     c_stdio_init();
+ 
+-- 
+2.1.4
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002598.html">[tyndur-devel] [PATCH 5/7] kernel2: syscall_shm_size
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002600.html">[tyndur-devel] [PATCH 7/7] shell: Unterstützung für Ein-/Ausgabeumleitung
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2599">[ Datum ]</a>
+              <a href="thread.html#2599">[ Thema ]</a>
+              <a href="subject.html#2599">[ Betreff (Subject)]</a>
+              <a href="author.html#2599">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

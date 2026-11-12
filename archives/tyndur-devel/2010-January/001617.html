@@ -1,0 +1,159 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH v2 2/7] kernel2: SHM beim Prozessende	schliessen
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%202/7%5D%20kernel2%3A%20SHM%20beim%20Prozessende%0A%09schliessen&In-Reply-To=%3C1262534601-14194-3-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001624.html">
+   <LINK REL="Next"  HREF="001625.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH v2 2/7] kernel2: SHM beim Prozessende	schliessen</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%202/7%5D%20kernel2%3A%20SHM%20beim%20Prozessende%0A%09schliessen&In-Reply-To=%3C1262534601-14194-3-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH v2 2/7] kernel2: SHM beim Prozessende	schliessen">kevin at tyndur.org
+                  </A><BR>
+    <I>So Jan  3 17:03:16 CET 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001624.html">[tyndur-devel] [PATCH v2 1/7] kernel2: SHM-Funktionen bekommen Prozess als Parameter
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001625.html">[tyndur-devel] [PATCH v2 2/7] kernel2: SHM beim Prozessende schliessen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1617">[ Datum ]</a>
+              <a href="thread.html#1617">[ Thema ]</a>
+              <a href="subject.html#1617">[ Betreff (Subject) ]</a>
+              <a href="author.html#1617">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>! kernel2: Alle geoeffneten SHM-Bereiche beim Prozessende schliessen
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/kernel2/include/tasks.h |    3 +++
+ src/kernel2/src/mm/shm.c    |   37 +++++++++++++++++++++++++++++++++++++
+ 2 files changed, 40 insertions(+), 0 deletions(-)
+
+diff --git a/src/kernel2/include/tasks.h b/src/kernel2/include/tasks.h
+index c8370f4..37d9714 100644
+--- a/src/kernel2/include/tasks.h
++++ b/src/kernel2/include/tasks.h
+@@ -84,6 +84,9 @@ typedef struct pm_process {
+     /// Eine Liste von RPC-Backlinks
+     list_t* rpcs;
+ 
++    /// Eine Liste von geoeffneten SHM-Bereichen
++    list_t* shm;
++
+     /**
+      * Eine Liste von Eventhandlern, die beim Loeschen des Prozesses
+      * aufgerufen werden
+diff --git a/src/kernel2/src/mm/shm.c b/src/kernel2/src/mm/shm.c
+index d05de0e..b067d91 100644
+--- a/src/kernel2/src/mm/shm.c
++++ b/src/kernel2/src/mm/shm.c
+@@ -51,6 +51,7 @@ struct shm_desc {
+ };
+ 
+ struct shm_process {
++    struct shm_desc*    shm;
+     pm_process_t*       process;
+     vaddr_t             vaddr;
+ };
+@@ -58,6 +59,8 @@ struct shm_process {
+ static tree_t* shms = NULL;
+ static uint32_t shm_last_id = 0;
+ 
++static void shm_destroy_task(pm_process_t* process, void* prv);
++
+ /**
+  * Initialisiert die SHM-Verwaltung
+  */
+@@ -126,10 +129,17 @@ void* shm_attach(pm_process_t* process, uint32_t id)
+     }
+ 
+     shm_proc = calloc(1, sizeof(*shm_proc));
++    shm_proc-&gt;shm = shm;
+     shm_proc-&gt;process = process;
+     shm_proc-&gt;vaddr = ret;
+     list_push(shm-&gt;processes, shm_proc);
+ 
++    if (process-&gt;shm == NULL) {
++        process-&gt;shm = list_create();
++        pm_register_on_destroy(process, shm_destroy_task, NULL);
++    }
++    list_push(process-&gt;shm, shm_proc);
++
+     return ret;
+ }
+ 
+@@ -150,6 +160,15 @@ void shm_detach(pm_process_t* process, uint32_t id)
+         return;
+     }
+ 
++    // Aus der SHM-Liste des Prozesses austragen
++    for (i = 0; (shm_proc = list_get_element_at(process-&gt;shm, i)); i++) {
++        if (shm_proc-&gt;shm == shm) {
++            list_remove(process-&gt;shm, i);
++            break;
++        }
++    }
++
++    // Aus der Prozessliste des SHM austragen
+     for (i = 0; (shm_proc = list_get_element_at(shm-&gt;processes, i)); i++) {
+         if (shm_proc-&gt;process == process) {
+             list_remove(shm-&gt;processes, i);
+@@ -184,3 +203,21 @@ found:
+ 
+     return;
+ }
++
++/**
++ * Schliesst alle SHM-Bereiche eines Prozesses
++ */
++static void shm_destroy_task(pm_process_t* process, void* prv)
++{
++    struct shm_process* shm_proc;
++
++    if (process-&gt;shm == NULL) {
++        return;
++    }
++
++    while ((shm_proc = list_get_element_at(process-&gt;shm, 0))) {
++        shm_detach(process, shm_proc-&gt;shm-&gt;id);
++    }
++
++    list_destroy(process-&gt;shm);
++}
+-- 
+1.6.0.2
+
+</PRE>
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001624.html">[tyndur-devel] [PATCH v2 1/7] kernel2: SHM-Funktionen bekommen Prozess als Parameter
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001625.html">[tyndur-devel] [PATCH v2 2/7] kernel2: SHM beim Prozessende schliessen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1617">[ Datum ]</a>
+              <a href="thread.html#1617">[ Thema ]</a>
+              <a href="subject.html#1617">[ Betreff (Subject)]</a>
+              <a href="author.html#1617">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

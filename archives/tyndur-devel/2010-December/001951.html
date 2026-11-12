@@ -1,0 +1,282 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 4/7] kernel2: SYSCALL_PM_INIT_PROC_PARAM_BLOCK
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%204/7%5D%20kernel2%3A%20SYSCALL_PM_INIT_PROC_PARAM_BLOCK&In-Reply-To=%3C1293628353-11131-5-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001950.html">
+   <LINK REL="Next"  HREF="001952.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 4/7] kernel2: SYSCALL_PM_INIT_PROC_PARAM_BLOCK</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%204/7%5D%20kernel2%3A%20SYSCALL_PM_INIT_PROC_PARAM_BLOCK&In-Reply-To=%3C1293628353-11131-5-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 4/7] kernel2: SYSCALL_PM_INIT_PROC_PARAM_BLOCK">kevin at tyndur.org
+                  </A><BR>
+    <I>Mi Dez 29 14:12:30 CET 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001950.html">[tyndur-devel] [PATCH 3/7] kernel2: Fixes für SHM in nicht-aktivem Kontext
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001952.html">[tyndur-devel] [PATCH 5/7] libc: Erstellen und Auslesen von PPBs
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1951">[ Datum ]</a>
+              <a href="thread.html#1951">[ Thema ]</a>
+              <a href="subject.html#1951">[ Betreff (Subject) ]</a>
+              <a href="author.html#1951">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ kernel2: Syscall, um einem neuen Kindprozess einen
+  Prozessparameterblock zu uebergeben. Dazu wird Shared Memory in den
+  Kindprozess gemappt und Pointer, Größe und SHM-ID in Registern
+  übergeben.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/include/syscallno.h                    |    3 +-
+ src/kernel2/include/mm.h                   |    3 ++
+ src/kernel2/include/syscall.h              |    4 +++
+ src/kernel2/src/arch/i386/cpu.c            |   20 +++++++++++++++
+ src/kernel2/src/mm/shm.c                   |   14 +++++++++++
+ src/kernel2/src/syscall.c                  |    1 +
+ src/kernel2/src/syscalls/pm.c              |   36 ++++++++++++++++++++++++++++
+ src/modules/include/syscall.h              |    1 +
+ src/modules/lib/syscalls/init_child_page.c |   15 +++++++++++
+ 9 files changed, 96 insertions(+), 1 deletions(-)
+ create mode 100644 src/kernel2/.ignorenobuild
+
+diff --git a/src/include/syscallno.h b/src/include/syscallno.h
+index fe2b693..1e156ca 100644
+--- a/src/include/syscallno.h
++++ b/src/include/syscallno.h
+@@ -45,6 +45,7 @@
+ #define SYSCALL_PM_CREATE_PROCESS 3
+ #define SYSCALL_PM_INIT_PAGE 13
+ #define SYSCALL_PM_INIT_PAGE_COPY 82
++#define SYSCALL_PM_INIT_PROC_PARAM_BLOCK 84
+ #define SYSCALL_PM_EXIT_PROCESS 5
+ #define SYSCALL_PM_SLEEP 6
+ #define SYSCALL_PM_GET_UID 7
+@@ -84,6 +85,6 @@
+ 
+ #define SYSCALL_DEBUG_STACKTRACE 80
+ //ACHTUNG: Muss eine Zahl groesser als die Groesste Syscall-Nummer sein
+-#define SYSCALL_MAX 84
++#define SYSCALL_MAX 85
+ 
+ #endif
+diff --git a/src/kernel2/.ignorenobuild b/src/kernel2/.ignorenobuild
+new file mode 100644
+index 0000000..e69de29
+diff --git a/src/kernel2/include/mm.h b/src/kernel2/include/mm.h
+index 559733c..e72a6cd 100644
+--- a/src/kernel2/include/mm.h
++++ b/src/kernel2/include/mm.h
+@@ -182,5 +182,8 @@ void* shm_attach(pm_process_t* process, uint32_t id);
+ /// Shared Memory schliessen.
+ void shm_detach(pm_process_t* process, uint32_t id);
+ 
++/// Gibt die Groesse des SHM-Bereichs in Bytes zurueck
++size_t shm_size(uint32_t id);
++
+ #endif
+ 
+diff --git a/src/kernel2/include/syscall.h b/src/kernel2/include/syscall.h
+index 9c5fe77..46c3181 100644
+--- a/src/kernel2/include/syscall.h
++++ b/src/kernel2/include/syscall.h
+@@ -128,6 +128,10 @@ void* syscall_pm_enumerate_tasks(void);
+ void syscall_init_child_page(pid_t pid, vaddr_t src, vaddr_t dest,
+     size_t size);
+ 
++/// Initialisiert den Prozessparameterblock eines Kindprozesses
++int syscall_init_ppb(pid_t pid, int shm_id);
++int arch_init_ppb(pm_process_t* process, int shm_id, void* ptr, size_t size);
++
+ /// IO-Ports anfordern
+ int syscall_io_request_port(uint32_t port, uint32_t length);
+ 
+diff --git a/src/kernel2/src/arch/i386/cpu.c b/src/kernel2/src/arch/i386/cpu.c
+index 1fea672..102c585 100644
+--- a/src/kernel2/src/arch/i386/cpu.c
++++ b/src/kernel2/src/arch/i386/cpu.c
+@@ -172,3 +172,23 @@ void cpu_prepare_current_task(void)
+ 
+     cpu_get_current()-&gt;tss.io_bit_map_offset = TSS_IO_BITMAP_NOT_LOADED;
+ }
++
++/*
++ * Setzt die Register des ersten Threads des Prozesses, um ihm seinen
++ * Prozessparameterblock bekannt zu machen.
++ *
++ * eax: ID des SHM
++ * ebx: Pointer auf den gemappten SHM
++ * ecx: Groesse des gemappten SHM
++ */
++int arch_init_ppb(pm_process_t* process, int shm_id, void* ptr, size_t size)
++{
++    pm_thread_t* thread = list_get_element_at(process-&gt;threads, 0);
++    interrupt_stack_frame_t* user_isf = thread-&gt;user_isf;
++
++    user_isf-&gt;eax = shm_id;
++    user_isf-&gt;ebx = (uintptr_t) ptr;
++    user_isf-&gt;ecx = size;
++
++    return 0;
++}
+diff --git a/src/kernel2/src/mm/shm.c b/src/kernel2/src/mm/shm.c
+index 2df78d6..6d94c52 100644
+--- a/src/kernel2/src/mm/shm.c
++++ b/src/kernel2/src/mm/shm.c
+@@ -205,6 +205,20 @@ found:
+ }
+ 
+ /**
++ * Gibt die Groesse des SHM-Bereichs in Bytes zurueck
++ */
++size_t shm_size(uint32_t id)
++{
++    struct shm_desc* shm = tree_search(shms, id);
++
++    if (shm == NULL) {
++        return 0;
++    }
++
++    return shm-&gt;num_pages * PAGE_SIZE;
++}
++
++/**
+  * Schliesst alle SHM-Bereiche eines Prozesses
+  */
+ static void shm_destroy_task(pm_process_t* process, void* prv)
+diff --git a/src/kernel2/src/syscall.c b/src/kernel2/src/syscall.c
+index 073fe9b..5a4aad4 100644
+--- a/src/kernel2/src/syscall.c
++++ b/src/kernel2/src/syscall.c
+@@ -70,6 +70,7 @@ void syscall_init()
+ 
+     syscall_register(SYSCALL_PM_CREATE_PROCESS, &amp;syscall_pm_create_process, 4);
+     syscall_register(SYSCALL_PM_INIT_PAGE, &amp;syscall_init_child_page, 4);
++    syscall_register(SYSCALL_PM_INIT_PROC_PARAM_BLOCK, &amp;syscall_init_ppb, 2);
+     syscall_register(SYSCALL_PM_EXIT_PROCESS, &amp;syscall_pm_exit_process, 0);
+ 
+     syscall_register(SYSCALL_PM_ENUMERATE_TASKS,
+diff --git a/src/kernel2/src/syscalls/pm.c b/src/kernel2/src/syscalls/pm.c
+index 0b36df3..e22246a 100644
+--- a/src/kernel2/src/syscalls/pm.c
++++ b/src/kernel2/src/syscalls/pm.c
+@@ -36,6 +36,7 @@
+ #include &lt;types.h&gt;
+ #include &lt;stdint.h&gt;
+ #include &lt;string.h&gt;
++#include &lt;errno.h&gt;
+ 
+ #include &quot;syscall.h&quot;
+ #include &quot;syscall_structs.h&quot;
+@@ -204,6 +205,41 @@ void syscall_init_child_page(pid_t pid, vaddr_t dest, vaddr_t src, size_t size)
+ }
+ 
+ /**
++ * Initialisiert den Prozessparameterblock eines Kindprozesses. Dazu wird der
++ * gegebene Shared Memory in den Kindprozess gemappt und dem Kindprozess in den
++ * Registern eax und edx ein Pointer auf den gemappten Bereich bzw. die Laenge
++ * des gemappten Bereichs in Bytes angegeben.
++ *
++ * Dieser Syscall darf nur benutzt werden, solange der Prozess noch nicht
++ * gestartet wurde.
++ */
++int syscall_init_ppb(pid_t pid, int shm_id)
++{
++    pm_process_t* process;
++    void* ptr;
++    size_t size;
++
++    process = pm_get(pid);
++    if (process == NULL) {
++        return -ESRCH;
++    }
++
++    // FIXME Prüfen, dass der Prozess noch nicht laeuft und dass er von
++    // current_process blockiert wird
++
++    /* SHM in den Kindprozess mappen */
++    ptr = shm_attach(process, shm_id);
++    if (ptr == NULL) {
++        return -EINVAL;
++    }
++
++    size = shm_size(shm_id);
++
++    /* Register eintragen */
++    return arch_init_ppb(process, shm_id, ptr, size);
++}
++
++/**
+  * Die Kontrolle an einen anderen Task abgeben
+  *
+  * FIXME Diesen Code gibt es in genau dieser Form auch in im.c
+diff --git a/src/modules/include/syscall.h b/src/modules/include/syscall.h
+index 7428c91..74ef0be 100644
+--- a/src/modules/include/syscall.h
++++ b/src/modules/include/syscall.h
+@@ -90,6 +90,7 @@ pid_t create_process(uint32_t initial_eip, uid_t uid, const char* path,
+ void destroy_process(void);
+ void init_child_page (pid_t pid, void* dest, void* src, size_t size);
+ void init_child_page_copy (pid_t pid, void* dest, void* src, size_t size);
++int init_child_ppb(pid_t pid, int shm);
+ void unblock_process(pid_t pid);
+ char* get_cmdline(void);
+ 
+diff --git a/src/modules/lib/syscalls/init_child_page.c b/src/modules/lib/syscalls/init_child_page.c
+index 11497c7..43148ce 100644
+--- a/src/modules/lib/syscalls/init_child_page.c
++++ b/src/modules/lib/syscalls/init_child_page.c
+@@ -55,3 +55,18 @@ void init_child_page_copy (pid_t pid, void* dest, void* src, size_t size)
+     : : &quot;i&quot; (SYSCALL_PM_INIT_PAGE_COPY), &quot;r&quot;(pid), &quot;r&quot; (dest), &quot;r&quot; (src), &quot;r&quot; (size));
+ }
+ 
++int init_child_ppb(pid_t pid, int shm)
++{
++    int ret;
++
++    asm(
++        &quot;pushl %3;&quot;
++        &quot;pushl %2;&quot;
++        &quot;mov %1, %%eax;&quot;
++        &quot;int $0x30;&quot;
++        &quot;add $0x08, %%esp;&quot;
++    : &quot;=a&quot; (ret)
++    : &quot;i&quot; (SYSCALL_PM_INIT_PROC_PARAM_BLOCK), &quot;r&quot;(pid), &quot;r&quot; (shm));
++
++    return ret;
++}
+-- 
+1.6.0.2
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001950.html">[tyndur-devel] [PATCH 3/7] kernel2: Fixes für SHM in nicht-aktivem Kontext
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001952.html">[tyndur-devel] [PATCH 5/7] libc: Erstellen und Auslesen von PPBs
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1951">[ Datum ]</a>
+              <a href="thread.html#1951">[ Thema ]</a>
+              <a href="subject.html#1951">[ Betreff (Subject)]</a>
+              <a href="author.html#1951">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

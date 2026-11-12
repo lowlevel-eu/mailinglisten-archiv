@@ -1,0 +1,681 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 5/5] shell: Neuen Parser importiert
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%205/5%5D%20shell%3A%20Neuen%20Parser%20importiert&In-Reply-To=%3C1471686656-28613-6-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002591.html">
+   
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 5/5] shell: Neuen Parser importiert</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%205/5%5D%20shell%3A%20Neuen%20Parser%20importiert&In-Reply-To=%3C1471686656-28613-6-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 5/5] shell: Neuen Parser importiert">kevin at tyndur.org
+                  </A><BR>
+    <I>Sa Aug 20 11:50:56 CEST 2016</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002591.html">[tyndur-devel] [PATCH 4/5] libc: wordexp.h
+</A></li>
+        
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2592">[ Datum ]</a>
+              <a href="thread.html#2592">[ Thema ]</a>
+              <a href="subject.html#2592">[ Betreff (Subject) ]</a>
+              <a href="author.html#2592">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>- shell: Alten kaputten Parser rausgeworfen
+
++ shell: Neuen, hoffentlich weniger kaputten Parser aus psh importiert,
+  der so direkt auf jeden Fall mal Quotes mitbringt. Er kann sogar
+  solche Sachen wie Ausgabeumleitung parsen, jetzt müsste man nur auch
+  noch die passende Funktionalität implementieren.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/c/shell/lang/lang_en.c |  12 ++
+ src/modules/c/shell/lang/resstr.h  |   4 +
+ src/modules/c/shell/shell.c        | 192 +++++++++++++---------------
+ src/modules/c/shell/shell.h        |  23 +++-
+ src/modules/c/shell/tokenize.c     | 252 +++++++++++++++++++++++++++++++++++++
+ 5 files changed, 378 insertions(+), 105 deletions(-)
+ create mode 100644 src/modules/c/shell/tokenize.c
+
+diff --git a/src/modules/c/shell/lang/lang_en.c b/src/modules/c/shell/lang/lang_en.c
+index be52080..3e24b25 100644
+--- a/src/modules/c/shell/lang/lang_en.c
++++ b/src/modules/c/shell/lang/lang_en.c
+@@ -113,6 +113,18 @@ static const struct tms_strings dict[] = {
+     &amp;__tms_shell_script_error,
+     &quot;An error happened while running the script\n&quot;,
+ 
++    &amp;__tms_shell_fail_dup,
++    &quot;lio_dup() failed: %s\n&quot;,
++
++    &amp;__tms_shell_parse_error,
++    &quot;Parse error in '%s'\n&quot;,
++
++    &amp;__tms_shell_err_end_dquot,
++    &quot;Could not find closing '\&quot;'\n&quot;,
++
++    &amp;__tms_shell_err_end_squot,
++    &quot;Could not find closing '\''\n&quot;,
++
+ 
+ 
+     &amp;__tms_bench_usage,
+diff --git a/src/modules/c/shell/lang/resstr.h b/src/modules/c/shell/lang/resstr.h
+index fdff7b9..6b83be8 100644
+--- a/src/modules/c/shell/lang/resstr.h
++++ b/src/modules/c/shell/lang/resstr.h
+@@ -41,6 +41,10 @@ extern void* __tms_cmd_help_text;
+ 
+ extern void* __tms_shell_usage;
+ extern void* __tms_shell_script_error;
++extern void* __tms_shell_fail_dup;
++extern void* __tms_shell_parse_error;
++extern void* __tms_shell_err_end_squot;
++extern void* __tms_shell_err_end_dquot;
+ 
+ extern void* __tms_bench_usage;
+ extern void* __tms_bench_opening_error;
+diff --git a/src/modules/c/shell/shell.c b/src/modules/c/shell/shell.c
+index 4e07707..8dfd2c0 100644
+--- a/src/modules/c/shell/shell.c
++++ b/src/modules/c/shell/shell.c
+@@ -47,6 +47,7 @@
+ #include &lt;lost/config.h&gt;
+ #include &lt;sleep.h&gt;
+ #include &lt;env.h&gt;
++#include &lt;errno.h&gt;
+ 
+ #define TMS_MODULE shell
+ #include &lt;tms.h&gt;
+@@ -67,7 +68,7 @@ char    shell_command_buffer[COMMAND_BUFFER_SIZE];
+ 
+ char    keyboard_read_char(void);
+ void    shell_read_command(void);
+-int     shell_do_cmd(void);
++int     handle_command(char* buf);
+ 
+ 
+ shell_command_t shell_commands[] = {
+@@ -106,7 +107,7 @@ shell_command_t shell_commands[] = {
+     {&quot;read&quot;,        &amp;shell_command_read},
+     {&quot;sync&quot;,        &amp;shell_command_sync},
+ #endif
+-    {NULL,          NULL}
++    {NULL,          &amp;shell_command_default}
+ };
+ 
+ 
+@@ -123,7 +124,7 @@ int main(int argc, char* argv[])
+         completion_init();
+         while (true) {
+             shell_read_command();
+-            shell_do_cmd();
++            handle_command(shell_command_buffer);
+         }
+     } else if ((argc == 2) &amp;&amp; (strcmp(argv[1], &quot;--help&quot;) == 0)) {
+         puts(TMS(usage,
+@@ -141,8 +142,7 @@ int main(int argc, char* argv[])
+                 &quot; Fehler aufgetreten.&quot;));
+         }
+     } else if ((argc == 3) &amp;&amp; (strcmp(argv[1], &quot;-c&quot;) == 0)) {
+-        strcpy(shell_command_buffer, argv[2]);
+-        shell_do_cmd();
++        handle_command(argv[2]);
+     }
+ 
+     return 0;
+@@ -187,128 +187,112 @@ void shell_read_command(void)
+     free(cwd);
+ }
+ 
+-/**
+- * Testet ob der Befehl am Anfang der uebergebenen Kommandozeile steht.
+- *
+- * @param cmd Pointer auf die Befehlsbeschreibung.
+- * @param cmdline Die eingegebene Kommandozeile.
+- *
+- * @return true wenn der Befehl drin steht, sonst false
+- */
+-bool shell_match_command(const char* cmd, const char* cmdline)
++int handle_command(char* buf)
+ {
+-    while (true)
+-    {
+-        // Wenn das Ende des Befehlsnamens erreicht ist, muss in der
+-        // Kommandozeile auch ein Nullbyte oder ein Leerschlag stehen.
+-        if ((*cmd == '\0') &amp;&amp; ((*cmdline == '\0') ||(*cmdline == ' '))) {
+-            return true;
+-        } else if (*cmd != *cmdline) {
+-            return false;
+-        }
+-        cmd++;
+-        cmdline++;
+-    }
+-
+-    // Kommt nie vor.
+-    return false;
+-}
+-
+-/**
+- * Alle Vorkommen von einer Zeichenkette im Puffer ersetzen
+- */
+-static void buffer_replace(const char* search, const char* replace)
+-{
+-    char* res;
+-    int search_len = strlen(search);
+-    int replacement_len = strlen(replace);
+-
+-    while ((res = strstr(shell_command_buffer, search))) {
+-        // Was uebrig bleibt verschieben
+-        memmove(res + replacement_len, res + search_len,
+-            strlen(res + search_len) + 1);
++    char* args;
++    char** argv = NULL;
++    int num_tokens, argc;
++    int i;
++    int in_idx, out_idx;
++    struct token* tokens;
++    int ret;
+ 
+-        memcpy(res, replace, replacement_len);
++    num_tokens = tokenize_cmdline(buf, NULL, NULL);
++    if (num_tokens &lt; 0) {
++        return 0;
+     }
+-}
+ 
+-/**
+- * Umgebungsvariablen im Puffer ersetzen
+- */
+-static void substitute_envvars(void)
+-{
+-    int i;
+-    const char* name;
+-    const char* value;
++    tokens = calloc(num_tokens, sizeof(*tokens));
++    if (num_tokens &amp;&amp; tokens == NULL) {
++        free(argv);
++        fprintf(stderr, &quot;Interner Fehler: Kein Speicher für tokens\n&quot;);
++        return 0;
++    }
+ 
+-    for (i = 0; i &lt; getenv_count(); i++) {
+-        name = getenv_name_by_index(i);
+-        value = getenv_index(i);
++    tokenize_cmdline(buf, &amp;args, tokens);
++
++    /* Befehlszeile parsen */
++    argc = 0;
++    for (i = 0; i &lt; num_tokens; i++) {
++        switch (tokens[i].type) {
++            case TT_OPERATOR:
++            {
++                ret = -1;
++                errno = ENOSYS;
++                if (ret &lt; 0) {
++                    fprintf(stderr,
++                            TMS(fail_dup, &quot;lio_dup() fehlgeschlagen: %s\n&quot;),
++                            strerror(-ret));
++                    goto found;
++                }
++                break;
++            }
+ 
+-        // Suchmuster generieren
+-        char pattern[strlen(name) + 2];
+-        pattern[0] = '$';
+-        strcpy(pattern + 1, name);
++            case TT_WORD:
++                ret = wordexp(tokens[i].value, &amp;tokens[i].we, 0);
++                if (ret &lt; 0) {
++                    fprintf(stderr, TMS(parse_error, &quot;Parserfehler in '%s'\n&quot;),
++                            tokens[i].value);
++                    goto found;
++                }
++                tokens[i].is_argv = true;
++                argc += tokens[i].we.we_wordc;
++                break;
+ 
+-        buffer_replace(pattern, value);
++            default:
++                abort();
++        }
+     }
+-}
+-
+-int shell_do_cmd(void)
+-{
+-    shell_command_t* command;
+-    uint32_t i;
+-    char* cmdstring = shell_command_buffer;
+-    int argc, pos;
+ 
+-    substitute_envvars();
+-
+-    // Einrueckung ignorieren
+-    while (*cmdstring == ' ' || *cmdstring == '\t') {
+-        cmdstring++;
++    /* Leerzeilen ignorieren */
++    if (argc == 0) {
++        goto found;
+     }
+ 
+-    // Kommentarzeilen ignorieren
+-    if (*cmdstring == '#') {
++    /* argv befüllen */
++    argv = calloc(argc + 1, sizeof(*argv));
++    if (argv == NULL) {
++        fprintf(stderr, &quot;Interner Fehler: Kein Speicher für argv\n&quot;);
+         return 0;
+     }
+ 
+-    // argc und argv befüllen
+-    char args[strlen(cmdstring) + 1];
+-    memcpy(args, cmdstring, strlen(cmdstring) + 1);
+-
+-    argc = 1;
+-    //Jetzt werden die Argumente gezaehlt.
+-    for (pos = 0; pos &lt; strlen(args); pos++) {
+-        if (args[pos] == ' ') {
+-            argc++;
++    for (in_idx = out_idx = 0; in_idx &lt; num_tokens; in_idx++) {
++        if (tokens[in_idx].is_argv) {
++            int j;
++            for (j = 0; j &lt; tokens[in_idx].we.we_wordc; j++) {
++                argv[out_idx++] = tokens[in_idx].we.we_wordv[j];
++            }
+         }
+     }
+ 
+-    char* argv[argc + 1];
+-    argv[0] = strtok(args, &quot; &quot;);
+-    for(pos = 1; pos &lt; argc; pos++)
+-    {
+-        argv[pos] = strtok(NULL, &quot; &quot;);
+-    }
+-    argv[pos] = NULL;
+ 
+-    while (argv[argc - 1] == NULL) {
+-        argc--;
++    /* Passenden Befehl suchen und ausfuehren */
++    for (i = 0; shell_commands[i].handler != NULL; i++) {
++        if ((shell_commands[i].name == NULL) ||
++            !strcmp(shell_commands[i].name, argv[0]))
++        {
++            shell_commands[i].handler(argc, argv);
++            goto found;
++        }
+     }
+ 
++    fprintf(stderr, &quot;Interner Fehler: Kein Befehl gefunden\n&quot;);
++    return 0;
+ 
+-    // Die Liste mit den Befehlen durchsuchen. Das wird solange gemacht, bis
+-    // der NULL eintrag am Ende erreicht wird.
+-    for (i = 0; (command = &amp;shell_commands[i]) &amp;&amp; (command-&gt;name); i++)
+-    {
+-        command = &amp;shell_commands[i];
+-        if (shell_match_command(command-&gt;name, cmdstring) == true) {
+-            return command-&gt;handler(argc, argv);
++    /* Aufraeumen */
++found:
++    for (i = 0; i &lt; num_tokens; i++) {
++        if (tokens[i].is_argv) {
++            wordfree(&amp;tokens[i].we);
+         }
+     }
+-    return shell_command_default(argc, argv);
++    free(tokens);
++    free(args);
++    free(argv);
++
++    return 0;
+ }
++
+ /**
+  * Shell-Skript ausfuehren
+  *
+@@ -333,7 +317,7 @@ bool shell_script(const char* path)
+             shell_command_buffer[i - 1] = '\0';
+         }
+ 
+-        shell_do_cmd();
++        handle_command(shell_command_buffer);
+     }
+ 
+     fclose(script);
+diff --git a/src/modules/c/shell/shell.h b/src/modules/c/shell/shell.h
+index f119b63..d86061b 100644
+--- a/src/modules/c/shell/shell.h
++++ b/src/modules/c/shell/shell.h
+@@ -36,12 +36,33 @@
+ #ifndef _SHELL_H_
+ #define _SHELL_H_
+ 
++#include &lt;stdbool.h&gt;
++#include &lt;wordexp.h&gt;
++
++#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
++
++/* Tokenizer */
++enum token_type {
++    TT_WORD,
++    TT_OPERATOR,
++};
++
++struct token {
++    enum token_type type;
++    char* value;
++    bool is_argv;
++    wordexp_t we;
++};
++
++int tokenize_cmdline(const char* str, char** output, struct token* tokens);
++
++
++/** Array mit den Befehlen */
+ typedef struct shell_command_t {
+     const char* name;
+     int (*handler)(int argc, char* argv[]);
+ } shell_command_t;
+ 
+-/** Array mit den Befehlen */
+ extern shell_command_t shell_commands[];
+ 
+ 
+diff --git a/src/modules/c/shell/tokenize.c b/src/modules/c/shell/tokenize.c
+new file mode 100644
+index 0000000..4743845
+--- /dev/null
++++ b/src/modules/c/shell/tokenize.c
+@@ -0,0 +1,252 @@
++/*
++ * Copyright (c) 2016 Kevin Wolf
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include &quot;shell.h&quot;
++
++#define TMS_MODULE shell
++#include &lt;tms.h&gt;
++
++#include &lt;errno.h&gt;
++#include &lt;stdio.h&gt;
++#include &lt;stdlib.h&gt;
++#include &lt;string.h&gt;
++#include &lt;ctype.h&gt;
++
++#define TOKENIZER_OUTPUT(c) \
++    do { \
++        if (tokens) { \
++            if (output_size &lt;= p - *output) { \
++                char *old_output = *output;\
++                int i; \
++                output_size *= 2; \
++                *output = realloc(*output, output_size); \
++                for (i = 0; i &lt; num_tokens; i++) \
++                    tokens[i].value = *output + (tokens[i].value - old_output); \
++                p = *output + (p - old_output); \
++                p_start = *output + (p_start - old_output); \
++            } \
++            *p++ = (c); \
++        } else {\
++            p++; \
++        } \
++    } while(0)
++
++#define TOKENIZER_ACCEPT(token_type) \
++    do { \
++        if (p != p_start) { \
++            TOKENIZER_OUTPUT('\0'); \
++            if (tokens) { \
++                tokens[num_tokens] = (struct token) { \
++                    .type   = token_type, \
++                    .value  = p_start, \
++                }; \
++            } \
++            p_start = p; \
++            num_tokens++; \
++        } \
++    } while(0);
++
++#define TOKENIZER_IGNORE() \
++    do { \
++        p_start = p; \
++    } while(0);
++
++static bool valid_operator(const char* buf)
++{
++    const char* operators[] = {
++        &quot;&lt;&quot;, &quot;&gt;&quot;, &quot;&gt;&gt;&quot;,
++    };
++    int i;
++
++    for (i = 0; i &lt; ARRAY_SIZE(operators); i++) {
++        if (!strcmp(buf, operators[i])) {
++            return true;
++        }
++    }
++
++    return false;
++}
++
++int tokenize_cmdline(const char* str, char** output, struct token* tokens)
++{
++    int num_tokens = 0;
++    char* p = NULL;
++    char* p_start = NULL;
++    size_t output_size = 0;
++
++    enum state {
++        WHITESPACE,
++        NUMBER,
++        NORMAL,
++        COMMENT,
++        QUOTED,
++        SINGLE_QUOTED,
++        ESCAPED,
++        ESCAPED_QUOTE,
++        ESCAPED_SINGLE_QUOTE,
++        OPERATOR,
++    };
++
++    enum state state = WHITESPACE;
++
++    if (output) {
++        output_size = strlen(str) + 5;
++        p = malloc(output_size);
++        if (!p) {
++            return -ENOMEM;
++        }
++        *output = p;
++    }
++
++    p_start = p;
++    while (*str) {
++        switch (state) {
++            case NUMBER:
++                if (*str == '&lt;' || *str == '&gt;') {
++                    state = OPERATOR;
++                    continue;
++                } else if (!isdigit(*str)) {
++                    state = NORMAL;
++                    continue;
++                }
++                TOKENIZER_OUTPUT(*str);
++                break;
++            case NORMAL:
++                switch (*str) {
++                    case '\'':   TOKENIZER_OUTPUT(*str); state = SINGLE_QUOTED; break;
++                    case '&quot;':   TOKENIZER_OUTPUT(*str); state = QUOTED; break;
++                    case '\\':  TOKENIZER_OUTPUT(*str); state = ESCAPED; break;
++                    case '&lt;':   TOKENIZER_ACCEPT(TT_WORD); state = OPERATOR; continue;
++                    case '&gt;':   TOKENIZER_ACCEPT(TT_WORD); state = OPERATOR; continue;
++                    case '|':   TOKENIZER_ACCEPT(TT_WORD); state = OPERATOR; continue;
++                    default:
++                        if (isspace(*str)) {
++                            TOKENIZER_ACCEPT(TT_WORD);
++                            state = WHITESPACE;
++                        } else {
++                            TOKENIZER_OUTPUT(*str);
++                        }
++                        break;
++                }
++                break;
++
++            case WHITESPACE:
++                if (*str == '#') {
++                    TOKENIZER_IGNORE();
++                    state = COMMENT;
++                } else if (!isspace(*str)) {
++                    TOKENIZER_IGNORE();
++                    state = NUMBER;
++                    continue;
++                }
++                break;
++
++            case COMMENT:
++                break;
++
++            case ESCAPED:
++                TOKENIZER_OUTPUT(*str);
++                state = NORMAL;
++                break;
++
++            case SINGLE_QUOTED:
++                if (*str == '\'') {
++                    state = NORMAL;
++                } else if (*str == '\\') {
++                    state = ESCAPED_SINGLE_QUOTE;
++                }
++                TOKENIZER_OUTPUT(*str);
++                break;
++
++            case QUOTED:
++                if (*str == '&quot;') {
++                    state = NORMAL;
++                } else if (*str == '\\') {
++                    state = ESCAPED_QUOTE;
++                }
++                TOKENIZER_OUTPUT(*str);
++                break;
++
++            case ESCAPED_QUOTE:
++                TOKENIZER_OUTPUT(*str);
++                state = QUOTED;
++                break;
++
++            case ESCAPED_SINGLE_QUOTE:
++                TOKENIZER_OUTPUT(*str);
++                state = SINGLE_QUOTED;
++                break;
++
++            case OPERATOR:
++            {
++                /* Längster Operator ist drei Zeichen */
++                char buf[4] = { 0 };
++                int i;
++
++                for (i = 0; i &lt; 3; i++) {
++                    buf[i] = *str;
++                    if (valid_operator(buf)) {
++                        TOKENIZER_OUTPUT(*str);
++                        str++;
++                    } else {
++                        break;
++                    }
++                }
++
++                TOKENIZER_ACCEPT(TT_OPERATOR);
++                state = NORMAL;
++                continue;
++            }
++        }
++
++        str++;
++    }
++
++    switch (state) {
++        case NUMBER:
++        case NORMAL:
++        case ESCAPED:
++            TOKENIZER_ACCEPT(TT_WORD);
++            break;
++        case WHITESPACE:
++        case COMMENT:
++            TOKENIZER_IGNORE();
++            break;
++        case QUOTED:
++        case ESCAPED_QUOTE:
++            fprintf(stderr, TMS(err_end_dquot,
++                                &quot;Abschliessendes '\&quot;' nicht gefunden\n&quot;));
++            return -EINVAL;
++        case SINGLE_QUOTED:
++        case ESCAPED_SINGLE_QUOTE:
++            fprintf(stderr, TMS(err_end_squot,
++                                &quot;Abschliessendes '\'' nicht gefunden\n&quot;));
++            return -EINVAL;
++        case OPERATOR:
++            abort();
++    }
++
++    return num_tokens;
++}
+-- 
+2.1.4
+
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002591.html">[tyndur-devel] [PATCH 4/5] libc: wordexp.h
+</A></li>
+	
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2592">[ Datum ]</a>
+              <a href="thread.html#2592">[ Thema ]</a>
+              <a href="subject.html#2592">[ Betreff (Subject)]</a>
+              <a href="author.html#2592">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

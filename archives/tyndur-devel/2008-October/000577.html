@@ -1,0 +1,194 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [Lost] [PATCH 2/5] lpt: Abhaengigkeiten
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5BLost%5D%20%5BPATCH%202/5%5D%20lpt%3A%20Abhaengigkeiten&In-Reply-To=%3C1225032710-30143-3-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="000576.html">
+   <LINK REL="Next"  HREF="000583.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[Lost] [PATCH 2/5] lpt: Abhaengigkeiten</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5BLost%5D%20%5BPATCH%202/5%5D%20lpt%3A%20Abhaengigkeiten&In-Reply-To=%3C1225032710-30143-3-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[Lost] [PATCH 2/5] lpt: Abhaengigkeiten">kevin at tyndur.org
+                  </A><BR>
+    <I>So Okt 26 15:51:47 CET 2008</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="000576.html">[PATCH 0/5] Patches fÃ¼r Version 0.2
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="000583.html">[Lost] [PATCH 2/5] lpt: Abhaengigkeiten
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#577">[ Datum ]</a>
+              <a href="thread.html#577">[ Thema ]</a>
+              <a href="subject.html#577">[ Betreff (Subject) ]</a>
+              <a href="author.html#577">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>! lpt: Behandlung von Abhaengigkeiten korrigiert
+---
+ src/modules/pas/lpt/lpt.pas      |    2 +-
+ src/modules/pas/lpt/packages.pas |   68 ++++++++++++++++++++++++++------------
+ 2 files changed, 48 insertions(+), 22 deletions(-)
+
+diff --git a/src/modules/pas/lpt/lpt.pas b/src/modules/pas/lpt/lpt.pas
+index b626eb0..1dd057a 100644
+--- a/src/modules/pas/lpt/lpt.pas
++++ b/src/modules/pas/lpt/lpt.pas
+@@ -228,7 +228,7 @@ begin
+     
+     instset := TPackageSet.create();
+     instset.AddVersion(version);
+-    instset.AddDependencies;
++    instset.AddDependencies(pkgset);
+ 
+     for i := 0 to instset.packages.count - 1 do begin
+         pkg := TPackage(instset.packages.items[i]);
+diff --git a/src/modules/pas/lpt/packages.pas b/src/modules/pas/lpt/packages.pas
+index 2daf654..eac8471 100644
+--- a/src/modules/pas/lpt/packages.pas
++++ b/src/modules/pas/lpt/packages.pas
+@@ -27,7 +27,7 @@ type
+             function add(name: String): TPackage;
+             procedure AddAll(pkgset: TPackageSet);
+             procedure AddVersion(ver: TPackageVersion);
+-            procedure AddDependencies;
++            procedure AddDependencies(from: TPackageSet);
+             function GetCurrentVersion
+                 (pkgname, sectname: String): TPackageVersion;
+ 
+@@ -72,6 +72,7 @@ type
+             constructor create(parent: TCollection); override;
+ 
+             procedure addDependency(typ: char; dep: String);
++            procedure copyDependencies(from: TPackageVersion);
+ 
+             property preinstDependencies: TCollection read instDep;
+             property runDependencies: TCollection read runDep;
+@@ -264,15 +265,15 @@ begin
+         sect.section := ver.section.section;
+     end;
+ 
+-    // FIXME Abhaengigkeiten werden nciht mitkopiert
+     newVer := sect.add(ver.version);
+     newVer.pkg := pkg;
+     newVer.section := sect;
+     newVer.repository := ver.repository;
+     newVer.size := ver.size;    
++    newVer.copyDependencies(ver);
+ end;
+             
+-procedure TPackageSet.AddDependencies;
++procedure TPackageSet.AddDependencies(from: TPackageSet);
+ var
+     pkg: TPackage;
+     sect: TPackageSection;
+@@ -282,29 +283,34 @@ var
+     depPkg: TPackageVersion;
+ 
+     i, j, k, l: integer;
++    changed: boolean;
+ begin
+-    
+-    // TODO Tut das mit verschachtelten Abhaengigkeiten?
+-    for i := 0 to packages.count - 1 do begin
+-        pkg := TPackage(packages.items[i]);
+-        for j := 0 to pkg.sections.count - 1 do begin
+-            sect := TPackageSection(pkg.sections.items[j]);
+-            for k := 0 to sect.versions.count - 1 do begin
+-                ver := TPackageVersion(sect.versions.items[k]);
+-                
+-                for l := 0 to ver.runDependencies.count - 1 do begin
+-                    dep := TDependency(ver.runDependencies.items[l]);
+-                    depPkg := GetCurrentVersion(dep.pkgname, dep.section);
+-                    if depPkg &lt;&gt; nil then begin
+-                        AddVersion(depPkg);
+-                    end else begin
+-                        raise EDependency.create('Paket ' + dep.pkgname + 
+-                            '/' + dep.section + ' fehlt');
++    repeat
++        changed := false;
++        for i := 0 to packages.count - 1 do begin
++            pkg := TPackage(packages.items[i]);
++            for j := 0 to pkg.sections.count - 1 do begin
++                sect := TPackageSection(pkg.sections.items[j]);
++                for k := 0 to sect.versions.count - 1 do begin
++                    ver := TPackageVersion(sect.versions.items[k]);
++                    
++                    for l := 0 to ver.runDependencies.count - 1 do begin
++                        dep := TDependency(ver.runDependencies.items[l]);
++                        depPkg := from.GetCurrentVersion(dep.pkgname, dep.section);
++                        if GetCurrentVersion(dep.pkgname, dep.section) &lt;&gt; nil then begin
++                            // Das Paket ist schon drin
++                        end else if depPkg &lt;&gt; nil then begin
++                            AddVersion(depPkg);
++                            changed := true;
++                        end else begin
++                            raise EDependency.create('Paket ' + dep.pkgname + 
++                                '/' + dep.section + ' fehlt');
++                        end;
+                     end;
+                 end;
+             end;
+         end;
+-    end;
++    until not changed;
+ end;
+ 
+ constructor TPackage.create(parent: TCollection);
+@@ -404,4 +410,24 @@ begin
+     newDep.section := Copy(dep, i + 1, length(dep));
+ end;
+ 
++procedure TPackageVersion.copyDependencies(from: TPackageVersion);
++var
++    i: integer;
++    dep, newDep: TDependency;
++begin
++    for i := 0 to from.runDependencies.count - 1 do begin
++        dep := TDependency(from.runDependencies.items[i]);
++        newDep := TDependency(runDep.add());
++        newDep.pkgname := dep.pkgname;
++        newDep.section := dep.section;
++    end;
++    
++    for i := 0 to from.preinstDependencies.count - 1 do begin
++        dep := TDependency(from.preinstDependencies.items[i]);
++        newDep := TDependency(instDep.add());
++        newDep.pkgname := dep.pkgname;
++        newDep.section := dep.section;
++    end;
++end;
++
+ end.
+-- 
+1.5.4.5
+
+
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="000576.html">[PATCH 0/5] Patches fÃ¼r Version 0.2
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="000583.html">[Lost] [PATCH 2/5] lpt: Abhaengigkeiten
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#577">[ Datum ]</a>
+              <a href="thread.html#577">[ Thema ]</a>
+              <a href="subject.html#577">[ Betreff (Subject)]</a>
+              <a href="author.html#577">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

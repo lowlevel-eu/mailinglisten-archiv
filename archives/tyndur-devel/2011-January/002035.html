@@ -1,0 +1,170 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 08/11] kernel2: zerstören von mm-Kontexten implementiert
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_08/11%3D5D_kernel2%3D3A_zerst%3DC3%3DB6%3F%3D%0A%09%3D%3Futf-8%3Fq%3Fren_von_mm-Kontexten_implementiert%3F%3D&In-Reply-To=%3C1295115491-31710-8-git-send-email-m.nemo%40gmx.net%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002034.html">
+   <LINK REL="Next"  HREF="002036.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 08/11] kernel2: zerstören von mm-Kontexten implementiert</H1>
+    <B>Andreas Freimuth</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_08/11%3D5D_kernel2%3D3A_zerst%3DC3%3DB6%3F%3D%0A%09%3D%3Futf-8%3Fq%3Fren_von_mm-Kontexten_implementiert%3F%3D&In-Reply-To=%3C1295115491-31710-8-git-send-email-m.nemo%40gmx.net%3E"
+           TITLE="[tyndur-devel] [PATCH 08/11] kernel2: zerstören von mm-Kontexten implementiert">m.nemo at gmx.net
+                  </A><BR>
+    <I>Sa Jan 15 19:18:08 CET 2011</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002034.html">[tyndur-devel] [PATCH 07/11] kernel2: Kernel-Kontext erstellen
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002036.html">[tyndur-devel] [PATCH 09/11] kernel2: jede CPU hat einen aktuellen	mm-Kontext
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2035">[ Datum ]</a>
+              <a href="thread.html#2035">[ Thema ]</a>
+              <a href="subject.html#2035">[ Betreff (Subject) ]</a>
+              <a href="author.html#2035">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ mmc_destroy tut jetzt auch was es soll
+
+Signed-off-by: Andreas Freimuth &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">m.nemo at gmx.net</A>&gt;
+---
+ src/kernel2/src/arch/amd64/mm/mm_context.c |   89 +++++++++++++++++++++++++++-
+ 1 files changed, 86 insertions(+), 3 deletions(-)
+
+diff --git a/src/kernel2/src/arch/amd64/mm/mm_context.c b/src/kernel2/src/arch/amd64/mm/mm_context.c
+index d21b1db..82115af 100644
+--- a/src/kernel2/src/arch/amd64/mm/mm_context.c
++++ b/src/kernel2/src/arch/amd64/mm/mm_context.c
+@@ -128,11 +128,94 @@ mmc_context_t mmc_create_kernel_context()
+ }
+ 
+ /**
+- * Einen MM-Kontext zerstoeren und den gemappten Userspace-Speicher freigeben
++ * Eine Page-Table und alle untergeordneten Pages freigeben.
++ *
++ * @param pd_entry Page-Directory-Eintrag für die frei zu gebende
++ *   Page-Table
++ */
++static void free_pt(mmc_pd_entry_t pd_entry)
++{
++    if(pd_entry &amp; PAGE_FLAGS_BIG) {
++        // 2MiB freigeben
++        pmm_free(pd_entry &amp; ~((1L &lt;&lt; PAGE_DIRECTORY_SHIFT) - 1),
++            PAGE_TABLE_LENGTH);
++    } else {
++        mmc_pt_entry_t* pt = MAPPED_PHYS_MEM_GET(pd_entry &amp; PAGE_MASK);
++
++        unsigned int i;
++        for(i = 0; i &lt; PAGE_TABLE_LENGTH; i++) {
++            if(pt[i] != 0)
++                pmm_free(pt[i] &amp; PAGE_MASK, 1);
++        }
++
++        pmm_free(pd_entry &amp; PAGE_MASK, 1);
++    }
++}
++
++/**
++ * Ein Page-Directory und alle untergeordneten Strukturen freigeben.
++ *
++ * @param pdpt_entry Page-Directory-Pointer-Table-Eintrag für das frei zu
++ *   gebende Page-Directory
++ */
++static void free_pd(mmc_pdpt_entry_t pdpt_entry)
++{
++    if(pdpt_entry &amp; PAGE_FLAGS_BIG) {
++        // 1GiB freigeben
++        pmm_free(pdpt_entry &amp; ~((1L &lt;&lt; PAGE_DIR_PTR_TABLE_SHIFT) - 1),
++            PAGE_DIRECTORY_LENGTH * PAGE_TABLE_LENGTH);
++    } else {
++        mmc_pd_entry_t* pd = MAPPED_PHYS_MEM_GET(pdpt_entry &amp; PAGE_MASK);
++
++        unsigned int i;
++        for(i = 0; i &lt; PAGE_DIRECTORY_LENGTH; i++) {
++            if(pd[i] != 0)
++                free_pt(pd[i]);
++        }
++
++        pmm_free(pdpt_entry &amp; PAGE_MASK, 1);
++    }
++}
++
++/**
++ * Eine Page-Directory-Pointer-Table und alle untergeordneten Strukturen
++ * freigeben.
++ *
++ * @param pm_entry Page-Map-Eintrag für die frei zu gebende
++ *   Page-Directory-Pointer-Table
++ */
++static void free_pdpt(mmc_pm_entry_t pm_entry)
++{
++    mmc_pdpt_entry_t* pdpt = MAPPED_PHYS_MEM_GET(pm_entry &amp; PAGE_MASK);
++
++    unsigned int i;
++    for(i = 0; i &lt; PAGE_DIR_PTR_TABLE_LENGTH; i++) {
++        if(pdpt[i] != 0)
++            free_pd(pdpt[i]);
++    }
++
++    pmm_free(pm_entry &amp; PAGE_MASK, 1);
++}
++
++/**
++ * Einen MM-Kontext zerstören und den gemappten Userspace-Speicher freigeben.
++ *
++ * @param context zu zerstörender MM-Kontext
+  */
+-void mmc_destroy(mmc_context_t context)
++void mmc_destroy(mmc_context_t* context)
+ {
+-    // TODO
++    mmc_pm_entry_t* pml4 = MAPPED_PHYS_MEM_GET(context-&gt;pml4);
++
++    pml4 += PAGE_MAP_INDEX(USER_MEM_START);
++    unsigned int i;
++    for(i = 0; i &lt; NUM_PAGE_MAPS(USER_MEM_END - USER_MEM_START);
++        i++)
++    {
++        if(pml4[i] != 0)
++            free_pdpt(pml4[i]);
++    }
++
++    pmm_free(context-&gt;pml4, 1);
+ }
+ 
+ /**
+-- 
+1.7.3.4
+
+</PRE>
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002034.html">[tyndur-devel] [PATCH 07/11] kernel2: Kernel-Kontext erstellen
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002036.html">[tyndur-devel] [PATCH 09/11] kernel2: jede CPU hat einen aktuellen	mm-Kontext
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2035">[ Datum ]</a>
+              <a href="thread.html#2035">[ Thema ]</a>
+              <a href="subject.html#2035">[ Betreff (Subject)]</a>
+              <a href="author.html#2035">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

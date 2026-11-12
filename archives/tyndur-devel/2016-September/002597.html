@@ -1,0 +1,239 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 4/7] kernel2: lio_stream_origin()
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%204/7%5D%20kernel2%3A%20lio_stream_origin%28%29&In-Reply-To=%3C1472914382-8896-5-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002596.html">
+   <LINK REL="Next"  HREF="002598.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 4/7] kernel2: lio_stream_origin()</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%204/7%5D%20kernel2%3A%20lio_stream_origin%28%29&In-Reply-To=%3C1472914382-8896-5-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 4/7] kernel2: lio_stream_origin()">kevin at tyndur.org
+                  </A><BR>
+    <I>Sa Sep  3 16:52:59 CEST 2016</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002596.html">[tyndur-devel] [PATCH 3/7] libc: file_get_stream()
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002598.html">[tyndur-devel] [PATCH 5/7] kernel2: syscall_shm_size
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2597">[ Datum ]</a>
+              <a href="thread.html#2597">[ Thema ]</a>
+              <a href="subject.html#2597">[ Betreff (Subject) ]</a>
+              <a href="author.html#2597">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ kernel2: Neuer Syscall lio_stream_origin(), mit dem sich feststellen
+  lässt, ob ein Stream tatsächlich existiert und von dem Prozess kommt,
+  der das (z.B. in einem RPC-Aufruf) behauptet.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/include/syscallno.h            |  3 ++-
+ src/kernel2/include/lostio/core.h  |  3 +++
+ src/kernel2/include/syscall.h      |  3 +++
+ src/kernel2/src/lostio/userspace.c |  1 +
+ src/kernel2/src/syscall.c          |  1 +
+ src/kernel2/src/syscalls/lostio.c  | 16 ++++++++++++++++
+ src/modules/include/syscall.h      | 13 +++++++++++++
+ src/modules/lib/syscalls/lostio.c  | 25 +++++++++++++++++++++++++
+ 8 files changed, 64 insertions(+), 1 deletion(-)
+
+diff --git a/src/include/syscallno.h b/src/include/syscallno.h
+index 3938718..d4794f5 100644
+--- a/src/include/syscallno.h
++++ b/src/include/syscallno.h
+@@ -109,7 +109,8 @@
+ #define SYSCALL_LIO_SYNC_ALL    99
+ #define SYSCALL_LIO_PASS_FD     100
+ #define SYSCALL_LIO_PROBE_SERVICE 101
+-#define SYSCALL_LIO_DUP         102
++#define SYSCALL_LIO_DUP           102
++#define SYSCALL_LIO_STREAM_ORIGIN 103
+ 
+ #define SYSCALL_LIO_SRV_SERVICE_REGISTER            110
+ #define SYSCALL_LIO_SRV_TREE_SET_RING               111
+diff --git a/src/kernel2/include/lostio/core.h b/src/kernel2/include/lostio/core.h
+index 3e71dc3..d8ad945 100644
+--- a/src/kernel2/include/lostio/core.h
++++ b/src/kernel2/include/lostio/core.h
+@@ -66,6 +66,9 @@ struct lio_usp_stream {
+ 
+     /** Sortierung nach usp_id im Baum */
+     struct tree_item        usp_item;
++
++    /** PID des Prozesses, der den Stream dem aktuellen übergeben hat */
++    pid_t                   origin;
+ };
+ 
+ struct lio_node {
+diff --git a/src/kernel2/include/syscall.h b/src/kernel2/include/syscall.h
+index c979373..e2b9148 100644
+--- a/src/kernel2/include/syscall.h
++++ b/src/kernel2/include/syscall.h
+@@ -217,6 +217,9 @@ int syscall_lio_dup(lio_usp_stream_t* source, lio_usp_stream_t* dest);
+ /// Stream an anderen Prozess weitergeben
+ int syscall_lio_pass_fd(lio_usp_stream_t* stream_id, pid_t pid);
+ 
++/// PID des Prozesses, der den Stream dem aktuellen übergeben hat, auslesen
++int syscall_lio_stream_origin(lio_usp_stream_t* stream_id);
++
+ /// Aus Stream lesen
+ void syscall_lio_read(lio_usp_stream_t* stream_id, uint64_t* offset,
+     size_t bytes, void* buffer, int updatepos, ssize_t* result);
+diff --git a/src/kernel2/src/lostio/userspace.c b/src/kernel2/src/lostio/userspace.c
+index 6fd5638..e814149 100644
+--- a/src/kernel2/src/lostio/userspace.c
++++ b/src/kernel2/src/lostio/userspace.c
+@@ -103,6 +103,7 @@ struct lio_usp_stream* lio_usp_do_add_stream(pm_process_t* proc,
+ 
+     entry-&gt;stream = stream;
+     entry-&gt;usp_id = id;
++    entry-&gt;origin = proc-&gt;pid;
+     tree_insert(proc-&gt;lio_streams, entry);
+ 
+     stream-&gt;usp_refcount++;
+diff --git a/src/kernel2/src/syscall.c b/src/kernel2/src/syscall.c
+index 557ab12..0cee76b 100644
+--- a/src/kernel2/src/syscall.c
++++ b/src/kernel2/src/syscall.c
+@@ -132,6 +132,7 @@ void syscall_init()
+     syscall_register(SYSCALL_LIO_PASS_FD, &amp;syscall_lio_pass_fd, 2);
+     syscall_register(SYSCALL_LIO_PROBE_SERVICE, &amp;syscall_lio_probe_service, 2);
+     syscall_register(SYSCALL_LIO_DUP, &amp;syscall_lio_dup, 2);
++    syscall_register(SYSCALL_LIO_STREAM_ORIGIN, &amp;syscall_lio_stream_origin, 1);
+ 
+     syscall_register(SYSCALL_LIO_SRV_SERVICE_REGISTER,
+         &amp;syscall_lio_srv_service_register, 4);
+diff --git a/src/kernel2/src/syscalls/lostio.c b/src/kernel2/src/syscalls/lostio.c
+index 73aa98e..47c2f8c 100644
+--- a/src/kernel2/src/syscalls/lostio.c
++++ b/src/kernel2/src/syscalls/lostio.c
+@@ -177,6 +177,7 @@ int syscall_lio_pass_fd(lio_usp_stream_t* stream_id, pid_t pid)
+ 
+     stream = fd-&gt;stream;
+     new_fd = lio_usp_add_stream(process, stream);
++    new_fd-&gt;origin = current_process-&gt;pid;
+     *stream_id = new_fd-&gt;usp_id;
+ 
+     // Wir haben gerade eine zweite Referenz hinzugefügt, also kann kein
+@@ -187,6 +188,21 @@ int syscall_lio_pass_fd(lio_usp_stream_t* stream_id, pid_t pid)
+     return 0;
+ }
+ 
++/// PID des Prozesses, der den Stream dem aktuellen übergeben hat, auslesen
++int syscall_lio_stream_origin(lio_usp_stream_t* stream_id)
++{
++    struct lio_usp_stream* fd;
++
++    // TODO: is_userspace
++    fd = lio_usp_get_stream(current_process, *stream_id);
++    if (fd == NULL) {
++        return -EBADF;
++    }
++
++    return fd-&gt;origin;
++}
++
++
+ /// Aus Stream lesen
+ void syscall_lio_read(lio_usp_stream_t* stream_id, uint64_t* offset,
+     size_t bytes, void* buffer, int flags, ssize_t* result)
+diff --git a/src/modules/include/syscall.h b/src/modules/include/syscall.h
+index 2fac1f4..5a493bb 100644
+--- a/src/modules/include/syscall.h
++++ b/src/modules/include/syscall.h
+@@ -198,6 +198,19 @@ int lio_close(lio_stream_t s);
+ lio_stream_t lio_pass_fd(lio_stream_t s, pid_t pid);
+ 
+ /**
++ * Gibt den Prozess zurück, der den Stream an den aktuellen Prozess übergeben
++ * hat.
++ *
++ * @param s Der zu prüfende Stream
++ * @return Falls der Stream von einem anderen Prozess übergeben wurde, dessen
++ * PID. Falls er von diesem Prozess geöffnet wurde, die eigene PID. Negativ
++ * im Fehlerfall, insbesondere:
++ *
++ *      -EBADF      Die Stream-ID ist ungültig
++ */
++int lio_stream_origin(lio_stream_t s);
++
++/**
+  * Liest aus dem Stream.
+  *
+  * @param s Auszulesender Stream
+diff --git a/src/modules/lib/syscalls/lostio.c b/src/modules/lib/syscalls/lostio.c
+index b898e7a..eb14658 100644
+--- a/src/modules/lib/syscalls/lostio.c
++++ b/src/modules/lib/syscalls/lostio.c
+@@ -202,6 +202,31 @@ lio_stream_t lio_pass_fd(lio_stream_t s, pid_t pid)
+     }
+ }
+ 
++/**
++ * Gibt den Prozess zurück, der den Stream an den aktuellen Prozess übergeben
++ * hat.
++ *
++ * @param s Der zu prüfende Stream
++ * @return Falls der Stream von einem anderen Prozess übergeben wurde, dessen
++ * PID. Falls er von diesem Prozess geöffnet wurde, die eigene PID. Negativ
++ * im Fehlerfall, insbesondere:
++ *
++ *      -EBADF      Die Stream-ID ist ungültig
++ */
++int lio_stream_origin(lio_stream_t s)
++{
++    int result;
++
++    asm(
++        &quot;pushl %2;&quot;
++        &quot;mov %1, %%eax;&quot;
++        &quot;int $0x30;&quot;
++        &quot;add $0x4, %%esp;&quot;
++    : &quot;=a&quot; (result): &quot;i&quot; (SYSCALL_LIO_STREAM_ORIGIN), &quot;r&quot; (&amp;s) : &quot;memory&quot;);
++
++    return result;
++}
++
+ ssize_t lio_readf(lio_stream_t s, uint64_t offset, size_t bytes,
+     void* buf, int flags)
+ {
+-- 
+2.1.4
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002596.html">[tyndur-devel] [PATCH 3/7] libc: file_get_stream()
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002598.html">[tyndur-devel] [PATCH 5/7] kernel2: syscall_shm_size
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2597">[ Datum ]</a>
+              <a href="thread.html#2597">[ Thema ]</a>
+              <a href="subject.html#2597">[ Betreff (Subject)]</a>
+              <a href="author.html#2597">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

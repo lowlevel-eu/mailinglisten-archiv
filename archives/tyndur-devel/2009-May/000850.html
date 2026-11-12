@@ -1,0 +1,284 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH v2] libc: POSIX: Eine notduerftige	sys/select.h
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%5D%20libc%3A%20POSIX%3A%20Eine%20notduerftige%0A%09sys/select.h&In-Reply-To=%3C1241297299-4706-1-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="000849.html">
+   <LINK REL="Next"  HREF="000862.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH v2] libc: POSIX: Eine notduerftige	sys/select.h</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%5D%20libc%3A%20POSIX%3A%20Eine%20notduerftige%0A%09sys/select.h&In-Reply-To=%3C1241297299-4706-1-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH v2] libc: POSIX: Eine notduerftige	sys/select.h">kevin at tyndur.org
+                  </A><BR>
+    <I>Sa Mai  2 22:48:19 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="000849.html">[tyndur-devel] [PATCH 2/3] libc: POSIX: Eine notduerftige	sys/select.h
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="000862.html">[tyndur-devel] [PATCH v2] libc: POSIX: Eine	notduerftige	sys/select.h
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#850">[ Datum ]</a>
+              <a href="thread.html#850">[ Thema ]</a>
+              <a href="subject.html#850">[ Betreff (Subject) ]</a>
+              <a href="author.html#850">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ libc: POSIX: Ein select(), das fuer Lesen per fgetc()/ungetc()
+  zusammengehackt ist, beim Schreiben immer ja und bei Fehlern immer
+  nein sagt. Dazu ein fd_set als 32-Bit-Bitmaske und passende Makros.
+---
+ src/modules/include/sys/select.h |   74 ++++++++++++++++++++++
+ src/modules/lib/posix/select.c   |  128 ++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 202 insertions(+), 0 deletions(-)
+ create mode 100644 src/modules/include/sys/select.h
+ create mode 100644 src/modules/lib/posix/select.c
+
+diff --git a/src/modules/include/sys/select.h b/src/modules/include/sys/select.h
+new file mode 100644
+index 0000000..cc53b7d
+--- /dev/null
++++ b/src/modules/include/sys/select.h
+@@ -0,0 +1,74 @@
++/*
++ * Copyright (c) 2009 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++#ifndef _SYS_SELECT_H_
++#define _SYS_SELECT_H_
++
++#include &lt;sys/time.h&gt;
++#include &lt;stdint.h&gt;
++
++#ifndef CONFIG_LIBC_NO_STUBS
++
++/**
++ * Menge von Dateideskriptoren
++ *
++ * FIXME Irgendwann will man da sicher mehr als 32 benutzen koennen
++ */
++typedef struct {
++    uint32_t bits;
++} fd_set;
++
++#define FD_ZERO(fdset) do { (fdset).bits = 0; } while (0)
++#define FD_SET(fd, fdset) do { (fdset).bits |= (1 &lt;&lt; (fd)); } while (0)
++#define FD_CLR(fd, fdset) do { (fdset).bits &amp;= ~(1 &lt;&lt; (fd)); } while (0)
++#define FD_ISSET(fd, fdset) ((fdset).bits &amp; (1 &lt;&lt; (fd)))
++
++/**
++ * Prueft, welche der gegebenen Dateideskriptoren bereit zum Lesen oder
++ * Schreiben sind oder ein Fehler fuer sie aufgetreten ist. Dateideskriptoren
++ * die nicht bereit bzw. in einem Fehlerzustand sind, werden aus der Menge
++ * entfernt.
++ *
++ * @param number_fds Nummer des hoechsten Dateideskriptors in einem der
++ * uebergebenen Mengen.
++ * @param readfds Dateideskriptoren, bei denen ueberprueft werden soll, ob sie
++ * zum Lesen bereit sind.
++ * @param writefds Dateideskriptoren, bei denen ueberprueft werden soll, ob sie
++ * zum Schreiben bereit sind.
++ * @param errfds Dateideskriptoren, bei denen ueberprueft werden soll, ob sie
++ * in einem Fehlerzustand sind.
++ * @param timeout Maximales Timeout, das gewartet werden soll, falls kein
++ * Deskriptor bereit ist. NULL fuer dauerhaftes Blockieren.
++ *
++ * @return Anzahl der Dateideskriptoren, die bereit bzw. in einem Fehlerzustand
++ * sind
++ */
++int select(int number_fds, fd_set* readfds, fd_set* writefds,
++    fd_set* errfds, struct timeval* timeout);
++#endif
++
++#endif
+diff --git a/src/modules/lib/posix/select.c b/src/modules/lib/posix/select.c
+new file mode 100644
+index 0000000..539f555
+--- /dev/null
++++ b/src/modules/lib/posix/select.c
+@@ -0,0 +1,128 @@
++/*
++ * Copyright (c) 2009 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include &lt;sys/select.h&gt;
++#include &lt;sys/time.h&gt;
++#include &lt;stdio.h&gt;
++#include &lt;syscall.h&gt;
++
++#ifndef CONFIG_LIBC_NO_STUBS
++/**
++ * Prueft, welche der gegebenen Dateideskriptoren bereit zum Lesen oder
++ * Schreiben sind oder ein Fehler fuer sie aufgetreten ist. Dateideskriptoren
++ * die nicht bereit bzw. in einem Fehlerzustand sind, werden aus der Menge
++ * entfernt.
++ *
++ * @param number_fds Nummer des hoechsten Dateideskriptors in einem der
++ * uebergebenen Mengen.
++ * @param readfds Dateideskriptoren, bei denen ueberprueft werden soll, ob sie
++ * zum Lesen bereit sind.
++ * @param writefds Dateideskriptoren, bei denen ueberprueft werden soll, ob sie
++ * zum Schreiben bereit sind.
++ * @param errfds Dateideskriptoren, bei denen ueberprueft werden soll, ob sie
++ * in einem Fehlerzustand sind.
++ * @param timeout Maximales Timeout, das gewartet werden soll, falls kein
++ * Deskriptor bereit ist. NULL fuer dauerhaftes Blockieren.
++ *
++ * @return Anzahl der Dateideskriptoren, die bereit bzw. in einem Fehlerzustand
++ * sind
++ */
++int select(int number_fds, fd_set* readfds, fd_set* writefds,
++    fd_set* errfds, struct timeval* timeout)
++{
++    uint32_t* rd = (uint32_t*) readfds;
++    uint32_t* wr = (uint32_t*) writefds;
++    uint32_t* err = (uint32_t*) errfds;
++    int c;
++    FILE* f;
++    int ret;
++
++    uint32_t orig_rd = rd ? *rd : 0;
++    uint32_t orig_wr = wr ? *wr : 0;
++
++    uint64_t timeout_tick;
++    if (timeout != NULL) {
++        timeout_tick = get_tick_count() + timeout-&gt;tv_sec +
++            1000ULL * 1000ULL * timeout-&gt;tv_usec;
++    } else {
++        timeout_tick = (uint64_t) -1;
++    }
++
++    // tyndur ist so toll, bei uns gibt es keine Fehler
++    if (err) {
++        *err = 0;
++    }
++
++    do {
++        int i;
++
++        // Wieder alles zuruecksetzen
++        ret = 0;
++        if (rd) {
++            *rd = orig_rd;
++        }
++        if (wr) {
++            *wr = orig_wr;
++        }
++
++
++        for (i = 0; i &lt; 32; i++) {
++
++            // Versuchsweise ein Zeichen auslesen. Wenn das funktioniert, als
++            // lesbar werten und das Zeichen schnell wieder zurueckstecken
++            // bevor das Programm was merkt.
++            if (rd &amp;&amp; (*rd &amp; (1 &lt;&lt; i))) {
++                f = fdopen(i, NULL);
++
++                if (f != NULL) {
++                    c = fgetc(f);
++                    if (c == 0 || c == EOF) {
++                        *rd &amp;= ~(1 &lt;&lt; i);
++                    } else {
++                        ungetc(c, f);
++                        ret++;
++                    }
++                }
++            }
++
++            // Schreiben geht immer
++            if (wr &amp;&amp; (*wr &amp; (1 &lt;&lt; i))) {
++                ret++;
++            }
++        }
++
++        // Busy Wait waere irgendwie auch doof
++        if (ret == 0) {
++            yield();
++        }
++
++    } while ((ret == 0) &amp;&amp; (timeout_tick &gt; get_tick_count()));
++
++    return ret;
++}
++#endif
+-- 
+1.6.0.2
+
+</PRE>
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="000849.html">[tyndur-devel] [PATCH 2/3] libc: POSIX: Eine notduerftige	sys/select.h
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="000862.html">[tyndur-devel] [PATCH v2] libc: POSIX: Eine	notduerftige	sys/select.h
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#850">[ Datum ]</a>
+              <a href="thread.html#850">[ Thema ]</a>
+              <a href="subject.html#850">[ Betreff (Subject)]</a>
+              <a href="author.html#850">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

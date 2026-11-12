@@ -1,0 +1,169 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH v2 4/7] kernel2: mmc_destroy implementieren
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%204/7%5D%20kernel2%3A%20mmc_destroy%0A%20implementieren&In-Reply-To=%3C20100103164855.GA26174%40neo.geekcave.lan%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001619.html">
+   <LINK REL="Next"  HREF="001620.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH v2 4/7] kernel2: mmc_destroy implementieren</H1>
+    <B>Antoine Kaufmann</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%204/7%5D%20kernel2%3A%20mmc_destroy%0A%20implementieren&In-Reply-To=%3C20100103164855.GA26174%40neo.geekcave.lan%3E"
+           TITLE="[tyndur-devel] [PATCH v2 4/7] kernel2: mmc_destroy implementieren">toni at tyndur.org
+                  </A><BR>
+    <I>So Jan  3 17:48:55 CET 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001619.html">[tyndur-devel] [PATCH v2 4/7] kernel2: mmc_destroy implementieren
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001620.html">[tyndur-devel] [PATCH v2 5/7] kernel2: Kernel-PD bei	Paging-Initialisierung richtig setzen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1630">[ Datum ]</a>
+              <a href="thread.html#1630">[ Thema ]</a>
+              <a href="subject.html#1630">[ Betreff (Subject) ]</a>
+              <a href="author.html#1630">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>On Sun, Jan 03 17:03, Kevin Wolf wrote:
+&gt;<i> + kernel2: mmc_destroy implementiert. Damit wird jetzt nach Prozessende
+</I>&gt;<i>   der Speicher auch wieder freigegeben.
+</I>&gt;<i> 
+</I>&gt;<i> Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+</I>&gt;<i> ---
+</I>&gt;<i>  src/kernel2/src/arch/i386/mm/mm_context.c |   39 ++++++++++++++++++++++++++++-
+</I>&gt;<i>  src/kernel2/src/tasks/pm.c                |    7 +++++
+</I>&gt;<i>  2 files changed, 45 insertions(+), 1 deletions(-)
+</I>&gt;<i> 
+</I>&gt;<i> diff --git a/src/kernel2/src/arch/i386/mm/mm_context.c b/src/kernel2/src/arch/i386/mm/mm_context.c
+</I>&gt;<i> index 34ac946..a9fc8eb 100644
+</I>&gt;<i> --- a/src/kernel2/src/arch/i386/mm/mm_context.c
+</I>&gt;<i> +++ b/src/kernel2/src/arch/i386/mm/mm_context.c
+</I>&gt;<i> @@ -61,6 +61,9 @@ bool use_phys_addr = TRUE;
+</I>&gt;<i>   */
+</I>&gt;<i>  static void mmc_sync(mmc_context_t* context);
+</I>&gt;<i>  
+</I>&gt;<i> +static inline vaddr_t get_pagetable(mmc_context_t* context, size_t index);
+</I>&gt;<i> +static inline void free_pagetable(mmc_context_t* context, vaddr_t page_table);
+</I>&gt;<i> +
+</I>&gt;<i>  /**
+</I>&gt;<i>   * Erstellt einen neuen MM-Kontext (Page Directory)
+</I>&gt;<i>   */
+</I>&gt;<i> @@ -142,11 +145,41 @@ void mmc_activate(mmc_context_t* context)
+</I>&gt;<i>  /**
+</I>&gt;<i>   * Kontext zerstoeren und Userspace-Speicher freigeben
+</I>&gt;<i>   *
+</I>&gt;<i> + * Achtung: Der noch gemappte Speicher darf nur zu diesem Kontext gehoeren, er
+</I>&gt;<i> + * wird physisch freigegeben! Shared Memory muss vorher freigegeben werden.
+</I>&gt;<i> + *
+</I>&gt;<i>   * @param context Kontext
+</I>&gt;<i>   */
+</I>&gt;<i>  void mmc_destroy(mmc_context_t* context)
+</I>&gt;<i>  {
+</I>&gt;<i> -    // TODO
+</I>&gt;<i> +    page_directory_t page_directory = context-&gt;page_directory_virt;
+</I>&gt;<i> +    page_table_t page_table;
+</I>&gt;<i> +    int i, n;
+</I>&gt;<i> +
+</I>&gt;<i> +    for (i = (MM_USER_START &gt;&gt; PGDIR_SHIFT);
+</I>&gt;<i> +         i &lt; (MM_USER_END &gt;&gt; PGDIR_SHIFT);
+</I>&gt;<i> +         i++)
+</I>&gt;<i> +    {
+</I>&gt;<i> +        page_table = get_pagetable(context, i);
+</I>&gt;<i> +        if (page_table == NULL) {
+</I>&gt;<i> +            continue;
+</I>&gt;<i> +        }
+</I>&gt;<i> +
+</I>&gt;<i> +        // Alle Page-Table-Eintraege freigeben
+</I>&gt;<i> +        for(n = 0; n &lt; 1024; n++) {
+</I>&gt;<i> +            if(page_table[n] &amp; PTE_P) {
+</I>&gt;<i> +                pmm_free((paddr_t) (page_table[n] &amp; PAGE_MASK), 1);
+</I>&gt;<i> +            }
+</I>&gt;<i> +        }
+</I>&gt;<i> +        free_pagetable(context, page_table);
+</I>&gt;<i> +
+</I>&gt;<i> +        // Page Table freigeben
+</I>&gt;<i> +        pmm_free((paddr_t) (page_directory[i] &amp; PAGE_MASK), 1);
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    // Page Directory freigeben
+</I>&gt;<i> +    mmc_unmap(&amp;mmc_current_context(), context-&gt;page_directory_virt, 1);
+</I>&gt;<i> +    pmm_free(context-&gt;page_directory, 1);
+</I>&gt;<i>  }
+</I>&gt;<i>  
+</I>&gt;<i>  /**
+</I>&gt;<i> @@ -159,6 +192,10 @@ static inline vaddr_t get_pagetable(mmc_context_t* context, size_t index)
+</I>&gt;<i>      page_directory_t pagedir = context-&gt;page_directory_virt;
+</I>&gt;<i>      page_table_t page_table;
+</I>&gt;<i>  
+</I>&gt;<i> +    if ((pagedir[index] &amp; PTE_P) == 0) {
+</I>&gt;<i> +        return NULL;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i>      if (context-&gt;page_directory == mmc_current_context().page_directory) {
+</I>&gt;<i>          if (!use_phys_addr) {
+</I>&gt;<i>              page_table = (page_table_t) 
+</I>&gt;<i> diff --git a/src/kernel2/src/tasks/pm.c b/src/kernel2/src/tasks/pm.c
+</I>&gt;<i> index 8dc8f2b..dde8f33 100644
+</I>&gt;<i> --- a/src/kernel2/src/tasks/pm.c
+</I>&gt;<i> +++ b/src/kernel2/src/tasks/pm.c
+</I>&gt;<i> @@ -58,6 +58,7 @@ static pid_t next_pid = 1;
+</I>&gt;<i>  
+</I>&gt;<i>  
+</I>&gt;<i>  extern void scheduler_init(void);
+</I>&gt;<i> +extern pm_process_t init_process;
+</I>&gt;<i>  
+</I>&gt;<i>  /**
+</I>&gt;<i>   * Die Prozessverwaltung initialisieren
+</I>&gt;<i> @@ -155,6 +156,12 @@ void pm_destroy(pm_process_t* process)
+</I>&gt;<i>  {
+</I>&gt;<i>      struct on_destroy_info* info;
+</I>&gt;<i>  
+</I>&gt;<i> +    // Der aktuelle Speicherkontext darf nicht zum zu zerstoerenden Task
+</I>&gt;<i> +    // gehoeren, sonst kriegen wir Probleme beim freigeben des Page Directory
+</I>&gt;<i> +    if (&amp;process-&gt;context == &amp;mmc_current_context()) {
+</I>&gt;<i> +        mmc_activate(&amp;init_process.context);
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i>      // Den Prozess blockieren
+</I>&gt;<i>      while (pm_block(process) == FALSE);
+</I>
+Acked-by: Antoine Kaufmann &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">toni at tyndur.org</A>&gt;
+
+-- 
+Antoine Kaufmann
+&lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">toni at famkaufmann.info</A>&gt;
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : &lt;<A HREF="http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100103/c7644cad/attachment-0001.pgp">http://list.tyndur.org/pipermail/tyndur-devel/attachments/20100103/c7644cad/attachment-0001.pgp</A>&gt;
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001619.html">[tyndur-devel] [PATCH v2 4/7] kernel2: mmc_destroy implementieren
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001620.html">[tyndur-devel] [PATCH v2 5/7] kernel2: Kernel-PD bei	Paging-Initialisierung richtig setzen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1630">[ Datum ]</a>
+              <a href="thread.html#1630">[ Thema ]</a>
+              <a href="subject.html#1630">[ Betreff (Subject)]</a>
+              <a href="author.html#1630">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

@@ -1,0 +1,178 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH v2 6/6] kernel2: Beim Prozessende offene	Dateien schliessen
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%206/6%5D%20kernel2%3A%20Beim%20Prozessende%20offene%0A%09Dateien%20schliessen&In-Reply-To=%3C1323549482-1766-7-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002324.html">
+   <LINK REL="Next"  HREF="002331.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH v2 6/6] kernel2: Beim Prozessende offene	Dateien schliessen</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%206/6%5D%20kernel2%3A%20Beim%20Prozessende%20offene%0A%09Dateien%20schliessen&In-Reply-To=%3C1323549482-1766-7-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH v2 6/6] kernel2: Beim Prozessende offene	Dateien schliessen">kevin at tyndur.org
+                  </A><BR>
+    <I>Sa Dez 10 21:38:02 CET 2011</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002324.html">[tyndur-devel] [PATCH v2 5/6] kernel2: LIOv2-Clientsyscalls	implementiert
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002331.html">[tyndur-devel] [PATCH] libc: inet_addr
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2325">[ Datum ]</a>
+              <a href="thread.html#2325">[ Thema ]</a>
+              <a href="subject.html#2325">[ Betreff (Subject) ]</a>
+              <a href="author.html#2325">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ kernel2: Wenn ein Prozess beendet wird, dann werden auch alle offenen
+  Dateien geschlossen
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/kernel2/include/tasks.h   |    3 +++
+ src/kernel2/src/syscalls/pm.c |    7 +++++++
+ src/kernel2/src/tasks/pm.c    |   33 +++++++++++++++++++++++++++++----
+ 3 files changed, 39 insertions(+), 4 deletions(-)
+
+diff --git a/src/kernel2/include/tasks.h b/src/kernel2/include/tasks.h
+index 5256e0f..1b719d7 100644
+--- a/src/kernel2/include/tasks.h
++++ b/src/kernel2/include/tasks.h
+@@ -155,6 +155,9 @@ void pm_init(void);
+ /// Prozess erstellen
+ pm_process_t* pm_create(pm_process_t* parent, const char* cmdline);
+ 
++/// Datenstrukturen eines Prozesses freigeben (vor dem Taskwechsel)
++void pm_prepare_destroy(pm_process_t* process);
++
+ /// Prozess zerstoeren
+ void pm_destroy(pm_process_t* process);
+ 
+diff --git a/src/kernel2/src/syscalls/pm.c b/src/kernel2/src/syscalls/pm.c
+index 806e827..eb63254 100644
+--- a/src/kernel2/src/syscalls/pm.c
++++ b/src/kernel2/src/syscalls/pm.c
+@@ -82,9 +82,16 @@ void syscall_pm_exit_process(void)
+ {
+     pm_process_t* old_task = current_process;
+ 
++    // Ein paar erste Datenstrukturen freigeben
++    pm_prepare_destroy(old_task);
++
+     // Task abgeben
+     pm_scheduler_push(current_thread);
+ 
++    // Den Prozess blockieren
++    while (pm_block(old_task) == false);
++
++
+     // Genau jetzt muss der Prozess geloescht werden: Der Thread ist nicht mehr
+     // aktiv, und er darf auch nicht wieder aktiviert werden.
+     pm_destroy(old_task);
+diff --git a/src/kernel2/src/tasks/pm.c b/src/kernel2/src/tasks/pm.c
+index 047c4d5..e3085c5 100644
+--- a/src/kernel2/src/tasks/pm.c
++++ b/src/kernel2/src/tasks/pm.c
+@@ -45,6 +45,7 @@
+ #include &quot;lock.h&quot;
+ #include &quot;timer.h&quot;
+ #include &quot;lostio/core.h&quot;
++#include &quot;lostio/client.h&quot;
+ #include &quot;lostio/userspace.h&quot;
+ 
+ 
+@@ -180,6 +181,33 @@ pm_process_t* pm_create(pm_process_t* parent, const char* cmdline)
+ }
+ 
+ /**
++ * Datenstrukturen eines Prozesses freigeben (falls von diesem Prozess selbst
++ * aufgerufen, darf der Task noch nicht gewechselt worden sein, damit
++ * unterbrechbare LIOv2-Funktionen benutzt werden koennen)
++ *
++ * @param process Pointer auf die Prozssstruktur.
++ */
++void pm_prepare_destroy(pm_process_t* process)
++{
++    // Alle Dateien schliessen und freigeben
++    struct lio_usp_stream* fd = NULL;
++    struct lio_usp_stream* next = NULL;
++    struct lio_stream* s;
++
++    fd = tree_next(process-&gt;lio_streams, NULL);
++    while (fd != NULL) {
++        next = tree_next(process-&gt;lio_streams, fd);
++
++        s = fd-&gt;stream;
++        lio_usp_remove_stream(process, fd);
++        lio_close(s);
++
++        fd = next;
++    }
++    tree_destroy(process-&gt;lio_streams);
++}
++
++/**
+  * Prozess zerstoeren
+  *
+  * @param process Pointer auf die Prozssstruktur.
+@@ -194,9 +222,6 @@ void pm_destroy(pm_process_t* process)
+         mmc_activate(&amp;init_process.context);
+     }
+ 
+-    // Den Prozess blockieren
+-    while (pm_block(process) == false);
+-
+     // Eventhandler ausfuehren
+     while ((info = list_pop(process-&gt;on_destroy))) {
+         info-&gt;handler(process, info-&gt;prv);
+@@ -238,7 +263,7 @@ void pm_destroy(pm_process_t* process)
+     while ((thread = list_get_element_at(process-&gt;threads, i++))) {
+         pm_thread_destroy(thread);
+     }
+-    
++
+     // Kommandozeile freigeben
+     free(process-&gt;cmdline);
+     
+-- 
+1.6.0.2
+
+</PRE>
+
+
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002324.html">[tyndur-devel] [PATCH v2 5/6] kernel2: LIOv2-Clientsyscalls	implementiert
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002331.html">[tyndur-devel] [PATCH] libc: inet_addr
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2325">[ Datum ]</a>
+              <a href="thread.html#2325">[ Thema ]</a>
+              <a href="subject.html#2325">[ Betreff (Subject)]</a>
+              <a href="author.html#2325">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

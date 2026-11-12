@@ -1,0 +1,681 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH 3/4] Call driver init function as a callback
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%203/4%5D%20Call%20driver%20init%20function%20as%20a%20callback&In-Reply-To=%3C1260029347-15604-4-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000047.html">
+   <LINK REL="Next"  HREF="000049.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH 3/4] Call driver init function as a callback</H1>
+    <B>Kevin Wolf</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%203/4%5D%20Call%20driver%20init%20function%20as%20a%20callback&In-Reply-To=%3C1260029347-15604-4-git-send-email-kevin%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH 3/4] Call driver init function as a callback">kevin at tyndur.org
+       </A><BR>
+    <I>Sat Dec  5 17:09:06 CET 2009</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000047.html">[cdi-devel] [PATCH 2/4] Use the CDI_DRIVER macro
+</A></li>
+        <LI>Next message: <A HREF="000049.html">[cdi-devel] [PATCH 4/4] Simplify driver declarations
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#48">[ date ]</a>
+              <a href="thread.html#48">[ thread ]</a>
+              <a href="subject.html#48">[ subject ]</a>
+              <a href="author.html#48">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>* cdi: Drivers register their initialization function in the generic
+  driver structur now. They no longer have a main function (if
+  possible), instead the entry point is moved to somewhere in the OS
+  specific CDI library.
+! cdi: Drivers need to specify their type
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">kevin at tyndur.org</A>&gt;
+---
+ ata/main.c     |   31 ++++++++++++++++++++-----------
+ e1000/main.c   |   24 +++++-------------------
+ ext2/main.c    |   27 ++++-----------------------
+ floppy/main.c  |   26 ++++----------------------
+ include/cdi.h  |    4 +++-
+ iso9660/main.c |   24 ++++--------------------
+ ne2k/main.c    |   22 +++-------------------
+ pcnet/main.c   |   22 +++-------------------
+ ramdisk/main.c |   26 ++++----------------------
+ rtl8139/main.c |   22 +++-------------------
+ serial/main.c  |   26 ++++----------------------
+ sis900/main.c  |   24 +++++-------------------
+ 12 files changed, 62 insertions(+), 216 deletions(-)
+
+diff --git a/ata/main.c b/ata/main.c
+index e7fec85..4699c2d 100644
+--- a/ata/main.c
++++ b/ata/main.c
+@@ -44,22 +44,19 @@ static struct cdi_storage_driver driver_storage;
+ static struct cdi_scsi_driver driver_scsi;
+ static cdi_list_t controller_list = NULL;
+ 
+-static void ata_driver_init(int argc, char* argv[]);
+-static void ata_driver_destroy(struct cdi_driver* driver);
+-static void atapi_driver_destroy(struct cdi_driver* driver);
++static int argc;
++static char** argv;
+ 
+ #ifdef CDI_STANDALONE
+-int main(int argc, char* argv[])
++int main(int _argc, char* _argv[])
+ #else
+-int init_ata(int argc, char* argv[])
++int init_ata(int _argc, char* _argv[])
+ #endif
+ {
+-    cdi_init();
+-    ata_driver_init(argc, argv);
+-    cdi_storage_driver_register((struct cdi_storage_driver*) &amp;driver_storage);
+-    cdi_scsi_driver_register((struct cdi_scsi_driver*) &amp;driver_scsi);
++    argc = _argc;
++    argv = _argv;
+ 
+-    cdi_run_drivers();
++    cdi_init();
+ 
+     return 0;
+ }
+@@ -67,7 +64,7 @@ int init_ata(int argc, char* argv[])
+ /**
+  * Initialisiert die Datenstrukturen fuer den sis900-Treiber
+  */
+-static void ata_driver_init(int argc, char* argv[])
++static int ata_driver_init(void)
+ {
+     struct ata_controller* controller;
+     uint16_t busmaster_regbase = 0;
+@@ -149,6 +146,8 @@ static void ata_driver_init(int argc, char* argv[])
+     controller-&gt;scsi = (struct cdi_scsi_driver*) &amp;driver_scsi;
+     ata_init_controller(controller);
+     cdi_list_push(controller_list, controller);
++
++    return 0;
+ }
+ 
+ /**
+@@ -161,6 +160,12 @@ static void ata_driver_destroy(struct cdi_driver* driver)
+     // TODO Alle Karten deinitialisieren
+ }
+ 
++static int atapi_driver_init(void)
++{
++    // TODO ATAPI-Initialisierungscode hierher verschieben
++    return 0;
++}
++
+ static void atapi_driver_destroy(struct cdi_driver* driver)
+ {
+     cdi_scsi_driver_destroy((struct cdi_scsi_driver*) driver);
+@@ -169,7 +174,9 @@ static void atapi_driver_destroy(struct cdi_driver* driver)
+ 
+ static struct cdi_storage_driver driver_storage = {
+     .drv = {
++        .type           = CDI_STORAGE,
+         .name           = DRIVER_STORAGE_NAME,
++        .init           = ata_driver_init,
+         .destroy        = ata_driver_destroy,
+         .init_device    = ata_init_device,
+         .remove_device  = ata_remove_device,
+@@ -180,7 +187,9 @@ static struct cdi_storage_driver driver_storage = {
+ 
+ static struct cdi_scsi_driver driver_scsi = {
+     .drv = {
++        .type           = CDI_SCSI,
+         .name           = DRIVER_SCSI_NAME,
++        .init           = atapi_driver_init,
+         .destroy        = atapi_driver_destroy,
+         .init_device    = atapi_init_device,
+         .remove_device  = atapi_remove_device,
+diff --git a/e1000/main.c b/e1000/main.c
+index 3affced..4f3bb9d 100644
+--- a/e1000/main.c
++++ b/e1000/main.c
+@@ -44,29 +44,11 @@ struct e1000_driver {
+ };
+ 
+ static struct e1000_driver driver;
+-static void e1000_driver_init(void);
+-static void e1000_driver_destroy(struct cdi_driver* driver);
+-
+-#ifdef CDI_STANDALONE
+-int main(void)
+-#else
+-int init_e1000(void)
+-#endif
+-{
+-    cdi_init();
+-
+-    e1000_driver_init();
+-    cdi_driver_register((struct cdi_driver*) &amp;driver);
+-
+-    cdi_run_drivers();
+-
+-    return 0;
+-}
+ 
+ /**
+  * Initialisiert die Datenstrukturen fuer den e1000-Treiber
+  */
+-static void e1000_driver_init()
++static int e1000_driver_init(void)
+ {
+     // Konstruktor der Vaterklasse
+     cdi_net_driver_init((struct cdi_net_driver*) &amp;driver);
+@@ -98,6 +80,8 @@ static void e1000_driver_init()
+         cdi_list_size(driver.net.drv.devices));
+ 
+     cdi_list_destroy(pci_devices);
++
++    return 0;
+ }
+ 
+ /**
+@@ -114,7 +98,9 @@ static void e1000_driver_destroy(struct cdi_driver* driver)
+ static struct e1000_driver driver = {
+     .net =  {
+         .drv = {
++            .type           = CDI_NETWORK,
+             .name           = DRIVER_NAME,
++            .init           = e1000_driver_init,
+             .destroy        = e1000_driver_destroy,
+             .init_device    = e1000_init_device,
+             .remove_device  = e1000_remove_device,
+diff --git a/ext2/main.c b/ext2/main.c
+index ae0c094..bdef05b 100644
+--- a/ext2/main.c
++++ b/ext2/main.c
+@@ -48,35 +48,14 @@ struct ext2_driver {
+ };
+ 
+ static struct ext2_driver ext2_driver;
+-static int ext2_driver_init(struct ext2_driver* driver);
+-static void ext2_driver_destroy(struct cdi_driver* driver);
+-
+-#ifdef CDI_STANDALONE
+-int main(void)
+-#else
+-int init_ext2(void)
+-#endif
+-{
+-    cdi_init();
+-
+-    if (ext2_driver_init(&amp;ext2_driver) != 0) {
+-        return -1;
+-    }
+-    cdi_fs_driver_register((struct cdi_fs_driver*) &amp;ext2_driver);
+-
+-    cdi_run_drivers();
+-
+-    return 0;
+-}
+ 
+ /**
+  * Initialisiert die Datenstrukturen fuer den ext2-Treiber
+  */
+-static int ext2_driver_init(struct ext2_driver* driver)
++static int ext2_driver_init(void)
+ {
+     // Konstruktor der Vaterklasse
+-    cdi_fs_driver_init((struct cdi_fs_driver*) driver);
+-
++    cdi_fs_driver_init((struct cdi_fs_driver*) &amp;ext2_driver);
+     return 0;
+ }
+ 
+@@ -92,7 +71,9 @@ static void ext2_driver_destroy(struct cdi_driver* driver)
+ static struct ext2_driver ext2_driver = {
+     .fs = {
+         .drv = {
++            .type       = CDI_FILESYSTEM,
+             .name       = DRIVER_NAME,
++            .init       = ext2_driver_init,
+             .destroy    = ext2_driver_destroy,
+         },
+         .fs_init        = ext2_fs_init,
+diff --git a/floppy/main.c b/floppy/main.c
+index 1f44ed6..f888eb0 100644
+--- a/floppy/main.c
++++ b/floppy/main.c
+@@ -47,34 +47,14 @@ static struct floppy_controller floppy_controller = {
+     .use_dma = 1
+ };
+ 
+-static int floppy_driver_init(struct floppy_driver* driver);
+-static void floppy_driver_destroy(struct cdi_driver* driver);
+-
+-#ifdef CDI_STANDALONE
+-int main(void)
+-#else
+-int init_floppy(void)
+-#endif
+-{
+-    cdi_init();
+-
+-    if (floppy_driver_init(&amp;floppy_driver) != 0) {
+-        return -1;
+-    }
+-    cdi_storage_driver_register((struct cdi_storage_driver*) &amp;floppy_driver);
+-
+-    cdi_run_drivers();
+-
+-    return 0;
+-}
+-
+ /**
+  * Initialisiert die Datenstrukturen fuer den floppy-Treiber
+  */
+-static int floppy_driver_init(struct floppy_driver* driver)
++static int floppy_driver_init(void)
+ {
+     int i;
+     struct floppy_device* device;
++    struct floppy_driver* driver = &amp;floppy_driver;
+ 
+     // Konstruktor der Vaterklasse
+     cdi_storage_driver_init((struct cdi_storage_driver*) driver);
+@@ -126,7 +106,9 @@ static void floppy_driver_destroy(struct cdi_driver* driver)
+ static struct floppy_driver floppy_driver = {
+     .storage = {
+         .drv = {
++            .type           = CDI_STORAGE,
+             .name           = DRIVER_NAME,
++            .init           = floppy_driver_init,
+             .destroy        = floppy_driver_destroy,
+             .init_device    = floppy_init_device,
+             .remove_device  = floppy_remove_device,
+diff --git a/include/cdi.h b/include/cdi.h
+index ed28c78..c3fdf8d 100644
+--- a/include/cdi.h
++++ b/include/cdi.h
+@@ -29,6 +29,7 @@ typedef enum {
+     CDI_AUDIO_MIXER     = 6,
+     CDI_USB_HCD         = 7,
+     CDI_USB             = 8,
++    CDI_FILESYSTEM      = 9,
+ } cdi_device_type_t;
+ 
+ struct cdi_driver;
+@@ -49,13 +50,14 @@ struct cdi_driver {
+     void (*init_device)(struct cdi_device* device);
+     void (*remove_device)(struct cdi_device* device);
+ 
++    int (*init)(void);
+     void (*destroy)(struct cdi_driver* driver);
+ };
+ 
+ /**
+  * Muss vor dem ersten Aufruf einer anderen CDI-Funktion aufgerufen werden.
+  * Initialisiert interne Datenstruktur der Implementierung fuer das jeweilige
+- * Betriebssystem.
++ * Betriebssystem und startet anschliessend alle Treiber.
+  *
+  * Ein wiederholter Aufruf bleibt ohne Effekt.
+  */
+diff --git a/iso9660/main.c b/iso9660/main.c
+index 01424d9..a935db9 100644
+--- a/iso9660/main.c
++++ b/iso9660/main.c
+@@ -31,31 +31,13 @@ struct iso9660_driver {
+ };
+ 
+ static struct iso9660_driver iso9660_driver;
+-static int iso9660_driver_init(struct iso9660_driver *driver);
+-static void iso9660_driver_destroy(struct cdi_driver* driver);
+-
+-#ifdef CDI_STANDALONE
+-int main(void)
+-#else
+-int init_iso9660(void)
+-#endif
+-{
+-    cdi_init();
+-
+-    if (iso9660_driver_init(&amp;iso9660_driver)!=0) return -1;
+-    cdi_fs_driver_register((struct cdi_fs_driver*)&amp;iso9660_driver);
+-
+-    cdi_run_drivers();
+-
+-    return 0;
+-}
+ 
+ /**
+  * Initializes the data structures for the iso9660 driver
+  */
+-static int iso9660_driver_init(struct iso9660_driver *driver) {
++static int iso9660_driver_init(void) {
+     // Konstruktor der Vaterklasse
+-    cdi_fs_driver_init((struct cdi_fs_driver*)driver);
++    cdi_fs_driver_init((struct cdi_fs_driver*) &amp;iso9660_driver);
+ 
+     return 0;
+ }
+@@ -91,7 +73,9 @@ int debug(const char *fmt,...) {
+ static struct iso9660_driver iso9660_driver = {
+     .drv =  {
+         .drv = {
++            .type           = CDI_FILESYSTEM,
+             .name           = DRIVER_NAME,
++            .init           = iso9660_driver_init,
+             .destroy        = iso9660_driver_destroy,
+         },
+         .fs_init            = iso9660_fs_init,
+diff --git a/ne2k/main.c b/ne2k/main.c
+index 170157a..e1ecd06 100644
+--- a/ne2k/main.c
++++ b/ne2k/main.c
+@@ -42,26 +42,8 @@ struct ne2k_driver {
+ };
+ 
+ static struct ne2k_driver driver;
+-static int ne2k_driver_init(int argc, char* argv[]);
+-static void ne2k_driver_destroy(struct cdi_driver* driver);
+-
+-#ifdef CDI_STANDALONE
+-int main(int argc, char* argv[])
+-#else
+-int init_ne2k(int argc, char* argv[])
+-#endif
+-{
+-    cdi_init();
+-
+-    ne2k_driver_init(argc, argv);
+-    cdi_driver_register((struct cdi_driver*) &amp;driver);
+-
+-    cdi_run_drivers();
+-
+-    return 0;
+-}
+ 
+-static int ne2k_driver_init(int argc, char* argv[])
++static int ne2k_driver_init(void)
+ {
+     // Konstruktor der Vaterklasse
+     cdi_net_driver_init((struct cdi_net_driver*) &amp;driver);
+@@ -108,7 +90,9 @@ static void ne2k_driver_destroy(struct cdi_driver* driver)
+ static struct ne2k_driver ne2k_driver = {
+     .net =  {
+         .drv = {
++            .type           = CDI_NETWORK,
+             .name           = DRIVER_NAME,
++            .init           = ne2k_driver_init,
+             .destroy        = ne2k_driver_destroy,
+             .init_device    = ne2k_init_device,
+             .remove_device  = ne2k_remove_device,
+diff --git a/pcnet/main.c b/pcnet/main.c
+index b6bf7e4..39f3fe9 100644
+--- a/pcnet/main.c
++++ b/pcnet/main.c
+@@ -47,26 +47,8 @@ struct pcnet_driver {
+ };
+ 
+ static struct pcnet_driver driver;
+-static int pcnet_driver_init(int argc, char* argv[]);
+-static void pcnet_driver_destroy(struct cdi_driver* driver);
+-
+-#ifdef CDI_STANDALONE
+-int main(int argc, char* argv[])
+-#else
+-int init_pcnet(int argc, char* argv[])
+-#endif
+-{
+-    cdi_init();
+-
+-    pcnet_driver_init(argc, argv);
+-    cdi_driver_register((struct cdi_driver*) &amp;driver);
+-
+-    cdi_run_drivers();
+-
+-    return 0;
+-}
+ 
+-static int pcnet_driver_init(int argc, char* argv[])
++static int pcnet_driver_init(void)
+ {
+     // TODO Auf pci-Service warten
+     // TODO Auf tcpip-Service warten
+@@ -113,7 +95,9 @@ static void pcnet_driver_destroy(struct cdi_driver* driver)
+ static struct pcnet_driver driver = {
+     .net =  {
+         .drv = {
++            .type           = CDI_NETWORK,
+             .name           = DRIVER_NAME,
++            .init           = pcnet_driver_init,
+             .destroy        = pcnet_driver_destroy,
+             .init_device    = pcnet_init_device,
+             .remove_device  = pcnet_remove_device,
+diff --git a/ramdisk/main.c b/ramdisk/main.c
+index 422cd80..b4417c8 100644
+--- a/ramdisk/main.c
++++ b/ramdisk/main.c
+@@ -42,34 +42,14 @@ struct ramdisk_driver {
+ };
+ 
+ static struct ramdisk_driver ramdisk_driver;
+-static int ramdisk_driver_init(struct ramdisk_driver* driver);
+-static void ramdisk_driver_destroy(struct cdi_driver* driver);
+-
+-#ifdef CDI_STANDALONE
+-int main(void)
+-#else
+-int init_ramdisk(void)
+-#endif
+-{
+-    cdi_init();
+-
+-    if (ramdisk_driver_init(&amp;ramdisk_driver) != 0) {
+-        return -1;
+-    }
+-    cdi_fs_driver_register((struct cdi_fs_driver*) &amp;ramdisk_driver);
+-
+-    cdi_run_drivers();
+-
+-    return 0;
+-}
+ 
+ /**
+  * Initialisiert die Datenstrukturen fuer den ramdisk-Treiber
+  */
+-static int ramdisk_driver_init(struct ramdisk_driver* driver)
++static int ramdisk_driver_init(void)
+ {
+     // Konstruktor der Vaterklasse
+-    cdi_fs_driver_init((struct cdi_fs_driver*) driver);
++    cdi_fs_driver_init((struct cdi_fs_driver*) &amp;ramdisk_driver);
+ 
+     return 0;
+ }
+@@ -86,7 +66,9 @@ static void ramdisk_driver_destroy(struct cdi_driver* driver)
+ static struct ramdisk_driver ramdisk_driver = {
+     .fs =  {
+         .drv = {
++            .type           = CDI_FILESYSTEM,
+             .name           = DRIVER_NAME,
++            .init           = ramdisk_driver_init,
+             .destroy        = ramdisk_driver_destroy,
+         },
+         .fs_init            = ramdisk_fs_init,
+diff --git a/rtl8139/main.c b/rtl8139/main.c
+index b9d7728..a9a74b3 100644
+--- a/rtl8139/main.c
++++ b/rtl8139/main.c
+@@ -45,26 +45,8 @@ static struct rtl8139_driver {
+     struct cdi_net_driver net;
+ } driver;
+ 
+-static int rtl8139_driver_init(int argc, char* argv[]);
+-static void rtl8139_driver_destroy(struct cdi_driver* driver);
+-
+-#ifdef CDI_STANDALONE
+-int main(int argc, char* argv[])
+-#else
+-int init_rtl8139(int argc, char* argv[])
+-#endif
+-{
+-    cdi_init();
+-
+-    rtl8139_driver_init(argc, argv);
+-    cdi_driver_register((struct cdi_driver*) &amp;driver);
+-
+-    cdi_run_drivers();
+-
+-    return 0;
+-}
+ 
+-static int rtl8139_driver_init(int argc, char* argv[])
++static int rtl8139_driver_init(void)
+ {
+     // TODO Auf pci-Service warten
+     // TODO Auf tcpip-Service warten
+@@ -114,7 +96,9 @@ static void rtl8139_driver_destroy(struct cdi_driver* driver)
+ static struct rtl8139_driver driver = {
+     .net =  {
+         .drv = {
++            .type           = CDI_NETWORK,
+             .name           = DRIVER_NAME,
++            .init           = rtl8139_driver_init,
+             .destroy        = rtl8139_driver_destroy,
+             .init_device    = rtl8139_init_device,
+             .remove_device  = rtl8139_remove_device,
+diff --git a/serial/main.c b/serial/main.c
+index 3fd71ba..e498990 100644
+--- a/serial/main.c
++++ b/serial/main.c
+@@ -42,34 +42,14 @@ struct serial_driver {
+ };
+ 
+ static struct serial_driver serial_driver;
+-static int serial_driver_init(struct serial_driver* driver);
+-static void serial_driver_destroy(struct cdi_driver* driver);
+-
+-#ifdef CDI_STANDALONE
+-int main(void)
+-#else
+-int init_serial(void)
+-#endif
+-{
+-    cdi_init();
+-
+-    if (serial_driver_init(&amp;serial_driver) != 0) {
+-        return -1;
+-    }
+-    cdi_fs_driver_register((struct cdi_fs_driver*) &amp;serial_driver);
+-
+-    cdi_run_drivers();
+-
+-    return 0;
+-}
+ 
+ /**
+  * Initialisiert die Datenstrukturen fuer den serial-Treiber
+  */
+-static int serial_driver_init(struct serial_driver* driver)
++static int serial_driver_init(void)
+ {
+     // Konstruktor der Vaterklasse
+-    cdi_fs_driver_init((struct cdi_fs_driver*) driver);
++    cdi_fs_driver_init((struct cdi_fs_driver*) &amp;serial_driver);
+ 
+     return 0;
+ }
+@@ -86,7 +66,9 @@ static void serial_driver_destroy(struct cdi_driver* driver)
+ static struct serial_driver serial_driver = {
+     .fs = {
+         .drv = {
++            .type       = CDI_FILESYSTEM,
+             .name       = DRIVER_NAME,
++            .init       = serial_driver_init,
+             .destroy    = serial_driver_destroy,
+         },
+         .fs_init        = serial_fs_init,
+diff --git a/sis900/main.c b/sis900/main.c
+index 0ae47ca..d4a0d93 100644
+--- a/sis900/main.c
++++ b/sis900/main.c
+@@ -44,29 +44,11 @@ struct sis900_driver {
+ };
+ 
+ static struct sis900_driver sis900_driver;
+-static void sis900_driver_init(int argc, char* argv[]);
+-static void sis900_driver_destroy(struct cdi_driver* driver);
+-
+-#ifdef CDI_STANDALONE
+-int main(int argc, char* argv[])
+-#else
+-int init_sis900(int argc, char* argv[])
+-#endif
+-{
+-    cdi_init();
+-
+-    sis900_driver_init(argc, argv);
+-    cdi_driver_register((struct cdi_driver*) &amp;sis900_driver);
+-
+-    cdi_run_drivers();
+-
+-    return 0;
+-}
+ 
+ /**
+  * Initialisiert die Datenstrukturen fuer den sis900-Treiber
+  */
+-static void sis900_driver_init(int argc, char* argv[])
++static int sis900_driver_init(void)
+ {
+     // Konstruktor der Vaterklasse
+     cdi_net_driver_init((struct cdi_net_driver*) &amp;sis900_driver);
+@@ -98,6 +80,8 @@ static void sis900_driver_init(int argc, char* argv[])
+         cdi_list_size(sis900_driver.net.drv.devices));
+ 
+     cdi_list_destroy(pci_devices);
++
++    return 0;
+ }
+ 
+ /**
+@@ -114,7 +98,9 @@ static void sis900_driver_destroy(struct cdi_driver* driver)
+ static struct sis900_driver sis900_driver = {
+     .net =  {
+         .drv = {
++            .type           = CDI_NETWORK,
+             .name           = DRIVER_NAME,
++            .init           = sis900_driver_init,
+             .destroy        = sis900_driver_destroy,
+             .init_device    = sis900_init_device,
+             .remove_device  = sis900_remove_device,
+-- 
+1.6.0.2
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000047.html">[cdi-devel] [PATCH 2/4] Use the CDI_DRIVER macro
+</A></li>
+	<LI>Next message: <A HREF="000049.html">[cdi-devel] [PATCH 4/4] Simplify driver declarations
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#48">[ date ]</a>
+              <a href="thread.html#48">[ thread ]</a>
+              <a href="subject.html#48">[ subject ]</a>
+              <a href="author.html#48">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

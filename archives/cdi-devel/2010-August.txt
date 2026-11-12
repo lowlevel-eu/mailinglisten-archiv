@@ -1,0 +1,1156 @@
+From matthew at theiselins.net  Wed Aug 11 07:31:38 2010
+From: matthew at theiselins.net (Matthew Iselin)
+Date: Wed, 11 Aug 2010 15:31:38 +1000
+Subject: [cdi-devel] [PATCH] Make e1000 work in VirtualBox
+In-Reply-To: <AANLkTi=eMwYWOviN=2aGC9fOFib_c68bgQF58hF=5VFr@mail.gmail.com>
+References: <1268472824-8328-1-git-send-email-matthew@theiselins.net>
+	<AANLkTi=eMwYWOviN=2aGC9fOFib_c68bgQF58hF=5VFr@mail.gmail.com>
+Message-ID: <AANLkTi=E9b5Z-1ymqA1SpyUn3Z3yuXwOW951=kfZm+zR@mail.gmail.com>
+
+Bump, requesting for this to be committed. The mentioned VMWare stuff
+may depend on this patch.
+
+Thanks,
+
+Matt
+
+On Sat, Mar 13, 2010 at 7:33 PM, Matthew Iselin <matthew at theiselins.net> wrote:
+> Hi,
+>
+> This patch makes the e1000 driver work in VirtualBox. I'm working towards
+> getting the driver working in VMWare as well, but VMWare emulates a
+> different chip (82545 rather than 82540). Those fixes and adjustments
+> will come in a different patch, at a later date.
+>
+> The biggest change here is that the driver now supports the microwire
+> interface for reading from the EEPROM as well as the EERD.
+>
+> Cheers,
+>
+> Matt
+>
+> Signed-off-by: Matthew Iselin <matthew at theiselins.net>
+> ---
+> ?e1000/device.c ? ?| ?224 +++++++++++++++++++++++++++++++++++++++++++++++++----
+> ?e1000/device.h ? ?| ? 22 +++++-
+> ?3 files changed, 232 insertions(+), 18 deletions(-)
+>
+> diff --git a/e1000/device.c b/e1000/device.c
+> index 1b31987..f1caa1f 100644
+> --- a/e1000/device.c
+> +++ b/e1000/device.c
+> @@ -48,14 +48,210 @@
+> ?static void e1000_handle_interrupt(struct cdi_device* device);
+> ?static uint64_t get_mac_address(struct e1000_device* device);
+>
+> -static uint16_t e1000_eeprom_read(struct e1000_device* device, uint16_t offset)
+> +static uint32_t e1000_reg_read(struct e1000_device *device, uint16_t offset)
+> +{
+> + ? ?return reg_inl(device, offset);
+> +}
+> +
+> +static void e1000_reg_write(struct e1000_device *device, uint16_t offset, uint32_t value)
+> +{
+> + ? ?reg_outl(device, offset, value);
+> +}
+> +
+> +static void e1000_write_flush(struct e1000_device *device)
+> +{
+> + ? ?uint32_t temp = e1000_reg_read(device, REG_STATUS);
+> +}
+> +
+> +static void e1000_raise_eeprom_clock(struct e1000_device *device, uint32_t *eecd)
+> +{
+> + ? ?*eecd |= E1000_EECD_SK;
+> + ? ?e1000_reg_write(device, REG_EECD, *eecd);
+> + ? ?e1000_write_flush(device);
+> + ? ?cdi_sleep_ms(5);
+> +}
+> +
+> +static void e1000_lower_eeprom_clock(struct e1000_device *device, uint32_t *eecd)
+> +{
+> + ? ?*eecd &= ~E1000_EECD_SK;
+> + ? ?e1000_reg_write(device, REG_EECD, *eecd);
+> + ? ?e1000_write_flush(device);
+> + ? ?cdi_sleep_ms(5);
+> +}
+> +
+> +static void e1000_write_eeprom_bits(struct e1000_device *device, uint16_t data, uint16_t bitcount)
+> +{
+> + ? ?uint32_t eecd, mask;
+> +
+> + ? ?mask = 0x1 << (bitcount - 1);
+> + ? ?eecd = e1000_reg_read(device, REG_EECD);
+> + ? ?eecd &= ~(E1000_EECD_DO | E1000_EECD_DI);
+> + ? ?do
+> + ? ?{
+> + ? ? ? ?eecd &= ~E1000_EECD_DI;
+> + ? ? ? ?if(data & mask)
+> + ? ? ? ? ? ?eecd |= E1000_EECD_DI;
+> + ? ? ? ?e1000_reg_write(device, REG_EECD, eecd);
+> + ? ? ? ?e1000_write_flush(device);
+> +
+> + ? ? ? ?cdi_sleep_ms(5);
+> +
+> + ? ? ? ?e1000_raise_eeprom_clock(device, &eecd);
+> + ? ? ? ?e1000_lower_eeprom_clock(device, &eecd);
+> +
+> + ? ? ? ?mask >>= 1;
+> + ? ?}
+> + ? ?while(mask);
+> +
+> + ? ?eecd &= ~E1000_EECD_DI;
+> + ? ?e1000_reg_write(device, REG_EECD, eecd);
+> +}
+> +
+> +static uint16_t e1000_read_eeprom_bits(struct e1000_device *device)
+> +{
+> + ? ?uint32_t eecd, i;
+> + ? ?uint16_t data;
+> +
+> + ? ?eecd = e1000_reg_read(device, REG_EECD);
+> + ? ?eecd &= ~(E1000_EECD_DO | E1000_EECD_DI);
+> + ? ?data = 0;
+> +
+> + ? ?for(i = 0; i < 16; i++)
+> + ? ?{
+> + ? ? ? ?data <<= 1;
+> + ? ? ? ?e1000_raise_eeprom_clock(device, &eecd);
+> +
+> + ? ? ? ?eecd = e1000_reg_read(device, REG_EECD);
+> +
+> + ? ? ? ?eecd &= ~E1000_EECD_DI;
+> + ? ? ? ?if(eecd & E1000_EECD_DO)
+> + ? ? ? ? ? ?data |= 1;
+> +
+> + ? ? ? ?e1000_lower_eeprom_clock(device, &eecd);
+> + ? ?}
+> +
+> + ? ?return data;
+> +}
+> +
+> +static void e1000_prep_eeprom(struct e1000_device *device)
+> ?{
+> - ? ?uint32_t eerd;
+> + ? ?uint32_t eecd = e1000_reg_read(device, REG_EECD);
+> +
+> + ? ?eecd &= ~(E1000_EECD_SK | E1000_EECD_DI);
+> + ? ?e1000_reg_write(device, REG_EECD, eecd);
+> +
+> + ? ?eecd |= E1000_EECD_CS;
+> + ? ?e1000_reg_write(device, REG_EECD, eecd);
+> +}
+> +
+> +static void e1000_standby_eeprom(struct e1000_device *device)
+> +{
+> + ? ?uint32_t eecd = e1000_reg_read(device, REG_EECD);
+> +
+> + ? ?eecd &= ~(E1000_EECD_CS | E1000_EECD_SK);
+> + ? ?e1000_reg_write(device, REG_EECD, eecd);
+> + ? ?e1000_write_flush(device);
+> + ? ?cdi_sleep_ms(5);
+> +
+> + ? ?eecd |= E1000_EECD_SK;
+> + ? ?e1000_reg_write(device, REG_EECD, eecd);
+> + ? ?e1000_write_flush(device);
+> + ? ?cdi_sleep_ms(5);
+> +
+> + ? ?eecd |= E1000_EECD_CS;
+> + ? ?e1000_reg_write(device, REG_EECD, eecd);
+> + ? ?e1000_write_flush(device);
+> + ? ?cdi_sleep_ms(5);
+> +
+> + ? ?eecd &= ~(E1000_EECD_SK);
+> + ? ?e1000_reg_write(device, REG_EECD, eecd);
+> + ? ?e1000_write_flush(device);
+> + ? ?cdi_sleep_ms(5);
+> +}
+> +
+> +static uint32_t e1000_read_uwire(struct e1000_device *device, uint16_t offset)
+> +{
+> + ? ?uint32_t eecd, i = 0;
+> + ? ?int large_eeprom = 0;
+> +
+> + ? ?// TODO: check for post-82544 chip, only run this handling if so
+> + ? ?eecd = e1000_reg_read(device, REG_EECD);
+> + ? ?if(eecd & E1000_EECD_SIZE)
+> + ? ? ? ?large_eeprom = 1;
+> + ? ?eecd |= E1000_EECD_REQ;
+> + ? ?e1000_reg_write(device, REG_EECD, eecd);
+> + ? ?eecd = e1000_reg_read(device, REG_EECD);
+> + ? ?while((!(eecd & E1000_EECD_GNT)) && (i++ < 100))
+> + ? ?{
+> + ? ? ? ?cdi_sleep_ms(1);
+> + ? ? ? ?eecd = e1000_reg_read(device, REG_EECD);
+> + ? ?}
+> + ? ?if(!(eecd & E1000_EECD_GNT))
+> + ? ?{
+> + ? ? ? ?eecd &= ~E1000_EECD_REQ;
+> + ? ? ? ?e1000_reg_write(device, REG_EECD, eecd);
+> + ? ? ? ?return (uint32_t) -1;
+> + ? ?}
+> +
+> + ? ?e1000_prep_eeprom(device);
+> +
+> + ? ?e1000_write_eeprom_bits(device, EEPROM_READ_OPCODE, 3);
+> + ? ?if(large_eeprom)
+> + ? ? ? ?e1000_write_eeprom_bits(device, offset, 8);
+> + ? ?else
+> + ? ? ? ?e1000_write_eeprom_bits(device, offset, 6);
+> +
+> + ? ?uint32_t data = e1000_read_eeprom_bits(device);
+> +
+> + ? ?e1000_standby_eeprom(device);
+> +
+> + ? ?// TODO: check for post-82544 chip
+> + ? ?eecd = e1000_reg_read(device, REG_EECD);
+> + ? ?eecd &= ~E1000_EECD_REQ;
+> + ? ?e1000_reg_write(device, REG_EECD, eecd);
+> +
+> + ? ?return data;
+> +}
+> +
+> +static uint32_t e1000_read_eerd(struct e1000_device *device, uint16_t offset)
+> +{
+> + ? ?uint32_t eerd, i;
+>
+> ? ? reg_outl(device, REG_EEPROM_READ, (offset << 8) | EERD_START);
+> - ? ?while (((eerd = reg_inl(device, REG_EEPROM_READ)) & EERD_DONE) == 0);
+> - ? ?printf("eerd = %8x\n", eerd);
+> - ? ?return (eerd >> 16);
+> + ? ?for(i = 0; i < 100; i++)
+> + ? ?{
+> + ? ? ? ?eerd = reg_inl(device, REG_EEPROM_READ);
+> + ? ? ? ?if(eerd & EERD_DONE)
+> + ? ? ? ? ? ?break;
+> + ? ? ? ?cdi_sleep_ms(1);
+> + ? ?}
+> +
+> + ? ?if(eerd & EERD_DONE)
+> + ? ? ? ?return (eerd >> 16) & 0xFFFF;
+> + ? ?else
+> + ? ? ? ?return (uint32_t) -1;
+> +}
+> +
+> +static uint16_t e1000_eeprom_read(struct e1000_device* device, uint16_t offset)
+> +{
+> + ? ?static int eerd_safe = 1;
+> +
+> + ? ?uint32_t data = 0;
+> + ? ?if(eerd_safe)
+> + ? ? ? ?data = e1000_read_eerd(device, offset);
+> + ? ?if(!eerd_safe || (data == ((uint32_t) -1)))
+> + ? ?{
+> + ? ? ? ?eerd_safe = 0;
+> +
+> + ? ? ? ?data = e1000_read_uwire(device, offset);
+> + ? ? ? ?if(data == ((uint32_t) -1))
+> + ? ? ? ?{
+> + ? ? ? ? ? ?printf("e1000: couldn't read eeprom via EERD or uwire!");
+> + ? ? ? ? ? ?return 0;
+> + ? ? ? ?}
+> + ? ?}
+> +
+> + ? ?return (uint16_t) (data & 0xFFFF);
+> ?}
+>
+> ?static void reset_nic(struct e1000_device* netcard)
+> @@ -106,6 +302,9 @@ static void reset_nic(struct e1000_device* netcard)
+> ? ? reg_outl(netcard, REG_RECV_ADDR_LIST + 4,
+> ? ? ? ? ((mac >> 32) & 0xFFFF) | RAH_VALID);
+>
+> + ? ?netcard->net.mac = mac;
+> + ? ?printf("e1000: MAC-Adresse: %012llx\n", (uint64_t) netcard->net.mac);
+> +
+> ? ? // Rx-Deskriptoren aufsetzen
+> ? ? for (i = 0; i < RX_BUFFER_NUM; i++) {
+> ? ? ? ? netcard->rx_desc[i].length = RX_BUFFER_SIZE;
+> @@ -123,10 +322,6 @@ static void reset_nic(struct e1000_device* netcard)
+> ? ? netcard->tx_cur_buffer = 0;
+> ? ? netcard->rx_cur_buffer = 0;
+>
+> - ? ?// Interrupts aktivieren
+> - ? ?reg_outl(netcard, REG_INTR_MASK_CLR, 0xFFFF);
+> - ? ?reg_outl(netcard, REG_INTR_MASK, 0xFFFF);
+> -
+> ? ? // Rx/Tx aktivieren
+> ? ? reg_outl(netcard, REG_RX_CTL, RCTL_ENABLE | RCTL_BROADCAST);
+> ? ? reg_outl(netcard, REG_TX_CTL, TCTL_ENABLE | TCTL_PADDING
+> @@ -153,7 +348,7 @@ struct cdi_device* e1000_init_device(struct cdi_bus_data* bus_data)
+> ? ? struct e1000_device* netcard;
+> ? ? struct cdi_mem_area* buf;
+>
+> - ? ?if (!((pci->vendor_id == 0x8086) && (pci->device_id == 0x100e))) {
+> + ? ?if (!((pci->vendor_id == 0x8086) && ((pci->device_id == 0x100e) || (pci->device_id == 0x100f)))) {
+> ? ? ? ? return NULL;
+> ? ? }
+>
+> @@ -191,11 +386,12 @@ struct cdi_device* e1000_init_device(struct cdi_bus_data* bus_data)
+> ? ? printf("e1000: Fuehre Reset der Karte durch\n");
+> ? ? reset_nic(netcard);
+>
+> - ? ?netcard->net.mac = get_mac_address(netcard);
+> - ? ?printf("e1000: MAC-Adresse: %012llx\n", (uint64_t) netcard->net.mac);
+> -
+> ? ? cdi_net_device_init(&netcard->net);
+>
+> + ? ?// Interrupts aktivieren
+> + ? ?reg_outl(netcard, REG_INTR_MASK_CLR, 0xFFFF);
+> + ? ?reg_outl(netcard, REG_INTR_MASK, 0xFFFF);
+> +
+> ? ? return &netcard->net.dev;
+> ?}
+>
+> diff --git a/e1000/device.h b/e1000/device.h
+> index 2a10365..428edad 100644
+> --- a/e1000/device.h
+> +++ b/e1000/device.h
+> @@ -26,8 +26,8 @@
+> ?* ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+> ?*/
+>
+> -#ifndef _SIS900_DEVICES_H_
+> -#define _SIS900_DEVICES_H_
+> +#ifndef _E1000_DEVICE_H_
+> +#define _E1000_DEVICE_H_
+>
+> ?#include <stdint.h>
+>
+> @@ -38,6 +38,8 @@
+>
+> ?enum {
+> ? ? REG_CTL ? ? ? ? ? ? = ? ?0x0,
+> + ? ?REG_STATUS ? ? ? ? ?= ? ?0x8,
+> + ? ?REG_EECD ? ? ? ? ? ?= ? 0x10, /* EEPROM Control */
+> ? ? REG_EEPROM_READ ? ? = ? 0x14, /* EERD */
+> ? ? REG_VET ? ? ? ? ? ? = ? 0x38, /* VLAN */
+>
+> @@ -104,6 +106,22 @@ enum {
+> ?#define EERD_START ?(1 << ?0)
+> ?#define EERD_DONE ? (1 << ?4)
+>
+> +/* EEPROM/Flash Control */
+> +#define E1000_EECD_SK ? ? ? ?0x00000001 /* EEPROM Clock */
+> +#define E1000_EECD_CS ? ? ? ?0x00000002 /* EEPROM Chip Select */
+> +#define E1000_EECD_DI ? ? ? ?0x00000004 /* EEPROM Data In */
+> +#define E1000_EECD_DO ? ? ? ?0x00000008 /* EEPROM Data Out */
+> +#define E1000_EECD_FWE_MASK ?0x00000030
+> +#define E1000_EECD_FWE_DIS ? 0x00000010 /* Disable FLASH writes */
+> +#define E1000_EECD_FWE_EN ? ?0x00000020 /* Enable FLASH writes */
+> +#define E1000_EECD_FWE_SHIFT 4
+> +#define E1000_EECD_SIZE ? ? ?0x00000200 /* EEPROM Size (0=64 word 1=256 word) */
+> +#define E1000_EECD_REQ ? ? ? 0x00000040 /* EEPROM Access Request */
+> +#define E1000_EECD_GNT ? ? ? 0x00000080 /* EEPROM Access Grant */
+> +#define E1000_EECD_PRES ? ? ?0x00000100 /* EEPROM Present */
+> +
+> +#define EEPROM_READ_OPCODE ?0x6
+> +
+> ?/* Allgemeine Definitionen */
+>
+> ?#define TX_BUFFER_SIZE ?2048
+> --
+> 1.6.4.msysgit.0
+>
+>
+
+From kevin at tyndur.org  Sat Aug 14 21:18:43 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sat, 14 Aug 2010 21:18:43 +0200
+Subject: [cdi-devel] [PATCH] Make e1000 work in VirtualBox
+In-Reply-To: <AANLkTi=E9b5Z-1ymqA1SpyUn3Z3yuXwOW951=kfZm+zR@mail.gmail.com>
+References: <1268472824-8328-1-git-send-email-matthew@theiselins.net>
+	<AANLkTi=eMwYWOviN=2aGC9fOFib_c68bgQF58hF=5VFr@mail.gmail.com>
+	<AANLkTi=E9b5Z-1ymqA1SpyUn3Z3yuXwOW951=kfZm+zR@mail.gmail.com>
+Message-ID: <20100814191843.GC9845@silvanus>
+
+Hi Matt,
+
+On Wed, Aug 11, 2010 at 03:31:38PM +1000, Matthew Iselin wrote:
+> Bump, requesting for this to be committed. The mentioned VMWare stuff
+> may depend on this patch.
+
+back then we had discussed some points that we wanted to improve before
+committing this. Actually I was just about to commit it anyway and send
+an cleanup patch on top, but it fails to compile for me:
+
+e1000/device.c: In function ?e1000_write_flush?:
+e1000/device.c:63: error: unused variable ?temp?
+
+
+> On Sat, Mar 13, 2010 at 7:33 PM, Matthew Iselin <matthew at theiselins.net> wrote:
+> > Hi,
+> >
+> > This patch makes the e1000 driver work in VirtualBox. I'm working towards
+> > getting the driver working in VMWare as well, but VMWare emulates a
+> > different chip (82545 rather than 82540). Those fixes and adjustments
+> > will come in a different patch, at a later date.
+> >
+> > The biggest change here is that the driver now supports the microwire
+> > interface for reading from the EEPROM as well as the EERD.
+> >
+> > Cheers,
+> >
+> > Matt
+> >
+> > Signed-off-by: Matthew Iselin <matthew at theiselins.net>
+> > ---
+> > ?e1000/device.c ? ?| ?224 +++++++++++++++++++++++++++++++++++++++++++++++++----
+> > ?e1000/device.h ? ?| ? 22 +++++-
+> > ?3 files changed, 232 insertions(+), 18 deletions(-)
+> >
+> > diff --git a/e1000/device.c b/e1000/device.c
+> > index 1b31987..f1caa1f 100644
+> > --- a/e1000/device.c
+> > +++ b/e1000/device.c
+> > @@ -48,14 +48,210 @@
+> > ?static void e1000_handle_interrupt(struct cdi_device* device);
+> > ?static uint64_t get_mac_address(struct e1000_device* device);
+> >
+> > -static uint16_t e1000_eeprom_read(struct e1000_device* device, uint16_t offset)
+> > +static uint32_t e1000_reg_read(struct e1000_device *device, uint16_t offset)
+> > +{
+> > + ? ?return reg_inl(device, offset);
+> > +}
+> > +
+> > +static void e1000_reg_write(struct e1000_device *device, uint16_t offset, uint32_t value)
+> > +{
+> > + ? ?reg_outl(device, offset, value);
+> > +}
+
+I think we intended to drop e1000_reg_read/write and replace it by
+direct calls to reg_inl/outl.
+
+And while your at it, git reported some whitespace errors. Maybe you
+want to fix them as well (though I have git am remove them automagically
+anyway)
+
+Kevin
+
+From matthew at theiselins.net  Mon Aug 16 13:16:11 2010
+From: matthew at theiselins.net (Matthew Iselin)
+Date: Mon, 16 Aug 2010 21:16:11 +1000
+Subject: [cdi-devel] [PATCH v2] Make e1000 work in VirtualBox
+In-Reply-To: <AANLkTikP9Xt5AkPXy3FiHXPzjiEpkEaz7gB72rXSsdnK@mail.gmail.com>
+References: <1268472824-8328-1-git-send-email-matthew@theiselins.net>
+	<AANLkTikP9Xt5AkPXy3FiHXPzjiEpkEaz7gB72rXSsdnK@mail.gmail.com>
+Message-ID: <AANLkTin=y1GBfsFA3RQAz40e4JWSo27UArf=QVXtWj0R@mail.gmail.com>
+
+Hi,
+
+This patch makes the e1000 driver work in VirtualBox. I'm working
+towards getting the driver working in VMWare as well, but VMWare
+emulates a different chip (82545 rather than 82540). Those fixes and
+adjustments will come in a different patch, at a later date.
+
+The biggest change here is that the driver now supports the microwire
+interface for reading from the EEPROM as well as the EERD.
+
+This is the second version of this patch, and fixes the "unused
+variable" error that comes up for some environments.
+
+Cheers,
+
+Matt
+
+Signed-off-by: Matthew Iselin <matthew at theiselins.net>
+---
+?e1000/device.c ? ?| ?224 +++++++++++++++++++++++++++++++++++++++++++++++++----
+?e1000/device.h ? ?| ? 22 +++++-
+?3 files changed, 232 insertions(+), 18 deletions(-)
+
+diff --git a/e1000/device.c b/e1000/device.c
+index 1b31987..f1caa1f 100644
+--- a/e1000/device.c
++++ b/e1000/device.c
+@@ -48,14 +48,210 @@
+?static void e1000_handle_interrupt(struct cdi_device* device);
+?static uint64_t get_mac_address(struct e1000_device* device);
+
+-static uint16_t e1000_eeprom_read(struct e1000_device* device, uint16_t offset)
++static uint32_t e1000_reg_read(struct e1000_device *device, uint16_t offset)
++{
++ ? ?return reg_inl(device, offset);
++}
++
++static void e1000_reg_write(struct e1000_device *device, uint16_t
+offset, uint32_t value)
++{
++ ? ?reg_outl(device, offset, value);
++}
++
++static void e1000_write_flush(struct e1000_device *device)
++{
++ ? ?e1000_reg_read(device, REG_STATUS);
++}
++
++static void e1000_raise_eeprom_clock(struct e1000_device *device,
+uint32_t *eecd)
++{
++ ? ?*eecd |= E1000_EECD_SK;
++ ? ?e1000_reg_write(device, REG_EECD, *eecd);
++ ? ?e1000_write_flush(device);
++ ? ?cdi_sleep_ms(5);
++}
++
++static void e1000_lower_eeprom_clock(struct e1000_device *device,
+uint32_t *eecd)
++{
++ ? ?*eecd &= ~E1000_EECD_SK;
++ ? ?e1000_reg_write(device, REG_EECD, *eecd);
++ ? ?e1000_write_flush(device);
++ ? ?cdi_sleep_ms(5);
++}
++
++static void e1000_write_eeprom_bits(struct e1000_device *device,
+uint16_t data, uint16_t bitcount)
++{
++ ? ?uint32_t eecd, mask;
++
++ ? ?mask = 0x1 << (bitcount - 1);
++ ? ?eecd = e1000_reg_read(device, REG_EECD);
++ ? ?eecd &= ~(E1000_EECD_DO | E1000_EECD_DI);
++ ? ?do
++ ? ?{
++ ? ? ? ?eecd &= ~E1000_EECD_DI;
++ ? ? ? ?if(data & mask)
++ ? ? ? ? ? ?eecd |= E1000_EECD_DI;
++ ? ? ? ?e1000_reg_write(device, REG_EECD, eecd);
++ ? ? ? ?e1000_write_flush(device);
++
++ ? ? ? ?cdi_sleep_ms(5);
++
++ ? ? ? ?e1000_raise_eeprom_clock(device, &eecd);
++ ? ? ? ?e1000_lower_eeprom_clock(device, &eecd);
++
++ ? ? ? ?mask >>= 1;
++ ? ?}
++ ? ?while(mask);
++
++ ? ?eecd &= ~E1000_EECD_DI;
++ ? ?e1000_reg_write(device, REG_EECD, eecd);
++}
++
++static uint16_t e1000_read_eeprom_bits(struct e1000_device *device)
++{
++ ? ?uint32_t eecd, i;
++ ? ?uint16_t data;
++
++ ? ?eecd = e1000_reg_read(device, REG_EECD);
++ ? ?eecd &= ~(E1000_EECD_DO | E1000_EECD_DI);
++ ? ?data = 0;
++
++ ? ?for(i = 0; i < 16; i++)
++ ? ?{
++ ? ? ? ?data <<= 1;
++ ? ? ? ?e1000_raise_eeprom_clock(device, &eecd);
++
++ ? ? ? ?eecd = e1000_reg_read(device, REG_EECD);
++
++ ? ? ? ?eecd &= ~E1000_EECD_DI;
++ ? ? ? ?if(eecd & E1000_EECD_DO)
++ ? ? ? ? ? ?data |= 1;
++
++ ? ? ? ?e1000_lower_eeprom_clock(device, &eecd);
++ ? ?}
++
++ ? ?return data;
++}
++
++static void e1000_prep_eeprom(struct e1000_device *device)
+?{
+- ? ?uint32_t eerd;
++ ? ?uint32_t eecd = e1000_reg_read(device, REG_EECD);
++
++ ? ?eecd &= ~(E1000_EECD_SK | E1000_EECD_DI);
++ ? ?e1000_reg_write(device, REG_EECD, eecd);
++
++ ? ?eecd |= E1000_EECD_CS;
++ ? ?e1000_reg_write(device, REG_EECD, eecd);
++}
++
++static void e1000_standby_eeprom(struct e1000_device *device)
++{
++ ? ?uint32_t eecd = e1000_reg_read(device, REG_EECD);
++
++ ? ?eecd &= ~(E1000_EECD_CS | E1000_EECD_SK);
++ ? ?e1000_reg_write(device, REG_EECD, eecd);
++ ? ?e1000_write_flush(device);
++ ? ?cdi_sleep_ms(5);
++
++ ? ?eecd |= E1000_EECD_SK;
++ ? ?e1000_reg_write(device, REG_EECD, eecd);
++ ? ?e1000_write_flush(device);
++ ? ?cdi_sleep_ms(5);
++
++ ? ?eecd |= E1000_EECD_CS;
++ ? ?e1000_reg_write(device, REG_EECD, eecd);
++ ? ?e1000_write_flush(device);
++ ? ?cdi_sleep_ms(5);
++
++ ? ?eecd &= ~(E1000_EECD_SK);
++ ? ?e1000_reg_write(device, REG_EECD, eecd);
++ ? ?e1000_write_flush(device);
++ ? ?cdi_sleep_ms(5);
++}
++
++static uint32_t e1000_read_uwire(struct e1000_device *device, uint16_t offset)
++{
++ ? ?uint32_t eecd, i = 0;
++ ? ?int large_eeprom = 0;
++
++ ? ?// TODO: check for post-82544 chip, only run this handling if so
++ ? ?eecd = e1000_reg_read(device, REG_EECD);
++ ? ?if(eecd & E1000_EECD_SIZE)
++ ? ? ? ?large_eeprom = 1;
++ ? ?eecd |= E1000_EECD_REQ;
++ ? ?e1000_reg_write(device, REG_EECD, eecd);
++ ? ?eecd = e1000_reg_read(device, REG_EECD);
++ ? ?while((!(eecd & E1000_EECD_GNT)) && (i++ < 100))
++ ? ?{
++ ? ? ? ?cdi_sleep_ms(1);
++ ? ? ? ?eecd = e1000_reg_read(device, REG_EECD);
++ ? ?}
++ ? ?if(!(eecd & E1000_EECD_GNT))
++ ? ?{
++ ? ? ? ?eecd &= ~E1000_EECD_REQ;
++ ? ? ? ?e1000_reg_write(device, REG_EECD, eecd);
++ ? ? ? ?return (uint32_t) -1;
++ ? ?}
++
++ ? ?e1000_prep_eeprom(device);
++
++ ? ?e1000_write_eeprom_bits(device, EEPROM_READ_OPCODE, 3);
++ ? ?if(large_eeprom)
++ ? ? ? ?e1000_write_eeprom_bits(device, offset, 8);
++ ? ?else
++ ? ? ? ?e1000_write_eeprom_bits(device, offset, 6);
++
++ ? ?uint32_t data = e1000_read_eeprom_bits(device);
++
++ ? ?e1000_standby_eeprom(device);
++
++ ? ?// TODO: check for post-82544 chip
++ ? ?eecd = e1000_reg_read(device, REG_EECD);
++ ? ?eecd &= ~E1000_EECD_REQ;
++ ? ?e1000_reg_write(device, REG_EECD, eecd);
++
++ ? ?return data;
++}
++
++static uint32_t e1000_read_eerd(struct e1000_device *device, uint16_t offset)
++{
++ ? ?uint32_t eerd, i;
+
+? ? reg_outl(device, REG_EEPROM_READ, (offset << 8) | EERD_START);
+- ? ?while (((eerd = reg_inl(device, REG_EEPROM_READ)) & EERD_DONE) == 0);
+- ? ?printf("eerd = %8x\n", eerd);
+- ? ?return (eerd >> 16);
++ ? ?for(i = 0; i < 100; i++)
++ ? ?{
++ ? ? ? ?eerd = reg_inl(device, REG_EEPROM_READ);
++ ? ? ? ?if(eerd & EERD_DONE)
++ ? ? ? ? ? ?break;
++ ? ? ? ?cdi_sleep_ms(1);
++ ? ?}
++
++ ? ?if(eerd & EERD_DONE)
++ ? ? ? ?return (eerd >> 16) & 0xFFFF;
++ ? ?else
++ ? ? ? ?return (uint32_t) -1;
++}
++
++static uint16_t e1000_eeprom_read(struct e1000_device* device, uint16_t offset)
++{
++ ? ?static int eerd_safe = 1;
++
++ ? ?uint32_t data = 0;
++ ? ?if(eerd_safe)
++ ? ? ? ?data = e1000_read_eerd(device, offset);
++ ? ?if(!eerd_safe || (data == ((uint32_t) -1)))
++ ? ?{
++ ? ? ? ?eerd_safe = 0;
++
++ ? ? ? ?data = e1000_read_uwire(device, offset);
++ ? ? ? ?if(data == ((uint32_t) -1))
++ ? ? ? ?{
++ ? ? ? ? ? ?printf("e1000: couldn't read eeprom via EERD or uwire!");
++ ? ? ? ? ? ?return 0;
++ ? ? ? ?}
++ ? ?}
++
++ ? ?return (uint16_t) (data & 0xFFFF);
+?}
+
+?static void reset_nic(struct e1000_device* netcard)
+@@ -106,6 +302,9 @@ static void reset_nic(struct e1000_device* netcard)
+? ? reg_outl(netcard, REG_RECV_ADDR_LIST + 4,
+? ? ? ? ((mac >> 32) & 0xFFFF) | RAH_VALID);
+
++ ? ?netcard->net.mac = mac;
++ ? ?printf("e1000: MAC-Adresse: %012llx\n", (uint64_t) netcard->net.mac);
++
+? ? // Rx-Deskriptoren aufsetzen
+? ? for (i = 0; i < RX_BUFFER_NUM; i++) {
+? ? ? ? netcard->rx_desc[i].length = RX_BUFFER_SIZE;
+@@ -123,10 +322,6 @@ static void reset_nic(struct e1000_device* netcard)
+? ? netcard->tx_cur_buffer = 0;
+? ? netcard->rx_cur_buffer = 0;
+
+- ? ?// Interrupts aktivieren
+- ? ?reg_outl(netcard, REG_INTR_MASK_CLR, 0xFFFF);
+- ? ?reg_outl(netcard, REG_INTR_MASK, 0xFFFF);
+-
+? ? // Rx/Tx aktivieren
+? ? reg_outl(netcard, REG_RX_CTL, RCTL_ENABLE | RCTL_BROADCAST);
+? ? reg_outl(netcard, REG_TX_CTL, TCTL_ENABLE | TCTL_PADDING
+@@ -153,7 +348,7 @@ struct cdi_device* e1000_init_device(struct
+cdi_bus_data* bus_data)
+? ? struct e1000_device* netcard;
+? ? struct cdi_mem_area* buf;
+
+- ? ?if (!((pci->vendor_id == 0x8086) && (pci->device_id == 0x100e))) {
++ ? ?if (!((pci->vendor_id == 0x8086) && ((pci->device_id == 0x100e)
+|| (pci->device_id == 0x100f)))) {
+? ? ? ? return NULL;
+? ? }
+
+@@ -191,11 +386,12 @@ struct cdi_device* e1000_init_device(struct
+cdi_bus_data* bus_data)
+? ? printf("e1000: Fuehre Reset der Karte durch\n");
+? ? reset_nic(netcard);
+
+- ? ?netcard->net.mac = get_mac_address(netcard);
+- ? ?printf("e1000: MAC-Adresse: %012llx\n", (uint64_t) netcard->net.mac);
+-
+? ? cdi_net_device_init(&netcard->net);
+
++ ? ?// Interrupts aktivieren
++ ? ?reg_outl(netcard, REG_INTR_MASK_CLR, 0xFFFF);
++ ? ?reg_outl(netcard, REG_INTR_MASK, 0xFFFF);
++
+? ? return &netcard->net.dev;
+?}
+
+diff --git a/e1000/device.h b/e1000/device.h
+index 2a10365..428edad 100644
+--- a/e1000/device.h
++++ b/e1000/device.h
+@@ -26,8 +26,8 @@
+?* ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+?*/
+
+-#ifndef _SIS900_DEVICES_H_
+-#define _SIS900_DEVICES_H_
++#ifndef _E1000_DEVICE_H_
++#define _E1000_DEVICE_H_
+
+?#include <stdint.h>
+
+@@ -38,6 +38,8 @@
+
+?enum {
+? ? REG_CTL ? ? ? ? ? ? = ? ?0x0,
++ ? ?REG_STATUS ? ? ? ? ?= ? ?0x8,
++ ? ?REG_EECD ? ? ? ? ? ?= ? 0x10, /* EEPROM Control */
+? ? REG_EEPROM_READ ? ? = ? 0x14, /* EERD */
+? ? REG_VET ? ? ? ? ? ? = ? 0x38, /* VLAN */
+
+@@ -104,6 +106,22 @@ enum {
+?#define EERD_START ?(1 << ?0)
+?#define EERD_DONE ? (1 << ?4)
+
++/* EEPROM/Flash Control */
++#define E1000_EECD_SK ? ? ? ?0x00000001 /* EEPROM Clock */
++#define E1000_EECD_CS ? ? ? ?0x00000002 /* EEPROM Chip Select */
++#define E1000_EECD_DI ? ? ? ?0x00000004 /* EEPROM Data In */
++#define E1000_EECD_DO ? ? ? ?0x00000008 /* EEPROM Data Out */
++#define E1000_EECD_FWE_MASK ?0x00000030
++#define E1000_EECD_FWE_DIS ? 0x00000010 /* Disable FLASH writes */
++#define E1000_EECD_FWE_EN ? ?0x00000020 /* Enable FLASH writes */
++#define E1000_EECD_FWE_SHIFT 4
++#define E1000_EECD_SIZE ? ? ?0x00000200 /* EEPROM Size (0=64 word
+1=256 word) */
++#define E1000_EECD_REQ ? ? ? 0x00000040 /* EEPROM Access Request */
++#define E1000_EECD_GNT ? ? ? 0x00000080 /* EEPROM Access Grant */
++#define E1000_EECD_PRES ? ? ?0x00000100 /* EEPROM Present */
++
++#define EEPROM_READ_OPCODE ?0x6
++
+?/* Allgemeine Definitionen */
+
+?#define TX_BUFFER_SIZE ?2048
+--
+1.6.4.msysgit.0
+
+From kevin at tyndur.org  Mon Aug 16 23:20:27 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Mon, 16 Aug 2010 23:20:27 +0200
+Subject: [cdi-devel] [PATCH v2] Make e1000 work in VirtualBox
+In-Reply-To: <AANLkTin=y1GBfsFA3RQAz40e4JWSo27UArf=QVXtWj0R@mail.gmail.com>
+References: <1268472824-8328-1-git-send-email-matthew@theiselins.net>
+	<AANLkTikP9Xt5AkPXy3FiHXPzjiEpkEaz7gB72rXSsdnK@mail.gmail.com>
+	<AANLkTin=y1GBfsFA3RQAz40e4JWSo27UArf=QVXtWj0R@mail.gmail.com>
+Message-ID: <20100816212026.GA4224@silvanus>
+
+On Mon, Aug 16, 2010 at 09:16:11PM +1000, Matthew Iselin wrote:
+> Hi,
+> 
+> This patch makes the e1000 driver work in VirtualBox. I'm working
+> towards getting the driver working in VMWare as well, but VMWare
+> emulates a different chip (82545 rather than 82540). Those fixes and
+> adjustments will come in a different patch, at a later date.
+> 
+> The biggest change here is that the driver now supports the microwire
+> interface for reading from the EEPROM as well as the EERD.
+> 
+> This is the second version of this patch, and fixes the "unused
+> variable" error that comes up for some environments.
+> 
+> Cheers,
+> 
+> Matt
+
+Thanks, applied to both CDI and tyndur.
+
+But next time please pay attention to create a patch that applies
+cleanly and doesn't have wrapped lines or non-breaking whitespace
+characters (took me a while to figure the latter out!)
+
+From kevin at tyndur.org  Mon Aug 23 23:23:58 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Mon, 23 Aug 2010 23:23:58 +0200
+Subject: [cdi-devel] [PATCH] Improve documentation for cdi/storage
+Message-ID: <1282598638-23342-1-git-send-email-kevin@tyndur.org>
+
+This extends the existing documentation for the storage module and
+adds an English translation.
+
+I consider cdi_storage_driver_register useless, so instead of
+documenting I removed it. If anyone has a use for it, please tell me
+and I'll try and find a reason why you're wrong.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ include/cdi/storage.h |  138 +++++++++++++++++++++++++++++++++++++++++++-----
+ 1 files changed, 123 insertions(+), 15 deletions(-)
+
+diff --git a/include/cdi/storage.h b/include/cdi/storage.h
+index aaffc78..c60e43c 100644
+--- a/include/cdi/storage.h
++++ b/include/cdi/storage.h
+@@ -2,14 +2,39 @@
+  * Copyright (c) 2007 Antoine Kaufmann
+  *
+  * This program is free software. It comes without any warranty, to
+- * the extent permitted by applicable law. You can redistribute it 
+- * and/or modify it under the terms of the Do What The Fuck You Want 
++ * the extent permitted by applicable law. You can redistribute it
++ * and/or modify it under the terms of the Do What The Fuck You Want
+  * To Public License, Version 2, as published by Sam Hocevar. See
+  * http://sam.zoy.org/projects/COPYING.WTFPL for more details.
+- */  
++ */
+ 
+ /**
+- * Treiber fuer Massenspeichergeraete
++ * \german
++ * Das Modul Storage enth??lt Treiber fuer Massenspeicherger??te.
++ *
++ * Storage implementiert zwei grundlegende Datenstrukturen aus \ref core und
++ * erweitert sie um Eigenschaften, die f??r Massenspeicher spezifisch sind:
++ *
++ * - cdi_storage_device beschreibt ein Massenspeicherger??t.
++ * - cdi_storage_driver enth??lt Funktionspointer aus die Funktionen eines
++ *   Treibers, der Massenspeicherger??te zur Verf??gung stellt.
++ *
++ * Treiber k??nnen die in storage.h definierten Funktionen aufrufen, um mit der
++ * CDI-Implementierung zu kommunizieren.
++ * \endgerman
++ * \english
++ * The Storage module contains drivers for mass storage devices.
++ *
++ * Storage implements two of the data structures defined in \ref core and
++ * extends them by properties specific to mass storage devices:
++ *
++ * - cdi_storage_device describes a mass storage device
++ * - cdi_storage_driver contains function pointers to the functions that a mass
++ *   storage driver provides.
++ *
++ * Drivers may call the functions defined in storage.h in order to communicate
++ * with the CDI implementation.
++ * \endenglish
+  * \defgroup storage
+  */
+ /*\@{*/
+@@ -21,17 +46,54 @@
+ 
+ #include <cdi.h>
+ 
++/**
++ * \german
++ * Repr??sentiert ein Massenspeicherger??t.
++ * \endgerman
++ * \english
++ * Represents a mass storage device.
++ * \endenglish
++ * \extends cdi_device
++ */
+ struct cdi_storage_device {
+     struct cdi_device   dev;
++
++    /**
++     * \german
++     * Blockgr????e des Ger??ts
++     * \endgerman
++     * \english
++     * Block size of this device
++     * \endenglish
++     */
+     size_t              block_size;
++
++    /**
++     * \german
++     * Gr????e des Massenspeichers in Bl??cken
++     * \endgerman
++     * \english
++     * Size of the mass storage device in blocks
++     * \endenglish
++     */
+     uint64_t            block_count;
+ };
+ 
++/**
++ * \german
++ * Beschreibt einen Treiber f??r Massenspeicherger??te.
++ * \endgerman
++ * \english
++ * Describes a driver for mass storage devices.
++ * \endenglish
++ * \extends cdi_driver
++ */
+ struct cdi_storage_driver {
+     struct cdi_driver   drv;
+-    
++
+     /**
+-     * Liest Blocks ein
++     * \german
++     * Liest Bl??cke vom Ger??t ein
+      *
+      * @param start Blocknummer des ersten zu lesenden Blockes (angefangen
+      *              bei 0).
+@@ -39,12 +101,24 @@ struct cdi_storage_driver {
+      * @param buffer Puffer in dem die Daten abgelegt werden sollen
+      *
+      * @return 0 bei Erfolg, -1 im Fehlerfall.
++     * \endgerman
++     * \english
++     * Reads blocks from the device
++     *
++     * @param start Number of the first block to be read (first block on the
++     * device is 0)
++     * @param count Number of blocks to read
++     * @param buffer Buffer in which the read data should be stored
++     *
++     * @return 0 on success, -1 in error cases
++     * \endenglish
+      */
+     int (*read_blocks)(struct cdi_storage_device* device, uint64_t start,
+         uint64_t count, void* buffer);
+-    
++
+     /**
+-     * Schreibt Blocks
++     * \german
++     * Schreibt Bl??cke auf das Ger??t
+      *
+      * @param start Blocknummer des ersten zu schreibenden Blockes (angefangen
+      *              bei 0).
+@@ -52,6 +126,17 @@ struct cdi_storage_driver {
+      * @param buffer Puffer aus dem die Daten gelesen werden sollen
+      *
+      * @return 0 bei Erfolg, -1 im Fehlerfall
++     * \endgerman
++     * \english
++     * Writes blocks to the device
++     *
++     * @param start Number of the first block to be written (first block on the
++     * device is 0)
++     * @param count Number of blocks to write
++     * @param buffer Buffer which contains the data to be written
++     *
++     * @return 0 on success, -1 in error cases
++     * \endenglish
+      */
+     int (*write_blocks)(struct cdi_storage_device* device, uint64_t start,
+         uint64_t count, void* buffer);
+@@ -62,24 +147,47 @@ extern "C" {
+ #endif
+ 
+ /**
++ * \german
+  * Initialisiert die Datenstrukturen fuer einen Massenspeichertreiber
+- * (erzeugt die devices-Liste)
++ * (erzeugt die devices-Liste). Diese Funktion muss w??hrend der
++ * Initialisierung eines Massenspeichertreibers aufgerufen werden.
++ * \endgerman
++ * \english
++ * Initialises the data structures for a mass storage device. This function
++ * must be called during initialisation of a mass storage driver.
++ * \endenglish
++ *
+  */
+ void cdi_storage_driver_init(struct cdi_storage_driver* driver);
+ 
+ /**
++ * \german
+  * Deinitialisiert die Datenstrukturen fuer einen Massenspeichertreiber
+  * (gibt die devices-Liste frei)
++ * \endgerman
++ * \english
++ * Deinitialises the data structures for a mass storage driver
++ * \endenglish
+  */
+ void cdi_storage_driver_destroy(struct cdi_storage_driver* driver);
+ 
+ /**
+- * Registiert einen Massenspeichertreiber
+- */
+-void cdi_storage_driver_register(struct cdi_storage_driver* driver);
+-
+-/**
+- * Initialisiert einen Massenspeicher
++ * \german
++ * Meldet ein Massenspeicherger??t beim Betriebssystem an. Diese Funktion muss
++ * aufgerufen werden, nachdem ein Massenspeichertreiber alle notwendigen
++ * Initialisierungen durchgef??hrt hat.
++ *
++ * Das Betriebssystem kann dann beispielsweise nach Partitionen auf dem Ger??t
++ * suchen und Ger??tedateien verf??gbar machen.
++ * \endgerman
++ * \english
++ * Registers a mass storage device with the operating system. This function
++ * must be called once a mass storage driver has completed all required
++ * initialisations.
++ *
++ * The operation system may react to this e.g. with scanning the device for
++ * partitions or creating device nodes for the user.
++ * \endenglish
+  */
+ void cdi_storage_device_init(struct cdi_storage_device* device);
+ 
+-- 
+1.6.0.2
+
+
+From kevin at tyndur.org  Thu Aug 26 22:20:49 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Thu, 26 Aug 2010 22:20:49 +0200
+Subject: [cdi-devel] [PATCH] e1000: Add 8086:1004 PCI ID
+Message-ID: <1282854049-8454-1-git-send-email-kevin@tyndur.org>
+
+This is the third e1000 model that is supported by VirtualBox. No
+further changes to the code seem to be required, it works fine as
+soon as the driver detects the device.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ e1000/device.c |   23 ++++++++++++++++++++---
+ 1 files changed, 20 insertions(+), 3 deletions(-)
+
+diff --git a/e1000/device.c b/e1000/device.c
+index 8c40d01..6ce814c 100644
+--- a/e1000/device.c
++++ b/e1000/device.c
+@@ -342,16 +342,34 @@ static uint64_t get_mac_address(struct e1000_device* device)
+     return mac;
+ }
+ 
++#define ARRAY_SIZE(a) (sizeof(a) / sizeof(a[0]))
++
++static struct {
++    uint16_t vendor_id;
++    uint16_t device_id;
++} pci_id_list[] = {
++    { 0x8086, 0x1004 },
++    { 0x8086, 0x100f },
++    { 0x8086, 0x100e },
++};
++
+ struct cdi_device* e1000_init_device(struct cdi_bus_data* bus_data)
+ {
+     struct cdi_pci_device* pci = (struct cdi_pci_device*) bus_data;
+     struct e1000_device* netcard;
+     struct cdi_mem_area* buf;
++    int i;
+ 
+-    if (!((pci->vendor_id == 0x8086) && ((pci->device_id == 0x100e) || (pci->device_id == 0x100f)))) {
+-        return NULL;
++    for (i = 0; i < ARRAY_SIZE(pci_id_list); i++) {
++        if (pci->vendor_id == pci_id_list[i].vendor_id
++            && pci->device_id == pci_id_list[i].device_id)
++        {
++            goto found;
++        }
+     }
++    return NULL;
+ 
++found:
+     buf = cdi_mem_alloc(sizeof(*netcard),
+         CDI_MEM_PHYS_CONTIGUOUS | CDI_MEM_DMA_4G | 2);
+     if (buf == NULL) {
+@@ -371,7 +389,6 @@ struct cdi_device* e1000_init_device(struct cdi_bus_data* bus_data)
+ 
+     cdi_list_t reslist = pci->resources;
+     struct cdi_pci_resource* res;
+-    int i;
+     for (i = 0; (res = cdi_list_get(reslist, i)); i++) {
+         if (res->type == CDI_PCI_MEMORY) {
+             struct cdi_mem_area* mmio = cdi_mem_map(res->start, res->length);
+-- 
+1.6.0.2
+
+
+From matthew at theiselins.net  Sat Aug 28 12:00:53 2010
+From: matthew at theiselins.net (Matthew Iselin)
+Date: Sat, 28 Aug 2010 20:00:53 +1000
+Subject: [cdi-devel] [PATCH] e1000: Add 8086:1004 PCI ID
+In-Reply-To: <1282854049-8454-1-git-send-email-kevin@tyndur.org>
+References: <1282854049-8454-1-git-send-email-kevin@tyndur.org>
+Message-ID: <AANLkTinQfenYmFyZ9_ON_00Nccb=XndHEPE8MXAuLbYs@mail.gmail.com>
+
+On Fri, Aug 27, 2010 at 6:20 AM, Kevin Wolf <kevin at tyndur.org> wrote:
+> This is the third e1000 model that is supported by VirtualBox. No
+> further changes to the code seem to be required, it works fine as
+> soon as the driver detects the device.
+>
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+> <snip>
+
+Looks good.
+
+Acked-by: Matthew Iselin <matthew at theiselins.net>
+
+From matthew at theiselins.net  Sat Aug 28 12:05:06 2010
+From: matthew at theiselins.net (Matthew Iselin)
+Date: Sat, 28 Aug 2010 20:05:06 +1000
+Subject: [cdi-devel] [PATCH] Improve documentation for cdi/storage
+In-Reply-To: <1282598638-23342-1-git-send-email-kevin@tyndur.org>
+References: <1282598638-23342-1-git-send-email-kevin@tyndur.org>
+Message-ID: <AANLkTimZAefPTNO7iUgoxXSmUDQQcOqrzxEnL6RSr4GD@mail.gmail.com>
+
+On Tue, Aug 24, 2010 at 7:23 AM, Kevin Wolf <kevin at tyndur.org> wrote:
+> This extends the existing documentation for the storage module and
+> adds an English translation.
+>
+> I consider cdi_storage_driver_register useless, so instead of
+> documenting I removed it. If anyone has a use for it, please tell me
+> and I'll try and find a reason why you're wrong.
+>
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+> <snip>
+
+Looks good to me - nice to see something I can understand in these headers ;)
+
+Acked-by: Matthew Iselin <matthew at theiselins.net>
+

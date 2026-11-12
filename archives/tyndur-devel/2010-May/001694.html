@@ -1,0 +1,247 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 1/4] init: devmgr
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%201/4%5D%20init%3A%20devmgr&In-Reply-To=%3C1273765834-15957-2-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001693.html">
+   <LINK REL="Next"  HREF="001709.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 1/4] init: devmgr</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%201/4%5D%20init%3A%20devmgr&In-Reply-To=%3C1273765834-15957-2-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 1/4] init: devmgr">kevin at tyndur.org
+                  </A><BR>
+    <I>Do Mai 13 17:50:31 CEST 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001693.html">[PATCH 0/4] init: GerÃ¤teverwaltung
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001709.html">[tyndur-devel] [PATCH 1/4] init: devmgr
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1694">[ Datum ]</a>
+              <a href="thread.html#1694">[ Thema ]</a>
+              <a href="subject.html#1694">[ Betreff (Subject) ]</a>
+              <a href="author.html#1694">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ init: Systemweit zentrale Verwaltung von Geraeten, damit sich
+  unterschiedliche Treiber koordinieren koennen
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/include/init.h |   10 ++++
+ src/modules/init/devmgr.c  |   98 ++++++++++++++++++++++++++++++++++++++++++++
+ src/modules/init/init.c    |    6 +++
+ src/modules/lib/init.c     |   20 +++++++++
+ 4 files changed, 134 insertions(+), 0 deletions(-)
+ create mode 100644 src/modules/init/devmgr.c
+
+diff --git a/src/modules/include/init.h b/src/modules/include/init.h
+index 325a7b4..aa18fd5 100644
+--- a/src/modules/include/init.h
++++ b/src/modules/include/init.h
+@@ -63,5 +63,15 @@ pid_t init_execute(const char* cmd);
+ 
+ #endif
+ 
++struct init_dev_desc {
++    char    name[64];
++    int     type;
++    size_t  bus_data_size;
++    uint8_t bus_data[];
++};
++
++int init_dev_register(struct init_dev_desc* dev, size_t size);
++int init_dev_list(struct init_dev_desc** devs);
++
+ #endif
+ 
+diff --git a/src/modules/init/devmgr.c b/src/modules/init/devmgr.c
+new file mode 100644
+index 0000000..42adc92
+--- /dev/null
++++ b/src/modules/init/devmgr.c
+@@ -0,0 +1,98 @@
++/*
++ * Copyright (c) 2010 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the tyndur Project
++ *     and its contributors.
++ * 4. Neither the name of the tyndur Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++#include &lt;rpc.h&gt;
++#include &lt;init.h&gt;
++#include &lt;collections.h&gt;
++#include &lt;stdlib.h&gt;
++#include &lt;string.h&gt;
++
++struct device {
++    struct init_dev_desc* public;
++};
++
++list_t* devices = NULL;
++
++void rpc_dev_register(pid_t pid, dword cid, size_t size, void* data)
++{
++    struct init_dev_desc* desc;
++    struct device* dev;
++
++    if (size &lt; sizeof(struct init_dev_desc)) {
++        rpc_send_int_response(pid, cid, -1);
++        return;
++    }
++
++    desc = data;
++    if (size != desc-&gt;bus_data_size + sizeof(struct init_dev_desc)) {
++        rpc_send_int_response(pid, cid, -1);
++        return;
++    }
++
++    desc = malloc(size);
++    memcpy(desc, data, size);
++    desc-&gt;name[sizeof(desc-&gt;name) - 1] = '\0';
++
++    dev = malloc(sizeof(*dev));
++    dev-&gt;public = desc;
++
++    if (devices == NULL) {
++        devices = list_create();
++    }
++
++    list_push(devices, dev);
++    rpc_send_int_response(pid, cid, 0);
++}
++
++void rpc_dev_list(pid_t pid, dword cid, size_t size, void* data)
++{
++    size_t bytes = 0;
++    int i;
++    struct device* dev;
++
++    for (i = 0; (dev = list_get_element_at(devices, i)); i++) {
++        bytes += dev-&gt;public-&gt;bus_data_size + sizeof(struct init_dev_desc);
++    }
++
++    uint8_t buf[bytes];
++    size_t pos = 0;
++
++    for (i = 0; (dev = list_get_element_at(devices, i)); i++) {
++        size_t s = dev-&gt;public-&gt;bus_data_size + sizeof(struct init_dev_desc);
++        memcpy(&amp;buf[pos], dev-&gt;public, s);
++        pos += s;
++    }
++
++    rpc_send_response(pid, cid, bytes, (char*) buf);
++}
+diff --git a/src/modules/init/init.c b/src/modules/init/init.c
+index 475d602..e5fbbdb 100644
+--- a/src/modules/init/init.c
++++ b/src/modules/init/init.c
+@@ -75,6 +75,9 @@ void rpc_loadelf(pid_t pid, dword correlation_id, size_t data_size, void* data);
+ 
+ void rpc_reopen_stdio(pid_t pid, dword cid, size_t size, void* data);
+ 
++void rpc_dev_register(pid_t pid, dword cid, size_t size, void* data);
++void rpc_dev_list(pid_t pid, dword cid, size_t size, void* data);
++
+ void load_modules(init_module_list_t* modules);
+ bool load_single_module(Elf32_Ehdr* elf_header, char* args, pid_t parent_pid);
+ bool start_program(char* path, char* args, pid_t parent_pid);
+@@ -168,6 +171,9 @@ void _start(dword modules)
+ 
+     register_message_handler(&quot;UP_STDIO&quot;, &amp;rpc_reopen_stdio);
+ 
++    register_message_handler(&quot;DEV_REG &quot;, &amp;rpc_dev_register);
++    register_message_handler(&quot;DEV_LIST&quot;, &amp;rpc_dev_list);
++
+     io_init();
+     
+ 
+diff --git a/src/modules/lib/init.c b/src/modules/lib/init.c
+index 3759114..1451e80 100644
+--- a/src/modules/lib/init.c
++++ b/src/modules/lib/init.c
+@@ -175,3 +175,23 @@ pid_t init_execute(const char* cmd)
+     return pid;
+ }
+ 
++int init_dev_register(struct init_dev_desc* dev, size_t size)
++{
++    return rpc_get_int(1, &quot;DEV_REG &quot;, size, (char*) dev);
++}
++
++int init_dev_list(struct init_dev_desc** devs)
++{
++    int res;
++    response_t* response = rpc_get_response(1, &quot;DEV_LIST&quot;, 0, NULL);
++
++    if (response == 0) {
++        return -1;
++    }
++
++    *devs = response-&gt;data;
++    res = response-&gt;data_length;
++    free(response);
++
++    return res;
++}
+-- 
+1.6.0.2
+
+</PRE>
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001693.html">[PATCH 0/4] init: GerÃ¤teverwaltung
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001709.html">[tyndur-devel] [PATCH 1/4] init: devmgr
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1694">[ Datum ]</a>
+              <a href="thread.html#1694">[ Thema ]</a>
+              <a href="subject.html#1694">[ Betreff (Subject)]</a>
+              <a href="author.html#1694">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

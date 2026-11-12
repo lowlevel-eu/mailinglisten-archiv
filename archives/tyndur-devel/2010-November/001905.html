@@ -1,0 +1,156 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 1/8] kernel2: Idle-Task
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%201/8%5D%20kernel2%3A%20Idle-Task&In-Reply-To=%3C1290358896-11861-2-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001904.html">
+   <LINK REL="Next"  HREF="001925.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 1/8] kernel2: Idle-Task</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%201/8%5D%20kernel2%3A%20Idle-Task&In-Reply-To=%3C1290358896-11861-2-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 1/8] kernel2: Idle-Task">kevin at tyndur.org
+                  </A><BR>
+    <I>So Nov 21 18:01:29 CET 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001904.html">[tyndur-devel] [PATCH 0/8] kernel2: Taskstatus-Fixes
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001925.html">[tyndur-devel] [PATCH 1/8] kernel2: Idle-Task
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1905">[ Datum ]</a>
+              <a href="thread.html#1905">[ Thema ]</a>
+              <a href="subject.html#1905">[ Betreff (Subject) ]</a>
+              <a href="author.html#1905">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ kernel2: Ein Idle-Task, der dann zum Zug kommt, wenn alle anderen
+  Tasks blockiert sind. Im Moment passiert das am Anfang des
+  Bootvorgangs ein paarmal.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/kernel2/src/tasks/pm.c        |   25 ++++++++++++++++++++++++-
+ src/kernel2/src/tasks/scheduler.c |   13 +++++++++++--
+ 2 files changed, 35 insertions(+), 3 deletions(-)
+
+diff --git a/src/kernel2/src/tasks/pm.c b/src/kernel2/src/tasks/pm.c
+index b066493..94fbbbf 100644
+--- a/src/kernel2/src/tasks/pm.c
++++ b/src/kernel2/src/tasks/pm.c
+@@ -60,15 +60,38 @@ static pid_t next_pid = 1;
+ 
+ extern void scheduler_init(void);
+ extern pm_process_t init_process;
++extern pm_thread_t* idle_task;
++
++/**
++ * Implementierung des Idle-Task
++ */
++static void idle(void)
++{
++    while(1) {
++        asm volatile(&quot;hlt&quot;);
++    }
++}
+ 
+ /**
+  * Die Prozessverwaltung initialisieren
+  */
+ void pm_init()
+ {
++    interrupt_stack_frame_t* isf;
++
+     // Prozessliste erstellen
+     process_list = list_create();
+-    
++
++    // Idle-Task erstellen
++    idle_task = pm_thread_create(&amp;init_process, &amp;idle);
++    isf = (interrupt_stack_frame_t*) idle_task-&gt;kernel_stack;
++    isf-&gt;cs = 0x08;
++    isf-&gt;ss = 0x10;
++    isf-&gt;ds = 0x10;
++    isf-&gt;es = 0x10;
++    pm_scheduler_delete(idle_task);
++
++    // Scheduler initialisieren
+     scheduler_init();
+ }
+ 
+diff --git a/src/kernel2/src/tasks/scheduler.c b/src/kernel2/src/tasks/scheduler.c
+index 84c7348..7c7c4ce 100644
+--- a/src/kernel2/src/tasks/scheduler.c
++++ b/src/kernel2/src/tasks/scheduler.c
+@@ -53,6 +53,9 @@ static list_t* threads_scheduled;
+ /// Lock
+ static lock_t scheduler_lock;
+ 
++/// Idle-Task
++pm_thread_t* idle_task;
++
+ /**
+  * Scheduler initialisieren
+  */
+@@ -154,7 +157,7 @@ pm_thread_t* pm_scheduler_pop()
+     thread = list_pop(threads_scheduled);
+ 
+     // Falls das nicht geklappt hat, wird solange probiert, 
+-    while (thread == NULL) {
++    if (thread == NULL) {
+         // FIXME: Das ist so nicht wirklich geschickt, wenn der aufrufer dafÃ¼r
+         // sorgen muss, dass wir nicht hÃ¤ngen bleiben.
+         unlock(&amp;scheduler_lock);
+@@ -164,9 +167,15 @@ pm_thread_t* pm_scheduler_pop()
+ 
+         // FIXME: s.o
+         lock(&amp;scheduler_lock);
+-        
++
+         // Ein weiterer Versuch, einen Thread zu erhalten.
++        // Wenn dann immer noch keiner bereit ist, kommt der Idle-Task zum Zug
+         thread = list_pop(threads_scheduled);
++        if (thread == NULL) {
++            unlock(&amp;scheduler_lock);
++            idle_task-&gt;status = PM_STATUS_RUNNING;
++            return idle_task;
++        }
+     }
+ 
+     // Sobald der richtige Thread gefunden wurde, kann der Scheduler wieder
+-- 
+1.6.0.2
+
+</PRE>
+
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001904.html">[tyndur-devel] [PATCH 0/8] kernel2: Taskstatus-Fixes
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001925.html">[tyndur-devel] [PATCH 1/8] kernel2: Idle-Task
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1905">[ Datum ]</a>
+              <a href="thread.html#1905">[ Thema ]</a>
+              <a href="subject.html#1905">[ Betreff (Subject)]</a>
+              <a href="author.html#1905">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

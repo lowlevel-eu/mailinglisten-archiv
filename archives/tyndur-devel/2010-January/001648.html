@@ -1,0 +1,134 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 3/3] kernel2: Taskwechsel beim RPC
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%203/3%5D%20kernel2%3A%20Taskwechsel%20beim%20RPC&In-Reply-To=%3C1264321777-14808-4-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001650.html">
+   <LINK REL="Next"  HREF="001653.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 3/3] kernel2: Taskwechsel beim RPC</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%203/3%5D%20kernel2%3A%20Taskwechsel%20beim%20RPC&In-Reply-To=%3C1264321777-14808-4-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 3/3] kernel2: Taskwechsel beim RPC">kevin at tyndur.org
+                  </A><BR>
+    <I>So Jan 24 09:29:37 CET 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001650.html">[tyndur-devel] [PATCH 2/3] kernel2: rpc_destroy_task_backlinks von kernel1 portiert
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001653.html">[tyndur-devel] [PATCH 3/3] kernel2: Taskwechsel beim RPC
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1648">[ Datum ]</a>
+              <a href="thread.html#1648">[ Thema ]</a>
+              <a href="subject.html#1648">[ Betreff (Subject) ]</a>
+              <a href="author.html#1648">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* kernel2: Beim erfolgreichen Senden eines RPC wird sofort zum
+  aufgerufenen Task gewechselt
+* kernel2: Bei der Rueckkehr von einem RPC wird zum Aufrufer
+  zurueckgewechselt
+* kernel2: Wenn ein RPC ausgefuehrt werden soll, der aufzurufende Task
+  aber blockiert ist (EAGAIN), wird der naechste Task geschedult
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/kernel2/src/syscalls/rpc.c |   30 ++++++++++++++++--------------
+ 1 files changed, 16 insertions(+), 14 deletions(-)
+
+diff --git a/src/kernel2/src/syscalls/rpc.c b/src/kernel2/src/syscalls/rpc.c
+index e6ffd1a..7fc887f 100644
+--- a/src/kernel2/src/syscalls/rpc.c
++++ b/src/kernel2/src/syscalls/rpc.c
+@@ -200,7 +200,7 @@ static int do_fastrpc(pid_t callee_pid, size_t metadata_size, void* metadata,
+         ((callee-&gt;process-&gt;blocked_by_pid) ||
+         !pm_block_rpc(callee-&gt;process, syscall_pm_get_pid())))
+     {
+-        return -EAGAIN;
++        goto fail_retry;
+     }
+ 
+     // Interrupt Stack Frame des aufgerufenen Tasks mappen
+@@ -292,17 +292,19 @@ static int do_fastrpc(pid_t callee_pid, size_t metadata_size, void* metadata,
+         pm_unblock_rpc(callee-&gt;process, syscall_pm_get_pid());
+     }
+ 
+-
+-#if 0
+-        {
+-            schedule_to_task(callee, (dword*) esp);
+-        } else {
+-            isf-&gt;eax = -1;
+-            schedule((dword*)esp);
+-        }
+-#endif
++    // Zum aufgerufenen Task wechseln
++    pm_scheduler_push(current_thread);
++    pm_scheduler_get(callee);
++    current_thread = callee;
+ 
+     return 0;
++
++fail_retry:
++    // Jetzt direkt nochmal probieren ist nicht sinnvoll, lassen wir erstmal
++    // einen anderen Task vor
++    pm_scheduler_push(current_thread);
++    current_thread = pm_scheduler_pop();
++    return -EAGAIN;
+ }
+ 
+ int syscall_fastrpc(pid_t callee_pid, size_t metadata_size, void* metadata,
+@@ -384,12 +386,12 @@ void syscall_fastrpc_ret(void)
+ //        rpc-&gt;caller-&gt;process-&gt;pid,
+ //        current_process-&gt;pid);
+ 
+-    // TODO Wechsel zum aufrufenden Task
+-#if 0
++    // Wechsel zum aufrufenden Task
+     if (rpc-&gt;caller) {
+-        schedule_to_task(rpc-&gt;caller, (dword*) esp);
++        pm_scheduler_push(current_thread);
++        pm_scheduler_get(rpc-&gt;caller);
++        current_thread = rpc-&gt;caller;
+     }
+-#endif
+ 
+     // Wenn es ein IRQ-verarbeitender RPC war, den Interrupt jetzt
+     // wieder aktivieren
+-- 
+1.6.0.2
+
+</PRE>
+
+
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001650.html">[tyndur-devel] [PATCH 2/3] kernel2: rpc_destroy_task_backlinks von kernel1 portiert
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001653.html">[tyndur-devel] [PATCH 3/3] kernel2: Taskwechsel beim RPC
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1648">[ Datum ]</a>
+              <a href="thread.html#1648">[ Thema ]</a>
+              <a href="subject.html#1648">[ Betreff (Subject)]</a>
+              <a href="author.html#1648">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

@@ -1,0 +1,172 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] kernel: SYSCALL_FASTRPC_WAIT
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20kernel%3A%20SYSCALL_FASTRPC_WAIT&In-Reply-To=%3C1238443864-6494-1-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="000697.html">
+   
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] kernel: SYSCALL_FASTRPC_WAIT</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20kernel%3A%20SYSCALL_FASTRPC_WAIT&In-Reply-To=%3C1238443864-6494-1-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH] kernel: SYSCALL_FASTRPC_WAIT">kevin at tyndur.org
+                  </A><BR>
+    <I>Mo Mär 30 22:11:04 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="000697.html">[tyndur-devel] [RFC] Taskwechsel beim RPC
+</A></li>
+        
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#704">[ Datum ]</a>
+              <a href="thread.html#704">[ Thema ]</a>
+              <a href="subject.html#704">[ Betreff (Subject) ]</a>
+              <a href="author.html#704">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ kernel: SYSCALL_FASTRPC_WAIT als Kombination von RPC und wait_for_rpc()
+* libc: Neuen Syscall fuer Sync-RPC benutzen
+---
+ src/include/syscallno.h        |    1 +
+ src/kernel/src/syscall.c       |   10 ++++++++++
+ src/modules/include/syscall.h  |    1 +
+ src/modules/lib/rpc/sync.c     |    2 +-
+ src/modules/lib/syscalls/rpc.c |   21 +++++++++++++++++----
+ 5 files changed, 30 insertions(+), 5 deletions(-)
+
+diff --git a/src/include/syscallno.h b/src/include/syscallno.h
+index b56ad45..16786f3 100644
+--- a/src/include/syscallno.h
++++ b/src/include/syscallno.h
+@@ -76,6 +76,7 @@
+ 
+ #define SYSCALL_FASTRPC 55
+ #define SYSCALL_FASTRPC_RET 56
++#define SYSCALL_FASTRPC_WAIT 58
+ 
+ #define SYSCALL_WAIT_FOR_RPC 57
+ 
+diff --git a/src/kernel/src/syscall.c b/src/kernel/src/syscall.c
+index 2ee793d..b2b11e0 100644
+--- a/src/kernel/src/syscall.c
++++ b/src/kernel/src/syscall.c
+@@ -657,6 +657,15 @@ void syscall(struct int_stack_frame ** esp)
+             break;
+         }
+ 
++        case SYSCALL_FASTRPC_WAIT:
++        {
++            dword callee_pid = *((dword*) isf-&gt;esp);
++
++            if (callee_pid != current_task-&gt;pid) {
++                current_task-&gt;status = TS_WAIT_FOR_RPC;
++            }
++        }
++            /* Fall-through */
+         case SYSCALL_FASTRPC:
+         {
+             dword metadata_size = *((dword*) (isf-&gt;esp + 4));
+@@ -693,6 +702,7 @@ void syscall(struct int_stack_frame ** esp)
+             )) {
+                 schedule_to_task(callee, (dword*) esp);
+             } else {
++                current_task-&gt;status = TS_RUNNING;
+                 isf-&gt;eax = -1;
+                 schedule((dword*)esp);
+             }
+diff --git a/src/modules/include/syscall.h b/src/modules/include/syscall.h
+index e22b0df..177b06c 100644
+--- a/src/modules/include/syscall.h
++++ b/src/modules/include/syscall.h
+@@ -73,6 +73,7 @@ void add_intr_handler(dword intr);
+ 
+ void rpc(pid_t pid);
+ void send_message(pid_t pid, dword function, dword correlation_id, dword len, char* data);
++void send_message_and_wait_for_rpc(pid_t pid, dword function, dword correlation_id, dword len, char* data);
+ void wait_for_rpc(void);
+ void v_and_wait_for_rpc(void);
+ 
+diff --git a/src/modules/lib/rpc/sync.c b/src/modules/lib/rpc/sync.c
+index 9c5bede..0f65fd7 100644
+--- a/src/modules/lib/rpc/sync.c
++++ b/src/modules/lib/rpc/sync.c
+@@ -174,7 +174,7 @@ static response_t* sync_rpc(pid_t pid, char* function_name, size_t data_length,
+     // Wï¿½hrend dem RPC selbst nicht blockieren, da es sonst bei Self-RPC dazu
+     // fï¿½hrt, daï¿½ Code geblockt ist, der dazu nicht vorgesehen ist.
+     v();
+-    send_message(pid, 512, correlation_id, data_length + RPC_FUNCTION_NAME_LENGTH, rpc_data);
++    send_message_and_wait_for_rpc(pid, 512, correlation_id, data_length + RPC_FUNCTION_NAME_LENGTH, rpc_data);
+     p();
+ 
+     response_t* response;
+diff --git a/src/modules/lib/syscalls/rpc.c b/src/modules/lib/syscalls/rpc.c
+index 72d4bbc..68cb394 100644
+--- a/src/modules/lib/syscalls/rpc.c
++++ b/src/modules/lib/syscalls/rpc.c
+@@ -16,8 +16,9 @@ void rpc(dword pid)
+     } while (result != 0);
+ }
+ 
+-void send_message
+-    (dword pid, dword function, dword correlation_id, dword len, char* data)
++static inline void do_send_message
++    (dword pid, dword function, dword correlation_id, dword len, char* data,
++    bool wait_for_rpc)
+ {
+     dword result = 0;
+ 
+@@ -38,10 +39,22 @@ void send_message
+             &quot;mov %1, %%eax;&quot;
+             &quot;int $0x30;&quot;
+             &quot;add $0x14, %%esp;&quot;
+-        : &quot;=a&quot; (result) 
+-        : &quot;i&quot; (SYSCALL_FASTRPC), &quot;g&quot; (pid), &quot;i&quot; (0x8), &quot;g&quot; (metadata), 
++        : &quot;=a&quot; (result)
++        : &quot;i&quot; (wait_for_rpc ? SYSCALL_FASTRPC_WAIT : SYSCALL_FASTRPC),
++            &quot;g&quot; (pid), &quot;i&quot; (0x8), &quot;g&quot; (metadata),
+             &quot;g&quot; (len), &quot;g&quot; (data), &quot;0&quot; (result));
+ 
+     } while (result != 0);
+ }
+ 
++void send_message
++    (dword pid, dword function, dword correlation_id, dword len, char* data)
++{
++    do_send_message(pid, function, correlation_id, len, data, FALSE);
++}
++
++void send_message_and_wait_for_rpc
++    (dword pid, dword function, dword correlation_id, dword len, char* data)
++{
++    do_send_message(pid, function, correlation_id, len, data, TRUE);
++}
+-- 
+1.5.6.5
+
+
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="000697.html">[tyndur-devel] [RFC] Taskwechsel beim RPC
+</A></li>
+	
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#704">[ Datum ]</a>
+              <a href="thread.html#704">[ Thema ]</a>
+              <a href="subject.html#704">[ Betreff (Subject)]</a>
+              <a href="author.html#704">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

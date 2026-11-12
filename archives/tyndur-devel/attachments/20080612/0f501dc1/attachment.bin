@@ -1,0 +1,71 @@
+Index: trunk/src/kernel2/src/syscall.c
+===================================================================
+--- trunk.orig/src/kernel2/src/syscall.c
++++ trunk/src/kernel2/src/syscall.c
+@@ -48,9 +48,9 @@ syscall_t syscalls[SYSCALL_MAX];
+  */
+ void syscall_init()
+ {
+-    syscall_register(SYSCALL_MEM_ALLOCATE, (void*) &syscall_mem_allocate, 3);
+-    //syscall_register(SYSCALL_MEM_FREE, (void*) &syscall_mem_free, 2);
+-    
++    syscall_register(SYSCALL_MEM_ALLOCATE, &syscall_mem_allocate, 3);
++    syscall_register(SYSCALL_MEM_FREE, &syscall_mem_free, 2);
++
+     syscall_register(SYSCALL_PM_GET_PID, (void*) &syscall_pm_get_pid, 0);
+     syscall_register(SYSCALL_PM_GET_PARENT_PID, (void*)
+         &syscall_pm_get_parent_pid, 1);
+Index: trunk/src/kernel2/src/syscalls/mem.c
+===================================================================
+--- trunk.orig/src/kernel2/src/syscalls/mem.c
++++ trunk/src/kernel2/src/syscalls/mem.c
+@@ -45,7 +45,7 @@
+  * @param bytes Groesse des Speicherblocks
+  * @param flags Flags
+  * @param phys Je nach Flags wird diese Adresse benutzt, um dort die
+- *              physikalische Adresse des Blocks zu speichern.
++ *              physische Adresse des Blocks zu speichern.
+  *
+  * @return Virtuelle Adresse des Blocks
+  */
+@@ -53,8 +53,8 @@ vaddr_t syscall_mem_allocate(size_t byte
+ {
+     vaddr_t address = NULL;
+     size_t page_count = NUM_PAGES(PAGE_ALIGN_ROUND_UP(bytes));
+-    
+-    // Der Speicher muss nicht physiskalisch zusamenhaengend sein.
++
++    // Der Speicher muss nicht physisch zusamenhaengend sein.
+     paddr_t physical_address = pmm_alloc(page_count);
+     address = mmc_automap(&mmc_current_context(), physical_address, page_count,
+         USER_MEM_START, USER_MEM_END, MM_FLAGS_USER_DATA);
+@@ -62,7 +62,28 @@ vaddr_t syscall_mem_allocate(size_t byte
+     return address;
+ }
+ 
++/**
++ * Einen Speicherbereich freigeben
++ *
++ * @param start Startadresse des Bereichs
++ * @param bytes Groesse des Speicherblocks
++ */
+ void syscall_mem_free(vaddr_t start, size_t bytes)
+ {
+-}
++    // Adresse auf PAGE_SIZE abrunden
++    start = (vaddr_t) PAGE_ALIGN_ROUND_DOWN((uintptr_t) start);
++    size_t num_pages = NUM_PAGES(bytes);
++
++    // Jetzt werden die Seiten freigegeben
++    while (num_pages-- != 0) {
++        // Physische Adresse ausfindig machen und Page in der
++        // physischen Speicherverwaltung freigeben
++        paddr_t phys = mmc_resolve(&mmc_current_context(), start);
++        pmm_free(phys, 1);
+ 
++        // Page unmappen
++        mmc_unmap(&mmc_current_context(), start, 1);
++
++        start = (vaddr_t) ((uintptr_t) start + PAGE_SIZE);
++    }
++}

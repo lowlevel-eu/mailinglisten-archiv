@@ -1,0 +1,300 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [PATCH] Re: +cp: -r, -v und -t hinzugefÃ¼gt
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5BPATCH%5D%20Re%3A%20%2Bcp%3A%20-r%2C%20-v%20und%20-t%20hinzugef%C3%BCgt&In-Reply-To=%3C1247059887-29488-1-git-send-email-alex%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001123.html">
+   <LINK REL="Next"  HREF="001161.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[PATCH] Re: +cp: -r, -v und -t hinzugefÃ¼gt</H1>
+    <B>Alexander Siol</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5BPATCH%5D%20Re%3A%20%2Bcp%3A%20-r%2C%20-v%20und%20-t%20hinzugef%C3%BCgt&In-Reply-To=%3C1247059887-29488-1-git-send-email-alex%40tyndur.org%3E"
+           TITLE="[PATCH] Re: +cp: -r, -v und -t hinzugefÃ¼gt">alex at tyndur.org
+                  </A><BR>
+    <I>Mi Jul  8 15:31:27 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001123.html">[PATCH] +cp: -r, -v und -t hinzugefÃ¼gt
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001161.html">[tyndur-devel] [PATCH] Re: +cp: -r, -v und -t hinzugefügt
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1124">[ Datum ]</a>
+              <a href="thread.html#1124">[ Thema ]</a>
+              <a href="subject.html#1124">[ Betreff (Subject) ]</a>
+              <a href="author.html#1124">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>---
+ trunk/src/modules/c/shell/cmds/cp.c |  181 ++++++++++++++++++++++++++++++----
+ 1 files changed, 159 insertions(+), 22 deletions(-)
+
+diff --git a/trunk/src/modules/c/shell/cmds/cp.c b/trunk/src/modules/c/shell/cmds/cp.c
+index 2c1ada5..30b8f53 100644
+--- a/trunk/src/modules/c/shell/cmds/cp.c
++++ b/trunk/src/modules/c/shell/cmds/cp.c
+@@ -41,11 +41,17 @@
+ #include &quot;stdlib.h&quot;
+ #include &quot;stdio.h&quot;
+ #include &quot;unistd.h&quot;
++#include &quot;getopt.h&quot;
++#include &quot;collections.h&quot;
+ #include &lt;lost/config.h&gt;
+ 
+ #define BUFFER_SIZE 4096
+ 
++int verbosity = 0;
++
+ void cp_display_usage(void);
++int cp_file(char* src_path, char* dst_path);
++int cp_recursive(char* src_path, char* dst_path);
+ 
+ #ifdef CONFIG_SHELL_BUILTIN_ONLY
+     int shell_command_cp(int argc, char* argv[], const char* args)
+@@ -53,21 +59,158 @@ void cp_display_usage(void);
+     int main(int argc, char* argv[])
+ #endif
+ {
+-    if (argc != 3) {
++    static const struct option long_options[] =
++    {
++        { &quot;target&quot;, required_argument, 0, 't' },
++        { &quot;recursive&quot;, no_argument,    0, 'r' },
++        { &quot;verbose&quot;, no_argument,      0, 'v' },
++        { &quot;help&quot;, no_argument,         0, 'h' },
++        { 0, 0, 0, 0 }
++    };
++
++    optind = 0;
++    verbosity = 0;
++
++    char* targetpath = NULL;
++    list_t* sources = list_create();
++
++    int index = -1;
++    int result;
++
++    int recursive = 0;
++
++    while (optind &lt; argc) {
++        result = getopt_long(argc, argv, &quot;vrt:&quot;, long_options, &amp;index);
++        if (result == -1) {
++            break;
++        }
++        switch (result) {
++            case 't':
++                targetpath = optarg;
++                break;
++            case 'r':
++                recursive = 1;
++                break;
++            case 'v':
++                verbosity++;
++                break;
++            case 'h':
++                cp_display_usage();
++                return EXIT_SUCCESS;
++            default:
++                break;
++        }
++    }
++
++    while (optind &lt; argc) {
++        list_push(sources, (void*)argv[optind++]);
++    }
++
++    // Falls kein Target-Parameter gegeben ist, letztes Element des Listings.
++    if (targetpath == NULL) {
++        targetpath = (char*)list_pop(sources);
++    }
++
++    if (targetpath == NULL || list_size(sources) == 0) {
+         cp_display_usage();
++        goto bad_exit;
++    }
++
++    if ( (list_size(sources) &gt; 1) &amp;&amp; (!is_directory(targetpath)) ) {
++        fprintf(stderr, 
++            &quot;Fehler: Mehrere Quellen, aber Ziel ist kein Verzeichnis!\n&quot;);
++        goto bad_exit;
++    }
++
++    char* src_path = NULL;
++    while ( (src_path = (char*)list_pop(sources)) ) {
++        if (is_directory(src_path)) {
++            if (recursive) {
++                cp_recursive(src_path, targetpath);
++            }
++            else {
++                fprintf(stderr, &quot;%s übersprungen (suchen sie 'cp -r' ?)\n&quot;, src_path);
++                goto bad_exit;
++            }
++        } else {
++            result = cp_file(src_path, targetpath);
++            if (result == -1) {
++                fprintf(stderr, &quot;Konnte die Quelldatei nicht öffnen\n&quot;);
++                goto bad_exit;
++            } 
++            else if (result == -2) {
++                fprintf(stderr, &quot;Konnte die Zieldatei nicht öffnen\n&quot;);
++                goto bad_exit;
++            }
++        }
++    }
++
++    list_destroy(sources);
++    return EXIT_SUCCESS;
++
++    bad_exit:
++    list_destroy(sources);
++    return EXIT_FAILURE;
++}
++
++void cp_display_usage()
++{
++    printf(&quot;Aufruf: cp [OPTIONEN] &lt;Quelle&gt; &lt;Ziel&gt;\n&quot;
++           &quot;  oder: cp [OPTIONEN] &lt;Quelle&gt; ... &lt;Verzeichniss&gt;\n&quot;
++           &quot;  oder: cp [OPTIONEN] -t &lt;Verzeichniss&gt; &lt;Quelle&gt; ...\n&quot;
++           &quot;\n&quot;
++           &quot;Optionen:\n&quot;
++           &quot;    -v --verbose     durchgeführte Tätigkeiten erklären\n&quot;
++           &quot;    -r --recursive   Verzeichnisse rekursiv kopieren\n&quot;
++           &quot;    -h --help        diese Hilfe anzeigen\n&quot;);
++}
++
++int cp_recursive(char* src_path, char* dst_path)
++{
++    if (is_directory(dst_path)) {
++        dst_path = strcat(dst_path, io_split_filename(src_path));
++    } 
++    if (!directory_create(dst_path)) {
++        fprintf(stderr, &quot;Fehler: Pfad %s konnte nicht angelegt werden!\n&quot;, dst_path);
++        fprintf(stderr, &quot;        %s übersprungen.\n&quot;, src_path);
+         return -1;
+     }
++    if (verbosity &gt; 0) {
++        printf(&quot;'%s' -&gt; '%s'\n&quot;, src_path, dst_path);
++    }
+     
+-    char* src_path = argv[1];
+-    char* dst_path = argv[2];
++    io_resource_t* dir_res = directory_open(src_path);
++    char *full_src_path = NULL;
++    char *full_dst_path = NULL;
++    if (dir_res != NULL) {
++        io_direntry_t* direntry;
++        while ((direntry = directory_read(dir_res))) {
++            asprintf(&amp;full_src_path, &quot;%s/%s&quot;, src_path, direntry-&gt;name);
++            asprintf(&amp;full_dst_path, &quot;%s/%s&quot;, dst_path, direntry-&gt;name);
++            if (direntry-&gt;type == IO_DIRENTRY_FILE) {
++                cp_file(full_src_path, full_dst_path);
++            } else {
++                cp_recursive(full_src_path, full_dst_path);
++            }
++            free(full_src_path);
++            free(full_dst_path);
++            free(direntry);
++        }
++        directory_close(dir_res);
++        return 1;
++    }
++    else {
++        return -1;
++    }
++}
+ 
++int cp_file(char* src_path, char* dst_path) {
+     FILE* src = fopen(src_path, &quot;r&quot;);
+     if (src == NULL) {
+-        fprintf(stderr, &quot;Konnte die Quelldatei nicht oeffnen\n&quot;);
+-        return EXIT_FAILURE;        
++        return -1;
+     }
+ 
+-    FILE* dst;
++    FILE* dst = NULL;
+     if (is_directory(dst_path)) {
+         char* filename = io_split_filename(src_path);
+         size_t length = strlen(filename) + strlen(dst_path) + 1;
+@@ -78,20 +221,20 @@ void cp_display_usage(void);
+         dst_file_path[strlen(dst_file_path)] = '/';
+         strcat(dst_file_path, filename);
+         dst_file_path[length] = '\0';
+-
+-        dst = fopen(dst_file_path, &quot;w&quot;);
+-    } else {
+-        dst = fopen(dst_path, &quot;w&quot;);
++        dst_path = dst_file_path;
+     }
++    dst = fopen(dst_path, &quot;w&quot;);
+ 
+     if (dst == NULL) {
+-        fprintf(stderr, &quot;Konnte die Zieldatei nicht oeffnen\n&quot;);
+-        fclose(src);
+-        return EXIT_FAILURE;        
++        return -2;
+     }
+ 
+     uint8_t buffer[BUFFER_SIZE];
+-        
++
++    if (verbosity &gt; 0) {
++        printf(&quot;'%s' -&gt; '%s'\n&quot;, src_path, dst_path);
++    }
++
+     while (!feof(src)) { 
+         size_t length = fread(buffer, BUFFER_SIZE, 1, src);
+         if (length == 0) {
+@@ -100,18 +243,12 @@ void cp_display_usage(void);
+             fclose(dst);
+             return EXIT_FAILURE;
+         }
+-        
++
+         fwrite(buffer, length, 1, dst);
+     }
+ 
+     fclose(src);
+     fclose(dst);
+ 
+-    return EXIT_SUCCESS;
+-}
+-
+-void cp_display_usage()
+-{
+-    puts(&quot;\nAufruf: cp &lt;Quelle&gt; &lt;Ziel&gt;&quot;);
++    return 1;
+ }
+-
+-- 
+1.6.0.4
+
+</PRE>
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001123.html">[PATCH] +cp: -r, -v und -t hinzugefÃ¼gt
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001161.html">[tyndur-devel] [PATCH] Re: +cp: -r, -v und -t hinzugefügt
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1124">[ Datum ]</a>
+              <a href="thread.html#1124">[ Thema ]</a>
+              <a href="subject.html#1124">[ Betreff (Subject)]</a>
+              <a href="author.html#1124">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

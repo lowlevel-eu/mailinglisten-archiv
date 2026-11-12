@@ -1,0 +1,203 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 3/4] tests: Ein einfacher Threadtest
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%203/4%5D%20tests%3A%20Ein%20einfacher%20Threadtest&In-Reply-To=%3C1363820305-17864-4-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002411.html">
+   <LINK REL="Next"  HREF="002413.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 3/4] tests: Ein einfacher Threadtest</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%203/4%5D%20tests%3A%20Ein%20einfacher%20Threadtest&In-Reply-To=%3C1363820305-17864-4-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 3/4] tests: Ein einfacher Threadtest">kevin at tyndur.org
+                  </A><BR>
+    <I>Mi Mär 20 23:58:24 CET 2013</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002411.html">[tyndur-devel] [PATCH 2/4] kernel/libc: Multithreading-Syscalls
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002413.html">[tyndur-devel] [PATCH 4/4] libc: pthread
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2412">[ Datum ]</a>
+              <a href="thread.html#2412">[ Thema ]</a>
+              <a href="subject.html#2412">[ Betreff (Subject) ]</a>
+              <a href="author.html#2412">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ tests: Thread starten, Parameterübergabe prüfen, TIDs vergleichen
+  (alles direkt mit Syscalls, kein pthread)
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ tests/libc/Makefile      |    5 ++-
+ tests/libc/main_thread.c |   92 ++++++++++++++++++++++++++++++++++++++++++++++
+ tests/libc/run_test.sh   |    2 +
+ 3 files changed, 98 insertions(+), 1 deletions(-)
+ create mode 100644 tests/libc/main_thread.c
+
+diff --git a/tests/libc/Makefile b/tests/libc/Makefile
+index fb07cf2..e1beb12 100644
+--- a/tests/libc/Makefile
++++ b/tests/libc/Makefile
+@@ -11,12 +11,15 @@ LDFLAGS=-T ../../src/modules/user-i386.ld --start-group ../../src/lib/library.a
+ 
+ export QEMU
+ 
+-qemu: main
++qemu: main main_thread
+ 	@./run_test.sh
+ 
+ main: main.o qsort.o bsearch.o sprintf.o stdio.o ../lib/testlib.o
+ 	@$(LD) $^ $(LDFLAGS) -o $@
+ 
++main_thread: main_thread.o ../lib/testlib.o
++	@$(LD) $^ $(LDFLAGS) -o $@
++
+ %.o: %.c
+ 	@$(CC) $(CFLAGS) -o $@ $^
+ 
+diff --git a/tests/libc/main_thread.c b/tests/libc/main_thread.c
+new file mode 100644
+index 0000000..6d841f0
+--- /dev/null
++++ b/tests/libc/main_thread.c
+@@ -0,0 +1,92 @@
++/*
++ * Copyright (c) 2013 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include &lt;stdio.h&gt;
++#include &lt;stdlib.h&gt;
++#include &lt;stdbool.h&gt;
++#include &lt;syscall.h&gt;
++
++#include &quot;testlib.h&quot;
++
++const char* test_name;
++
++struct test1_data {
++    int a;
++    tid_t ctid;
++};
++
++static void test1_t1(void* arg)
++{
++    struct test1_data* data = arg;
++    test_assert(data-&gt;a == 42);
++    data-&gt;a = 43;
++    data-&gt;ctid = get_tid();
++    exit_thread();
++    test_assert(false);
++}
++
++static void test1(void)
++{
++    tid_t tid, ctid;
++    struct test1_data data = {
++        .a = 42,
++    };
++
++    test_name = &quot;sys_threads&quot;;
++    tid = get_tid();
++
++    ctid = create_thread((uint32_t) &amp;test1_t1, &amp;data);
++    while (data.a == 42) {
++        yield();
++    }
++
++    test_assert(data.a == 43);
++    test_assert(data.ctid == ctid);
++    test_assert(get_tid() == tid);
++
++    printf(&quot;* PASS %s\n&quot;, test_name);
++}
++
++int main(int argc, char* argv[])
++{
++    if (argc &lt; 2) {
++        printf(&quot;* ERROR Zu wenige Parameter\n&quot;);
++        quit_qemu();
++    }
++
++    switch (atoi(argv[1])) {
++        case 1:
++            test1();
++            break;
++        default:
++            printf(&quot;* ERROR Unbekannter Testfall\n&quot;);
++            break;
++    }
++
++    quit_qemu();
++}
+diff --git a/tests/libc/run_test.sh b/tests/libc/run_test.sh
+index 2842dae..c6c05dc 100755
+--- a/tests/libc/run_test.sh
++++ b/tests/libc/run_test.sh
+@@ -32,3 +32,5 @@ run_test main 1
+ run_test main 2
+ run_test main 3
+ run_test main 4
++
++run_test main_thread 1
+-- 
+1.7.7
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002411.html">[tyndur-devel] [PATCH 2/4] kernel/libc: Multithreading-Syscalls
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002413.html">[tyndur-devel] [PATCH 4/4] libc: pthread
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2412">[ Datum ]</a>
+              <a href="thread.html#2412">[ Thema ]</a>
+              <a href="subject.html#2412">[ Betreff (Subject)]</a>
+              <a href="author.html#2412">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

@@ -1,0 +1,91 @@
+Index: src/modules/lib/stdlibc/file.c
+===================================================================
+--- src/modules/lib/stdlibc/file.c	(Revision 599)
++++ src/modules/lib/stdlibc/file.c	(Arbeitskopie)
+@@ -345,19 +345,36 @@
+     FILE* io_res)
+ {   
+     size_t data_size = blockcount * blocksize;
+-    uint8_t request[sizeof(io_write_request_t) + data_size];
++    size_t request_size = sizeof(io_write_request_t);
++    
++    // Bei mehr als einem Kilobyte wird shared memory fuer die Daten benutzt
++    if (data_size < 1024) {
++        request_size += data_size;
++    }
++    uint8_t request[request_size];
+ 
+     io_write_request_t* write_request = (io_write_request_t*) request;    
+     write_request->id = io_res->id;
+     write_request->blocksize = blocksize;
+     write_request->blockcount = blockcount;
++
++    // Wenn kein SHM benutzt wird, werden die Daten direkt an den Request
++    // angehaengt
++    if (data_size < 1024) {
++        write_request->shared_mem_id = 0;
++        memcpy(write_request->data, src, data_size);
++    } else {
++        write_request->shared_mem_id = create_shared_memory(data_size);
++        void* data = open_shared_memory(write_request->shared_mem_id);
++        memcpy(data, src, data_size);
++    }
+     
+-    memcpy(write_request->data, src, data_size);
++    size_t resp = rpc_get_dword(io_res->pid, "IO_WRITE", 
++        request_size, (char*) request);
+     
+-    
+-    size_t resp = rpc_get_dword(io_res->pid, "IO_WRITE", 
+-        sizeof(io_write_request_t) + data_size, (char*) request);
+-
++    if (data_size > 1024) {
++        close_shared_memory(write_request->shared_mem_id);
++    }
+     return resp;
+ }
+ 
+Index: src/modules/lib/lostio/handler.c
+===================================================================
+--- src/modules/lib/lostio/handler.c	(Revision 599)
++++ src/modules/lib/lostio/handler.c	(Arbeitskopie)
+@@ -222,18 +222,23 @@
+     
+     if((typehandle != NULL) && (typehandle->write != NULL))
+     {
+-        //puts("as");
+-        //printf("%d\n", filehandle->node->type);
+-        //printf("2.5pid:%d\n", pid);
+-        size_t result = typehandle->write(filehandle, write_request->blocksize, write_request->blockcount, write_request->data);
+-        ///puts("---");
+-        ///printf("3pid:%d\n", pid);
++        void* write_data;
++        if (write_request->shared_mem_id == 0) {
++            write_data = write_request->data;
++        } else {
++            write_data = open_shared_memory(write_request->shared_mem_id);
++        }
++
++        size_t result = typehandle->write(filehandle, write_request->blocksize, write_request->blockcount, write_data);
++
++        if (write_request->shared_mem_id != 0) {
++            close_shared_memory(write_request->shared_mem_id);
++        }
++ 
+         rpc_send_dword_response(pid, correlation_id, (dword) result);
+     }
+     else
+     {
+-        //puts("bs");
+-        //printf("4pid:%d\n", pid);
+         rpc_send_dword_response(pid, correlation_id, (dword)-1);
+     }
+     //v();
+@@ -248,7 +253,6 @@
+     io_seek_request_t* seek_request = (io_seek_request_t*) data;
+     
+     //p();
+-    //printf("id: %d\n", seek_request->id);
+ 
+     lostio_filehandle_t* filehandle = get_filehandle(pid, seek_request->id);
+     if(filehandle == NULL)

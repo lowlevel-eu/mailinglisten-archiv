@@ -1,0 +1,532 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 5/5] tcpip: Erster Teil der DHCP-Unterstützung
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_5/5%3D5D_tcpip%3D3A_Erster_Teil_der%3F%3D%0A%09%3D%3Futf-8%3Fq%3F_DHCP-Unterst%3DC3%3DBCtzung%3F%3D&In-Reply-To=%3C1311536861-12812-6-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002208.html">
+   <LINK REL="Next"  HREF="002210.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 5/5] tcpip: Erster Teil der DHCP-Unterstützung</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_5/5%3D5D_tcpip%3D3A_Erster_Teil_der%3F%3D%0A%09%3D%3Futf-8%3Fq%3F_DHCP-Unterst%3DC3%3DBCtzung%3F%3D&In-Reply-To=%3C1311536861-12812-6-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 5/5] tcpip: Erster Teil der DHCP-Unterstützung">kevin at tyndur.org
+                  </A><BR>
+    <I>So Jul 24 21:47:41 CEST 2011</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002208.html">[tyndur-devel] [PATCH 4/5] tcpip: UDP-Paket über vorgegebene Route verschicken
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002210.html">[tyndur-devel] [PATCH v2 5/5] tcpip: DHCP-Unterstützung
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2209">[ Datum ]</a>
+              <a href="thread.html#2209">[ Thema ]</a>
+              <a href="subject.html#2209">[ Betreff (Subject) ]</a>
+              <a href="author.html#2209">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ tcpip: Der eigentliche DHCP-Prozess kann jetzt durchgeführt werden
+  (solange keine Fehler auftreten jedenfalls...), dazu muss 'fetch' nach
+  tcpip:/$TREIBER/0/dhcp geschrieben werden. Die Karte wird noch nicht
+  entsprechend konfiguriert und zurückgeben kann man ein Lease auch noch
+  nicht.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/tcpip/dhcp.c              |  322 +++++++++++++++++++++++++++++++++
+ src/modules/tcpip/include/dhcp.h      |   45 +++++
+ src/modules/tcpip/include/lostio_if.h |    1 +
+ src/modules/tcpip/include/main.h      |    3 +
+ src/modules/tcpip/lostio_if.c         |    4 +
+ src/modules/tcpip/main.c              |    4 +-
+ 6 files changed, 377 insertions(+), 2 deletions(-)
+ create mode 100644 src/modules/tcpip/dhcp.c
+ create mode 100644 src/modules/tcpip/include/dhcp.h
+
+diff --git a/src/modules/tcpip/dhcp.c b/src/modules/tcpip/dhcp.c
+new file mode 100644
+index 0000000..5495ac0
+--- /dev/null
++++ b/src/modules/tcpip/dhcp.c
+@@ -0,0 +1,322 @@
++/*
++ * Copyright (c) 2011 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include &quot;dhcp.h&quot;
++#include &quot;udp.h&quot;
++#include &quot;ip.h&quot;
++#include &quot;lostio_if.h&quot;
++
++#include &lt;string.h&gt;
++#include &lt;stdio.h&gt;
++#include &lt;stdlib.h&gt;
++#include &lt;errno.h&gt;
++#include &lt;syscall.h&gt;
++#include &lt;stdint.h&gt;
++#include &lt;ctype.h&gt;
++
++struct dhcp_packet {
++    uint8_t     op;
++    uint8_t     htype;
++    uint8_t     hlen;
++    uint8_t     hops;
++    uint32_t    xid;
++    uint16_t    secs;
++    uint16_t    flags;
++    uint32_t    ciaddr; /* Client IP address */
++    uint32_t    yiaddr; /* 'your' (client) address */
++    uint32_t    siaddr;
++    uint32_t    giaddr;
++    uint8_t     chaddr[16];
++    char        sname[64];
++    char        file[128];
++    uint8_t     options[312];
++} __attribute__((packed));
++
++enum {
++    BOOTREQUEST = 1,
++    BOOTREPLY   = 2,
++};
++
++struct dhcp_msgtype {
++    uint8_t     magic[4];
++    uint8_t     code;
++    uint8_t     len;
++    uint8_t     type;
++} __attribute__((packed));
++
++struct dhcp_serverid {
++    uint8_t     code;
++    uint8_t     len;
++    uint32_t    addr;
++} __attribute__((packed));
++
++struct dhcp_end {
++    uint8_t     code;
++} __attribute__((packed));
++
++struct dhcp_discover_opts {
++    struct dhcp_msgtype     msgtype;
++    struct dhcp_end         end;
++} __attribute__((packed));
++
++struct dhcp_request_opts {
++    struct dhcp_msgtype     msgtype;
++    struct dhcp_serverid    serverid;
++    struct dhcp_end         end;
++} __attribute__((packed));
++
++enum {
++    DHCPDISCOVER    = 1,
++    DHCPOFFER       = 2,
++    DHCPREQUEST     = 3,
++    DHCPDECLINE     = 4,
++    DHCPACK         = 5,
++    DHCPNAK         = 6,
++    DHCPRELEASE     = 7,
++    DHCPINFORM      = 8,
++};
++
++static void dhcp_fill_packet(struct device* device, struct dhcp_packet* p,
++    struct dhcp_msgtype* m, struct dhcp_end* end, int type)
++{
++    uint64_t mac = device-&gt;dev.mac;
++
++    *p = (struct dhcp_packet) {
++        .op     = BOOTREQUEST,
++        .htype  = 0x01,
++        .hlen   = 6,
++        .xid    = 0,
++        .chaddr = { mac &gt;&gt;  0, mac &gt;&gt;  8, mac &gt;&gt; 16,
++                    mac &gt;&gt; 24, mac &gt;&gt; 32, mac &gt;&gt; 40 },
++    };
++
++    *m = (struct dhcp_msgtype) {
++        .magic  = { 99, 130, 83, 99 },
++        .code   = 53,
++        .len    = 1,
++        .type   = type,
++    };
++
++    *end = (struct dhcp_end) {
++        .code   = 255,
++    };
++}
++
++static int dhcp_discover(struct device* device, struct udp_socket* s)
++{
++    struct dhcp_discover_opts* opts;
++    struct dhcp_packet p;
++
++    opts = (void*) &amp;p.options;
++    dhcp_fill_packet(device, &amp;p, &amp;opts-&gt;msgtype, &amp;opts-&gt;end, DHCPDISCOVER);
++
++    return udp_write(s, &amp;p, sizeof(p));
++}
++
++static void dhcp_parse_options(struct device* device, struct dhcp_packet *p)
++{
++    int i;
++
++    /* Optionen parsen (DHCP-Magic überspringen) */
++    i = 4;
++
++    while (i &lt; sizeof(p-&gt;options) - 1) {
++        uint8_t* option = &amp;p-&gt;options[i];
++        uint8_t op = option[0];
++
++        if (op == 0xff) {
++            break;
++        } else if (op == 0x0) {
++            i++;
++            continue;
++        }
++
++        i += 2 + option[1];
++        if (i &gt; sizeof(p-&gt;options)) {
++            break;
++        }
++
++        switch (op) {
++            case 1: /* Subnet Mask */
++                device-&gt;dhcp.subnet = *(uint32_t*) &amp;option[2];
++                break;
++
++            case 3: /* Router */
++                device-&gt;dhcp.gateway = *(uint32_t*) &amp;option[2];
++                break;
++
++            case 6: /* Domain Name Server */
++                device-&gt;dhcp.nameserver = *(uint32_t*) &amp;option[2];
++                break;
++
++            case 51: /* IP Address Lease Time */
++                /* TODO */
++                break;
++
++            case 53: /* Message Type */
++                device-&gt;dhcp.last_op = option[2];
++                break;
++
++            case 54: /* Server Identifier */
++                device-&gt;dhcp.server_ip = *(uint32_t*) &amp;option[2];
++                break;
++        }
++    }
++}
++
++static int dhcp_wait_response(struct device* device, struct udp_socket* s,
++    uint8_t msgtype)
++{
++    int ret;
++    uint8_t buf[1024];
++    struct dhcp_packet* p = (void*) buf;
++
++again:
++    ret = udp_read(s, buf, sizeof(*p));
++
++    /* TODO Timeout */
++    while (ret != sizeof(struct dhcp_packet)) {
++        yield();
++        ret = udp_read(s, buf, sizeof(buf));
++    }
++
++    device-&gt;dhcp.client_ip = p-&gt;yiaddr;
++    dhcp_parse_options(device, p);
++
++    if (device-&gt;dhcp.last_op != msgtype) {
++        goto again;
++    }
++
++    return 0;
++}
++
++int dhcp_request(struct device* device, struct udp_socket* s)
++{
++    struct dhcp_request_opts* opts;
++    struct dhcp_packet p;
++
++    opts = (void*) &amp;p.options;
++    dhcp_fill_packet(device, &amp;p, &amp;opts-&gt;msgtype, &amp;opts-&gt;end, DHCPREQUEST);
++
++    opts-&gt;serverid = (struct dhcp_serverid) {
++        .code       = 54,
++        .len        = 4,
++        .addr       = device-&gt;dhcp.server_ip,
++    };
++
++    return udp_write(s, &amp;p, sizeof(p));
++}
++
++/**
++ * Sendet eine DHCP-Anfrage und holt die Informationen vom Server
++ */
++int dhcp_fetch(struct device* device)
++{
++    struct udp_socket* s;
++    struct routing_entry route = {
++        .target     = 0,
++        .subnet     = 0xffffffff,
++        .gateway    = 0,
++        .device     = device,
++    };
++
++    device-&gt;ip = 0;
++    memset(&amp;device-&gt;dhcp, 0, sizeof(device-&gt;dhcp));
++
++    s = udp_open_route(68, 0xffffffff, 67, &amp;route);
++    if (s == NULL) {
++        return -EIO;
++    }
++
++    dhcp_discover(device, s);
++    dhcp_wait_response(device, s, DHCPOFFER);
++    dhcp_request(device, s);
++    dhcp_wait_response(device, s, DHCPACK);
++
++    udp_close(s);
++
++    printf(&quot;ip  = %08x\n&quot;, device-&gt;dhcp.client_ip);
++    printf(&quot;sub = %08x\n&quot;, device-&gt;dhcp.subnet);
++    printf(&quot;gw  = %08x\n&quot;, device-&gt;dhcp.gateway);
++    printf(&quot;dns = %08x\n&quot;, device-&gt;dhcp.nameserver);
++
++    return 0;
++}
++
++/**
++ * TODO Lesen aus der DHCP-Datei
++ */
++static size_t lio_dhcp_read(lostio_filehandle_t* fh, void* buf,
++    size_t blocksize, size_t count)
++{
++    return 0;
++}
++
++/**
++ * Behandelt Schreibzugriffe in die DHCP-Datei. Mögliche Werte sind &quot;fetch&quot;,
++ * &quot;configure&quot; und &quot;release&quot;
++ */
++static size_t lio_dhcp_write(lostio_filehandle_t* fh, size_t blocksize,
++    size_t count, void* buf)
++{
++    struct device *device = fh-&gt;node-&gt;data;
++    size_t len = count * blocksize;
++    char* p;
++
++    /* Sicherstellen, dass der Puffer nullterminiert ist */
++    p = buf;
++    p[len - 1] = '\0';
++
++    /* Alles abschneiden, was keine Buchstaben sind */
++    while (isalpha(*p)) {
++        p++;
++    }
++    *p = '\0';
++
++    /* Entsprechende Aktion ausführen */
++    if (!strcmp(buf, &quot;fetch&quot;)) {
++        dhcp_fetch(device);
++    }
++
++    return len;
++}
++
++/** Typ fuer die DHCP-Steuerdatei */
++static typehandle_t lio_type_dhcp = {
++    .id          = LOSTIO_TYPES_DHCP,
++    .read        = &amp;lio_dhcp_read,
++    .write       = &amp;lio_dhcp_write,
++};
++
++/**
++ * Registriert die LostIO-Typehandles, die fuer DHCP benoetigt werden
++ */
++void dhcp_register_lostio(void)
++{
++    lostio_register_typehandle(&amp;lio_type_dhcp);
++}
+diff --git a/src/modules/tcpip/include/dhcp.h b/src/modules/tcpip/include/dhcp.h
+new file mode 100644
+index 0000000..e320af9
+--- /dev/null
++++ b/src/modules/tcpip/include/dhcp.h
+@@ -0,0 +1,45 @@
++/*
++ * Copyright (c) 2011 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef DHCP_H
++#define DHCP_H
++
++#include &lt;stdint.h&gt;
++
++struct dhcp_device_info {
++    uint8_t     last_op;
++    uint32_t    server_ip;
++    uint32_t    client_ip;
++    uint32_t    subnet;
++    uint32_t    gateway;
++    uint32_t    nameserver;
++};
++
++void dhcp_register_lostio(void);
++
++#endif
+diff --git a/src/modules/tcpip/include/lostio_if.h b/src/modules/tcpip/include/lostio_if.h
+index 854de9e..78f2e03 100644
+--- a/src/modules/tcpip/include/lostio_if.h
++++ b/src/modules/tcpip/include/lostio_if.h
+@@ -50,6 +50,7 @@
+ #define LOSTIO_TYPES_SERVER_CONN 249
+ #define LOSTIO_TYPES_UDP_DIR 248
+ #define LOSTIO_TYPES_UDP 247
++#define LOSTIO_TYPES_DHCP 246
+ 
+ 
+ void init_lostio_interface(void);
+diff --git a/src/modules/tcpip/include/main.h b/src/modules/tcpip/include/main.h
+index 03f11e4..9226038 100644
+--- a/src/modules/tcpip/include/main.h
++++ b/src/modules/tcpip/include/main.h
+@@ -36,6 +36,8 @@
+ #ifndef _MAIN_H_
+ #define _MAIN_H_
+ 
++#include &quot;dhcp.h&quot;
++
+ #include &lt;collections.h&gt;
+ #include &lt;network.h&gt;
+ #include &lt;stdint.h&gt;
+@@ -59,6 +61,7 @@ struct device
+     struct net_device dev;
+     struct driver *driver;
+     uint32_t ip;
++    struct dhcp_device_info dhcp;
+ };
+ 
+ extern struct module_options options;
+diff --git a/src/modules/tcpip/lostio_if.c b/src/modules/tcpip/lostio_if.c
+index e37c305..96c62cd 100644
+--- a/src/modules/tcpip/lostio_if.c
++++ b/src/modules/tcpip/lostio_if.c
+@@ -50,6 +50,7 @@
+ #include &quot;udp.h&quot;
+ #include &quot;lostio_if.h&quot;
+ #include &quot;dns.h&quot;
++#include &quot;dhcp.h&quot;
+ 
+ //Hier koennen die Debug-Nachrichten aktiviert werden
+ #define DEBUG 0
+@@ -131,6 +132,7 @@ void init_lostio_interface(void)
+     // Weitere Typen
+     tcp_server_register_lostio();
+     udp_register_lostio();
++    dhcp_register_lostio();
+ 
+     // Dateien/Verzeichnisse anlegen
+     vfstree_create_node(&quot;/dns&quot;, LOSTIO_TYPES_DNS, 0, NULL, 
+@@ -163,6 +165,8 @@ void lostio_add_device(struct device *device)
+     vfstree_create_node(fsname, LOSTIO_TYPES_NETCONFIG, 1, device, 0);
+     strcpy(fsname_suffix, &quot;mac&quot;);
+     vfstree_create_node(fsname, LOSTIO_TYPES_NETCONFIG, 2, device, 0);
++    strcpy(fsname_suffix, &quot;dhcp&quot;);
++    vfstree_create_node(fsname, LOSTIO_TYPES_DHCP, 0, device, 0);
+ }
+ 
+ bool lostio_tcp_not_found(char** path, uint8_t flags, pid_t pid,
+diff --git a/src/modules/tcpip/main.c b/src/modules/tcpip/main.c
+index 9581dc9..c0aa5e8 100644
+--- a/src/modules/tcpip/main.c
++++ b/src/modules/tcpip/main.c
+@@ -158,8 +158,8 @@ void rpc_register_driver(pid_t pid, uint32_t cid, size_t data_size, void* data)
+     }
+ 
+     // Device in die Liste hinzufügen
+-    struct device *device = malloc(sizeof(struct device));
+-    memcpy(device, data, sizeof(struct net_device));
++    struct device *device = calloc(1, sizeof(struct device));
++    memcpy(&amp;device-&gt;dev, data, sizeof(struct net_device));
+     device-&gt;driver = driver;
+     device-&gt;ip = options.ip;
+     list_push(driver-&gt;devices, device);
+-- 
+1.6.0.2
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002208.html">[tyndur-devel] [PATCH 4/5] tcpip: UDP-Paket über vorgegebene Route verschicken
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002210.html">[tyndur-devel] [PATCH v2 5/5] tcpip: DHCP-Unterstützung
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2209">[ Datum ]</a>
+              <a href="thread.html#2209">[ Thema ]</a>
+              <a href="subject.html#2209">[ Betreff (Subject)]</a>
+              <a href="author.html#2209">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

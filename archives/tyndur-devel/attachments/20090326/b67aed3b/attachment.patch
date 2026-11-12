@@ -1,0 +1,114 @@
+diff --git a/src/kernel2/include/tasks.h b/src/kernel2/include/tasks.h
+index 1aedbec..2d7a97d 100644
+--- a/src/kernel2/include/tasks.h
++++ b/src/kernel2/include/tasks.h
+@@ -184,6 +184,9 @@ pm_thread_t* pm_scheduler_pop(void);
+ /// Einen ausgefuerten Thread wieder zurueck an den Scheduler geben
+ void pm_scheduler_push(pm_thread_t* thread);
+ 
++/// Zu einem bestimmten Task wechseln
++void pm_schedule_to_task(pm_thread_t* thread);
++
+ /**
+  * Initialisierung
+  */
+diff --git a/src/kernel2/src/interrupts/im.c b/src/kernel2/src/interrupts/im.c
+index 5057303..1f8adb4 100644
+--- a/src/kernel2/src/interrupts/im.c
++++ b/src/kernel2/src/interrupts/im.c
+@@ -225,7 +225,7 @@ bool im_add_handler(uint32_t intr, pm_process_t* handler)
+ void im_send_interrupts(void)
+ {
+     uint32_t intr;
+-    pm_thread_t* old_thread = current_thread;
++//    pm_thread_t* old_thread = current_thread;
+ 
+     for (intr = 0; intr < IM_NUM_INTERRUPTS; intr++)
+     {
+@@ -237,8 +237,9 @@ void im_send_interrupts(void)
+ 
+             // Dieses Wechseln des Tasks ist wichtig: IRQs werden nur
+             // angenommen, wenn der Task sie sich selbst schickt
+-            // TODO schedule_to_task(intr_handling_task[intr], esp);
+-            current_thread = list_get_element_at(intr_handling_task[intr]->threads, 0);
++            pm_schedule_to_task(list_get_element_at(
++                intr_handling_task[intr]->threads, 0));
++            //current_thread = list_get_element_at(intr_handling_task[intr]->threads, 0);
+ 
+             if (!fastrpc_irq(intr_handling_task[intr], 0, 0,
+                 sizeof(intr), (char*) &intr, intr - IM_IRQ_BASE))
+@@ -249,5 +250,5 @@ void im_send_interrupts(void)
+         }
+     }
+ 
+-    current_thread = old_thread;
++    //current_thread = old_thread;
+ }
+diff --git a/src/kernel2/src/syscalls/rpc.c b/src/kernel2/src/syscalls/rpc.c
+index 688c4ea..c3e153a 100644
+--- a/src/kernel2/src/syscalls/rpc.c
++++ b/src/kernel2/src/syscalls/rpc.c
+@@ -286,11 +286,9 @@ int syscall_fastrpc(pid_t callee_pid, size_t metadata_size, void* metadata,
+         pm_unblock_rpc(callee->process, syscall_pm_get_pid());
+     }
+ 
+-
++    pm_schedule_to_task(callee);
+ #if 0
+-        {
+-            schedule_to_task(callee, (dword*) esp);
+-        } else {
++        } else /* wenn RPC fehlgeschlagen */ {
+             isf->eax = -1;
+             schedule((dword*)esp);
+         }
+@@ -371,10 +369,12 @@ void syscall_fastrpc_ret(void)
+ //        rpc->caller->process->pid,
+ //        current_process->pid);
+ 
+-    // TODO Wechsel zum aufrufenden Task
+ #if 0
++    // Wechsel zum aufrufenden Task
++    // TODO Das geht erst, wenn beim Task loeschen die Backlinks aufgeraeumt
++    // werden
+     if (rpc->caller) {
+-        schedule_to_task(rpc->caller, (dword*) esp);
++        pm_schedule_to_task(rpc->caller);
+     }
+ #endif
+ 
+diff --git a/src/kernel2/src/tasks/scheduler.c b/src/kernel2/src/tasks/scheduler.c
+index 1556999..4e3ff40 100644
+--- a/src/kernel2/src/tasks/scheduler.c
++++ b/src/kernel2/src/tasks/scheduler.c
+@@ -192,3 +192,30 @@ void pm_scheduler_push(pm_thread_t* thread)
+     unlock(&thread->lock);
+ }
+ 
++
++/**
++ * Wechselt die Ausfuehrung zu einem gegebenen Task
++ */
++void pm_schedule_to_task(pm_thread_t* thread)
++{
++    int i;
++    pm_thread_t* cur;
++
++    // Den aktuellen Thread an den Scheduler zurueckgeben
++    pm_scheduler_push(current_thread);
++
++    // Neuen Task aus der Scheduler-Liste entfernen
++    for (i = 0; (cur = list_get_element_at(threads_scheduled, i)); i++) {
++        if (cur == thread) {
++            list_remove(threads_scheduled, i);
++            break;
++        }
++    }
++
++    // Thread-Struktur des neuen Tasks sperren und Status setzen
++    lock(&thread->lock);
++    thread->status = PM_STATUS_RUNNING;
++    unlock(&thread->lock);
++
++    current_thread = thread;
++}

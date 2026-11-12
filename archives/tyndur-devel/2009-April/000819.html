@@ -1,0 +1,134 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] tcpip: Schreibvorgaenge auf	mehrere	TCP-Pakete aufteilen
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20tcpip%3A%20Schreibvorgaenge%20auf%0A%09mehrere%09TCP-Pakete%20aufteilen&In-Reply-To=%3C20090428101811.GA13437%40thales.produktiv.lan%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="000818.html">
+   <LINK REL="Next"  HREF="000821.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] tcpip: Schreibvorgaenge auf	mehrere	TCP-Pakete aufteilen</H1>
+    <B>Antoine Kaufmann</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20tcpip%3A%20Schreibvorgaenge%20auf%0A%09mehrere%09TCP-Pakete%20aufteilen&In-Reply-To=%3C20090428101811.GA13437%40thales.produktiv.lan%3E"
+           TITLE="[tyndur-devel] [PATCH] tcpip: Schreibvorgaenge auf	mehrere	TCP-Pakete aufteilen">toni at tyndur.org
+                  </A><BR>
+    <I>Di Apr 28 12:18:12 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="000818.html">[tyndur-devel] [PATCH] tcpip: Schreibvorgaenge auf mehrere	TCP-Pakete aufteilen
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="000821.html">[tyndur-devel] [PATCH] Fix für _SVN-Verzeichnisse auf CD-Images
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#819">[ Datum ]</a>
+              <a href="thread.html#819">[ Thema ]</a>
+              <a href="subject.html#819">[ Betreff (Subject) ]</a>
+              <a href="author.html#819">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>On Mon, Apr 27 23:18, Kevin Wolf wrote:
+&gt;<i> ! tcpip: Beim Senden von TCP-Paketen sollte man die MSS nicht
+</I>&gt;<i>   ueberschreiten, sonst spielt der Netzwerktreiber nicht mehr mit und
+</I>&gt;<i>   man kann keine Foreneintraege abschicken. Daher werden in der
+</I>&gt;<i>   LostIO-Schnittstelle jetzt die Daten auf mehrere Pakete verteilt.
+</I>&gt;<i> ---
+</I>&gt;<i>  src/modules/tcpip/include/tcp.h |    7 +++++++
+</I>&gt;<i>  src/modules/tcpip/lostio_if.c   |   24 ++++++++++++++++++------
+</I>&gt;<i>  src/modules/tcpip/tcp.c         |   10 ++++++++++
+</I>&gt;<i>  3 files changed, 35 insertions(+), 6 deletions(-)
+</I>&gt;<i> 
+</I>&gt;<i> diff --git a/src/modules/tcpip/include/tcp.h b/src/modules/tcpip/include/tcp.h
+</I>&gt;<i> index e325ae7..42b5699 100644
+</I>&gt;<i> --- a/src/modules/tcpip/include/tcp.h
+</I>&gt;<i> +++ b/src/modules/tcpip/include/tcp.h
+</I>&gt;<i> @@ -121,4 +121,11 @@ void tcp_update_checksum
+</I>&gt;<i>  void tcp_receive(dword source_ip, void* data, dword data_size);
+</I>&gt;<i>  void tcp_send_ack(struct tcp_connection* conn); // TODO Ersetzen
+</I>&gt;<i>  
+</I>&gt;<i> +/**
+</I>&gt;<i> + * Gibt die MSS (Maximum Segment Size) fuer eine TCP-Verbindung zurueck, d.h.
+</I>&gt;<i> + * die maximale Anzahl Bytes, die als Nutzdaten in einem TCP-Paket uebertragen
+</I>&gt;<i> + * werden koennen
+</I>&gt;<i> + */
+</I>&gt;<i> +size_t tcp_get_mss(struct tcp_connection* conn);
+</I>&gt;<i> +
+</I>&gt;<i>  #endif
+</I>&gt;<i> diff --git a/src/modules/tcpip/lostio_if.c b/src/modules/tcpip/lostio_if.c
+</I>&gt;<i> index 5b4037b..410d221 100644
+</I>&gt;<i> --- a/src/modules/tcpip/lostio_if.c
+</I>&gt;<i> +++ b/src/modules/tcpip/lostio_if.c
+</I>&gt;<i> @@ -293,13 +293,25 @@ size_t lostio_tcp_write
+</I>&gt;<i>          return 0;
+</I>&gt;<i>      }
+</I>&gt;<i>  
+</I>&gt;<i> -    struct tcp_out_buffer* out_buffer = malloc(sizeof(*out_buffer));
+</I>&gt;<i> -    out_buffer-&gt;data = data;
+</I>&gt;<i> -    out_buffer-&gt;size = blocksize * count;
+</I>&gt;<i> +    // Zu schreibende Teile auf passende Paketgroessen zusammenhacken und in
+</I>&gt;<i> +    // den ausgehenden Puffer speichern
+</I>&gt;<i> +    struct tcp_out_buffer* out_buffer;
+</I>&gt;<i> +    size_t size = blocksize * count;
+</I>&gt;<i> +    size_t mss = tcp_get_mss(conn);
+</I>&gt;<i> +    while (size &gt; 0) {
+</I>&gt;<i> +        size_t packet_size = size &gt; mss ? mss : size;
+</I>&gt;<i>  
+</I>&gt;<i> -    list_insert(conn-&gt;out_buffer, list_size(conn-&gt;out_buffer), out_buffer);
+</I>&gt;<i> -    //list_push(conn-&gt;out_buffer, &quot;GET / HTTP/1.0\r\n\r\n&quot;);
+</I>&gt;<i> -    
+</I>&gt;<i> +        out_buffer = malloc(packet_size);
+</I>
+Hm, was hat packet_size mit der Groesse der Struktur zu tun? :-/
+
+&gt;<i> +        out_buffer-&gt;data = data;
+</I>&gt;<i> +        out_buffer-&gt;size = packet_size;
+</I>&gt;<i> +
+</I>&gt;<i> +        list_insert(conn-&gt;out_buffer, list_size(conn-&gt;out_buffer), out_buffer);
+</I>&gt;<i> +
+</I>&gt;<i> +        data += packet_size;
+</I>&gt;<i> +        size -= packet_size;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    // Ausgehenden Puffer senden
+</I>&gt;<i>      while (!list_is_empty(conn-&gt;out_buffer)) {
+</I>&gt;<i>          tcp_send_ack(conn);
+</I>&gt;<i>      }
+</I>
+Ich glaube abgesehen davon sieht das, soweit ich es beurteilen kann,
+vernuenftig aus. ;-)
+
+-- 
+Antoine Kaufmann
+&lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">toni at famkaufmann.info</A>&gt;
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 197 bytes
+Beschreibung: nicht verfügbar
+URL         : &lt;<A HREF="http://list.tyndur.org/pipermail/tyndur-devel/attachments/20090428/a2f12075/attachment.pgp">http://list.tyndur.org/pipermail/tyndur-devel/attachments/20090428/a2f12075/attachment.pgp</A>&gt;
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="000818.html">[tyndur-devel] [PATCH] tcpip: Schreibvorgaenge auf mehrere	TCP-Pakete aufteilen
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="000821.html">[tyndur-devel] [PATCH] Fix für _SVN-Verzeichnisse auf CD-Images
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#819">[ Datum ]</a>
+              <a href="thread.html#819">[ Thema ]</a>
+              <a href="subject.html#819">[ Betreff (Subject)]</a>
+              <a href="author.html#819">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

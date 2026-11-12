@@ -1,0 +1,162 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 2/6] shell: bench -s
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%202/6%5D%20shell%3A%20bench%20-s&In-Reply-To=%3C1336857589-6603-3-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002353.html">
+   <LINK REL="Next"  HREF="002355.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 2/6] shell: bench -s</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%202/6%5D%20shell%3A%20bench%20-s&In-Reply-To=%3C1336857589-6603-3-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 2/6] shell: bench -s">kevin at tyndur.org
+                  </A><BR>
+    <I>Sa Mai 12 23:19:45 CEST 2012</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002353.html">[PATCH 0/6] libc: Lesepuffer fÃ¼r stdio.h
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002355.html">[tyndur-devel] [PATCH 3/6] libc: Lesepuffer in fread
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2354">[ Datum ]</a>
+              <a href="thread.html#2354">[ Thema ]</a>
+              <a href="subject.html#2354">[ Betreff (Subject) ]</a>
+              <a href="author.html#2354">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ shell: bench -s macht sehr kurz Reads (16 und 1 Byte), dass man den
+  Effekt von Readahead in stdio.h messen kann
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/c/shell/cmds/bench.c   |   45 ++++++++++++++++++++++++++++++-----
+ src/modules/c/shell/lang/lang_en.c |    2 +-
+ 2 files changed, 39 insertions(+), 8 deletions(-)
+
+diff --git a/src/modules/c/shell/cmds/bench.c b/src/modules/c/shell/cmds/bench.c
+index 09493dd..fae16fe 100644
+--- a/src/modules/c/shell/cmds/bench.c
++++ b/src/modules/c/shell/cmds/bench.c
+@@ -39,9 +39,15 @@
+ #include &lt;stdio.h&gt;
+ #include &lt;string.h&gt;
+ #include &lt;tms.h&gt;
++#include &lt;getopt.h&gt;
+ 
+ #define MAX_BLOCK_SIZE 524288
+ 
++static void usage(void)
++{
++    printf(TMS(bench_usage, &quot;\nAufruf: bench [-s] &lt;Dateiname&gt; &lt;Kilobytes&gt;\n&quot;));
++}
++
+ #ifdef CONFIG_SHELL_BUILTIN_ONLY
+     int shell_command_bench(int argc, char* argv[], const char* args)
+ #else
+@@ -50,24 +56,49 @@
+ {
+     char buffer[MAX_BLOCK_SIZE];
+     size_t count, n, size, rsize;
+-    size_t bs[] = { 524288, 65536, 4096, 512, 0 };
++    size_t bs_large[] = { 524288, 65536, 4096, 512, 0 };
++    size_t bs_small[] = { 16, 1, 0 };
++    size_t* bs;
+     int i;
++    char* path;
+     FILE* file;
+     uint64_t tick_start, tick_end, diff;
++    bool small_reads = false;
++
++    optind = 1;
++    while (optind &lt; argc) {
++        int result = getopt(argc, argv, &quot;s&quot;);
++        if (result == -1) {
++            break;
++        }
+ 
+-    if (argc != 3) {
+-        printf(TMS(bench_usage, &quot;\nAufruf: bench &lt;Dateiname&gt; &lt;Kilobytes&gt;\n&quot;));
+-        return -1;
++        switch (result) {
++            case 's':
++                small_reads = true;
++                break;
++            default:
++                usage();
++                return EXIT_FAILURE;
++        }
+     }
+ 
+-    char* path = argv[1];
++    if (optind != argc - 2) {
++        usage();
++        return EXIT_FAILURE;
++    }
+ 
++    path = argv[optind++];
++    count = atoi(argv[optind++]);
+ 
+-    count = atoi(argv[2]);
++    bs = small_reads ? bs_small : bs_large;
+ 
+     for (i = 0; bs[i]; i++)
+     {
+-        n = ((count + 63) &amp; ~63) * 1024;
++        if (small_reads) {
++            n = count * 1024;
++        } else {
++            n = ((count + 63) &amp; ~63) * 1024;
++        }
+ 
+         puts(&quot;&quot;);
+ 
+diff --git a/src/modules/c/shell/lang/lang_en.c b/src/modules/c/shell/lang/lang_en.c
+index 6a7c050..3366190 100644
+--- a/src/modules/c/shell/lang/lang_en.c
++++ b/src/modules/c/shell/lang/lang_en.c
+@@ -116,7 +116,7 @@ static const struct tms_strings dict[] = {
+ 
+ 
+     &amp;__tms_bench_usage,
+-    &quot;\nUsage: bench &lt;filename&gt; &lt;kilobytes&gt;\n&quot;,
++    &quot;\nUsage: bench [-s] &lt;filename&gt; &lt;kilobytes&gt;\n&quot;,
+ 
+     &amp;__tms_bench_opening_error,
+     &quot;Couldn't open '%s' for reading!\n&quot;,
+-- 
+1.7.7
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002353.html">[PATCH 0/6] libc: Lesepuffer fÃ¼r stdio.h
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002355.html">[tyndur-devel] [PATCH 3/6] libc: Lesepuffer in fread
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2354">[ Datum ]</a>
+              <a href="thread.html#2354">[ Thema ]</a>
+              <a href="subject.html#2354">[ Betreff (Subject)]</a>
+              <a href="author.html#2354">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

@@ -1,0 +1,159 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] kernel2: Syscall SYSCALL_MEM_INFO
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20kernel2%3A%20Syscall%20SYSCALL_MEM_INFO&In-Reply-To=%3C1249594886-374-1-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001185.html">
+   <LINK REL="Next"  HREF="001205.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] kernel2: Syscall SYSCALL_MEM_INFO</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20kernel2%3A%20Syscall%20SYSCALL_MEM_INFO&In-Reply-To=%3C1249594886-374-1-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH] kernel2: Syscall SYSCALL_MEM_INFO">kevin at tyndur.org
+                  </A><BR>
+    <I>Do Aug  6 23:41:26 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001185.html">[tyndur-devel] [PATCH] Pascal: Compilerfehler mit	neuerer	FPC-Version
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001205.html">[tyndur-devel] [PATCH] kernel2: Syscall SYSCALL_MEM_INFO
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1186">[ Datum ]</a>
+              <a href="thread.html#1186">[ Thema ]</a>
+              <a href="subject.html#1186">[ Betreff (Subject) ]</a>
+              <a href="author.html#1186">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ kernel2: Syscall SYSCALL_MEM_INFO
+! kernel2: pmm_count_pages() macht jetzt was sinnvolles anstatt eine
+  uninitialisierte Variable zurueckzugeben.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/kernel2/include/syscall.h       |    4 ++++
+ src/kernel2/src/arch/i386/syscall.c |    4 ++++
+ src/kernel2/src/mm/phys.c           |    9 +--------
+ src/kernel2/src/syscall.c           |    1 +
+ src/kernel2/src/syscalls/mem.c      |   10 ++++++++++
+ 5 files changed, 20 insertions(+), 8 deletions(-)
+
+diff --git a/src/kernel2/include/syscall.h b/src/kernel2/include/syscall.h
+index b7ebfc9..ea182c4 100644
+--- a/src/kernel2/include/syscall.h
++++ b/src/kernel2/include/syscall.h
+@@ -84,6 +84,10 @@ vaddr_t syscall_mem_allocate_physical(
+ /// Einen Speicherblock freigeben
+ void syscall_mem_free(vaddr_t start, size_t bytes);
+ 
++/// Freie Pages und Gesamtspeicher zurueckgeben
++void syscall_mem_info(uint32_t* sum_pages, uint32_t* free_pages);
++
++
+ // Prozessverwaltung
+ /// PID des aktuellen Prozesses abfragen
+ pid_t syscall_pm_get_pid(void);
+diff --git a/src/kernel2/src/arch/i386/syscall.c b/src/kernel2/src/arch/i386/syscall.c
+index 268d4e4..e8d71dc 100644
+--- a/src/kernel2/src/arch/i386/syscall.c
++++ b/src/kernel2/src/arch/i386/syscall.c
+@@ -91,6 +91,10 @@ void syscall_arch(machine_state_t* isf)
+ 
+         syscall_fastrpc_ret();
+ 
++    } else if (handler == syscall_mem_info) {
++
++        syscall_mem_info(&amp;isf-&gt;eax, &amp;isf-&gt;edx);
++
+     } else {
+         uint32_t eax, edx;
+         dword stack_backup;
+diff --git a/src/kernel2/src/mm/phys.c b/src/kernel2/src/mm/phys.c
+index 1d11478..e77bb3c 100644
+--- a/src/kernel2/src/mm/phys.c
++++ b/src/kernel2/src/mm/phys.c
+@@ -65,13 +65,6 @@ static lock_t pmm_lock = 0;
+ static size_t pmm_bitmap_length;
+ 
+ /**
+- * Anzahl der nutzbaren Seiten. Entspricht pmm_bitmap_size * 32 abzüglich
+- * der von der BIOS-Memory-Map als reserviert gekennzeichneten Bereiche.
+- */
+-static size_t pmm_bitmap_usable_pages;
+-
+-
+-/**
+  * Gibt die Startadresse der Bitmap zurück
+  */
+ void* pmm_get_bitmap_start()
+@@ -123,7 +116,7 @@ size_t pmm_count_free()
+  */
+ size_t pmm_count_pages()
+ {
+-    return pmm_bitmap_usable_pages;
++    return 8 * pmm_get_bitmap_size();
+ }
+ 
+ /**
+diff --git a/src/kernel2/src/syscall.c b/src/kernel2/src/syscall.c
+index fcb9f66..4292724 100644
+--- a/src/kernel2/src/syscall.c
++++ b/src/kernel2/src/syscall.c
+@@ -52,6 +52,7 @@ void syscall_init()
+     syscall_register(SYSCALL_MEM_ALLOCATE_PHYSICAL,
+             &amp;syscall_mem_allocate_physical, 3);
+     syscall_register(SYSCALL_MEM_FREE, &amp;syscall_mem_free, 2);
++    syscall_register(SYSCALL_MEM_INFO, &amp;syscall_mem_info, 0);
+ 
+     syscall_register(SYSCALL_PM_GET_PID, (void*) &amp;syscall_pm_get_pid, 0);
+     syscall_register(SYSCALL_PM_GET_PARENT_PID, (void*)
+diff --git a/src/kernel2/src/syscalls/mem.c b/src/kernel2/src/syscalls/mem.c
+index ff66fa0..20f9e73 100644
+--- a/src/kernel2/src/syscalls/mem.c
++++ b/src/kernel2/src/syscalls/mem.c
+@@ -130,3 +130,13 @@ void syscall_mem_free(vaddr_t start, size_t bytes)
+         start = (vaddr_t) ((uintptr_t) start + PAGE_SIZE);
+     }
+ }
++
++/**
++ * Gibt zurueck, wie viele Byte Speicher dem System insgesamt zur Verfuegung
++ * stehen und wie viele davon frei sind.
++ */
++void syscall_mem_info(uint32_t* sum_pages, uint32_t* free_pages)
++{
++    *sum_pages =  pmm_count_pages() * PAGE_SIZE;
++    *free_pages = pmm_count_free() * PAGE_SIZE;
++}
+-- 
+1.5.6.5
+
+</PRE>
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001185.html">[tyndur-devel] [PATCH] Pascal: Compilerfehler mit	neuerer	FPC-Version
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001205.html">[tyndur-devel] [PATCH] kernel2: Syscall SYSCALL_MEM_INFO
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1186">[ Datum ]</a>
+              <a href="thread.html#1186">[ Thema ]</a>
+              <a href="subject.html#1186">[ Betreff (Subject)]</a>
+              <a href="author.html#1186">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

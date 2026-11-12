@@ -1,0 +1,1447 @@
+Index: atapi.c
+===================================================================
+--- atapi.c	(Revision 931)
++++ atapi.c	(Arbeitskopie)
+@@ -1,4 +1,4 @@
+-/*  
++/*
+  * Copyright (c) 2007 The LOST Project. All rights reserved.
+  *
+  * This code is derived from software contributed to the LOST Project
+@@ -20,16 +20,16 @@
+  *    contributors may be used to endorse or promote products derived
+  *    from this software without specific prior written permission.
+  *
+- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS 
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+  * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+  * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR 
+- * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, 
+- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, 
+- * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; 
+- * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
+- * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR 
+- * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+  * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
+@@ -40,6 +40,7 @@
+ #include "cdi/storage.h"
+ #include "cdi/misc.h"
+ #include "cdi/io.h"
++#include "cdi/scsi.h"
+ 
+ #include "device.h"
+ 
+@@ -51,7 +52,8 @@
+  */
+ int atapi_drv_identify(struct ata_device* dev)
+ {
+-    uint8_t buffer[ATA_SECTOR_SIZE];
++    //uint8_t buffer[ATA_SECTOR_SIZE];
++    struct ata_identfiy_data id;
+ 
+     // Request vorbereiten
+     struct ata_request request = {
+@@ -66,22 +68,84 @@
+         .registers.ata.command = IDENTIFY_PACKET_DEVICE,
+         .block_count = 1,
+         .block_size = ATA_SECTOR_SIZE,
+-        .buffer = buffer,
++        .buffer = &id,
+ 
+         .error = 0
+     };
+-    
++
+     // Request starten
+     if (!ata_request(&request)) {
+         // Pech gehabt
+         return 0;
+     }
+-    
++
+     // Es handelt sich um ein ATAPI-Geraet
+     dev->atapi = 1;
+ 
+-    // TODO: Informationen verarbeiten
+-
+     return 1;
+ }
+ 
++void atapi_init_device(struct cdi_device* device)
++{
++
++}
++
++void atapi_remove_device(struct cdi_device* device)
++{
++
++}
++
++int atapi_request(struct cdi_scsi_device* scsi,struct cdi_scsi_packet* packet)
++{
++    struct ata_device *dev = (struct ata_device*)scsi;
++    struct ata_request request = {
++        .dev = dev,
++        .protocol = PIO,
++        .flags = {
++            .direction = WRITE,
++            .poll = 1,
++            .ata = 0, // Ich brauch nur ATA-Befehle (Packet)
++            .lba = 0 // Der Kommentar in device.h ist kein deutscher Satz!
++        },
++        .registers = {
++            .ata = {
++                .command = PACKET,
++                .lba = 0x00FFFF00 // Sonst hat bei mir nachher nichts in den
++                                  // LBA-Registern dringestanden und die
++                                  // braucht man ja fuer die Paketgroesse.
++            }
++        },
++        .block_count = 1,
++        .block_size = packet->cmdsize,
++        .blocks_done = 0,
++        .buffer = packet->command,
++        .error = 0
++    };
++
++    if (ata_request(&request))
++    {
++        struct ata_request rw_request = {
++            .dev = dev,
++            .flags = {
++                .poll = 1,
++                .lba = 1,
++                .ata = 1
++            },
++            .block_count = 1,
++            .block_size = packet->bufsize,
++            .blocks_done = 0,
++            .buffer = packet->buffer,
++            .error = 0
++        };
++
++        // Lesen bzw. Schreiben der Daten
++        // TODO: DMA
++        if (packet->direction==CDI_SCSI_READ) ata_protocol_pio_in(&rw_request);
++        else if (packet->direction==CDI_SCSI_WRITE) ata_protocol_pio_in(&rw_request);
++
++        // Sense Key zurueck
++        return (ata_reg_inb(dev->controller,REG_ERROR)>>4);
++    }
++
++    return 0xB;
++}
+Index: device.c
+===================================================================
+--- device.c	(Revision 931)
++++ device.c	(Arbeitskopie)
+@@ -1,4 +1,4 @@
+-/*  
++/*
+  * Copyright (c) 2007 The LOST Project. All rights reserved.
+  *
+  * This code is derived from software contributed to the LOST Project
+@@ -20,16 +20,16 @@
+  *    contributors may be used to endorse or promote products derived
+  *    from this software without specific prior written permission.
+  *
+- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS 
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+  * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+  * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR 
+- * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, 
+- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, 
+- * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; 
+- * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
+- * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR 
+- * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+  * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
+@@ -40,12 +40,11 @@
+ #include "cdi/storage.h"
+ #include "cdi/misc.h"
+ #include "cdi/io.h"
++#include "cdi/scsi.h"
+ 
+ #include "device.h"
+ #include "libpartition.h"
+ 
+-#define MAX(a, b) (a > b ? a : b)
+-
+ // IRQ-Handler
+ static inline void ata_controller_irq(struct cdi_device* dev);
+ 
+@@ -67,15 +66,7 @@
+     ATA_DELAY();
+     status = ata_reg_inb(controller, REG_STATUS);
+ 
+-    // Nicht floating
+-    if (status != 0xFF) {
+-        return 0;
+-    }
+-
+-    // Slave auswaehlen
+-    ata_reg_outb(controller, REG_DEVICE, DEVICE_DEV(1));
+-    ATA_DELAY();
+-    status = ata_reg_inb(controller, REG_STATUS);
++    // Wenn alle Bits gesetzt sind, ist der Bus floating
+     return (status == 0xFF);
+ }
+ 
+@@ -200,20 +191,20 @@
+                 printf("ata: TODO Erweiterte Partitionstabelleneintraege\n");
+                 continue;
+             }
+-            
++
+             struct ata_partition* partition = malloc(sizeof(*partition));
+-            partition->dev = dev;
++            partition->realdev = dev;
+             partition->null = NULL;
+             partition->start = partition_table.entries[i].start;
+-            partition->storage.block_size = ATA_SECTOR_SIZE;
+-            partition->storage.block_count = partition_table.entries[i].size;
+-            printf("ata: Partition von %d bis %d\n", partition->start, partition->storage.block_count + partition->start - 1);
+-            asprintf((char**) &(partition->storage.dev.name), "ata%01d%01d_p%01d",
++            partition->dev.storage.block_size = ATA_SECTOR_SIZE;
++            partition->dev.storage.block_count = partition_table.entries[i].size;
++            printf("ata: Partition von %d bis %d\n", partition->start, partition->dev.storage.block_count + partition->start - 1);
++            asprintf((char**) &(partition->dev.storage.dev.name), "ata%01d%01d_p%01d",
+                 (uint32_t) dev->controller->id, dev->id, cdi_list_size(dev->
+                 partition_list));
+ 
+             // Geraet registrieren
+-            cdi_list_push(dev->controller->driver->drv.devices, partition);
++            cdi_list_push(dev->controller->storage->drv.devices, partition);
+ 
+             // An Partitionsliste fuer das aktuelle Geraet anhaengen
+             cdi_list_push(dev->partition_list, partition);
+@@ -241,7 +232,7 @@
+         cdi_ioports_free(controller->port_cmd_base, 8);
+         return;
+     }
+-    
++
+     // Da NIEN nicht ueberall sauber funktioniert, muss jetzt trotzdem schon
+     // ein IRQ-Handler registriert werden. Und dafuer brauchen wir nun mal ein
+     // Geraet.
+@@ -270,7 +261,7 @@
+         printf("ata: Floating Bus %d\n", controller->id);
+         return;
+     }
+-    
++
+     // Testen ob mindestens ein antwortendes Geraet am Bus haengt. Hier muss
+     // darauf geachtet werden, dass der Master auch antworten muss, wenn zwar
+     // der Slave ausgewaehlt ist, aber nicht existiert.
+@@ -285,30 +276,54 @@
+         struct ata_device* dev = malloc(sizeof(*dev));
+         dev->controller = controller;
+         dev->id = i;
+-        dev->storage.block_size = ATA_SECTOR_SIZE;
+         dev->partition_list = cdi_list_create();
+ 
+         if (ata_drv_identify(dev)) {
+             printf("Bus %d  Device %d: ATAPI=%d\n", (uint32_t) controller->id, i, dev->atapi);
++
+             if (dev->atapi == 0) {
++                dev->dev.storage.block_size = ATA_SECTOR_SIZE;
++                dev->atapi = 0;
++
+                 // Handler setzen
+                 dev->read_sectors = ata_drv_read_sectors;
+                 dev->write_sectors = ata_drv_write_sectors;
+-                
++
+                 // Name setzen
+-                asprintf((char**) &(dev->storage.dev.name), "ata%01d%01d",
++                asprintf((char**) &(dev->dev.storage.dev.name), "ata%01d%01d",
+                     (uint32_t) controller->id, i);
+ 
+                 // Partitionen parsen
+                 ata_parse_partitions(dev);
++
++                // Geraet registrieren
++                cdi_list_push(controller->storage->drv.devices, dev);
+             } else {
++#ifdef ATAPI_ENABLE
++                dev->atapi = 1;
++
+                 // Name setzen
+-                asprintf((char**) &(dev->storage.dev.name), "atapi%01d%01d",
++                asprintf((char**) &(dev->dev.scsi.dev.name),"atapi%01d%01d",
+                     (uint32_t) controller->id, i);
++
++                // Geraet registrieren
++                cdi_list_push(controller->scsi->drv.devices, dev);
++#else
++                dev->dev.storage.block_size = ATA_SECTOR_SIZE;
++                dev->atapi = 0;
++
++                // Handler setzen
++                dev->read_sectors = ata_drv_read_sectors;
++                dev->write_sectors = ata_drv_write_sectors;
++
++                // Name setzen
++                asprintf((char**) &(dev->dev.storage.dev.name), "atapi%01d%01d",
++                    (uint32_t) controller->id, i);
++
++                // Geraet registrieren
++                cdi_list_push(controller->storage->drv.devices, dev);
++#endif
+             }
+-            
+-            // Geraet registrieren
+-            cdi_list_push(controller->driver->drv.devices, dev);
+         } else {
+             free(dev);
+         }
+@@ -339,19 +354,19 @@
+ {
+     struct ata_device* dev = (struct ata_device*) device;
+     struct ata_partition* partition = NULL;
+-    
++
+     // Wenn der Pointer auf den Controller NULL ist, handelt es sich um eine
+     // Partition
+     if (dev->controller == NULL) {
+         partition = (struct ata_partition*) dev;
+-        dev = partition->dev;
++        dev = partition->realdev;
+     }
+ 
+     // Natuerlich nur ausfuehren wenn ein Handler eingetragen ist
+     if (dev->read_sectors == NULL) {
+         return -1;
+     }
+-    
++
+     // Bei einer Partition noch den Offset dazurechnen
+     if (partition == NULL) {
+         return !dev->read_sectors(dev, block, count, buffer);
+@@ -369,19 +384,19 @@
+ {
+     struct ata_device* dev = (struct ata_device*) device;
+     struct ata_partition* partition = NULL;
+-    
++
+     // Wenn der Pointer auf den Controller NULL ist, handelt es sich um eine
+     // Partition
+     if (dev->controller == NULL) {
+         partition = (struct ata_partition*) dev;
+-        dev = partition->dev;
++        dev = partition->realdev;
+     }
+ 
+     // Natuerlich nur ausfuehren wenn ein Handler eingetragen ist
+     if (dev->write_sectors == NULL) {
+         return -1;
+     }
+-    
++
+     // Bei einer Partition muss noch ein Offset drauf addiert werden
+     if (partition == NULL) {
+         return !dev->write_sectors(dev, block, count, buffer);
+Index: device.h
+===================================================================
+--- device.h	(Revision 931)
++++ device.h	(Arbeitskopie)
+@@ -1,4 +1,4 @@
+-/*  
++/*
+  * Copyright (c) 2007 The LOST Project. All rights reserved.
+  *
+  * This code is derived from software contributed to the LOST Project
+@@ -20,16 +20,16 @@
+  *    contributors may be used to endorse or promote products derived
+  *    from this software without specific prior written permission.
+  *
+- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS 
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+  * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+  * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR 
+- * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, 
+- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, 
+- * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; 
+- * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
+- * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR 
+- * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+  * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
+@@ -42,7 +42,10 @@
+ #include "cdi/storage.h"
+ #include "cdi/io.h"
+ #include "cdi/lists.h"
++#include "cdi/scsi.h"
+ 
++#define ATAPI_ENABLE
++
+ #define ATA_PRIMARY_CMD_BASE    0x1F0
+ #define ATA_PRIMARY_CTL_BASE    0x3F6
+ #define ATA_PRIMARY_IRQ         14
+@@ -51,7 +54,7 @@
+ #define ATA_SECONDARY_CTL_BASE  0x376
+ #define ATA_SECONDARY_IRQ       15
+ 
+-#define ATA_DELAY()             
++#define ATA_DELAY()
+ 
+ // Hinweis: Worst Case nach ATA-Spec waeren 30 Sekunden
+ #define ATA_IDENTIFY_TIMEOUT    5000
+@@ -96,37 +99,209 @@
+                                 STATUS_DRQ | STATUS_ERR)
+ 
+ // Befehle
+-#define COMMAND_IDENTIFY        0xEC
++//#define COMMAND_IDENTIFY        0xEC
+ 
+ // Control Register
+ #define CONTROL_HOB             (1 << 7)
+ #define CONTROL_SRST            (1 << 2)
+ #define CONTROL_NIEN            (1 << 1)
+ 
++/**
++ * Resultat beim IDENTIFY DEVICE Befehl
++ */
++struct ata_identfiy_data {
++    struct {
++        uint8_t                         : 7;
++        uint8_t     removable           : 1;
++        uint8_t                         : 7;
++        uint8_t     ata                 : 1;
++    } __attribute__((packed)) general_config;
+ 
++    uint16_t        log_cyl;                    // Veraltet
++    uint16_t                            : 16;
++    uint16_t        log_heads;                  // Veraltet
++    uint16_t                            : 16;
++    uint16_t                            : 16;
++    uint16_t        log_spt;                    // Veraltet
++    uint16_t                            : 16;
++    // 8
++    uint16_t                            : 16;
++    uint16_t                            : 16;
++    char            serial_number[20];
++    // 20
++    uint16_t                            : 16;
++    uint16_t                            : 16;
++    uint16_t                            : 16;
++    char            firmware_revision[8];
++    // 27
++    char            model_number[40];
++    uint8_t                             : 8; // Immer 0x80
++    uint8_t         max_sec_per_irq;
++    // 48
++    uint16_t                            : 16;
++    struct {
++        uint16_t                        : 8;
++        uint8_t     dma                 : 1;
++        uint8_t     lba                 : 1;
++        uint8_t     iordy_disabled      : 1;
++        uint8_t     irdy_supported      : 1;
++        uint8_t                         : 1;
++        uint8_t                         : 1;    // Irgendwas mit Standbytimer
++        uint8_t                         : 2;
++    } __attribute__((packed)) capabilities;
++    uint16_t                            : 16; // Noch ein paar Faehigkeiten,
++                                              // die wir aber sicher nicht
++                                              // brauchen
++    uint8_t                             : 8;
++    uint8_t         pio_mode_number;
++    uint16_t                            : 16;
++    struct {
++        uint8_t     current_chs         : 1;    // Words 54-56
++        uint8_t     transfer_settings   : 1;    // Words 64-70
++        uint8_t     ultra_dma           : 1;    // Word 88
++        uint16_t                        : 13;
++    } __attribute__((packed)) valid_words;
++    uint16_t        cur_log_cyl;                // Veraltet
++    uint16_t        cur_log_heads;              // Veraltet
++    // 56
++    uint16_t        cur_log_spt;                // Veraltet
++    uint16_t        chs_capacity[2];            // Veraltet
++    struct {
++        uint8_t     cur_sec_per_int     : 8;
++        uint8_t     setting_valid       : 1;
++        uint8_t                         : 7;
++    } __attribute__((packed)) multi_sector;
++    uint32_t        lba_sector_count;           // LBA28
++    uint16_t                            : 16;
++    struct {
++        uint8_t                         : 1;
++        uint8_t     mode0_supported     : 1;
++        uint8_t     mode1_supported     : 1;
++        uint8_t     mode2_supported     : 1;
++        uint8_t                         : 4;
++        uint8_t     mode0_selected      : 1;
++        uint8_t     mode1_selected      : 1;
++        uint8_t     mode2_selected      : 1;
++        uint8_t                         : 5;
++    } __attribute__((packed)) multiword_dma;
++    // 64
++    uint8_t         pio_modes_supported;
++    uint8_t                             : 8;
++    // Multiword dma Zeiten
++    uint16_t        mwd_time1;
++    uint16_t        mwd_time2;
++    uint16_t        mwd_time3;
++    uint16_t        mwd_time4;
++    uint16_t                            : 16;
++    uint16_t                            : 16;
++    uint16_t                            : 16;
++    // 72
++    uint16_t                            : 16;
++    uint16_t                            : 16;
++    uint16_t                            : 16;
++    struct {
++        uint8_t     max_depth           : 5;
++        uint16_t                        : 11;
++    } __attribute__((packed)) queue_depth;
++    uint16_t                            : 16;
++    uint16_t                            : 16;
++    uint16_t                            : 16;
++    uint16_t                            : 16;
++    // 80
++    union {
++        uint16_t    raw;
++        struct {
++            uint8_t                     : 1;
++            uint8_t ata1                : 1;
++            uint8_t ata2                : 1;
++            uint8_t ata3                : 1;
++            uint8_t ata4                : 1;
++            uint8_t ata5                : 1;
++            uint8_t ata6                : 1;
++            uint8_t ata7                : 1;
++            uint16_t                    : 8;
++        } __attribute__((packed)) bits;
++    } major_version;
++    uint16_t        minor_version;
+ 
++    union {
++        uint16_t    raw[2];
++        struct {
++            // Word 82
++            uint8_t smart               : 1;
++            uint8_t security_mode       : 1;
++            uint8_t removable_media     : 1;
++            uint8_t power_management    : 1;
++            uint8_t packet              : 1;
++            uint8_t write_cache         : 1;
++            uint8_t look_ahead          : 1;
++            uint8_t release_int         : 1;
++            uint8_t service_int         : 1;
++            uint8_t device_reset        : 1;
++            uint8_t hpa                 : 1; // Host protected area
++            uint8_t                     : 1;
++            uint8_t write_buffer        : 1;
++            uint8_t read_buffer         : 1;
++            uint8_t nop                 : 1;
++            uint8_t                     : 1;
++
++            // Word 83
++            uint8_t download_microcode  : 1;
++            uint8_t rw_dma_queued       : 1;
++            uint8_t cfa                 : 1;
++            uint8_t apm                 : 1; // Advanced power management
++            uint8_t removable_media_sn  : 1; // R. Media Status notification
++            uint8_t power_up_standby    : 1;
++            uint8_t set_features_spinup : 1;
++            uint8_t                     : 1;
++            uint8_t set_max_security    : 1;
++            uint8_t auto_acoustic_mngmnt: 1; // Automatic acoustic management
++            uint8_t lba48               : 1;
++            uint8_t dev_config_overlay  : 1;
++            uint8_t flush_cache         : 1;
++            uint8_t flush_cache_ext     : 1;
++            uint8_t                     : 2;
++        } __attribute__((packed)) bits;
++    } features_support;
++    // 83
++    uint16_t        todo[17];
++    // 100
++    uint64_t        max_lba48_address;
++    // 107
++    uint16_t        todo2[153];
++} __attribute__((packed));
++
+ struct ata_partition {
+-    struct cdi_storage_device   storage;
++    union {
++      struct cdi_storage_device   storage;
++      struct cdi_scsi_device      scsi;
++    } dev;
++
+     // Muss auf NULL gesetzt werden
+     void*                       null;
+-    struct ata_device*          dev;
++    struct ata_device*          realdev;
+ 
+     // Startsektor
+     uint32_t                    start;
+ };
+ 
+ struct ata_device {
+-    struct cdi_storage_device   storage;
++    union {
++      struct cdi_storage_device   storage;
++      struct cdi_scsi_device      scsi;
++    } dev;
++
+     // In der Partitionstruktur ist dieses Feld null, um Partitionen erkennen
+     // zu koennen.
+     struct ata_controller*      controller;
+-    
++
+     // Liste mit den Partitionen
+     cdi_list_t                  partition_list;
+ 
+     uint8_t                     id;
+ 
+     // 1 wenn es sich um ein ATAPI-Gerat handelt, 0 sonst
++    // Bei ATAPI-Geraeten wir im union dev scsi verwendet, ansonsten storage
+     uint8_t                     atapi;
+ 
+     // 1 Wenn das Geraet lba48 unterstuetzt
+@@ -134,7 +309,7 @@
+ 
+     // 1 Wenn das Geraet lba28 unterstuetzt
+     uint8_t                     lba28;
+-    
++
+     // Funktionen fuer den Zugriff auf dieses Geraet
+     int (*read_sectors) (struct ata_device* dev, uint64_t start, size_t count,
+         void* dest);
+@@ -143,7 +318,8 @@
+ };
+ 
+ struct ata_controller {
+-    struct cdi_storage_driver*  driver;
++    struct cdi_storage_driver   *storage;
++    struct cdi_scsi_driver      *scsi;
+ 
+     uint8_t                     id;
+     uint16_t                    port_cmd_base;
+@@ -160,7 +336,7 @@
+ 
+ struct ata_request {
+     struct ata_device* dev;
+-    
++
+     enum {
+         NON_DATA,
+         PIO
+@@ -172,13 +348,13 @@
+             READ,
+             WRITE
+         } direction;
+-        
++
+         // 1 fuer Polling; 0 fuer Interrupts
+         uint8_t poll;
+-        
++
+         // 1 fuer ATAPI; 0 fuer ata
+         uint8_t ata;
+-        
++
+         // 1 Wenn das LBA-Bit im Geraeteregister
+         uint8_t lba;
+     } flags;
+@@ -189,21 +365,18 @@
+             enum {
+                 IDENTIFY_DEVICE = 0xEC,
+                 IDENTIFY_PACKET_DEVICE = 0xA1,
++                PACKET = 0xA0,
+                 READ_SECTORS = 0x20,
+                 WRITE_SECTORS = 0x30
+             } command;
+             uint8_t count;
+             uint64_t lba;
+         } ata;
+-        
+-        // Parameter fuer ATAPI-Operationen
+-        struct {
+-        } atapi;
+     } registers;
+ 
+     // Anzahl der Blocks die uebertragen werden sollen
+     uint16_t block_count;
+-    
++
+     // Groesse eines Blocks
+     uint16_t block_size;
+ 
+@@ -213,7 +386,7 @@
+     // Puffer in den die Daten geschrieben werden sollen/aus dem sie gelesen
+     // werden sollen.
+     void* buffer;
+-    
++
+     // Moegliche Fehler
+     enum {
+         NO_ERROR = 0,
+@@ -223,7 +396,6 @@
+     } error;
+ };
+ 
+-
+ void ata_init_controller(struct ata_controller* controller);
+ void ata_remove_controller(struct ata_controller* controller);
+ void ata_init_device(struct cdi_device* device);
+@@ -237,6 +409,9 @@
+ // Einen ATA-Request absenden und ausfuehren
+ int ata_request(struct ata_request* request);
+ 
++int ata_protocol_pio_out(struct ata_request* request);
++int ata_protocol_pio_in(struct ata_request* request);
++
+ // ATA-Funktionen
+ int ata_drv_identify(struct ata_device* dev);
+ int ata_drv_read_sectors(struct ata_device* dev, uint64_t start, size_t count,
+@@ -246,6 +421,9 @@
+ 
+ // ATAPI-Funktionen
+ int atapi_drv_identify(struct ata_device* dev);
++void atapi_init_device(struct cdi_device* device);
++void atapi_remove_device(struct cdi_device* device);
++int atapi_request(struct cdi_scsi_device* dev,struct cdi_scsi_packet* packet);
+ 
+ // Auf einen IRQ warten
+ int ata_wait_irq(struct ata_controller* controller, uint32_t timeout);
+@@ -280,7 +458,7 @@
+ /**
+  * Byte in Kontrollerregister schreiben
+  */
+-static inline void ata_reg_outb(struct ata_controller* controller, 
++static inline void ata_reg_outb(struct ata_controller* controller,
+     uint8_t reg, uint8_t value)
+ {
+     uint16_t base = ata_reg_base(controller, reg);
+@@ -313,7 +491,7 @@
+ static inline void ata_drv_select(struct ata_device* dev)
+ {
+     ata_reg_outb(dev->controller, REG_DEVICE, DEVICE_DEV(dev->id));
+-    ATA_DELAY();  
++    ATA_DELAY();
+ }
+ 
+ 
+Index: main.c
+===================================================================
+--- main.c	(Revision 931)
++++ main.c	(Arbeitskopie)
+@@ -1,4 +1,4 @@
+-/*  
++/*
+  * Copyright (c) 2007 The LOST Project. All rights reserved.
+  *
+  * This code is derived from software contributed to the LOST Project
+@@ -20,16 +20,16 @@
+  *    contributors may be used to endorse or promote products derived
+  *    from this software without specific prior written permission.
+  *
+- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS 
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+  * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+  * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR 
+- * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, 
+- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, 
+- * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; 
+- * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
+- * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR 
+- * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+  * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
+@@ -43,16 +43,15 @@
+ 
+ #include "device.h"
+ 
+-struct ata_driver {
+-    struct cdi_storage_driver storage;
+-};
+-
+-static struct ata_driver driver;
+-static const char* driver_name = "ata";
++static struct cdi_storage_driver driver_storage;
++static struct cdi_scsi_driver driver_scsi;
++static const char* driver_storage_name = "ata";
++static const char* driver_scsi_name = "atapi";
+ static cdi_list_t controller_list = NULL;
+ 
+ static void ata_driver_init(void);
+ static void ata_driver_destroy(struct cdi_driver* driver);
++static void atapi_driver_destroy(struct cdi_driver* driver);
+ 
+ #ifdef CDI_STANDALONE
+ int main(void)
+@@ -62,11 +61,12 @@
+ {
+     cdi_init();
+     ata_driver_init();
+-    cdi_storage_driver_register((struct cdi_storage_driver*) &driver);
++    cdi_storage_driver_register((struct cdi_storage_driver*) &driver_storage);
++    cdi_scsi_driver_register((struct cdi_scsi_driver*) &driver_scsi);
+ 
+ #ifdef CDI_STANDALONE
+     cdi_run_drivers();
+-#endif    
++#endif
+ 
+     return 0;
+ }
+@@ -79,39 +79,47 @@
+     struct ata_controller* controller;
+ 
+     // Konstruktor der Vaterklasse
+-    cdi_storage_driver_init((struct cdi_storage_driver*) &driver);
+-    
++    cdi_storage_driver_init((struct cdi_storage_driver*) &driver_storage);
++    cdi_scsi_driver_init((struct cdi_scsi_driver*) &driver_scsi);
++
+     // Namen setzen
+-    driver.storage.drv.name = driver_name;
++    driver_storage.drv.name = driver_storage_name;
++    driver_scsi.drv.name = driver_scsi_name;
+ 
+     // Funktionspointer initialisieren
+-    driver.storage.drv.destroy          = ata_driver_destroy;
+-    driver.storage.drv.init_device      = ata_init_device;
+-    driver.storage.drv.remove_device    = ata_remove_device;
+-    driver.storage.read_blocks          = ata_read_blocks;
+-    driver.storage.write_blocks         = ata_write_blocks;
+-    
++    driver_storage.drv.destroy          = ata_driver_destroy;
++    driver_storage.drv.init_device      = ata_init_device;
++    driver_storage.drv.remove_device    = ata_remove_device;
++    driver_storage.read_blocks          = ata_read_blocks;
++    driver_storage.write_blocks         = ata_write_blocks;
++
++    driver_scsi.drv.destroy             = atapi_driver_destroy;
++    driver_scsi.drv.init_device         = atapi_init_device;
++    driver_scsi.drv.remove_device       = atapi_remove_device;
++    driver_scsi.request                 = atapi_request;
++
+     // Liste mit Controllern initialisieren
+     controller_list = cdi_list_create();
+-    
+-    
++
+     // Primaeren Controller vorbereiten
+     controller = malloc(sizeof(*controller));
+     controller->port_cmd_base = ATA_PRIMARY_CMD_BASE;
+     controller->port_ctl_base = ATA_PRIMARY_CTL_BASE;
+     controller->irq = ATA_PRIMARY_IRQ;
+     controller->id = 0;
+-    controller->driver = (struct cdi_storage_driver*) &driver;
++    controller->storage = (struct cdi_storage_driver*) &driver_storage;
++    controller->scsi = (struct cdi_scsi_driver*) &driver_scsi;
+     ata_init_controller(controller);
+     cdi_list_push(controller_list, controller);
+-    
++
+     // Sekundaeren Controller vorbereiten
+     controller = malloc(sizeof(*controller));
+     controller->port_cmd_base = ATA_SECONDARY_CMD_BASE;
+     controller->port_ctl_base = ATA_SECONDARY_CTL_BASE;
+     controller->irq = ATA_SECONDARY_IRQ;
+     controller->id = 1;
+-    controller->driver = (struct cdi_storage_driver*) &driver;
++    controller->storage = (struct cdi_storage_driver*) &driver_storage;
++    controller->scsi = (struct cdi_scsi_driver*) &driver_scsi;
+     ata_init_controller(controller);
+     cdi_list_push(controller_list, controller);
+ }
+@@ -125,3 +133,8 @@
+ 
+     // TODO Alle Karten deinitialisieren
+ }
++
++static void atapi_driver_destroy(struct cdi_driver* driver)
++{
++    cdi_scsi_driver_destroy((struct cdi_scsi_driver*) driver);
++}
+Index: ata.c
+===================================================================
+--- ata.c	(Revision 931)
++++ ata.c	(Arbeitskopie)
+@@ -1,4 +1,4 @@
+-/*  
++/*
+  * Copyright (c) 2007 The LOST Project. All rights reserved.
+  *
+  * This code is derived from software contributed to the LOST Project
+@@ -20,16 +20,16 @@
+  *    contributors may be used to endorse or promote products derived
+  *    from this software without specific prior written permission.
+  *
+- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS 
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+  * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+  * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR 
+- * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, 
+- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, 
+- * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; 
+- * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
+- * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR 
+- * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+  * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
+@@ -44,172 +44,6 @@
+ #include "device.h"
+ 
+ /**
+- * Resultat beim IDENTIFY DEVICE Befehl
+- */
+-struct ata_identfiy_data {
+-    struct {
+-        uint8_t                         : 7;    
+-        uint8_t     removable           : 1;
+-        uint8_t                         : 7;
+-        uint8_t     ata                 : 1;
+-    } __attribute__((packed)) general_config;
+-
+-    uint16_t        log_cyl;                    // Veraltet
+-    uint16_t                            : 16;
+-    uint16_t        log_heads;                  // Veraltet
+-    uint16_t                            : 16;
+-    uint16_t                            : 16;
+-    uint16_t        log_spt;                    // Veraltet
+-    uint16_t                            : 16;
+-    // 8
+-    uint16_t                            : 16;
+-    uint16_t                            : 16;
+-    char            serial_number[20];
+-    // 20
+-    uint16_t                            : 16;
+-    uint16_t                            : 16;
+-    uint16_t                            : 16;
+-    char            firmware_revision[8];
+-    // 27
+-    char            model_number[40];
+-    uint8_t                             : 8; // Immer 0x80
+-    uint8_t         max_sec_per_irq;
+-    // 48
+-    uint16_t                            : 16;
+-    struct {
+-        uint16_t                        : 8;
+-        uint8_t     dma                 : 1;
+-        uint8_t     lba                 : 1;
+-        uint8_t     iordy_disabled      : 1;
+-        uint8_t     irdy_supported      : 1;
+-        uint8_t                         : 1;
+-        uint8_t                         : 1;    // Irgendwas mit Standbytimer
+-        uint8_t                         : 2;
+-    } __attribute__((packed)) capabilities;
+-    uint16_t                            : 16; // Noch ein paar Faehigkeiten,
+-                                              // die wir aber sicher nicht
+-                                              // brauchen
+-    uint8_t                             : 8;
+-    uint8_t         pio_mode_number;
+-    uint16_t                            : 16;
+-    struct {
+-        uint8_t     current_chs         : 1;    // Words 54-56
+-        uint8_t     transfer_settings   : 1;    // Words 64-70
+-        uint8_t     ultra_dma           : 1;    // Word 88
+-        uint16_t                        : 13;
+-    } __attribute__((packed)) valid_words;
+-    uint16_t        cur_log_cyl;                // Veraltet
+-    uint16_t        cur_log_heads;              // Veraltet
+-    // 56
+-    uint16_t        cur_log_spt;                // Veraltet
+-    uint16_t        chs_capacity[2];            // Veraltet
+-    struct {
+-        uint8_t     cur_sec_per_int     : 8;
+-        uint8_t     setting_valid       : 1;
+-        uint8_t                         : 7;
+-    } __attribute__((packed)) multi_sector;
+-    uint32_t        lba_sector_count;           // LBA28
+-    uint16_t                            : 16;
+-    struct {
+-        uint8_t                         : 1;
+-        uint8_t     mode0_supported     : 1;
+-        uint8_t     mode1_supported     : 1;
+-        uint8_t     mode2_supported     : 1;
+-        uint8_t                         : 4;
+-        uint8_t     mode0_selected      : 1;
+-        uint8_t     mode1_selected      : 1;
+-        uint8_t     mode2_selected      : 1;
+-        uint8_t                         : 5;
+-    } __attribute__((packed)) multiword_dma;
+-    // 64
+-    uint8_t         pio_modes_supported;
+-    uint8_t                             : 8;
+-    // Multiword dma Zeiten
+-    uint16_t        mwd_time1;
+-    uint16_t        mwd_time2;
+-    uint16_t        mwd_time3;
+-    uint16_t        mwd_time4;
+-    uint16_t                            : 16;
+-    uint16_t                            : 16;
+-    uint16_t                            : 16;
+-    // 72
+-    uint16_t                            : 16;
+-    uint16_t                            : 16;
+-    uint16_t                            : 16;
+-    struct {
+-        uint8_t     max_depth           : 5;
+-        uint16_t                        : 11;
+-    } __attribute__((packed)) queue_depth;
+-    uint16_t                            : 16;
+-    uint16_t                            : 16;
+-    uint16_t                            : 16;
+-    uint16_t                            : 16;
+-    // 80
+-    union {
+-        uint16_t    raw;
+-        struct {
+-            uint8_t                     : 1;
+-            uint8_t ata1                : 1;
+-            uint8_t ata2                : 1;
+-            uint8_t ata3                : 1;
+-            uint8_t ata4                : 1;
+-            uint8_t ata5                : 1;
+-            uint8_t ata6                : 1;
+-            uint8_t ata7                : 1;
+-            uint16_t                    : 8;
+-        } __attribute__((packed)) bits;
+-    } major_version;
+-    uint16_t        minor_version;
+-    
+-    union {
+-        uint16_t    raw[2];
+-        struct {
+-            // Word 82
+-            uint8_t smart               : 1;
+-            uint8_t security_mode       : 1;
+-            uint8_t removable_media     : 1;
+-            uint8_t power_management    : 1;
+-            uint8_t packet              : 1;
+-            uint8_t write_cache         : 1;
+-            uint8_t look_ahead          : 1;
+-            uint8_t release_int         : 1;
+-            uint8_t service_int         : 1;
+-            uint8_t device_reset        : 1;
+-            uint8_t hpa                 : 1; // Host protected area
+-            uint8_t                     : 1;
+-            uint8_t write_buffer        : 1;
+-            uint8_t read_buffer         : 1;
+-            uint8_t nop                 : 1;
+-            uint8_t                     : 1;
+-
+-            // Word 83
+-            uint8_t download_microcode  : 1;
+-            uint8_t rw_dma_queued       : 1;
+-            uint8_t cfa                 : 1;
+-            uint8_t apm                 : 1; // Advanced power management
+-            uint8_t removable_media_sn  : 1; // R. Media Status notification
+-            uint8_t power_up_standby    : 1;
+-            uint8_t set_features_spinup : 1;
+-            uint8_t                     : 1;
+-            uint8_t set_max_security    : 1;
+-            uint8_t auto_acoustic_mngmnt: 1; // Automatic acoustic management
+-            uint8_t lba48               : 1;
+-            uint8_t dev_config_overlay  : 1;
+-            uint8_t flush_cache         : 1;
+-            uint8_t flush_cache_ext     : 1;
+-            uint8_t                     : 2;
+-        } __attribute__((packed)) bits;
+-    } features_support;
+-    // 83
+-    uint16_t        todo[17];
+-    // 100
+-    uint64_t        max_lba48_address;
+-    // 107
+-    uint16_t        todo2[153];
+-} __attribute__((packed));
+-
+-
+-/**
+  * ATA-Geraet identifizieren
+  *
+  * @return 0 Wenn das Geraet erfolgreich identifiziert wurde, != 0 sonst
+@@ -234,22 +68,22 @@
+ 
+         .error = 0
+     };
+-    
++
+     // Request starten
+     if (!ata_request(&request)) {
+         // Wenn ein Fehler aufgetreten ist, koennen wir es noch mit einem
+         // IDENTIFY PACKET DEVICE probieren.
+         return atapi_drv_identify(dev);
+     }
+-    
++
+     // Pruefen, welche LBA-Modi dabei sind
+     if (id.features_support.bits.lba48) {
+         dev->lba48 = 1;
+-        dev->storage.block_count = id.max_lba48_address;
++        dev->dev.storage.block_count = id.max_lba48_address;
+     }
+     if (id.capabilities.lba) {
+         dev->lba28 = 1;
+-        dev->storage.block_count = id.lba_sector_count;
++        dev->dev.storage.block_count = id.lba_sector_count;
+     }
+ 
+     // Wenn keiner der LBA-Modi unterstuetzt wird, muss abgebrochen werden, da
+@@ -300,7 +134,7 @@
+         } else {
+             current_count = count_left;
+         }
+-        
++
+         // Request vorbereiten
+         request.dev = dev;
+         // TODO: DMA, UltraDMA...
+@@ -319,7 +153,7 @@
+             request.flags.direction = WRITE;
+             request.registers.ata.command = WRITE_SECTORS;
+         }
+-        
++
+         // Achtung: Beim casten nach uint8_t wird bei 256 Sektoren eine 0.
+         // Das macht aber nichts, da in der Spezifikation festgelegt ist,
+         // dass 256 Sektoren gelesen werden sollen, wenn im count-Register
+@@ -333,10 +167,10 @@
+         request.buffer = current_buffer;
+ 
+         request.error = NO_ERROR;
+-        
++
+         // TODO: LBA48
+         // TODO: CHS
+-        
++
+         // Request ausfuehren
+         if (!ata_request(&request)) {
+             result = 0;
+Index: request.c
+===================================================================
+--- request.c	(Revision 931)
++++ request.c	(Arbeitskopie)
+@@ -1,4 +1,4 @@
+-/*  
++/*
+  * Copyright (c) 2007 The LOST Project. All rights reserved.
+  *
+  * This code is derived from software contributed to the LOST Project
+@@ -20,16 +20,16 @@
+  *    contributors may be used to endorse or promote products derived
+  *    from this software without specific prior written permission.
+  *
+- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS 
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+  * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+  * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR 
+- * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, 
+- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, 
+- * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; 
+- * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
+- * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR 
+- * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+  * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
+@@ -65,13 +65,13 @@
+         time += 10;
+         cdi_sleep_ms(10);
+     }
+-    
++
+     // Dem Geraet etwas Zeit geben
+     ATA_DELAY();
+ 
+     // Jetzt koennen wir warten bis die gewuenschten Bits gesetzt sind
+     while (((ata_reg_inb(ctrl, REG_STATUS) & bits) != bits) &&
+-        (time < timeout)) 
++        (time < timeout))
+     {
+         time += 10;
+         cdi_sleep_ms(10);
+@@ -91,7 +91,7 @@
+     struct ata_device* dev = request->dev;
+     struct ata_controller* ctrl = dev->controller;
+     uint8_t control;
+-    
++
+     // IRQ-Zaehler zuruecksetzen, egal ob er gebraucht wird oder nicht, stoert
+     // ja niemanden
+     ctrl->irq_cnt = 0;
+@@ -103,7 +103,7 @@
+         request->error = DEVICE_READY_TIMEOUT;
+         return 0;
+     }
+-    
++
+     // Device Register schreiben
+     // TODO: nicht lba?
+     ata_reg_outb(ctrl, REG_DEVICE, (request->flags.lba << 6) | (request->dev->
+@@ -120,7 +120,7 @@
+ 
+     // Count-Register schrieben
+     ata_reg_outb(ctrl, REG_SEC_CNT, request->registers.ata.count);
+-    
++
+     // LBA Register schreiben
+     ata_reg_outb(ctrl, REG_LBA_LOW, request->registers.ata.lba & 0xFF);
+     ata_reg_outb(ctrl, REG_LBA_MID, (request->registers.ata.lba >> 8) & 0xFF);
+@@ -140,13 +140,13 @@
+ {
+     struct ata_device* dev = request->dev;
+     struct ata_controller* ctrl = dev->controller;
+-    
++
+     // Aktueller Status im Protokol
+     enum {
+         IRQ_WAIT,
+         CHECK_STATUS
+     } state;
+-    
++
+     // Der Anfangsstatus haengt davon ab, ob gepollt werden soll oder nicht.
+     if  (request->flags.poll) {
+         state = CHECK_STATUS;
+@@ -167,10 +167,10 @@
+                 // Jetzt muss der Status ueberprueft werden
+                 state = CHECK_STATUS;
+                 break;
+-            
++
+             case CHECK_STATUS: {
+                 uint8_t status = ata_reg_inb(ctrl, REG_STATUS);
+-                
++
+                 // Status ueberpruefen
+                 if ((status & STATUS_BSY) == STATUS_BSY) {
+                     // Wenn das Busy-Flag gesetzt ist, muss gewartet werden,
+@@ -190,18 +190,19 @@
+  * sollen.
+  * Nach Kapitel 11 in der ATA7-Spec
+  */
+-static int ata_protocol_pio_in(struct ata_request* request)
++int ata_protocol_pio_in(struct ata_request* request)
+ {
+     struct ata_device* dev = request->dev;
+     struct ata_controller* ctrl = dev->controller;
+-    
++    size_t packet_size = 0;
++
+     // Aktueller Status im Protokol
+     enum {
+         IRQ_WAIT,
+         CHECK_STATUS,
+         TRANSFER_DATA
+     } state;
+-    
++
+     // Der Anfangsstatus haengt davon ab, ob gepollt werden soll oder nicht.
+     if  (request->flags.poll) {
+         state = CHECK_STATUS;
+@@ -219,13 +220,19 @@
+                     return 0;
+                 }
+ 
++                if (request->flags.ata && packet_size==0) // ATAPI
++                {
++                    // Paketgroesse einlesen, da sonst unendlich viel gelesen wird
++                    packet_size = ata_reg_inb(ctrl,REG_LBA_MID)|(ata_reg_inb(ctrl,REG_LBA_HIG)<<8);
++                }
++
+                 // Jetzt muss der Status ueberprueft werden
+                 state = CHECK_STATUS;
+                 break;
+-            
++
+             case CHECK_STATUS: {
+                 uint8_t status = ata_reg_inb(ctrl, REG_STATUS);
+-                
++
+                 // Status ueberpruefen
+                 // Wenn DRQ und BSY geloescht wurden ist irgendetwas schief
+                 // gelaufen.
+@@ -250,7 +257,7 @@
+                 uint16_t i;
+                 uint16_t* buffer = (uint16_t*) (request->buffer + (request->
+                     blocks_done * request->block_size));
+-                
++
+                 // Einen Block einlesen
+                 for (i = 0; i < request->block_size / 2; i++) {
+                     buffer[i] = ata_reg_inw(ctrl, REG_DATA);
+@@ -258,12 +265,19 @@
+ 
+                 // Anzahl der gelesenen Block erhoehen
+                 request->blocks_done++;
+-                
++
+                 // Naechste Transaktion ausfindig machen
+-                if (request->blocks_done >= request->block_count) {
++                if (!request->flags.ata &&
++                    request->blocks_done >= request->block_count) {
+                     // Wenn alle Blocks gelesen wurden ist der Transfer
+                     // abgeschlossen.
+                     return 1;
++                } else if (request->flags.ata &&
++                         request->blocks_done*request->block_size>=packet_size)
++                {
++                    // Wenn alle Bytes des ATAPI-Paketes gelesen wurden
++                    // ist der Transfer abgeschlossen
++                    return 1;
+                 } else if (request->flags.poll) {
+                     // Wenn gepollt wird, muss jetzt gewartet werden, bis der
+                     // Status wieder stimmt um den naechsten Block zu lesen.
+@@ -282,11 +296,12 @@
+  * Verarbeitet einen ATA-Request bei dem Daten ueber PIO geschrieben werden
+  * sollen
+  */
+-static int ata_protocol_pio_out(struct ata_request* request)
++int ata_protocol_pio_out(struct ata_request* request)
+ {
+     struct ata_device* dev = request->dev;
+     struct ata_controller* ctrl = dev->controller;
+-    
++    size_t packet_size = 0;
++
+     // Aktueller Status im Protokol
+     enum {
+         IRQ_WAIT,
+@@ -305,25 +320,41 @@
+                     return 0;
+                 }
+ 
++                if (request->flags.ata && packet_size==0) // ATAPI
++                {
++                    // Paketgroesse einlesen, da sonst unendlich viel geschrieben wird
++                    packet_size = ata_reg_inb(ctrl,REG_LBA_MID)|(ata_reg_inb(ctrl,REG_LBA_HIG)<<8);
++                    printf("ata: packet_size = %d\n",packet_size);
++                }
++
+                 // Jetzt muss der Status ueberprueft werden
+                 state = CHECK_STATUS;
+                 break;
+-            
++
+             case CHECK_STATUS: {
+                 uint8_t status = ata_reg_inb(ctrl, REG_STATUS);
+-                
+-                // Status ueberpruefen
+-                // Wenn DRQ und BSY geloescht wurden ist irgendetwas schief
+-                // gelaufen, falls der Befehl noch nicht zu Ende ist
+-                if ((status & (STATUS_BSY | STATUS_DRQ)) == 0) {
+-                    if (request->blocks_done != request->block_count) {
+-                        // TODO: Fehlerbehandlung
+-                        printf("ata: pio_out unerwarteter Status: 0x%x\n",
+-                            status);
+-                        return 0;
+-                    } else {
+-                        return 1;
+-                    }
++
++                if (request->flags.ata &&
++                    request->blocks_done * request->block_size>=packet_size)
++                {
++                    // Das Paket wurde vollstaendig gelesen. DRQ wird nicht
++                    // gesetzt, deswegen muss so beendet werden.
++                    return 1;
++                }
++                else if (!request->flags.ata &&
++                         request->blocks_done==request->block_count)
++                {
++                    // Der Buffer wurde komplett gelesen. Dies sollte bei
++                    // ATAPI nicht passieren!
++                    return 1;
++                }
++                else if ((status & (STATUS_BSY | STATUS_DRQ)) == 0)
++                {
++                    // TODO: Fehlerbehandlung
++                    printf("ata: pio_out unerwarteter Status: 0x%x\n",
++                           status);
++                    return 0;
++
+                 } else if ((status & STATUS_BSY) == STATUS_BSY) {
+                     // Wenn das Busy-Flag gesetzt ist, muss gewartet werden,
+                     // bis es geloescht wird.
+@@ -342,7 +373,7 @@
+                 uint16_t i;
+                 uint16_t* buffer = (uint16_t*) (request->buffer + (request->
+                     blocks_done * request->block_size));
+-                
++
+                 // Einen Block schreiben
+                 for (i = 0; i < request->block_size / 2; i++) {
+                     ata_reg_outw(ctrl, REG_DATA, buffer[i]);
+@@ -350,7 +381,7 @@
+ 
+                 // Anzahl der geschriebenen Block erhoehen
+                 request->blocks_done++;
+-                
++
+                 // Naechste Transaktion ausfindig machen
+                 if (request->flags.poll) {
+                     // Wenn gepollt wird, muss jetzt gewartet werden, bis der
+@@ -388,7 +419,7 @@
+                 return 0;
+             }
+             break;
+-        
++
+         case PIO:
+             if ((request->flags.direction == READ) &&
+                 (!ata_protocol_pio_in(request)))

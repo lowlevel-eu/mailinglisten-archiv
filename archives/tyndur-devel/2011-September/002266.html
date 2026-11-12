@@ -1,0 +1,354 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH v2 3/3] libc: dir.h-Funktionen benutzen	struct dir_handle statt FILE
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%203/3%5D%20libc%3A%20dir.h-Funktionen%20benutzen%0A%09struct%20dir_handle%20statt%20FILE&In-Reply-To=%3C1316860817-13454-4-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002271.html">
+   <LINK REL="Next"  HREF="002272.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH v2 3/3] libc: dir.h-Funktionen benutzen	struct dir_handle statt FILE</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%203/3%5D%20libc%3A%20dir.h-Funktionen%20benutzen%0A%09struct%20dir_handle%20statt%20FILE&In-Reply-To=%3C1316860817-13454-4-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH v2 3/3] libc: dir.h-Funktionen benutzen	struct dir_handle statt FILE">kevin at tyndur.org
+                  </A><BR>
+    <I>Sa Sep 24 12:40:17 CEST 2011</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002271.html">[tyndur-devel] [PATCH v2 2/3] libc: lio_compat_eof()
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002272.html">[tyndur-devel] [PATCH v2 3/3] libc: dir.h-Funktionen benutzen struct dir_handle statt FILE
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2266">[ Datum ]</a>
+              <a href="thread.html#2266">[ Thema ]</a>
+              <a href="subject.html#2266">[ Betreff (Subject) ]</a>
+              <a href="author.html#2266">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* libc: Nach den letzten Änderungen benutzen die Verzeichnisfunktionen
+  FILE, was erstens doof aussieht und zweitens nicht für LIOv2
+  erweiterbar ist. Also wird das jetzt geändert.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/c/shell/cmds/cp.c       |    2 +-
+ src/modules/c/shell/cmds/ls.c       |   21 ++++++++----
+ src/modules/c/shell/cmds/rm.c       |    2 +-
+ src/modules/c/shell/completion.c    |    4 +-
+ src/modules/include/dir.h           |   12 ++++--
+ src/modules/include/dirent.h        |    3 +-
+ src/modules/include/io_struct.h     |    1 +
+ src/modules/lib/posix/stat.c        |    2 +-
+ src/modules/lib/stdlibc/directory.c |   63 ++++++++++++++++++++++++-----------
+ src/modules/servmgr/config.c        |    4 +-
+ 10 files changed, 75 insertions(+), 39 deletions(-)
+
+diff --git a/src/modules/c/shell/cmds/cp.c b/src/modules/c/shell/cmds/cp.c
+index 952d5bc..dbb9b30 100644
+--- a/src/modules/c/shell/cmds/cp.c
++++ b/src/modules/c/shell/cmds/cp.c
+@@ -198,7 +198,7 @@ int cp_recursive(char* src_path, char* dst_path)
+         printf(&quot;'%s' -&gt; '%s'\n&quot;, src_path, dst_path);
+     }
+     
+-    FILE* dir_res = directory_open(src_path);
++    struct dir_handle* dir_res = directory_open(src_path);
+     char* full_src_path = NULL;
+     char* full_dst_path = NULL;
+     if (dir_res != NULL) {
+diff --git a/src/modules/c/shell/cmds/ls.c b/src/modules/c/shell/cmds/ls.c
+index 5828b72..105ad09 100644
+--- a/src/modules/c/shell/cmds/ls.c
++++ b/src/modules/c/shell/cmds/ls.c
+@@ -107,7 +107,7 @@ char* format_size(size_t size, bool human_readable);
+         if (print_dirnames) {
+             printf(&quot;%s:\n&quot;, dir_path);
+         }
+-        FILE* dir_res = directory_open(dir_path);
++        struct dir_handle* dir_res = directory_open(dir_path);
+         if (dir_res != NULL) {
+             io_direntry_t* direntry;
+             while ((direntry = directory_read(dir_res))) {
+@@ -115,13 +115,20 @@ char* format_size(size_t size, bool human_readable);
+                 if (!entry_hidden || show_hidden) {
+                     char *formatted_size = format_size(direntry-&gt;size,
+                             human_readable);
+-                    if (direntry-&gt;type == IO_DIRENTRY_FILE) {
+-                        printf(&quot;       %s %s\n&quot;, formatted_size,
+-                            direntry-&gt;name);
+-                    } else {
+-                        printf(&quot; [DIR] %s %s\n&quot;, formatted_size,
+-                            direntry-&gt;name);
++                    char flags[4] = &quot;   &quot;;
++
++                    if (direntry-&gt;type &amp; IO_DIRENTRY_FILE) {
++                        flags[0] = 'f';
++                    }
++                    if (direntry-&gt;type &amp; IO_DIRENTRY_DIR) {
++                        flags[1] = 'd';
+                     }
++                    if (direntry-&gt;type &amp; IO_DIRENTRY_LINK) {
++                        flags[2] = 'l';
++                    }
++
++                    printf(&quot; [%s]   %s %s\n&quot;, flags, formatted_size,
++                        direntry-&gt;name);
+                     free(formatted_size);
+                 }
+                 free(direntry);
+diff --git a/src/modules/c/shell/cmds/rm.c b/src/modules/c/shell/cmds/rm.c
+index 7d41d98..03fb22f 100644
+--- a/src/modules/c/shell/cmds/rm.c
++++ b/src/modules/c/shell/cmds/rm.c
+@@ -186,7 +186,7 @@ int rm_recursive(char* src_path, bool recurse, bool verbose, int interactive)
+ {
+     int result = 0;
+     char* path = NULL;
+-    FILE* dir_res;
++    struct dir_handle* dir_res;
+     char c;
+     struct stat buf;
+     if ((stat(src_path, &amp;buf))) {
+diff --git a/src/modules/c/shell/completion.c b/src/modules/c/shell/completion.c
+index 58130ee..b23cd75 100644
+--- a/src/modules/c/shell/completion.c
++++ b/src/modules/c/shell/completion.c
+@@ -153,7 +153,7 @@ static void match_external_cmds(const char* word, list_t* matches_list)
+ {
+     int word_len = strlen(word);
+     char* dir;
+-    FILE* dh;
++    struct dir_handle* dh;
+     io_direntry_t* dentry;
+ 
+     // Wir muessen die Umgebungsvariable kopieren, da strtok den Bereich
+@@ -253,7 +253,7 @@ static char** shell_file_matches(const char* word)
+     char* filename;
+     int dir_len;
+     int filename_len;
+-    FILE* dir;
++    struct dir_handle* dir;
+     io_direntry_t* dentry;
+     char** matches = NULL;
+     list_t* matches_list;
+diff --git a/src/modules/include/dir.h b/src/modules/include/dir.h
+index d825a55..3056c0d 100644
+--- a/src/modules/include/dir.h
++++ b/src/modules/include/dir.h
+@@ -32,10 +32,14 @@
+ #include &quot;stdio.h&quot;
+ #include &quot;io.h&quot;
+ 
+-FILE* directory_open(const char* dirname);
+-int directory_close(FILE* io_res);
+-io_direntry_t* directory_read(FILE* io_res);
+-int directory_seek(FILE* io_res, long int offset, int origin);
++struct dir_handle {
++    io_resource_t* lio1_handle;
++};
++
++struct dir_handle* directory_open(const char* dirname);
++int directory_close(struct dir_handle* io_res);
++io_direntry_t* directory_read(struct dir_handle* io_res);
++int directory_seek(struct dir_handle* io_res, long int offset, int origin);
+ bool directory_create(const char* dirname);
+ bool is_directory(const char* dirname);
+ 
+diff --git a/src/modules/include/dirent.h b/src/modules/include/dirent.h
+index 8e86e46..a4a4962 100644
+--- a/src/modules/include/dirent.h
++++ b/src/modules/include/dirent.h
+@@ -36,7 +36,8 @@ struct dirent {
+     char d_name[MAX_FILENAME_LEN + 1];
+ };
+ 
+-typedef struct lostio_internal_file DIR;
++struct dir_handle;
++typedef struct dir_handle DIR;
+ 
+ 
+ #ifdef __cplusplus
+diff --git a/src/modules/include/io_struct.h b/src/modules/include/io_struct.h
+index b769b09..665ab38 100644
+--- a/src/modules/include/io_struct.h
++++ b/src/modules/include/io_struct.h
+@@ -33,6 +33,7 @@
+ #define MAX_FILENAME_LEN 255
+ #define IO_DIRENTRY_FILE 1
+ #define IO_DIRENTRY_DIR 2
++#define IO_DIRENTRY_LINK 4
+ 
+ #define IO_OPEN_MODE_READ 1
+ #define IO_OPEN_MODE_WRITE 2
+diff --git a/src/modules/lib/posix/stat.c b/src/modules/lib/posix/stat.c
+index 946a947..4fdbf09 100644
+--- a/src/modules/lib/posix/stat.c
++++ b/src/modules/lib/posix/stat.c
+@@ -125,7 +125,7 @@ int stat(const char* filename, struct stat* stat_buf)
+     // Wenn die Datei nicht geoeffnet werden kann, koennte es sich um ein
+     // Verzeichnis handeln, falls nicht wird sofort abgebrochen
+     if (file == NULL) {
+-        FILE* dir = directory_open(filename);
++        struct dir_handle* dir = directory_open(filename);
+         if (dir == NULL) {
+             errno = ENOENT;
+             return -1;
+diff --git a/src/modules/lib/stdlibc/directory.c b/src/modules/lib/stdlibc/directory.c
+index 6a32ddf..a08474d 100644
+--- a/src/modules/lib/stdlibc/directory.c
++++ b/src/modules/lib/stdlibc/directory.c
+@@ -31,54 +31,77 @@
+ #include &quot;rpc.h&quot;
+ #include &quot;stdlib.h&quot;
+ #include &quot;dir.h&quot;
++#include &lt;string.h&gt;
+ 
+-FILE* directory_open(const char* dirname)
++struct dir_handle* directory_open(const char* path)
+ {
+-    return fopen(dirname, &quot;rd&quot;);
+-}
++    struct dir_handle* handle;
++    io_resource_t* io_res;
+ 
++    io_res = lio_compat_open(path, IO_OPEN_MODE_READ | IO_OPEN_MODE_DIRECTORY);
++    if (io_res == NULL) {
++        return NULL;
++    }
+ 
+-int directory_close(FILE* io_res)
+-{
+-    return fclose(io_res);
++    handle = malloc(sizeof(*handle));
++    handle-&gt;lio1_handle = io_res;
++
++    return handle;
+ }
+ 
++int directory_close(struct dir_handle* handle)
++{
++    int result = 0;
++
++    if (lio_compat_close(handle-&gt;lio1_handle)) {
++        result = -1;
++    }
++    free(handle);
+ 
+-io_direntry_t* directory_read(FILE* io_res)
++    return result;
++}
++
++io_direntry_t* directory_read(struct dir_handle* io_res)
+ {
+-    if ((io_res == NULL) || (feof(io_res) != 0)) {
++    int ret;
++
++    if ((io_res == NULL) || (lio_compat_eof(io_res-&gt;lio1_handle) != 0)) {
++        return NULL;
++    }
++
++    io_direntry_t* result = malloc(sizeof(*result));
++
++    ret = lio_compat_read(result, sizeof(*result), 1, io_res-&gt;lio1_handle);
++    if (ret &lt; 0) {
++        free(result);
+         return NULL;
+     }
+-                                
+-    io_direntry_t* result = malloc(sizeof(io_direntry_t));
+ 
+-    fread(result, sizeof(io_direntry_t), 1, (FILE*)io_res);
+-    
+     return result;
+ }
+ 
+-
+-int directory_seek(FILE* io_res, long int offset, int origin)
++int directory_seek(struct dir_handle* handle, long int offset, int origin)
+ {
+-    return fseek(io_res, offset, origin);
++    return lio_seek(handle-&gt;lio1_handle, offset, origin);
+ }
+ 
+ bool directory_create(const char* dirname)
+ {
+-    FILE* io_res = fopen(dirname, &quot;wd&quot;);
++    io_resource_t* io_res = lio_compat_open(dirname,
++        IO_OPEN_MODE_WRITE | IO_OPEN_MODE_CREATE | IO_OPEN_MODE_TRUNC |
++        IO_OPEN_MODE_DIRECTORY);
+ 
+-    if(io_res == NULL)
+-    {
++    if(io_res == NULL) {
+         return false;
+     }
+ 
+-    fclose(io_res);
++    lio_compat_close(io_res);
+     return true;
+ }
+ 
+ bool is_directory(const char* dirname)
+ {
+-    FILE* dir = directory_open(dirname);
++    struct dir_handle* dir = directory_open(dirname);
+     if (dir != NULL) {
+         directory_close(dir);
+         return true;
+diff --git a/src/modules/servmgr/config.c b/src/modules/servmgr/config.c
+index ec33c22..3f8202a 100644
+--- a/src/modules/servmgr/config.c
++++ b/src/modules/servmgr/config.c
+@@ -216,7 +216,7 @@ static void config_parse_conf(const char* path,
+  *
+  * @return true wenn erfolgreich abgeschlossen wurde, false sonst.
+  */
+-static bool config_dir_parse(FILE* dir)
++static bool config_dir_parse(struct dir_handle* dir)
+ {
+     io_direntry_t* entry;
+     struct config_service* conf_serv;
+@@ -278,7 +278,7 @@ static bool config_dir_parse(FILE* dir)
+ bool config_read()
+ {
+     const char* config_path = &quot;/config/servmgr&quot;;
+-    FILE* dir;
++    struct dir_handle* dir;
+     bool result;
+     int ires;
+ 
+-- 
+1.6.0.2
+
+</PRE>
+
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002271.html">[tyndur-devel] [PATCH v2 2/3] libc: lio_compat_eof()
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002272.html">[tyndur-devel] [PATCH v2 3/3] libc: dir.h-Funktionen benutzen struct dir_handle statt FILE
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2266">[ Datum ]</a>
+              <a href="thread.html#2266">[ Thema ]</a>
+              <a href="subject.html#2266">[ Betreff (Subject)]</a>
+              <a href="author.html#2266">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

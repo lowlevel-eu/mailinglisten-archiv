@@ -1,0 +1,222 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 3/4] libc: Wortweise Navigation fuer	readline()
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%203/4%5D%20libc%3A%20Wortweise%20Navigation%20fuer%0A%09readline%28%29&In-Reply-To=%3C1242577169-2340-4-git-send-email-toni%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001011.html">
+   <LINK REL="Next"  HREF="000930.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 3/4] libc: Wortweise Navigation fuer	readline()</H1>
+    <B>Antoine Kaufmann</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%203/4%5D%20libc%3A%20Wortweise%20Navigation%20fuer%0A%09readline%28%29&In-Reply-To=%3C1242577169-2340-4-git-send-email-toni%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 3/4] libc: Wortweise Navigation fuer	readline()">toni at tyndur.org
+                  </A><BR>
+    <I>So Mai 17 18:19:28 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001011.html">[tyndur-devel] [PATCH] libc: Strings aus breiten Zeichen in	readline() benutzen
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="000930.html">[tyndur-devel] [PATCH 3/4] libc: Wortweise Navigation fuer	readline()
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#899">[ Datum ]</a>
+              <a href="thread.html#899">[ Thema ]</a>
+              <a href="subject.html#899">[ Betreff (Subject) ]</a>
+              <a href="author.html#899">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ libc: Wortweise Navigation fuer readline()
+
+Signed-off-by: Antoine Kaufmann &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">toni at tyndur.org</A>&gt;
+---
+ src/modules/lib/readline.c |   72 ++++++++++++++++++++++++++++++++++++++++++++
+ 1 files changed, 72 insertions(+), 0 deletions(-)
+
+diff --git a/src/modules/lib/readline.c b/src/modules/lib/readline.c
+index e740f22..93cd0b9 100644
+--- a/src/modules/lib/readline.c
++++ b/src/modules/lib/readline.c
+@@ -32,6 +32,7 @@
+ #include &lt;stdint.h&gt;
+ #include &lt;collections.h&gt;
+ #include &lt;wchar.h&gt;
++#include &lt;wctype.h&gt;
+ 
+ #include &lt;readline/readline.h&gt;
+ 
+@@ -51,6 +52,10 @@ typedef enum {
+     BEGINNING_OF_LINE,
+     /// Cursor an das Ende der Zeile bewegen
+     END_OF_LINE,
++    /// Cursor ans Ende des aktuellen/naechsten Worts bewegen
++    FORWARD_WORD,
++    /// Cursor an den Anfang des aktuellen/vorherigen Worts bewegen
++    BACKWARD_WORD,
+ 
+     // Text editieren
+     /// Zeile abschliessen
+@@ -82,6 +87,10 @@ static struct {
+     { L&quot;\033[H&quot;, BEGINNING_OF_LINE },
+     /// Ende
+     { L&quot;\033[F&quot;, END_OF_LINE },
++    /// Alt + Pfeil rechts
++    { L&quot;\033\033[C&quot;, FORWARD_WORD },
++    /// Alt + Pfeil links
++    { L&quot;\033\033[D&quot;, BACKWARD_WORD },
+ 
+     /// Enter
+     { L&quot;\n&quot;, ACCEPT_LINE },
+@@ -181,6 +190,53 @@ static int count_visible_chars(wchar_t* buffer, int start, int size)
+ }
+ 
+ /**
++ * Position des naechsten Wortendes suchen
++ *
++ * @param start Position von der angefangen werden soll zu suchen
++ * @param size  Anzahl Zeichen im Puffer
++ */
++static int find_word_end(wchar_t* buffer, int start, int size)
++{
++    int begin_found = 0;
++
++    while ((start &lt; size) &amp;&amp; (!begin_found || iswalnum(buffer[start]))) {
++        if (!begin_found &amp;&amp; iswalnum(buffer[start])) {
++            begin_found = 1;
++        }
++
++        start++;
++    }
++
++    return start;
++}
++
++/**
++ * Position des naechsten Wortanfanges suchen
++ *
++ * @param start Position von der angefangen werden soll zu suchen
++ * @param size  Anzahl Zeichen im Puffer
++ */
++static int find_word_begin(wchar_t* buffer, int start, int size)
++{
++    int word_found = 0;
++
++    if (start &lt;= 1) {
++        return 0;
++    }
++
++    start--;
++    while ((start &gt;= 0) &amp;&amp; (!word_found || iswalnum(buffer[start]))) {
++        if (!word_found &amp;&amp; iswalnum(buffer[start])) {
++            word_found = 1;
++        }
++
++        start--;
++    }
++
++    return start + 1;
++}
++
++/**
+  * Array mit Matches freigeben
+  *
+  * @param matches Liste
+@@ -432,6 +488,22 @@ again:
+                 fflush(stdout);
+                 break;
+ 
++            case FORWARD_WORD: {
++                size_t next_word_end = find_word_end(buffer, pos, size);
++                printf(&quot;\033[%dC&quot;, next_word_end - pos);
++                pos = next_word_end;
++                fflush(stdout);
++                break;
++            }
++
++            case BACKWARD_WORD: {
++                size_t word_begin = find_word_begin(buffer, pos, size);
++                printf(&quot;\033[%dD&quot;, pos - word_begin);
++                pos = word_begin;
++                fflush(stdout);
++                break;
++            }
++
+ 
+             case PREVIOUS_HISTORY:
+             case NEXT_HISTORY:
+-- 
+1.6.0.6
+
+</PRE>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001011.html">[tyndur-devel] [PATCH] libc: Strings aus breiten Zeichen in	readline() benutzen
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="000930.html">[tyndur-devel] [PATCH 3/4] libc: Wortweise Navigation fuer	readline()
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#899">[ Datum ]</a>
+              <a href="thread.html#899">[ Thema ]</a>
+              <a href="subject.html#899">[ Betreff (Subject)]</a>
+              <a href="author.html#899">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

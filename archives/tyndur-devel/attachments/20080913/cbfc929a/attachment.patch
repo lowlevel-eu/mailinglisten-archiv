@@ -1,0 +1,127 @@
+Index: trunk/src/kernel2/include/kernel.h
+===================================================================
+--- trunk.orig/src/kernel2/include/kernel.h
++++ trunk/src/kernel2/include/kernel.h
+@@ -35,7 +35,9 @@
+ 
+ #ifndef _KERNEL_H_
+ #define _KERNEL_H_
+-    
++
++extern uint64_t timer_ticks;
++
+ __attribute__((noreturn)) void panic(char* message, ...);
+ 
+ #endif
+Index: trunk/src/kernel2/include/syscall.h
+===================================================================
+--- trunk.orig/src/kernel2/include/syscall.h
++++ trunk/src/kernel2/include/syscall.h
+@@ -116,6 +116,9 @@ void syscall_init_child_page(pid_t pid,
+ /// IO-Ports anfordern
+ void syscall_io_request_port(uint32_t port, uint32_t length);
+ 
++/// Aktuelle Zeit abfragen (Mikrosekunden seit Systemstart)
++uint64_t syscall_get_tick_count(void);
++
+ 
+ // RPC
+ /// RPC-Handler registrieren
+Index: trunk/src/kernel2/src/interrupts/im.c
+===================================================================
+--- trunk.orig/src/kernel2/src/interrupts/im.c
++++ trunk/src/kernel2/src/interrupts/im.c
+@@ -47,6 +47,9 @@
+ 
+ extern size_t cpu_count;
+ 
++/** Einheit: Mikrosekunden */
++uint64_t timer_ticks = 0;
++
+ static pm_process_t* intr_handling_task[IM_NUM_INTERRUPTS];
+ static uint32_t intr_to_send[IM_NUM_INTERRUPTS];
+ 
+@@ -103,6 +106,8 @@ interrupt_stack_frame_t* im_handler(inte
+     {
+         // Beim Timer-IRQ wird geschedulet
+         if (int_num == 0x20) {
++            timer_ticks += 1000000 / CONFIG_TIMER_HZ;
++
+             // Den aktuellen Thread an den Scheduler zurueckgeben
+             pm_scheduler_push(thread);
+ 
+Index: trunk/src/kernel2/src/syscall.c
+===================================================================
+--- trunk.orig/src/kernel2/src/syscall.c
++++ trunk/src/kernel2/src/syscall.c
+@@ -79,6 +79,7 @@ void syscall_init()
+         syscall_add_interrupt_handler, 1);
+ 
+     syscall_register(SYSCALL_PUTSN, (void*) &syscall_putsn, 2);
++    syscall_register(SYSCALL_GET_TICK_COUNT, syscall_get_tick_count, 0);
+ }
+ 
+ /**
+Index: trunk/src/kernel2/src/syscalls/misc.c
+===================================================================
+--- trunk.orig/src/kernel2/src/syscalls/misc.c
++++ trunk/src/kernel2/src/syscalls/misc.c
+@@ -35,6 +35,7 @@
+ 
+ #include <stdint.h>
+ 
++#include "kernel.h"
+ #include "syscall.h"
+ #include "kprintf.h"
+ #include "console.h"
+@@ -52,3 +53,11 @@ void syscall_putsn(int char_count, char*
+     // zugreifen darf.
+     con_putsn(char_count, source);
+ }
++
++/**
++ * Gibt die Anzahl der Mikrosekunden seit Systemstart zurueck
++ */
++uint64_t syscall_get_tick_count(void)
++{
++    return timer_ticks;
++}
+Index: trunk/src/kernel2/src/arch/i386/syscall.c
+===================================================================
+--- trunk.orig/src/kernel2/src/arch/i386/syscall.c
++++ trunk/src/kernel2/src/arch/i386/syscall.c
+@@ -88,23 +88,27 @@ void syscall_arch(machine_state_t* isf)
+         syscall_fastrpc_ret();
+ 
+     } else {
+-        dword result;
++        uint32_t eax, edx;
+         dword stack_backup;
+ 
+          // Die Syscallhandler werden mit dem Userspace-Stack aufgerufen, damit
+         // keine Parameter kopiert werden muessen.
+         asm("pusha;"
+             // Den original-Stackpointer retten
+-            "movl %%esp, %2;"
++            "movl %%esp, %3;"
+             // Stack wechseln
+-            "movl %1, %%esp;"
+-            "call *%3;"
+-            "movl %%eax, %0;"
+             "movl %2, %%esp;"
++            "call *%4;"
++            "movl %%eax, %0;"
++            "movl %%edx, %1;"
++            "movl %3, %%esp;"
+             "popa;"
+-            : "=m" (result) : "r" (stack), "m" (stack_backup), "r" (handler));
++            : "=m" (eax), "=m" (edx) : "r" (stack), "m" (stack_backup), "r" (handler));
+ 
+-        isf->eax = result;
++        isf->eax = eax;
++        if (handler == syscall_get_tick_count) {
++            isf->edx = edx;
++        }
+     }
+ }
+ 

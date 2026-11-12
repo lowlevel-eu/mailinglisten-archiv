@@ -1,0 +1,309 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 1/3] PCI &#8211; direkter Zugriff zum Konfigurationsraum
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_1/3%3D5D_PCI_%3DE2%3D80%3D93_direkter_Z%3F%3D%0A%09%3D%3Futf-8%3Fq%3Fugriff_zum_Konfigurationsraum%3F%3D&In-Reply-To=%3C1279137456-26450-2-git-send-email-max%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001763.html">
+   <LINK REL="Next"  HREF="001765.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 1/3] PCI &#8211; direkter Zugriff zum Konfigurationsraum</H1>
+    <B>max at tyndur.org</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_1/3%3D5D_PCI_%3DE2%3D80%3D93_direkter_Z%3F%3D%0A%09%3D%3Futf-8%3Fq%3Fugriff_zum_Konfigurationsraum%3F%3D&In-Reply-To=%3C1279137456-26450-2-git-send-email-max%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 1/3] PCI &#8211; direkter Zugriff zum Konfigurationsraum">max at tyndur.org
+                  </A><BR>
+    <I>Mi Jul 14 21:57:34 CEST 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001763.html">[tyndur-devel] [PATCH 0/3] USB-Treiber
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001765.html">[tyndur-devel] [PATCH 2/3] errno.h
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1764">[ Datum ]</a>
+              <a href="thread.html#1764">[ Thema ]</a>
+              <a href="subject.html#1764">[ Betreff (Subject) ]</a>
+              <a href="author.html#1764">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>From: Max Reitz &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">max at tyndur.org</A>&gt;
+
++ Per RPC zum pci-Treiber ist jetzt direkter Zugriff auf den
+  PCI-Konfigurationsraum eines PCI-GerÃ¤ts mÃ¶glich.
+
+Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">max at tyndur.org</A>&gt;
+---
+ src/modules/include/pci.h |   27 ++++++++++++
+ src/modules/pci/pci.c     |    3 +
+ src/modules/pci/pcihw.c   |   42 +++++++++++++++++--
+ src/modules/pci/pcirpc.c  |  100 +++++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 168 insertions(+), 4 deletions(-)
+ create mode 100644 src/modules/pci/pcirpc.c
+
+diff --git a/src/modules/include/pci.h b/src/modules/include/pci.h
+index 30c661f..fdab461 100644
+--- a/src/modules/include/pci.h
++++ b/src/modules/include/pci.h
+@@ -62,4 +62,31 @@ struct pci_resource {
+     uint32_t   length;
+ } __attribute__ ((packed));
+ 
++
++// Direkter Zugriff auf den PCI-Konfigurationsraum eines GerÃ¤ts
++// Es wird immer ein dword zurÃ¼ckgegeben (das bei Schreibzugriffen keine
++// Bedeutung hat)
++#define RPC_PCI_CONFIG_SPACE_ACCESS &quot;PCICFGS&quot;
++
++// Typen des Zugriffs
++enum pci_csa_type {
++    PCI_CSA_READ32,
++    PCI_CSA_READ16,
++    PCI_CSA_READ8,
++    PCI_CSA_WRITE32,
++    PCI_CSA_WRITE16,
++    PCI_CSA_WRITE8
++};
++
++// RPC-Request
++struct pci_config_space_access {
++    enum pci_csa_type type;
++    // Adresse auf dem PCI-Bus
++    uint16_t bus, device, function;
++    // Offset im Konfigurationsraum
++    uint32_t reg;
++    // Nur notwendig, wenn geschrieben werden soll
++    uint32_t value;
++};
++
+ #endif
+diff --git a/src/modules/pci/pci.c b/src/modules/pci/pci.c
+index 617f74b..a7f6599 100644
+--- a/src/modules/pci/pci.c
++++ b/src/modules/pci/pci.c
+@@ -57,6 +57,7 @@ void create_device_files(void);
+ bool pre_open_handler(char** path, uint8_t args, pid_t pid,
+     io_resource_t* pipe_source);
+ int close_handler(lostio_filehandle_t* handle);
++void init_rpc_interface(void);
+ 
+ int main(int argc, char* argv[])
+ {
+@@ -92,6 +93,8 @@ int main(int argc, char* argv[])
+ 
+     create_device_files();
+ 
++    init_rpc_interface();
++
+     init_service_register(&quot;pci&quot;);
+     
+     while(1) {
+diff --git a/src/modules/pci/pcihw.c b/src/modules/pci/pcihw.c
+index b9007e3..d4e4e91 100644
+--- a/src/modules/pci/pcihw.c
++++ b/src/modules/pci/pcihw.c
+@@ -1,8 +1,8 @@
+ /*  
+- * Copyright (c) 2007-2009 The tyndur Project. All rights reserved.
++ * Copyright (c) 2007-2010 The tyndur Project. All rights reserved.
+  *
+  * This code is derived from software contributed to the tyndur Project
+- * by Kevin Wolf.
++ * by Kevin Wolf and Max Reitz.
+  *
+  * Redistribution and use in source and binary forms, with or without
+  * modification, are permitted provided that the following conditions
+@@ -63,7 +63,7 @@ void pci_request_io_ports()
+  * zurückgegeben, wenn reg dword-aligned ist. Ansonsten werden die
+  * höchstwertigen Bits mit Nullen aufgefüllt.
+  */
+-static uint32_t pci_config_read(uint32_t bus, uint32_t device, uint32_t func,
++uint32_t pci_config_read(uint32_t bus, uint32_t device, uint32_t func,
+     uint32_t reg)
+ {
+     uint32_t offset = reg % 0x04;
+@@ -117,7 +117,7 @@ static inline uint8_t pci_config_read_byte
+  * @param reg Offset des zu schreibenden Registers
+  *
+  */
+-static void pci_config_write_dword
++void pci_config_write_dword
+     (uint32_t bus, uint32_t device, uint32_t func, uint32_t reg, uint32_t value)
+ {
+     outl(PCI_CONFIG_ADDR, 
+@@ -131,6 +131,40 @@ static void pci_config_write_dword
+ }
+ 
+ /**
++ * Schreibt ein word in ein Konfigurationsregister eines PCI-Geräts
++ * @see pci_config_write_dword
++ */
++void pci_config_write_word
++    (uint32_t bus, uint32_t device, uint32_t func, uint32_t reg, uint16_t value)
++{
++    outl(PCI_CONFIG_ADDR,
++        0x1 &lt;&lt; 31
++        | ((bus    &amp; 0xFF) &lt;&lt; 16)
++        | ((device &amp; 0x1F) &lt;&lt; 11)
++        | ((func   &amp; 0x07) &lt;&lt;  8)
++        | ((reg    &amp; 0xFC)));
++
++    outw(PCI_CONFIG_DATA + (reg &amp; 2), value);
++}
++
++/**
++ * Schreibt ein byte in ein Konfigurationsregister eines PCI-Geräts
++ * @see pci_config_write_dword
++ */
++void pci_config_write_byte
++    (uint32_t bus, uint32_t device, uint32_t func, uint32_t reg, uint8_t value)
++{
++    outl(PCI_CONFIG_ADDR,
++        0x1 &lt;&lt; 31
++        | ((bus    &amp; 0xFF) &lt;&lt; 16)
++        | ((device &amp; 0x1F) &lt;&lt; 11)
++        | ((func   &amp; 0x07) &lt;&lt;  8)
++        | ((reg    &amp; 0xFC)));
++
++    outb(PCI_CONFIG_DATA + (reg &amp; 3), value);
++}
++
++/**
+  * Prueft ob ein PCI-Geraet Funktionen unterstuetzt.
+  *
+  * @param bus Bus-Nummer des Geräts
+diff --git a/src/modules/pci/pcirpc.c b/src/modules/pci/pcirpc.c
+new file mode 100644
+index 0000000..f753536
+--- /dev/null
++++ b/src/modules/pci/pcirpc.c
+@@ -0,0 +1,100 @@
++/*
++ * Copyright (c) 2010 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Max Reitz.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include &lt;stdint.h&gt;
++
++#include &lt;rpc.h&gt;
++#include &lt;syscall.h&gt;
++
++#include &quot;pci.h&quot;
++#include &quot;pcihw.h&quot;
++
++
++void pci_config_write_dword(uint32_t bus, uint32_t device, uint32_t func,
++    uint32_t reg, uint32_t value);
++void pci_config_write_word(uint32_t bus, uint32_t device, uint32_t func,
++    uint32_t reg, uint16_t value);
++void pci_config_write_byte(uint32_t bus, uint32_t device, uint32_t func,
++    uint32_t reg, uint8_t value);
++uint32_t pci_config_read(uint32_t bus, uint32_t device, uint32_t func,
++    uint32_t reg);
++
++
++static void config_space_handler(pid_t src, uint32_t corr_id, size_t length,
++    void* data)
++{
++    struct pci_config_space_access* csa = data;
++
++    if (length &lt; sizeof(*csa)) {
++        rpc_send_dword_response(src, corr_id, 0);
++        return;
++    }
++
++    uint32_t value = csa-&gt;value;
++
++    switch (csa-&gt;type) {
++        case PCI_CSA_READ32:
++            value = pci_config_read(csa-&gt;bus, csa-&gt;device, csa-&gt;function,
++                csa-&gt;reg);
++            rpc_send_dword_response(src, corr_id, value);
++            break;
++        case PCI_CSA_READ16:
++            value = pci_config_read(csa-&gt;bus, csa-&gt;device, csa-&gt;function,
++                csa-&gt;reg);
++            rpc_send_dword_response(src, corr_id, value &amp; 0xFFFF);
++            break;
++        case PCI_CSA_READ8:
++            value = pci_config_read(csa-&gt;bus, csa-&gt;device, csa-&gt;function,
++                csa-&gt;reg);
++            rpc_send_dword_response(src, corr_id, value &amp; 0xFF);
++            break;
++        case PCI_CSA_WRITE32:
++            pci_config_write_dword(csa-&gt;bus, csa-&gt;device, csa-&gt;function,
++                csa-&gt;reg, value);
++            rpc_send_dword_response(src, corr_id, 0);
++            break;
++        case PCI_CSA_WRITE16:
++            pci_config_write_word(csa-&gt;bus, csa-&gt;device, csa-&gt;function,
++                csa-&gt;reg, value);
++            rpc_send_dword_response(src, corr_id, 0);
++            break;
++        case PCI_CSA_WRITE8:
++            pci_config_write_byte(csa-&gt;bus, csa-&gt;device, csa-&gt;function,
++                csa-&gt;reg, value);
++            rpc_send_dword_response(src, corr_id, 0);
++            break;
++        default:
++            rpc_send_dword_response(src, corr_id, 0);
++    }
++}
++
++void init_rpc_interface(void)
++{
++    register_message_handler(RPC_PCI_CONFIG_SPACE_ACCESS,
++        &amp;config_space_handler);
++}
+-- 
+1.6.4.2
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001763.html">[tyndur-devel] [PATCH 0/3] USB-Treiber
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001765.html">[tyndur-devel] [PATCH 2/3] errno.h
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1764">[ Datum ]</a>
+              <a href="thread.html#1764">[ Thema ]</a>
+              <a href="subject.html#1764">[ Betreff (Subject)]</a>
+              <a href="author.html#1764">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

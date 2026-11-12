@@ -1,0 +1,268 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 3/5] libc: lio_compat_write/close()
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%203/5%5D%20libc%3A%20lio_compat_write/close%28%29&In-Reply-To=%3C1316349714-17413-4-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002240.html">
+   <LINK REL="Next"  HREF="002241.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 3/5] libc: lio_compat_write/close()</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%203/5%5D%20libc%3A%20lio_compat_write/close%28%29&In-Reply-To=%3C1316349714-17413-4-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 3/5] libc: lio_compat_write/close()">kevin at tyndur.org
+                  </A><BR>
+    <I>So Sep 18 14:41:52 CEST 2011</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002240.html">[tyndur-devel] [PATCH 2/5] libc: lio_compat_open()
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002241.html">[tyndur-devel] [PATCH 3/5] libc: lio_compat_write/close()
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2236">[ Datum ]</a>
+              <a href="thread.html#2236">[ Thema ]</a>
+              <a href="subject.html#2236">[ Betreff (Subject) ]</a>
+              <a href="author.html#2236">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* libc: lio_compat_write/close aus den stdio-Funktionen
+  herausgesplittet. Mehr oder weniger nur verschobener Code.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/include/lostio.h         |    7 ++++
+ src/modules/lib/lostio/client/file.c |   50 ++++++++++++++++++++++++++++
+ src/modules/lib/stdlibc/file.c       |   60 +++++----------------------------
+ 3 files changed, 66 insertions(+), 51 deletions(-)
+
+diff --git a/src/modules/include/lostio.h b/src/modules/include/lostio.h
+index f8d3a57..794a125 100644
+--- a/src/modules/include/lostio.h
++++ b/src/modules/include/lostio.h
+@@ -192,6 +192,13 @@ void lostio_type_directory_use_as(typeid_t id);
+ /// Stream oeffnen
+ io_resource_t* lio_compat_open(const char* filename, uint8_t attr);
+ 
++/// Stream schliessen
++int lio_compat_close(io_resource_t* io_res);
++
++/// In einen Stream schreiben
++size_t lio_compat_write(const void* src, size_t blocksize, size_t blockcount,
++    io_resource_t* io_res);
++
+ /// Stream-Position setzen
+ bool lio_seek(struct lostio_internal_file* io_res, uint64_t offset, int origin);
+ 
+diff --git a/src/modules/lib/lostio/client/file.c b/src/modules/lib/lostio/client/file.c
+index 3e048bb..f474132 100644
+--- a/src/modules/lib/lostio/client/file.c
++++ b/src/modules/lib/lostio/client/file.c
+@@ -31,6 +31,7 @@
+ #include &lt;string.h&gt;
+ #include &lt;stdlib.h&gt;
+ #include &lt;rpc.h&gt;
++#include &lt;syscall.h&gt;
+ 
+ io_resource_t* lio_compat_open(const char* filename, uint8_t attr)
+ {
+@@ -62,3 +63,52 @@ io_resource_t* lio_compat_open(const char* filename, uint8_t attr)
+ 
+     return result;
+ }
++
++int lio_compat_close(io_resource_t* io_res)
++{
++    uint32_t result;
++    result = rpc_get_dword(io_res-&gt;pid, &quot;IO_CLOSE&quot;,
++        sizeof(io_resource_id_t), (char*) &amp;(io_res-&gt;id));
++    free(io_res);
++
++    return result;
++}
++
++size_t lio_compat_write(const void* src, size_t blocksize, size_t blockcount,
++    io_resource_t* io_res)
++{
++    size_t data_size = blockcount * blocksize;
++    size_t request_size = sizeof(io_write_request_t);
++
++    // Bei mehr als einem Kilobyte wird shared memory fuer die Daten benutzt
++    if (data_size &lt; 1024) {
++        request_size += data_size;
++    }
++    uint8_t request[request_size];
++
++    io_write_request_t* write_request = (io_write_request_t*) request;
++    write_request-&gt;id = io_res-&gt;id;
++    write_request-&gt;blocksize = blocksize;
++    write_request-&gt;blockcount = blockcount;
++
++    // Wenn kein SHM benutzt wird, werden die Daten direkt an den Request
++    // angehaengt
++    if (data_size &lt; 1024) {
++        write_request-&gt;shared_mem_id = 0;
++        memcpy(write_request-&gt;data, src, data_size);
++    } else {
++        write_request-&gt;shared_mem_id = create_shared_memory(data_size);
++        void* data = open_shared_memory(write_request-&gt;shared_mem_id);
++        memcpy(data, src, data_size);
++    }
++
++    size_t resp = rpc_get_dword(io_res-&gt;pid, &quot;IO_WRITE&quot;,
++        request_size, (char*) request);
++
++    if (data_size &gt;= 1024) {
++        close_shared_memory(write_request-&gt;shared_mem_id);
++    }
++    return resp;
++}
++
++
+diff --git a/src/modules/lib/stdlibc/file.c b/src/modules/lib/stdlibc/file.c
+index 522eba6..9f47e13 100644
+--- a/src/modules/lib/stdlibc/file.c
++++ b/src/modules/lib/stdlibc/file.c
+@@ -174,8 +174,8 @@ FILE* freopen(const char* path, const char* mode, FILE* stream)
+  */
+ int fclose (FILE* io_res)
+ {
+-    uint32_t result;
+-    
++    int result;
++
+     if((io_res == NULL) || (io_res-&gt;res.pid == 0))
+     {
+         return EOF;
+@@ -184,11 +184,9 @@ int fclose (FILE* io_res)
+     fflush(io_res);
+     setvbuf(io_res, NULL, _IONBF, 0);
+ 
+-    result = rpc_get_dword(io_res-&gt;res.pid, &quot;IO_CLOSE&quot;, sizeof(io_resource_id_t),
+-        (char*) &amp;(io_res-&gt;res.id));
+-    free(io_res);
++    result = lio_compat_close(&amp;io_res-&gt;res);
+ 
+-    return result;
++    return result ? EOF : 0;
+ }
+ 
+ 
+@@ -394,47 +392,6 @@ int ungetc(int c, FILE* io_res)
+ }
+ 
+ /**
+- *
+- */
+-static size_t io_write(const void* src, size_t blocksize, size_t blockcount,
+-    FILE* io_res)
+-{   
+-    size_t data_size = blockcount * blocksize;
+-    size_t request_size = sizeof(io_write_request_t);
+-    
+-    // Bei mehr als einem Kilobyte wird shared memory fuer die Daten benutzt
+-    if (data_size &lt; 1024) {
+-        request_size += data_size;
+-    }
+-    uint8_t request[request_size];
+-
+-    io_write_request_t* write_request = (io_write_request_t*) request;    
+-    write_request-&gt;id = io_res-&gt;res.id;
+-    write_request-&gt;blocksize = blocksize;
+-    write_request-&gt;blockcount = blockcount;
+-
+-    // Wenn kein SHM benutzt wird, werden die Daten direkt an den Request
+-    // angehaengt
+-    if (data_size &lt; 1024) {
+-        write_request-&gt;shared_mem_id = 0;
+-        memcpy(write_request-&gt;data, src, data_size);
+-    } else {
+-        write_request-&gt;shared_mem_id = create_shared_memory(data_size);
+-        void* data = open_shared_memory(write_request-&gt;shared_mem_id);
+-        memcpy(data, src, data_size);
+-    }
+-    
+-    size_t resp = rpc_get_dword(io_res-&gt;res.pid, &quot;IO_WRITE&quot;,
+-        request_size, (char*) request);
+-    
+-    if (data_size &gt;= 1024) {
+-        close_shared_memory(write_request-&gt;shared_mem_id);
+-    }
+-    return resp;
+-}
+-
+-
+-/**
+  * Daten in die Datei schreiben.
+  *
+  * @param data Pointer auf die Quelldaten
+@@ -469,7 +426,7 @@ size_t fwrite(const void* data, size_t blocksize, size_t blockcount,
+     // gespeichert, sondern direkt an den Zielprozess gesendet.
+ 	switch (io_res-&gt;buffer_mode) {
+ 		case IO_BUFFER_MODE_NONE:
+-			return io_write(data, blocksize, blockcount, io_res);
++			return lio_compat_write(data, blocksize, blockcount, &amp;io_res-&gt;res);
+ 			break;
+ 		
+ 		case IO_BUFFER_MODE_FULL:
+@@ -486,7 +443,7 @@ size_t fwrite(const void* data, size_t blocksize, size_t blockcount,
+ 				if (fflush(io_res) == EOF) {
+                     return 0;
+                 }
+-				return io_write(data, blocksize, blockcount, io_res);
++				return lio_compat_write(data, blocksize, blockcount, &amp;io_res-&gt;res);
+ 			}
+ 			break;
+ 		
+@@ -501,7 +458,7 @@ size_t fwrite(const void* data, size_t blocksize, size_t blockcount,
+ 			    if (fflush(io_res) == EOF) {
+                     return 0;
+                 }
+-				return io_write(data, blocksize, blockcount, io_res);
++				return lio_compat_write(data, blocksize, blockcount, &amp;io_res-&gt;res);
+ 			} else {
+ 				//Daten in den Buffer kopieren.
+ 				memcpy((void*)((uint32_t) io_res-&gt;buffer_ptr +
+@@ -710,7 +667,8 @@ int fflush(FILE* io_res)
+         return 0;
+     }
+ 
+-    size_t size = io_write(io_res-&gt;buffer_ptr, 1, io_res-&gt;buffer_pos, io_res);
++    size_t size = lio_compat_write(io_res-&gt;buffer_ptr,
++        1, io_res-&gt;buffer_pos, &amp;io_res-&gt;res);
+     
+     if (size == io_res-&gt;buffer_pos) {
+         io_res-&gt;buffer_pos = 0;
+-- 
+1.6.0.2
+
+</PRE>
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002240.html">[tyndur-devel] [PATCH 2/5] libc: lio_compat_open()
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002241.html">[tyndur-devel] [PATCH 3/5] libc: lio_compat_write/close()
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2236">[ Datum ]</a>
+              <a href="thread.html#2236">[ Thema ]</a>
+              <a href="subject.html#2236">[ Betreff (Subject)]</a>
+              <a href="author.html#2236">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

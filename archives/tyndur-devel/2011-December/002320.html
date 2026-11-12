@@ -1,0 +1,687 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH v2 1/6] kernel2: LIOv2-Grundgerüst
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_v2_1/6%3D5D_kernel2%3D3A_LIOv2-Grun%3F%3D%0A%09%3D%3Futf-8%3Fq%3Fdger%3DC3%3DBCst%3F%3D&In-Reply-To=%3C1323549482-1766-2-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002319.html">
+   <LINK REL="Next"  HREF="002321.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH v2 1/6] kernel2: LIOv2-Grundgerüst</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_v2_1/6%3D5D_kernel2%3D3A_LIOv2-Grun%3F%3D%0A%09%3D%3Futf-8%3Fq%3Fdger%3DC3%3DBCst%3F%3D&In-Reply-To=%3C1323549482-1766-2-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH v2 1/6] kernel2: LIOv2-Grundgerüst">kevin at tyndur.org
+                  </A><BR>
+    <I>Sa Dez 10 21:37:57 CET 2011</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002319.html">[tyndur-devel] [PATCH v2 0/6] kernel2: LIOv2-Grundlagen
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002321.html">[tyndur-devel] [PATCH v2 2/6] kernel2: Zentrale	LIOv2-Clientfunktionen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2320">[ Datum ]</a>
+              <a href="thread.html#2320">[ Thema ]</a>
+              <a href="subject.html#2320">[ Betreff (Subject) ]</a>
+              <a href="author.html#2320">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ kernel2: LIOv2-Datenstrukturen zur Verwaltung von Verzeichnisbäumen
++ kernel2: Funktionen zur Verwaltung der Userspace-Deskriptoren für
+  LIOv2-Kernelobjekte
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/include/syscall_structs.h               |    3 +
+ src/kernel2/include/lostio/core.h           |   82 ++++++++++++++
+ src/kernel2/include/lostio/userspace.h      |   84 +++++++++++++++
+ src/kernel2/include/tasks.h                 |    4 +
+ src/kernel2/src/init.c                      |    4 +
+ src/kernel2/src/lostio/include/lostio_int.h |  131 +++++++++++++++++++++++
+ src/kernel2/src/lostio/lostio.c             |   46 ++++++++
+ src/kernel2/src/lostio/userspace.c          |  154 +++++++++++++++++++++++++++
+ src/kernel2/src/tasks/pm.c                  |    6 +
+ 9 files changed, 514 insertions(+), 0 deletions(-)
+ create mode 100644 src/kernel2/include/lostio/core.h
+ create mode 100644 src/kernel2/include/lostio/userspace.h
+ create mode 100644 src/kernel2/src/lostio/include/lostio_int.h
+ create mode 100644 src/kernel2/src/lostio/lostio.c
+ create mode 100644 src/kernel2/src/lostio/userspace.c
+
+diff --git a/src/include/syscall_structs.h b/src/include/syscall_structs.h
+index 6ec63a0..ab2ec95 100644
+--- a/src/include/syscall_structs.h
++++ b/src/include/syscall_structs.h
+@@ -82,6 +82,9 @@ typedef int64_t lio_usp_stream_t;
+ /** ID einer LostIO-Ressource */
+ typedef int64_t lio_usp_resource_t;
+ 
++/** ID eines LostIO-Verzeichnisbaums */
++typedef int64_t lio_usp_tree_t;
++
+ /**
+  * Beschreibt als Bitmaske den Modus, in dem ein Stream arbeiten soll.
+  */
+diff --git a/src/kernel2/include/lostio/core.h b/src/kernel2/include/lostio/core.h
+new file mode 100644
+index 0000000..b1183b4
+--- /dev/null
++++ b/src/kernel2/include/lostio/core.h
+@@ -0,0 +1,82 @@
++/*
++ * Copyright (c) 2008 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the tyndur Project
++ *     and its contributors.
++ * 4. Neither the name of the tyndur Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef _LOSTIO_CORE_H_
++#define _LOSTIO_CORE_H_
++
++#include &lt;stdint.h&gt;
++#include &lt;stdbool.h&gt;
++#include &lt;collections.h&gt;
++#include &lt;syscall_structs.h&gt;
++
++struct lio_resource;
++struct lio_tree;
++
++struct lio_stream {
++    struct lio_resource*    res;
++
++    struct lio_resource*    res_read;
++    uint64_t                pos_read;
++    struct lio_resource*    res_write;
++    uint64_t                pos_write;
++
++    int                     flags;
++    bool                    eof;
++};
++
++struct lio_usp_stream {
++    struct lio_stream*      stream;
++
++    /** Id des Streams fuer Userspace-Programme */
++    lio_usp_stream_t        usp_id;
++
++    /** Sortierung nach usp_id im Baum */
++    struct tree_item        usp_item;
++};
++
++struct lio_node {
++    struct lio_resource*    res;
++
++    // Fuer den Wurzelknoten eines Baums ist der Name der Pfad der Quelle und
++    // hoert mit einem / auf (z.B. ata:/ata00p0|ext2:/)
++    char*                   name;
++};
++
++/**
++ * Initialisiert interne Datenstrukturen für LostIO
++ */
++void lio_init(void);
++
++#endif
+diff --git a/src/kernel2/include/lostio/userspace.h b/src/kernel2/include/lostio/userspace.h
+new file mode 100644
+index 0000000..a8a5cdc
+--- /dev/null
++++ b/src/kernel2/include/lostio/userspace.h
+@@ -0,0 +1,84 @@
++/*
++ * Copyright (c) 2008 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the tyndur Project
++ *     and its contributors.
++ * 4. Neither the name of the tyndur Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef _LOSTIO_USERSPACE_H
++#define _LOSTIO_USERSPACE_H
++
++#include &quot;lostio/core.h&quot;
++
++
++
++/***** Streams ******/
++
++/** Weist einem Stream eine Userspace-ID zu */
++struct lio_usp_stream* lio_usp_add_stream(pm_process_t* proc,
++    struct lio_stream* stream);
++
++/**
++ * Gibt den zur Userspace-ID gehörenden Stream zurück, oder NULL wenn es
++ * keinen passenden Stream gibt.
++ */
++struct lio_usp_stream* lio_usp_get_stream(pm_process_t* proc,
++    lio_usp_stream_t id);
++
++/** Gibt die Userspace-ID des Streams wieder frei */
++void lio_usp_remove_stream(pm_process_t* proc, struct lio_usp_stream* stream);
++
++
++
++/***** Ressourcen ******/
++
++/**
++ * Gibt die zur Userspace-ID gehörende Ressource zurück, oder NULL wenn es
++ * keine passende Ressource gibt.
++ */
++struct lio_resource* lio_usp_get_resource(lio_usp_resource_t id);
++
++/**
++ * Gitb die Userspace-ID zu einer gegebenen Ressource zurück.
++ */
++lio_usp_resource_t lio_usp_get_id(struct lio_resource* res);
++
++
++
++/***** Verzeichnisbäume ******/
++
++/**
++ * Gibt den zur Userspace-ID gehörenden Verzeichnisbaum zurück, oder NULL
++ * wenn es keinen passenden Verzeichnisbaum gibt.
++ */
++struct lio_tree* lio_usp_get_tree(lio_usp_tree_t id);
++
++#endif
+diff --git a/src/kernel2/include/tasks.h b/src/kernel2/include/tasks.h
+index 04d6b41..5256e0f 100644
+--- a/src/kernel2/include/tasks.h
++++ b/src/kernel2/include/tasks.h
+@@ -107,6 +107,10 @@ typedef struct pm_process {
+ 
+     /// Speicherverbrauch des Prozesses
+     uintmax_t memory_used;
++
++    /// Baum aller geoeffneten LostIO-Streams
++    tree_t* lio_streams;
++
+ } pm_process_t;
+ 
+ typedef struct {
+diff --git a/src/kernel2/src/init.c b/src/kernel2/src/init.c
+index c92a10f..9ad5d0b 100644
+--- a/src/kernel2/src/init.c
++++ b/src/kernel2/src/init.c
+@@ -52,6 +52,7 @@
+ #include &quot;lock.h&quot;
+ #include &quot;gdt.h&quot;
+ #include &quot;timer.h&quot;
++#include &quot;lostio/core.h&quot;
+ 
+ struct multiboot_info multiboot_info;
+ 
+@@ -270,6 +271,9 @@ void init(int multiboot_magic, struct multiboot_info *boot_info, bool bsp)
+         // Timer initialisieren
+         timer_init();
+ 
++        // LostIO initialisieren
++        lio_init();
++
+         // Init-Modul laden
+         debug_print(DEBUG_FLAG_INIT, &quot;Lade Module&quot;);
+         load_init_module(&amp;multiboot_info);
+diff --git a/src/kernel2/src/lostio/include/lostio_int.h b/src/kernel2/src/lostio/include/lostio_int.h
+new file mode 100644
+index 0000000..63d3630
+--- /dev/null
++++ b/src/kernel2/src/lostio/include/lostio_int.h
+@@ -0,0 +1,131 @@
++/*
++ * Copyright (c) 2008 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the tyndur Project
++ *     and its contributors.
++ * 4. Neither the name of the tyndur Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef LOSTIO_INT_H
++#define LOSTIO_INT_H
++
++#include &lt;collections.h&gt;
++#include &lt;syscall_structs.h&gt;
++
++#include &quot;lostio/core.h&quot;
++#include &quot;tasks.h&quot;
++
++struct lio_service;
++
++/**
++ * Beschreibt eine von LostIO verwaltete Ressource (d.h. in der Regel eine
++ * Datei). Alle Informationen, die nicht für einen bestimmten Client
++ * spezifisch sind, werden hier gespeichert.
++ */
++struct lio_resource {
++
++    /** Verzeichnisbaum, zu dem die Ressource gehört */
++    struct lio_tree*            tree;
++
++    /**
++     * Verzeichniseinträge (struct lio_node), falls die Ressource ein
++     * Verzeichnis ist
++     */
++    list_t*                     children;
++
++    /** Größe der Ressource in Bytes */
++    uint64_t                    size;
++
++    /**
++     * Die Blockgröße ist die kleinste Einheit, in der Anfragen an den
++     * Service gemacht werden. Sie wird auch intern für den Cache verwendet.
++     * Nur Zweierpotenzen; block_size * LIO_CLUSTER_SIZE sollte durch PAGE_SIZE
++     * teilbar sein.
++     */
++    uint32_t                    blocksize;
++
++    /* FIXME Sollte backendspezifisch sein */
++    tree_t*                     dirty;
++    bool                        dirty_lock;
++
++    /** Hat unterschiedliche Ressourcen fuer Lesen und Schreiben */
++    bool                        ispipe;
++
++    bool                        readable;
++    bool                        writable;
++    bool                        seekable;
++    bool                        moredata;
++    bool                        browsable;
++    bool                        changeable;
++    bool                        resolvable;
++    bool                        retargetable;
++
++    /** Benutzt uebersetzungstabellen */
++    bool                        translated;
++
++    /** Id der Ressource fuer Userspace-Programme */
++    lio_usp_resource_t          usp_id;
++
++    /** Sortierung nach usp_id im Baum */
++    struct tree_item            usp_item;
++
++    /** Private Daten des Services */
++    void*                       opaque;
++};
++
++struct lio_tree {
++    struct lio_node*        root;
++    struct lio_service*     service;
++    struct lio_stream*      source;
++
++    lio_usp_tree_t          usp_id;
++    struct tree_item        usp_item;
++};
++
++
++/**
++ * Initialisiert die Verwaltung der Userspace-Deskriptoren für Kernelobjekte
++ */
++int lio_init_userspace(void);
++
++
++/** Weist einer Ressource eine Userspace-ID zu */
++void lio_usp_add_resource(struct lio_resource* res);
++
++/** Gibt die Userspace-ID der Ressource wieder frei */
++void lio_usp_remove_resource(struct lio_resource* res);
++
++/** Weist einem Verzeichnisbaum eine Userspace-ID zu */
++void lio_usp_add_tree(struct lio_tree* tree);
++
++/**  Gibt die Userspace-ID des Verzeichnisbaums wieder frei */
++void lio_usp_remove_tree(struct lio_tree* tree);
++
++#endif
+diff --git a/src/kernel2/src/lostio/lostio.c b/src/kernel2/src/lostio/lostio.c
+new file mode 100644
+index 0000000..3843f4e
+--- /dev/null
++++ b/src/kernel2/src/lostio/lostio.c
+@@ -0,0 +1,46 @@
++/*
++ * Copyright (c) 2010 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Antoine Kaufmann.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the tyndur Project
++ *     and its contributors.
++ * 4. Neither the name of the tyndur Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include &lt;string.h&gt;
++
++#include &quot;lostio/core.h&quot;
++#include &quot;lostio_int.h&quot;
++
++void lio_init(void)
++{
++    lio_init_userspace();
++
++    return;
++}
+diff --git a/src/kernel2/src/lostio/userspace.c b/src/kernel2/src/lostio/userspace.c
+new file mode 100644
+index 0000000..d6376de
+--- /dev/null
++++ b/src/kernel2/src/lostio/userspace.c
+@@ -0,0 +1,154 @@
++/*
++ * Copyright (c) 2009 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the tyndur Project
++ *     and its contributors.
++ * 4. Neither the name of the tyndur Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include &lt;stdlib.h&gt;
++
++#include &quot;lostio/core.h&quot;
++#include &quot;lostio_int.h&quot;
++
++static tree_t* resource_tree;
++static tree_t* tree_tree;
++
++/**
++ * Initialisiert die Verwaltung der Userspace-Deskriptoren für Kernelobjekte
++ */
++int lio_init_userspace(void)
++{
++    resource_tree = tree_create(struct lio_resource, usp_item, usp_id);
++    tree_tree = tree_create(struct lio_tree, usp_item, usp_id);
++    return 0;
++}
++
++static lio_usp_resource_t new_resourceid(void)
++{
++    static lio_usp_resource_t prev_id = 0;
++    return ++prev_id;
++}
++
++static lio_usp_stream_t new_streamid(void)
++{
++    static lio_usp_stream_t prev_id = 0;
++    return ++prev_id;
++}
++
++static lio_usp_tree_t new_treeid(void)
++{
++    static lio_usp_tree_t prev_id = 0;
++    return ++prev_id;
++}
++
++
++/** Weist einer Ressource eine Userspace-ID zu */
++void lio_usp_add_resource(struct lio_resource* res)
++{
++    res-&gt;usp_id = new_resourceid();
++    tree_insert(resource_tree, res);
++}
++
++/**
++ * Gibt die zur Userspace-ID gehörende Ressource zurück, oder NULL wenn es
++ * keine passende Ressource gibt.
++ */
++struct lio_resource* lio_usp_get_resource(lio_usp_resource_t id)
++{
++    return tree_search(resource_tree, id);
++}
++
++
++/** Gibt die Userspace-ID der Ressource wieder frei */
++void lio_usp_remove_resource(struct lio_resource* res)
++{
++    tree_remove(resource_tree, res);
++}
++
++/** Weist einem Stream eine Userspace-ID zu */
++struct lio_usp_stream* lio_usp_add_stream(pm_process_t* proc,
++    struct lio_stream* stream)
++{
++    struct lio_usp_stream* entry = malloc(sizeof(*entry));
++
++    entry-&gt;stream = stream;
++    entry-&gt;usp_id = new_streamid();
++
++    tree_insert(proc-&gt;lio_streams, entry);
++    return entry;
++}
++
++/**
++ * Gibt den zur Userspace-ID gehörenden Stream zurück, oder NULL wenn es
++ * keinen passenden Stream gibt.
++ */
++struct lio_usp_stream* lio_usp_get_stream(pm_process_t* proc,
++    lio_usp_stream_t id)
++{
++    return tree_search(proc-&gt;lio_streams, id);
++}
++
++/** Gibt die Userspace-ID des Streams wieder frei */
++void lio_usp_remove_stream(pm_process_t* proc, struct lio_usp_stream* stream)
++{
++    tree_remove(proc-&gt;lio_streams, stream);
++    free(stream);
++}
++
++/** Weist einem Verzeichnisbaum eine Userspace-ID zu */
++void lio_usp_add_tree(struct lio_tree* tree)
++{
++    tree-&gt;usp_id = new_treeid();
++    tree_insert(tree_tree, tree);
++}
++
++/**  Gibt die Userspace-ID des Verzeichnisbaums wieder frei */
++void lio_usp_remove_tree(struct lio_tree* tree)
++{
++    tree_remove(tree_tree, tree);
++}
++
++/**
++ * Gibt den zur Userspace-ID gehörenden Verzeichnisbaum zurück, oder NULL
++ * wenn es keinen passenden Verzeichnisbaum gibt.
++ */
++struct lio_tree* lio_usp_get_tree(lio_usp_tree_t id)
++{
++    return tree_search(tree_tree, id);
++}
++
++/**
++ * Gitb die Userspace-ID zu einer gegebenen Ressource zurück.
++ */
++lio_usp_resource_t lio_usp_get_id(struct lio_resource* res)
++{
++    return res-&gt;usp_id;
++}
+diff --git a/src/kernel2/src/tasks/pm.c b/src/kernel2/src/tasks/pm.c
+index 846323a..047c4d5 100644
+--- a/src/kernel2/src/tasks/pm.c
++++ b/src/kernel2/src/tasks/pm.c
+@@ -44,6 +44,8 @@
+ #include &quot;tasks.h&quot;
+ #include &quot;lock.h&quot;
+ #include &quot;timer.h&quot;
++#include &quot;lostio/core.h&quot;
++#include &quot;lostio/userspace.h&quot;
+ 
+ 
+ struct on_destroy_info {
+@@ -166,6 +168,10 @@ pm_process_t* pm_create(pm_process_t* parent, const char* cmdline)
+     process-&gt;rpc_handler = NULL;
+     process-&gt;rpcs = list_create();
+ 
++    // Dateiliste initialisieren
++    process-&gt;lio_streams =
++        tree_create(struct lio_usp_stream, usp_item, usp_id);
++
+     list_push(process_list, process);
+ 
+     process-&gt;memory_used = 0;
+-- 
+1.6.0.2
+
+</PRE>
+
+
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002319.html">[tyndur-devel] [PATCH v2 0/6] kernel2: LIOv2-Grundlagen
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002321.html">[tyndur-devel] [PATCH v2 2/6] kernel2: Zentrale	LIOv2-Clientfunktionen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2320">[ Datum ]</a>
+              <a href="thread.html#2320">[ Thema ]</a>
+              <a href="subject.html#2320">[ Betreff (Subject)]</a>
+              <a href="author.html#2320">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

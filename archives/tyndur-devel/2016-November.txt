@@ -1,0 +1,433 @@
+From kevin at tyndur.org  Sun Nov  6 00:40:34 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  6 Nov 2016 00:40:34 +0100
+Subject: [PATCH 0/4] LIO-Fixes fÃ¼r git
+Message-ID: <1478389238-7842-1-git-send-email-kevin@tyndur.org>
+
+Diese Serie fixt ein paar Regressionen, so dass anschließend git wieder so ein
+bisschen auf tyndur funktioniert (so wie es halt früher schon einmal getan
+hat). Interessanterweise gehören zu den Sachen, die ein 'git init' braucht,
+dass ein Verzeichnis zweimal anlegen errno=EEXIST gibt.
+
+Der erste Patch ist zusätzlich drin, weil Verzeichnisse, die man git
+tatsächlich doppelt anlegen lässt, hinterher nicht mehr löschbar waren, sondern
+einen Pagefault produziert haben.
+
+Kevin Wolf (4):
+  LostIOv2: Knoten beim unlink aus Liste löschen
+  libc: errno für mkdir() setzen
+  kernel2: get_node_in_dir() raussplitten
+  kernel2: Fehlercodes zurückgeben in lio_mkfile/dir/symlink
+
+ src/kernel2/include/lostio/client.h  | 10 +++--
+ src/kernel2/src/lostio/client.c      | 86 +++++++++++++++++++++++++-----------
+ src/kernel2/src/lostio/modules/tmp.c |  3 +-
+ src/kernel2/src/syscalls/lostio.c    | 21 +++++----
+ src/modules/lib/lostio/lio_server.c  | 13 +++++-
+ src/modules/lib/stdlibc/directory.c  |  9 +++-
+ 6 files changed, 99 insertions(+), 43 deletions(-)
+
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Sun Nov  6 00:40:35 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  6 Nov 2016 00:40:35 +0100
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH_1/4=5D_LostIOv2=3A_Knoten_beim_?=
+	=?utf-8?q?unlink_aus_Liste_l=C3=B6schen?=
+In-Reply-To: <1478389238-7842-1-git-send-email-kevin@tyndur.org>
+References: <1478389238-7842-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1478389238-7842-2-git-send-email-kevin@tyndur.org>
+
+! LostIOv2: Wenn Userspace-Services einen Knoten gelöscht haben, dann
+  wurde der zwar beim Kernel abgemeldet und der Speicher freigegeben,
+  aber er wurde nicht aus der Userspace-Liste der Verzeichniseinträge
+  gelöscht. Über kurz oder lang gibt das Rot.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/lib/lostio/lio_server.c | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/src/modules/lib/lostio/lio_server.c b/src/modules/lib/lostio/lio_server.c
+index 2f3825d..e90e3f7 100644
+--- a/src/modules/lib/lostio/lio_server.c
++++ b/src/modules/lib/lostio/lio_server.c
+@@ -527,5 +527,16 @@ struct lio_node* lio_resource_get_child(struct lio_resource* parent,
+ void lio_resource_remove_child(struct lio_resource* parent,
+     struct lio_node* child)
+ {
+-    lio_srv_node_remove(parent->server.id, child->name);
++    struct lio_node* node;
++    size_t i;
++
++    for (i = 0; (node = list_get_element_at(parent->children, i)); i++) {
++        if (node == child) {
++            list_remove(parent->children, i);
++            lio_srv_node_remove(parent->server.id, child->name);
++            return;
++        }
++    }
++
++    abort();
+ }
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Sun Nov  6 00:40:36 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  6 Nov 2016 00:40:36 +0100
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH_2/4=5D_libc=3A_errno_f=C3=BCr_m?=
+	=?utf-8?q?kdir=28=29_setzen?=
+In-Reply-To: <1478389238-7842-1-git-send-email-kevin@tyndur.org>
+References: <1478389238-7842-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1478389238-7842-3-git-send-email-kevin@tyndur.org>
+
+! libc: Zumindest für LIOv2 bekommen wir einen Fehlercode vom Kernel
+  zurück, den könnten wir dann eigentlich auch nach errno schreiben.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/modules/lib/stdlibc/directory.c | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/src/modules/lib/stdlibc/directory.c b/src/modules/lib/stdlibc/directory.c
+index e8519a7..75861fd 100644
+--- a/src/modules/lib/stdlibc/directory.c
++++ b/src/modules/lib/stdlibc/directory.c
+@@ -33,6 +33,7 @@
+ #include "dir.h"
+ #include <string.h>
+ #include <lostio.h>
++#include <errno.h>
+ 
+ static struct dir_handle* new_opendir(const char* path)
+ {
+@@ -173,10 +174,14 @@ static bool new_directory_create(const char* path)
+     char* dir = io_split_dirname(abs);
+     char* file = io_split_filename(abs);
+     bool result = false;
+-    lio_resource_t parent;
++    lio_resource_t parent, ret;
+ 
+     if ((parent = lio_resource(dir, 1)) >= 0) {
+-        result = (lio_mkdir(parent, file) >= 0);
++        ret = lio_mkdir(parent, file);
++        result = (ret >= 0);
++        if (!result) {
++            errno = -ret;
++        }
+     }
+ 
+     free(dir);
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Sun Nov  6 00:40:37 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  6 Nov 2016 00:40:37 +0100
+Subject: [tyndur-devel] [PATCH 3/4] kernel2: get_node_in_dir() raussplitten
+In-Reply-To: <1478389238-7842-1-git-send-email-kevin@tyndur.org>
+References: <1478389238-7842-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1478389238-7842-4-git-send-email-kevin@tyndur.org>
+
+* kernel2: get_node_in_dir() ist der Teil von lio_get_resource(), der in
+  einer gegebenen Verzeichnis-Ressource nach einem Eintrag sucht. Das
+  ist auch in anderen Zusammenhängen nützlich.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/src/lostio/client.c | 47 +++++++++++++++++++++++++++--------------
+ 1 file changed, 31 insertions(+), 16 deletions(-)
+
+diff --git a/src/kernel2/src/lostio/client.c b/src/kernel2/src/lostio/client.c
+index 8f3bcd1..770b675 100644
+--- a/src/kernel2/src/lostio/client.c
++++ b/src/kernel2/src/lostio/client.c
+@@ -114,6 +114,32 @@ static struct lio_resource* resolve_symlink(struct lio_resource* link,
+     return lio_do_get_resource(buf, 1, depth + 1);
+ }
+ 
++static int get_node_in_dir(struct lio_resource* dir, const char* name,
++                           struct lio_node** node)
++{
++    struct lio_node* n;
++    int ret;
++    int i;
++
++    // Falls die Liste der Kinder nicht geladen ist, nachholen
++    if (dir->children == NULL) {
++        ret = dir->tree->service->lio_ops.load_children(dir);
++        if (ret < 0) {
++            return ret;
++        }
++    }
++
++    // Passendes Kind raussuchen
++    for (i = 0; (n = list_get_element_at(dir->children, i)); i++) {
++        if (strcmp(n->name, name) == 0) {
++            *node = n;
++            return 0;
++        }
++    }
++
++    return -ENOENT;
++}
++
+ struct lio_resource* lio_do_get_resource(const char* path, int follow_symlinks,
+                                          int depth)
+ {
+@@ -124,7 +150,7 @@ struct lio_resource* lio_do_get_resource(const char* path, int follow_symlinks,
+     char* tokenize_path;
+     char* name;
+     char* old_name = NULL;
+-    int i;
++    int ret;
+ 
+     // Passenden Baum raussuchen
+     tree = lio_get_tree(path, &rel_path, depth);
+@@ -160,24 +186,13 @@ struct lio_resource* lio_do_get_resource(const char* path, int follow_symlinks,
+             goto out;
+         }
+ 
+-        // Falls die Liste der Kinder nicht geladen ist, nachholen
+-        if (res->children == NULL) {
+-            if (tree->service->lio_ops.load_children(res)) {
+-                res = NULL;
+-                goto out;
+-            }
+-        }
+-
+         // Passendes Kind raussuchen
+-        for (i = 0; (node = list_get_element_at(res->children, i)); i++) {
+-            if (strcmp(node->name, name) == 0) {
+-                goto found;
+-            }
++        ret = get_node_in_dir(res, name, &node);
++        if (ret < 0) {
++            res = NULL;
++            goto out;
+         }
+-        res = NULL;
+-        goto out;
+ 
+-found:
+         // Passender Kindknoten wurde gefunden, weiter im Pfad
+         old_name = name;
+         name = strtok_r(NULL, "/", &saveptr);
+-- 
+2.1.4
+
+
+From kevin at tyndur.org  Sun Nov  6 00:40:38 2016
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun,  6 Nov 2016 00:40:38 +0100
+Subject: [tyndur-devel] =?utf-8?q?=5BPATCH_4/4=5D_kernel2=3A_Fehlercodes_z?=
+	=?utf-8?q?ur=C3=BCckgeben_in_lio=5Fmkfile/dir/symlink?=
+In-Reply-To: <1478389238-7842-1-git-send-email-kevin@tyndur.org>
+References: <1478389238-7842-1-git-send-email-kevin@tyndur.org>
+Message-ID: <1478389238-7842-5-git-send-email-kevin@tyndur.org>
+
+* kernel2: lio_mkfile/dir/symlink können jetzt einen Fehlercode
+  zurückgeben statt nur NULL (woraus immer -EIO wurde)
+
++ kernel2: EEXIST zurückgeben, wenn lio_mkfile/dir/symlink mit einem
+  Dateinamen aufgerufen wird, den es im Verzeichnis schon gibt
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ src/kernel2/include/lostio/client.h  | 10 +++++----
+ src/kernel2/src/lostio/client.c      | 41 ++++++++++++++++++++++++++----------
+ src/kernel2/src/lostio/modules/tmp.c |  3 ++-
+ src/kernel2/src/syscalls/lostio.c    | 21 ++++++++++--------
+ 4 files changed, 50 insertions(+), 25 deletions(-)
+
+diff --git a/src/kernel2/include/lostio/client.h b/src/kernel2/include/lostio/client.h
+index 8880e62..12bfb09 100644
+--- a/src/kernel2/include/lostio/client.h
++++ b/src/kernel2/include/lostio/client.h
+@@ -172,14 +172,16 @@ ssize_t lio_read_dir(struct lio_resource* dir, size_t start, size_t num,
+     struct lio_dir_entry* buf);
+ 
+ /** Erstellt eine neue Datei */
+-struct lio_resource* lio_mkfile(struct lio_resource* parent, const char* name);
++int lio_mkfile(struct lio_resource* parent, const char* name,
++               struct lio_resource** res);
+ 
+ /** Erstellt ein neues Verzeichnis */
+-struct lio_resource* lio_mkdir(struct lio_resource* parent, const char* name);
++int lio_mkdir(struct lio_resource* parent, const char* name,
++               struct lio_resource** res);
+ 
+ /** Erstellt einen neuen Symlink */
+-struct lio_resource* lio_mksymlink(struct lio_resource* parent,
+-    const char* name, const char* target);
++int lio_mksymlink(struct lio_resource* parent, const char* name,
++                  const char* target, struct lio_resource** res);
+ 
+ /**
+  * Gibt Informationen zu einer Ressource zurueck
+diff --git a/src/kernel2/src/lostio/client.c b/src/kernel2/src/lostio/client.c
+index 770b675..015516e 100644
+--- a/src/kernel2/src/lostio/client.c
++++ b/src/kernel2/src/lostio/client.c
+@@ -132,7 +132,9 @@ static int get_node_in_dir(struct lio_resource* dir, const char* name,
+     // Passendes Kind raussuchen
+     for (i = 0; (n = list_get_element_at(dir->children, i)); i++) {
+         if (strcmp(n->name, name) == 0) {
+-            *node = n;
++            if (node) {
++                *node = n;
++            }
+             return 0;
+         }
+     }
+@@ -708,34 +710,51 @@ ssize_t lio_read_dir(struct lio_resource* dir, size_t start, size_t num,
+ }
+ 
+ /** Erstellt eine neue Datei */
+-struct lio_resource* lio_mkfile(struct lio_resource* parent, const char* name)
++int lio_mkfile(struct lio_resource* parent, const char* name,
++               struct lio_resource** res)
+ {
+     if (!parent->tree->service->lio_ops.make_file || !parent->changeable) {
+-        return NULL;
++        return -EACCES;
+     }
+ 
+-    return parent->tree->service->lio_ops.make_file(parent, name);
++    if (get_node_in_dir(parent, name, NULL) == 0) {
++        return -EEXIST;
++    }
++
++    *res = parent->tree->service->lio_ops.make_file(parent, name);
++    return *res ? 0 : -EIO;
+ }
+ 
+ /** Erstellt ein neues Verzeichnis */
+-struct lio_resource* lio_mkdir(struct lio_resource* parent, const char* name)
++int lio_mkdir(struct lio_resource* parent, const char* name,
++               struct lio_resource** res)
+ {
+     if (!parent->tree->service->lio_ops.make_dir || !parent->changeable) {
+-        return NULL;
++        return -EACCES;
+     }
+ 
+-    return parent->tree->service->lio_ops.make_dir(parent, name);
++    if (get_node_in_dir(parent, name, NULL) == 0) {
++        return -EEXIST;
++    }
++
++    *res = parent->tree->service->lio_ops.make_dir(parent, name);
++    return *res ? 0 : -EIO;
+ }
+ 
+ /** Erstellt einen neuen Symlink */
+-struct lio_resource* lio_mksymlink(struct lio_resource* parent,
+-    const char* name, const char* target)
++int lio_mksymlink(struct lio_resource* parent, const char* name,
++                  const char* target, struct lio_resource** res)
+ {
+     if (!parent->tree->service->lio_ops.make_symlink || !parent->changeable) {
+-        return NULL;
++        return -EACCES;
++    }
++
++    if (get_node_in_dir(parent, name, NULL) == 0) {
++        return -EEXIST;
+     }
+ 
+-    return parent->tree->service->lio_ops.make_symlink(parent, name, target);
++    *res = parent->tree->service->lio_ops.make_symlink(parent, name, target);
++    return *res ? 0 : -EIO;
+ }
+ 
+ /**
+diff --git a/src/kernel2/src/lostio/modules/tmp.c b/src/kernel2/src/lostio/modules/tmp.c
+index 9c22911..5919ad5 100644
+--- a/src/kernel2/src/lostio/modules/tmp.c
++++ b/src/kernel2/src/lostio/modules/tmp.c
+@@ -255,6 +255,7 @@ void lio_init_tmp(void)
+     lio_add_service(&dev_service);
+     dev_root = lio_get_resource("dev:/", false);
+     if (dev_root != NULL) {
+-        lio_mkdir(dev_root, "fs");
++        struct lio_resource* dev_fs_res;
++        lio_mkdir(dev_root, "fs", &dev_fs_res);
+     }
+ }
+diff --git a/src/kernel2/src/syscalls/lostio.c b/src/kernel2/src/syscalls/lostio.c
+index 47c2f8c..01d49c5 100644
+--- a/src/kernel2/src/syscalls/lostio.c
++++ b/src/kernel2/src/syscalls/lostio.c
+@@ -293,6 +293,7 @@ void syscall_lio_mkfile(lio_usp_resource_t* parent, const char* name,
+ {
+     struct lio_resource* parentres;
+     struct lio_resource* res;
++    int ret;
+ 
+     parentres = lio_usp_get_resource(*parent);
+     if (parentres == NULL) {
+@@ -307,9 +308,9 @@ void syscall_lio_mkfile(lio_usp_resource_t* parent, const char* name,
+     }
+ 
+     // TODO: is_userspace
+-    res = lio_mkfile(parentres, name);
+-    if (res == NULL) {
+-        *result = -EIO; // FIXME
++    ret = lio_mkfile(parentres, name, &res);
++    if (ret < 0) {
++        *result = ret;
+         return;
+     }
+ 
+@@ -322,6 +323,7 @@ void syscall_lio_mkdir(lio_usp_resource_t* parent, const char* name,
+ {
+     struct lio_resource* parentres;
+     struct lio_resource* res;
++    int ret;
+ 
+     parentres = lio_usp_get_resource(*parent);
+     if (parentres == NULL) {
+@@ -336,9 +338,9 @@ void syscall_lio_mkdir(lio_usp_resource_t* parent, const char* name,
+     }
+ 
+     // TODO: is_userspace
+-    res = lio_mkdir(parentres, name);
+-    if (res == NULL) {
+-        *result = -EIO; // FIXME
++    ret = lio_mkdir(parentres, name, &res);
++    if (ret < 0) {
++        *result = ret;
+         return;
+     }
+ 
+@@ -352,6 +354,7 @@ void syscall_lio_mksymlink(lio_usp_resource_t* parent, const char* name,
+ {
+     struct lio_resource* parentres;
+     struct lio_resource* res;
++    int ret;
+ 
+     parentres = lio_usp_get_resource(*parent);
+     if (parentres == NULL) {
+@@ -371,9 +374,9 @@ void syscall_lio_mksymlink(lio_usp_resource_t* parent, const char* name,
+         return;
+     }
+ 
+-    res = lio_mksymlink(parentres, name, target);
+-    if (res == NULL) {
+-        *result = -EIO; // FIXME
++    ret = lio_mksymlink(parentres, name, target, &res);
++    if (ret < 0) {
++        *result = ret;
+         return;
+     }
+     *result = lio_usp_get_id(res);
+-- 
+2.1.4
+
+

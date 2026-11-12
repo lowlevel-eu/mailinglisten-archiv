@@ -1,0 +1,192 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 2/2] libc: ELF-Loader fuer geteilte Pages	gefixt
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%202/2%5D%20libc%3A%20ELF-Loader%20fuer%20geteilte%20Pages%0A%09gefixt&In-Reply-To=%3C1275146217-13020-3-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001738.html">
+   <LINK REL="Next"  HREF="001737.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 2/2] libc: ELF-Loader fuer geteilte Pages	gefixt</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%202/2%5D%20libc%3A%20ELF-Loader%20fuer%20geteilte%20Pages%0A%09gefixt&In-Reply-To=%3C1275146217-13020-3-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 2/2] libc: ELF-Loader fuer geteilte Pages	gefixt">kevin at tyndur.org
+                  </A><BR>
+    <I>Sa Mai 29 17:16:57 CEST 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001738.html">[tyndur-devel] [PATCH 1/2] init: ELF-Loader aus der libc benutzen
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001737.html">[tyndur-devel] [PATCH 2/2] libc: ELF-Loader fuer geteilte Pages gefixt
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1736">[ Datum ]</a>
+              <a href="thread.html#1736">[ Thema ]</a>
+              <a href="subject.html#1736">[ Betreff (Subject) ]</a>
+              <a href="author.html#1736">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>! libc: Der ELF-Loader hatte bisher Probleme, wenn sich zwei Program
+  Header eine Page teilen, so dass einer von beiden gewinnt und der
+  andere genullten Speicher bekommt. Stattdessen den gesamten Speicher
+  auf einmal allozieren und nach getaner Arbeit alles auf einmal dem
+  Kindprozess uebertragen
+* user-i386.ld: Workaround aus dem Linkerskript entfernt
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/lib/bin_loader/elf32.c |   66 +++++++++++++++++++++++++++----------------
+ src/modules/user-i386.ld   |    4 --
+ 2 files changed, 41 insertions(+), 29 deletions(-)
+
+diff --git a/src/lib/bin_loader/elf32.c b/src/lib/bin_loader/elf32.c
+index 22b9487..cc9513d 100644
+--- a/src/lib/bin_loader/elf32.c
++++ b/src/lib/bin_loader/elf32.c
+@@ -63,53 +63,69 @@ bool loader_is_elf32(vaddr_t image_start, size_t image_size)
+ 
+ 
+ /**
+- * Laed ein ELF-32-Image
++ * Laedt ein ELF-32-Image
+  */
+-bool loader_elf32_load_image(pid_t process, vaddr_t image_start, size_t image_size)
++bool loader_elf32_load_image(pid_t process, vaddr_t image_start,
++    size_t image_size)
+ {
+ 
+     Elf32_Ehdr* elf_header = (Elf32_Ehdr*) image_start;
+-    
++
+     // Nur gueltige ELF-Images laden
+     if (elf_header-&gt;e_magic != ELF_MAGIC) {
+         return FALSE;
+     }
++
+     // Hauptthread erstellen
+     loader_create_thread(process, (vaddr_t) elf_header-&gt;e_entry);
+-    
++
+     // Pointer auf den ersten Program-Header, dieser wird von e_phnum weiteren
+     // PHs gefolgt
+     Elf32_Phdr* program_header = (Elf32_Phdr*) (((uintptr_t) elf_header) +
+         elf_header-&gt;e_phoff);
+-    
+-    // Jetzt werden die einzelnen Program-Header geladen
++
++    // Groesse des gesamten Zielspeichers bestimmen
++    uintptr_t min_addr = -1;
++    uintptr_t max_addr = 0;
++    size_t num_pages;
+     int i;
++
++    for (i = 0; i &lt; elf_header-&gt;e_phnum; i++) {
++        if (program_header[i].p_type != PT_LOAD) {
++            continue;
++        }
++        if (program_header[i].p_vaddr &lt; min_addr) {
++            min_addr = program_header[i].p_vaddr;
++        }
++        if (program_header[i].p_vaddr + program_header[i].p_memsz &gt; max_addr) {
++            max_addr = program_header[i].p_vaddr + program_header[i].p_memsz;
++        }
++    }
++
++    num_pages = (max_addr &gt;&gt; PAGE_SHIFT) - (min_addr &gt;&gt; PAGE_SHIFT) + 1;
++    min_addr &amp;= PAGE_MASK;
++
++    // Jetzt werden die einzelnen Program-Header geladen
++    uint8_t* src_mem = image_start;
++    uint8_t* child_mem = loader_allocate_mem(num_pages * PAGE_SIZE);
++    memset(child_mem, 0, num_pages * PAGE_SIZE);
++
+     for (i = 0; i &lt; elf_header-&gt;e_phnum; i++) {
+         // Nur ladbare PHs laden ;-)
+         if (program_header-&gt;p_type == PT_LOAD) {
+-            // Speicher allokieren, daten kopieren und anschliessend den
+-            // Beriech zwischen filesz und memsz mit Nullen auffuellen
+-            //
+-            // FIXME Das +1 koennte unter Umstaenden zu viel Speicher
+-            // reservieren und den naechsten Header schiefgehen lassen
+-            size_t page_count = NUM_PAGES(PAGE_ALIGN_ROUND_UP(
+-                program_header-&gt;p_memsz) + 1);
+-            vaddr_t mem_image = loader_allocate_mem(page_count * PAGE_SIZE);
+-            memcpy((vaddr_t) ((uintptr_t) mem_image + program_header-&gt;p_offset
+-                % PAGE_SIZE), (vaddr_t) ((uintptr_t) elf_header +
+-                program_header-&gt;p_offset), program_header-&gt;p_filesz);
+-            memset((vaddr_t) ((uintptr_t) mem_image + program_header-&gt;p_offset
+-                % PAGE_SIZE +  program_header-&gt;p_filesz), 0, program_header-&gt;
+-                p_memsz - program_header-&gt;p_filesz);
+-            // Den geladenen Speicher in den Adressraum des Prozesses
+-            // verschieben
+-            loader_assign_mem(process, (vaddr_t) PAGE_ALIGN_ROUND_DOWN(
+-                program_header-&gt;p_vaddr),
+-                mem_image, page_count * PAGE_SIZE);
++            memcpy(
++                &amp;child_mem[program_header-&gt;p_vaddr - min_addr],
++                &amp;src_mem[program_header-&gt;p_offset],
++                program_header-&gt;p_filesz);
+         }
+         program_header++;
+     }
+ 
++    // Den geladenen Speicher in den Adressraum des Prozesses
++    // verschieben
++    loader_assign_mem(process, (void*) min_addr, child_mem,
++        num_pages * PAGE_SIZE);
++
+     return TRUE;
+ }
+ 
+diff --git a/src/modules/user-i386.ld b/src/modules/user-i386.ld
+index 14e21b0..4709d66 100644
+--- a/src/modules/user-i386.ld
++++ b/src/modules/user-i386.ld
+@@ -23,16 +23,12 @@ SECTIONS
+ 		*(.bss)
+ 	}
+ 
+-    /* FIXME Alignment ist Workaround fuer kaputten ELF-Loader in init */
+-    . = ALIGN(4096);
+     __ctor_start__ = .;
+     .ctors : AT(ADDR(.ctors)) {
+         *(.ctors)
+     }
+     __ctor_end__ = .;
+ 
+-    /* FIXME Alignment ist Workaround fuer kaputten ELF-Loader in init */
+-    . = ALIGN(4096);
+     __dtor_start__ = .;
+     .dtors : {
+         *(.dtors)
+-- 
+1.6.0.2
+
+</PRE>
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001738.html">[tyndur-devel] [PATCH 1/2] init: ELF-Loader aus der libc benutzen
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001737.html">[tyndur-devel] [PATCH 2/2] libc: ELF-Loader fuer geteilte Pages gefixt
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1736">[ Datum ]</a>
+              <a href="thread.html#1736">[ Thema ]</a>
+              <a href="subject.html#1736">[ Betreff (Subject)]</a>
+              <a href="author.html#1736">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

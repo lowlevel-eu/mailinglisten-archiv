@@ -1,0 +1,1148 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH] OHCI
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%5D%20OHCI&In-Reply-To=%3C1260389417-12012-1-git-send-email-max%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000055.html">
+   <LINK REL="Next"  HREF="000057.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH] OHCI</H1>
+    <B>max at tyndur.org</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%5D%20OHCI&In-Reply-To=%3C1260389417-12012-1-git-send-email-max%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH] OHCI">max at tyndur.org
+       </A><BR>
+    <I>Wed Dec  9 21:10:17 CET 2009</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000055.html">[cdi-devel] [PATCH] UHCI
+</A></li>
+        <LI>Next message: <A HREF="000057.html">[cdi-devel] [PATCH] USB mass storage device driver
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#56">[ date ]</a>
+              <a href="thread.html#56">[ thread ]</a>
+              <a href="subject.html#56">[ subject ]</a>
+              <a href="author.html#56">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>From: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+
++ Added OHCI driver based on CDI.usb-hcd
+
+Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+---
+ ohci/hcd.c                   |  315 ++++++++++++++++++++++++++++++++++++++++++
+ ohci/include/ohci-hcd.h      |   17 +++
+ ohci/include/ohci-init.h     |   31 ++++
+ ohci/include/ohci-transfer.h |    8 +
+ ohci/include/ohci.h          |  283 +++++++++++++++++++++++++++++++++++++
+ ohci/init.c                  |  241 ++++++++++++++++++++++++++++++++
+ ohci/main.c                  |   34 +++++
+ ohci/transfer.c              |   84 +++++++++++
+ 8 files changed, 1013 insertions(+), 0 deletions(-)
+ create mode 100644 ohci/hcd.c
+ create mode 100644 ohci/include/ohci-hcd.h
+ create mode 100644 ohci/include/ohci-init.h
+ create mode 100644 ohci/include/ohci-transfer.h
+ create mode 100644 ohci/include/ohci.h
+ create mode 100644 ohci/init.c
+ create mode 100644 ohci/main.c
+ create mode 100644 ohci/transfer.c
+
+diff --git a/ohci/hcd.c b/ohci/hcd.c
+new file mode 100644
+index 0000000..8296ba9
+--- /dev/null
++++ b/ohci/hcd.c
+@@ -0,0 +1,315 @@
++/*****************************************************************************
++* Copyright (c) 2009 Max Reitz                                               *
++*                                                                            *
++* Permission is hereby granted,  free of charge,  to any  person obtaining a *
++* copy of this software and associated documentation files (the &quot;Software&quot;), *
++* to deal in the Software without restriction,  including without limitation *
++* the rights to use,  copy, modify, merge, publish,  distribute, sublicense, *
++* and/or sell copies  of the  Software,  and to permit  persons to whom  the *
++* Software is furnished to do so, subject to the following conditions:       *
++*                                                                            *
++* The above copyright notice and this permission notice shall be included in *
++* all copies or substantial portions of the Software.                        *
++*                                                                            *
++* THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++* IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF MERCHANTABILITY, *
++* FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT SHALL *
++* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++* LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++* FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++* DEALINGS IN THE SOFTWARE.                                                  *
++*****************************************************************************/
++
++#include &lt;stdlib.h&gt;
++#include &lt;string.h&gt;
++
++#include &lt;cdi/io.h&gt;
++#include &lt;cdi/lists.h&gt;
++#include &lt;cdi/mempool.h&gt;
++#include &lt;cdi/usb.h&gt;
++#include &lt;cdi/usb-hcd.h&gt;
++
++#include &quot;ohci.h&quot;
++#include &quot;ohci-hcd.h&quot;
++
++static void reset_device(struct cdi_usb_device *device);
++
++static void find_devices(struct cdi_usb_hc *device)
++{
++    struct ohci *ohci = (struct ohci *)device;
++    struct cdi_usb_device *dev;
++    int i;
++
++    d0printf(&quot;Scanning root ports\n&quot;);
++    for (i = 0; i &lt; ohci-&gt;root_ports; i++) {
++        if (!(ohci-&gt;memory-&gt;hc_rh_port_status[i] &amp; OHC_RP_CCS)) {
++            continue;
++        }
++        dev = malloc(sizeof(struct cdi_usb_device));
++        dev-&gt;hc = device;
++        dev-&gt;id = 0;
++        dev-&gt;port = i;
++        dev-&gt;speed = (ohci-&gt;memory-&gt;hc_rh_port_status[i] &amp; OHC_RP_LSDA) ?
++            CDI_USB_LOW_SPEED : CDI_USB_FULL_SPEED;
++        dev-&gt;reset = &amp;reset_device;
++        cdi_usb_device_init(dev);
++    }
++}
++
++static void activate_device(struct cdi_usb_device *device)
++{
++    struct ohci *ohci = (struct ohci *)device-&gt;hc;
++
++    if (device-&gt;hub != NULL) {
++        return;
++    }
++
++    d1printf(&quot;Activating device on port %i.\n&quot;, device-&gt;port);
++    ohci-&gt;memory-&gt;hc_rh_port_status[device-&gt;port] |= OHC_RP_PES;
++    cdi_sleep_ms(20);
++}
++
++static void reset_device(struct cdi_usb_device *device)
++{
++    struct ohci *ohci = (struct ohci *)device-&gt;hc;
++
++    if (device-&gt;hub != NULL) {
++        return;
++    }
++
++    d1printf(&quot;Resetting device on port %i.\n&quot;, device-&gt;port);
++    ohci-&gt;memory-&gt;hc_rh_port_status[device-&gt;port] |= OHC_RP_PRS;
++    cdi_sleep_ms(20);
++}
++
++static void add_pipe(struct cdi_usb_pipe *pipe)
++{
++    struct ohci *ohci = (struct ohci *)pipe-&gt;device-&gt;hc;
++    struct ohci_ed *ved;
++    uintptr_t ped;
++    struct ohci_ed_desc *dsc;
++    //TODO Mehr als Control und Bulk
++    int iscontrol = 0;
++
++    if (mempool_get(ohci-&gt;ed_pool, (void **)&amp;ved, &amp;ped) == -1) {
++        return;
++    }
++    ved-&gt;function = pipe-&gt;device-&gt;id;
++    ved-&gt;endpoint = pipe-&gt;endpoint-&gt;endpoint_address;
++    if (ved-&gt;endpoint == 0) {
++        //EP0
++        ved-&gt;direction = OHC_ED_DIR_TD;
++        iscontrol = 1;
++    } else if (pipe-&gt;endpoint-&gt;endpoint_address &amp; 0x80) {
++        ved-&gt;direction = OHC_ED_DIR_IN;
++    } else {
++        ved-&gt;direction = OHC_ED_DIR_OUT;
++    }
++    ved-&gt;low_speed = !!(pipe-&gt;device-&gt;speed == CDI_USB_LOW_SPEED);
++    ved-&gt;skip = 0;
++    ved-&gt;format = 0;
++    ved-&gt;mps = pipe-&gt;endpoint-&gt;max_packet_size;
++    ved-&gt;td_queue_tail = 0;
++    ved-&gt;td_queue_head = 0;
++    dsc = cdi_list_get(ohci-&gt;ed_list, 0);
++    if (dsc == NULL) {
++        ved-&gt;next_ed = 0;
++    } else {
++        ved-&gt;next_ed = dsc-&gt;phys;
++    }
++    dsc = malloc(sizeof(*dsc));
++    if (dsc == NULL) {
++        mempool_put(ohci-&gt;ed_pool, ved);
++        return;
++    }
++    dsc-&gt;virt = ved;
++    dsc-&gt;phys = ped;
++    dsc-&gt;function = pipe-&gt;device-&gt;id;
++    dsc-&gt;endpoint = pipe-&gt;endpoint-&gt;endpoint_address;
++    dsc-&gt;type = iscontrol ? USB_CONTROL : USB_BULK;
++    dsc-&gt;transfers = cdi_list_create();
++    cdi_list_push(ohci-&gt;ed_list, dsc);
++
++    if (iscontrol) {
++        ohci-&gt;memory-&gt;hc_control_head_ed = ped;
++    } else {
++        ohci-&gt;memory-&gt;hc_bulk_head_ed = ped;
++    }
++}
++
++static inline int _tsl(volatile int *variable)
++{
++    int rval;
++    rval = *variable;
++    *variable = 1;
++    return rval;
++}
++
++static volatile int locked = 0;
++
++static cdi_usb_status_t do_packets(struct cdi_usb_packet *packets,
++    size_t num_packets)
++{
++    struct ohci_ed_desc *edsc;
++    struct ohci_td_desc *tdsc, *otdsc;
++    int i, j, cond, toggle, done_packets;
++    struct ohci *ohci = (struct ohci *)packets[0].pipe-&gt;device-&gt;hc;
++    struct ohci_td *vtd[num_packets];
++    uintptr_t ptd[num_packets];
++
++    for (i = 0; (edsc = cdi_list_get(ohci-&gt;ed_list, i)) != NULL; i++) {
++        if ((edsc-&gt;function == packets[0].pipe-&gt;device-&gt;id) &amp;&amp;
++             (edsc-&gt;endpoint == packets[0].pipe-&gt;endpoint-&gt;endpoint_address))
++        {
++            break;
++        }
++    }
++    if (edsc == NULL) {
++        return CDI_USB_TIMEOUT; //Genau das w&#195;&#188;rde passieren
++    }
++
++    toggle = packets[0].pipe-&gt;data_toggle;
++    for (i = 0; i &lt; (int)num_packets; i++) {
++        if (mempool_get(ohci-&gt;transfer_pool, (void **)&amp;vtd[i], &amp;ptd[i]) == -1)
++        {
++            return CDI_USB_TRIVIAL_ERROR;
++        }
++        if ((packets[i].data != NULL) &amp;&amp;
++            (packets[i].type != CDI_USB_PACKET_IN))
++        {
++            memcpy((void *)((uintptr_t)vtd[i] + sizeof(struct ohci_td)),
++                    packets[i].data, packets[i].length);
++        }
++        vtd[i]-&gt;rounding = 1; //Warum nicht
++        switch (packets[i].type) {
++            case CDI_USB_PACKET_SETUP:
++                vtd[i]-&gt;direction = OHC_TD_DIR_SETUP;
++                break;
++            case CDI_USB_PACKET_IN:
++                vtd[i]-&gt;direction = OHC_TD_DIR_IN;
++                break;
++            case CDI_USB_PACKET_OUT:
++                vtd[i]-&gt;direction = OHC_TD_DIR_OUT;
++                break;
++                default: //Hm, passt nicht ganz
++                    for (j = 0; j &lt;= i; j++) {
++                        mempool_put(ohci-&gt;transfer_pool, vtd[j]);
++                    }
++                    return CDI_USB_TRIVIAL_ERROR;
++        }
++        vtd[i]-&gt;di = 0;
++        if (packets[i].use_toggle == TOGGLE_0) {
++            toggle = 0;
++        } else if (packets[i].use_toggle == TOGGLE_1) {
++            toggle = 1;
++        }
++        vtd[i]-&gt;toggle = 0x2 | toggle;
++        toggle ^= 1;
++        vtd[i]-&gt;error = 0;
++        vtd[i]-&gt;condition = 15;
++        if ((packets[i].data == NULL) || !packets[i].length) {
++            vtd[i]-&gt;current_buffer_pointer = 0;
++            vtd[i]-&gt;buffer_end = 0;
++        } else {
++            vtd[i]-&gt;current_buffer_pointer = ptd[i] + sizeof(struct ohci_td);
++            vtd[i]-&gt;buffer_end = ptd[i] +
++                    sizeof(struct ohci_td) + packets[i].length - 1;
++        }
++        vtd[i]-&gt;next_td = 0;
++        tdsc = malloc(sizeof(*tdsc));
++        if (tdsc == NULL) {
++            for (j = 0; j &lt;= i; j++) {
++                mempool_put(ohci-&gt;transfer_pool, vtd[j]);
++            }
++            return CDI_USB_TRIVIAL_ERROR;
++        }
++        tdsc-&gt;virt = vtd[i];
++        tdsc-&gt;phys = ptd[i];
++        tdsc-&gt;endpoint = edsc;
++
++        if (cdi_list_size(edsc-&gt;transfers)) {
++            otdsc = cdi_list_get(edsc-&gt;transfers, 0);
++            otdsc-&gt;virt-&gt;next_td = ptd[i];
++        }
++        if (!edsc-&gt;virt-&gt;td_queue_head) {
++            edsc-&gt;virt-&gt;td_queue_head = ptd[i];
++        }
++
++        cdi_list_push(edsc-&gt;transfers, tdsc);
++    }
++    packets[0].pipe-&gt;data_toggle = toggle;
++    if (edsc-&gt;type == USB_CONTROL) {
++        ohci-&gt;memory-&gt;hc_command_status |= OHC_CMST_CLF;
++    } else if (edsc-&gt;type == USB_BULK) {
++        ohci-&gt;memory-&gt;hc_command_status |= OHC_CMST_BLF;
++    }
++    done_packets = 0;
++    cond = CDI_USB_NO_ERROR;
++    while (done_packets &lt; (int)num_packets) {
++        cdi_sleep_ms(1);
++        for (i = 0; i &lt; (int)num_packets; i++) {
++            if (vtd[i]-&gt;condition != 15) {
++                done_packets++;
++                switch (vtd[i]-&gt;condition) {
++                    case 0x00:
++                        packets[i].condition = CDI_USB_NO_ERROR;
++                        break;
++                    case 0x02:
++                        packets[i].condition = CDI_USB_BITSTUFF;
++                        break;
++                    case 0x04:
++                        packets[i].condition = CDI_USB_STALLED;
++                        for (j = 0; j &lt; (int)num_packets; j++) {
++                            //Allet, was nicht fertig ist, ist STALLed
++                            vtd[j]-&gt;condition = 0x04;
++                        }
++                        break;
++                    case 0x05:
++                        packets[i].condition = CDI_USB_TIMEOUT;
++                        break;
++                    case 0x08:
++                        packets[i].condition = CDI_USB_BABBLE;
++                        break;
++                    case 0x0C:
++                    case 0x0D:
++                        packets[i].condition = CDI_USB_BUFFER_ERROR;
++                        break;
++                    default:
++                        packets[i].condition = CDI_USB_CRC;
++                        break;
++                }
++                cond |= packets[i].condition;
++                vtd[i]-&gt;condition = 15; //Nicht nochmal &#195;&#188;berpr&#195;&#188;fen
++            }
++        }
++    }
++    for (i = 0; i &lt; (int)num_packets; i++) {
++        if ((packets[i].data != NULL) &amp;&amp;
++            (packets[i].type == CDI_USB_PACKET_IN))
++        {
++            memcpy(packets[i].data, (void *)((uintptr_t)vtd[i] +
++                    sizeof(struct ohci_td)), packets[i].length);
++        }
++        if (vtd[i]-&gt;next_td == 0) {
++            edsc-&gt;virt-&gt;td_queue_head = 0;
++        }
++        mempool_put(ohci-&gt;transfer_pool, vtd[i]);
++    }
++    if (cond &amp; CDI_USB_STALLED) {
++        //Transferliste f&#195;&#188;r diesen Endpoint leeren
++        edsc-&gt;virt-&gt;td_queue_head = 0;
++        while ((tdsc = cdi_list_pop(edsc-&gt;transfers)) != NULL) {
++            free(tdsc);
++        }
++        edsc-&gt;virt-&gt;td_queue_tail = 0; //Weitermachen
++    }
++    return cond;
++}
++
++
++const struct ohci_functions ohci_functions = {
++    .find_devices = &amp;find_devices,
++    .activate_device = &amp;activate_device,
++    .send_packets = &amp;do_packets,
++    .add_pipe = &amp;add_pipe
++};
+diff --git a/ohci/include/ohci-hcd.h b/ohci/include/ohci-hcd.h
+new file mode 100644
+index 0000000..162b357
+--- /dev/null
++++ b/ohci/include/ohci-hcd.h
+@@ -0,0 +1,17 @@
++#ifndef UHCI_CONTROL_H
++#define UHCI_CONTROL_H
++
++#include &lt;cdi/usb.h&gt;
++#include &lt;cdi/usb-hcd.h&gt;
++
++struct ohci_functions {
++    void (*find_devices)(struct cdi_usb_hc *device);
++    void (*activate_device)(struct cdi_usb_device *device);
++    cdi_usb_status_t (*send_packets)(struct cdi_usb_packet *packets,
++        size_t num_packets);
++    void (*add_pipe)(struct cdi_usb_pipe *pipe);
++};
++
++cdi_list_t ohci_find_devices(struct cdi_usb_hc *device);
++
++#endif
+diff --git a/ohci/include/ohci-init.h b/ohci/include/ohci-init.h
+new file mode 100644
+index 0000000..2f19d2c
+--- /dev/null
++++ b/ohci/include/ohci-init.h
+@@ -0,0 +1,31 @@
++/*****************************************************************************
++* Copyright (c) 2009 Max Reitz                                               *
++*                                                                            *
++* Permission is hereby granted,  free of charge,  to any  person obtaining a *
++* copy of this software and associated documentation files (the &quot;Software&quot;), *
++* to deal in the Software without restriction,  including without limitation *
++* the rights to use,  copy, modify, merge, publish,  distribute, sublicense, *
++* and/or sell copies  of the  Software,  and to permit  persons to whom  the *
++* Software is furnished to do so, subject to the following conditions:       *
++*                                                                            *
++* The above copyright notice and this permission notice shall be included in *
++* all copies or substantial portions of the Software.                        *
++*                                                                            *
++* THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++* IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF MERCHANTABILITY, *
++* FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT SHALL *
++* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++* LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++* FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++* DEALINGS IN THE SOFTWARE.                                                  *
++*****************************************************************************/
++
++#ifndef OHCI_INIT_H
++#define OHCI_INIT_H
++
++#include &quot;ohci.h&quot;
++
++void find_and_init_ohcis(void);
++void ohci_init(struct cdi_device *dev);
++
++#endif
+diff --git a/ohci/include/ohci-transfer.h b/ohci/include/ohci-transfer.h
+new file mode 100644
+index 0000000..06267e6
+--- /dev/null
++++ b/ohci/include/ohci-transfer.h
+@@ -0,0 +1,8 @@
++#ifndef USB_TRANSFER_H
++#define USB_TRANSFER_H
++
++#include &lt;cdi/misc.h&gt;
++
++void ohci_handler(struct cdi_device *cdi_hci);
++
++#endif
+diff --git a/ohci/include/ohci.h b/ohci/include/ohci.h
+new file mode 100644
+index 0000000..b06a280
+--- /dev/null
++++ b/ohci/include/ohci.h
+@@ -0,0 +1,283 @@
++/*****************************************************************************
++* Copyright (c) 2009 Max Reitz                                               *
++*                                                                            *
++* Permission is hereby granted,  free of charge,  to any  person obtaining a *
++* copy of this software and associated documentation files (the &quot;Software&quot;), *
++* to deal in the Software without restriction,  including without limitation *
++* the rights to use,  copy, modify, merge, publish,  distribute, sublicense, *
++* and/or sell copies  of the  Software,  and to permit  persons to whom  the *
++* Software is furnished to do so, subject to the following conditions:       *
++*                                                                            *
++* The above copyright notice and this permission notice shall be included in *
++* all copies or substantial portions of the Software.                        *
++*                                                                            *
++* THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++* IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF MERCHANTABILITY, *
++* FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT SHALL *
++* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++* LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++* FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++* DEALINGS IN THE SOFTWARE.                                                  *
++*****************************************************************************/
++
++#ifndef OHCI_H
++#define OHCI_H
++
++#include &lt;stdint.h&gt;
++#include &lt;stdio.h&gt;
++
++#include &lt;cdi/misc.h&gt;
++#include &lt;cdi/pci.h&gt;
++#include &lt;cdi/usb-hcd.h&gt;
++
++#include &quot;ohci.h&quot;
++
++
++//#define DEBUG
++
++#ifdef DEBUG
++#define d1printf(...) printf(&quot;[ohci] &quot; __VA_ARGS__)
++#define _d1printf(...) printf(__VA_ARGS__)
++#else
++#define d1printf(...)
++#define _d1printf(...)
++#endif
++
++#define d0printf(...) printf(&quot;[ohci] &quot; __VA_ARGS__)
++#define _d0printf(...) printf(__VA_ARGS__)
++
++
++#define OHC_USB_RESET       0x00000000
++#define OHC_USB_RESUME      0x00000040
++#define OHC_USB_OPERATIONAL 0x00000080
++#define OHC_USB_SUSPEND     0x000000C0
++
++#define OHC_CTRL_CBSR  0x00000003 //Verh&#195;&#164;ltnis zwischen Control und Bulk
++                                 //(cbsr+1 zu 1)
++#define OHC_CTRL_PLE   0x00000004 //Periodische Transfers aktivieren
++#define OHC_CTRL_IE    0x00000008 //Isochronous-Transfers aktivieren
++#define OHC_CTRL_CLE   0x00000010 //Control-Transfers aktivieren
++#define OHC_CTRL_BLE   0x00000020 //Bulk-Transfers aktivieren
++#define OHC_CTRL_HCFS  0x000000C0 //Status des HCs
++#define OHC_CTRL_IR    0x00000100 //Wenn gesetzt, dann werden IRQs zum SMB
++                                  //geleitet
++#define OHC_CTRL_RWC   0x00000200 //Remote wakeup unterset&#195;&#188;tzt
++#define OHC_CTRL_RW    0x00000400 //Remote wakeup aktivieren
++
++#define OHC_CMST_RESET 0x00000001 //Reset
++#define OHC_CMST_CLF   0x00000002 //Control list filled (muss gesetzt werden,
++                                  //wenn ein Eintrag zur Controlliste
++                                  //hinzugef&#195;&#188;gt wird)
++#define OHC_CMST_BLF   0x00000004 //Bulk list filled (muss gesetzt werden, wenn
++                                  //ein Eintrag zur Bulkliste hinzugef&#195;&#188;gt wird)
++#define OHC_CMST_OCR   0x00000008 //Ownership change request
++#define OHC_CMST_SOC   0x00030000 //Scheduling overrun count
++
++#define OHC_INT_SO     0x00000001 //Scheduling overrun
++#define OHC_INT_WDH    0x00000002 //Write back done head
++#define OHC_INT_SF     0x00000004 //Start of frame (wird bei SOF gesetzt)
++#define OHC_INT_RD     0x00000008 //Resume detected (wird bei einem von einem
++                                  //Ger&#195;&#164;t gesendeten Resume gesetzt)
++#define OHC_INT_UE     0x00000010 //Unrecoverable error (wird bei einem HC-
++                                  //Fehler gesetzt, der nichts mit USB zu tun 
++                                  //hat)
++#define OHC_INT_FNO    0x00000020 //Frame number overflow (wird gesetzt, wenn
++                                  //die Framenummer gr&#195;&#182;&#195;&#159;er als 32767 und
++                                  //umgebrochen wird)
++#define OHC_INT_RHSC   0x00000040 //Root hub status change (wird gesetzt, wenn
++                                  //sich irgendwas am Roothub ge&#195;&#164;ndert hat)
++#define OHC_INT_OC     0x40000000 //Ownership change
++#define OHC_INT_MIE    0x80000000 //(De-)Aktiviert Interrupts
++
++#define OHC_RHA_NDP    0x000000FF //Anzahl an Rootports (1 bis 15)
++#define OHC_RHA_PSM    0x00000100 //Gesetzt, wenn man die Stromzufuhr zu
++                                  //einzelnen Ports unabh&#195;&#164;ngig setzen kann
++#define OHC_RHA_NPS    0x00000200 //Gel&#195;&#182;scht, wenn man die Stromzufuhr zu
++                                  //einzelnen Ports unabh&#195;&#164;ngig setzen kann
++#define OHC_RHA_DT     0x00000400 //Immer 0, zeigt so an, dass der Roothub kein
++                                  //Compound device ist.
++#define OHC_RHA_OCPM   0x00000800 //Gesetzt, wenn &#195;&#156;berspannungen f&#195;&#188;r jeden Port
++                                  //einzeln gemeldet werden
++#define OHC_RHA_NOCP   0x00001000 //Gesetzt, wenn keine &#195;&#156;berspannungen erkannt
++                                  //bzw. verhindert werden k&#195;&#182;nnen
++#define OHC_RHA_POTPGT 0xFF000000 //Power on to power good time (potpgt * 2)
++
++#define OHC_RHS_LPS    0x00000001 //R: 0
++                                  //W: Strom abdrehen
++#define OHC_RHS_OCI    0x00000002 //R: Unspezifische &#195;&#156;berspannung
++#define OHC_RHS_DRWE   0x00008000 //R: Irgendwas mit Remote Wakeup Enable
++                                  //W: Das aktivieren
++#define OHC_RHS_LPSC   0x00010000 //R: 0
++                                  //W: Strom andrehen
++#define OHC_RHS_OCIC   0x00020000 //R: Bei &#195;&#132;nderungen von OCI gesetzt
++                                  //W: Feld l&#195;&#182;schen
++#define OHC_RHS_CRWE   0x80000000 //W: Remote Wakeup Enable deaktivieren
++
++#define OHC_RP_CCS     0x00000001 //R: Ger&#195;&#164;t angeschlossen
++                                  //W: Deaktiviert den Port
++#define OHC_RP_PES     0x00000002 //R: Port aktiviert
++                                  //W: Aktiviert den Port
++#define OHC_RP_PSS     0x00000004 //R: Port schl&#195;&#164;ft
++                                  //W: Schl&#195;&#164;fert den Port ein
++#define OHC_RP_POCI    0x00000008 //R: &#195;&#156;berspannung
++                                  //W: Port aufwecken
++#define OHC_RP_PRS     0x00000010 //R: Reset l&#195;&#164;uft
++                                  //W: Reset treiben
++#define OHC_RP_PPS     0x00000100 //R: Strom an
++                                  //W: Strom andrehen
++#define OHC_RP_LSDA    0x00000200 //R: Low-Speed-Ger&#195;&#164;t
++                                  //W: Strom abdrehen
++#define OHC_RP_CSC     0x00010000 //R: Ger&#195;&#164;t an- oder abgezogen
++                                  //W: Bit l&#195;&#182;schen
++#define OHC_RP_PESC    0x00020000 //R: Port (de-)aktiviert
++                                  //W: Bit l&#195;&#182;schen
++#define OHC_RP_PSSC    0x00040000 //R: Port wurde geweckt
++                                  //W: Bit l&#195;&#182;schen
++#define OHC_RP_OCIC    0x00080000 //R: &#195;&#156;berspannungsbit ver&#195;&#164;ndert
++                                  //W: Bit l&#195;&#182;schen
++#define OHC_RP_PRSC    0x00100000 //R: Reset beendet
++                                  //W: Bit l&#195;&#182;schen
++
++struct ohci_registers
++{
++    uint32_t hc_revision; //Revision
++    volatile uint32_t hc_control;
++    volatile uint32_t hc_command_status;
++    volatile uint32_t hc_interrupt_status;
++    volatile uint32_t hc_interrupt_enable;
++    volatile uint32_t hc_interrupt_disable;
++    uint32_t hc_hcca; //Adresse des HCCA
++    volatile uint32_t hc_period_current_ed; //Adresse des aktuellen
++                                           //Endpointdescriptors der
++                                           //periodischen Transfers
++    uint32_t hc_control_head_ed; //Adresse des ersten Endpointdescriptors der
++                                //Control-Transfers
++    volatile uint32_t hc_control_current_ed; //Adresse des aktuellen
++                                            //Endpointdescriptors der Control-
++                                            //Transfers
++    uint32_t hc_bulk_head_ed; //Adresse des ersten Endpointdescriptors der
++                             //Bulk-Transfers
++    volatile uint32_t hc_bulk_current_ed; //Adresse des aktuellen
++                                         //Endpointdescriptors der Bulk-
++                                         //Transfers
++    volatile uint32_t hc_done_head; //Adresse des zuletzt abgearbeiteten
++                                   //Transferdeskriptors, der der Done-Liste
++                                   //hinzugef&#195;&#188;gt wurde
++    uint32_t hc_fm_interval; //Gibt die L&#195;&#164;nge eines Frames und die maximale
++                            //Paketgr&#195;&#182;&#195;&#159;e an
++    volatile uint32_t hc_fm_remaining; //Verbleibende Takte des aktuellen
++                                       //Frames
++    volatile uint32_t hc_fm_number; //Nummer des aktuellen Frames
++    uint32_t hc_periodic_start; //10% von HcFmInterval, wenn HcFmInterval
++                                //diesen Wert erreicht, dann haben periodische
++                                //Transfers Vorrang
++    uint32_t hc_ls_threshold; //Besser nicht &#195;&#164;ndern
++    uint32_t hc_rh_descriptor_a;
++    uint32_t hc_rh_descriptor_b;
++    volatile uint32_t hc_rh_status;
++    volatile uint32_t hc_rh_port_status[];
++} __attribute__((packed));
++
++struct ohci_legsup
++{
++    uint32_t hce_control;
++    uint32_t hce_input;
++    uint32_t hce_output;
++    uint32_t hce_status;
++} __attribute__((packed));
++
++struct ohci_hcca
++{
++    uint32_t interrupt_table[32]; //Zeiger zu Interrupt-EDs
++    uint16_t frame_number; //Die Nummer des aktuellen Frames
++    uint16_t pad; //Wird auf 0 gesetzt, wenn frame_number neu geschrieben wird
++                 //(Ausrichten an DWord-Grenzen vermutlich)
++    uint32_t done_head;
++    uint8_t rsvd[116];
++} __attribute__((packed));
++
++struct ohci
++{
++    struct cdi_usb_hc cdidev;
++    struct cdi_pci_device *pcidev;
++
++    struct ohci_registers *memory;
++    struct ohci_legsup *legsup;
++    int root_ports;
++    struct ohci_hcca *hcca;
++
++    struct mempool *ed_pool;
++    struct mempool *transfer_pool;
++
++    cdi_list_t ed_list;
++};
++
++#define OHC_ED_DIR_TD  0 //Richtung im TD definiert
++#define OHC_ED_DIR_OUT 1
++#define OHC_ED_DIR_IN  2
++
++struct ohci_ed
++{
++    unsigned function : 7; //USB-Adresse des Ger&#195;&#164;ts
++    unsigned endpoint : 4; //Nummer des Endpoints
++    unsigned direction : 2; //Richtung des Transfers
++    unsigned low_speed : 1;
++    unsigned skip : 1;
++    unsigned format : 1; //Bei Isochronous gesetzt
++    unsigned mps : 11; //Maximale Paketgr&#195;&#182;&#195;&#159;e
++    unsigned user : 5; //F&#195;&#188;r uns frei verf&#195;&#188;gbar
++    uint32_t td_queue_tail; //Letzter TD in der Warteschlange
++    volatile uint32_t td_queue_head; //N&#195;&#164;chster TD in der Warteschlange
++    uint32_t next_ed; //N&#195;&#164;chster ED
++} __attribute__((packed));
++
++struct ohci_ed_desc
++{
++    struct ohci_ed *virt;
++    uintptr_t phys;
++    int function;
++    int endpoint;
++    cdi_list_t transfers;
++    enum
++    {
++        USB_CONTROL,
++        USB_BULK
++    } type;
++} __attribute__((packed));
++
++#define OHC_TD_DIR_SETUP 0
++#define OHC_TD_DIR_OUT   1
++#define OHC_TD_DIR_IN    2
++
++struct ohci_td
++{
++    unsigned user : 18; //F&#195;&#188;r uns frei verf&#195;&#188;gbar
++    unsigned rounding : 1; //Wenn gesetzt, dann sind zu kleine Pakete nicht so
++                          //schlimm
++    unsigned direction : 2; //Richtung/Typ des Transfers (nur g&#195;&#188;ltig, wenn das
++                           //&quot;direction&quot;-Feld im ED 00b oder 11b ist)
++    unsigned di : 3; //Gibt an, wie viele Frames der HC vor Ausl&#195;&#182;sen eines IRQs
++                    //warten soll
++    unsigned toggle : 2; //Datatoggle (00b oder 01b - Wert muss aus dem ED
++                        //ermittelt werden, 10b = DATA0, 11b = DATA1)
++    volatile unsigned error : 2; //Anzahl der aufgetretenen Fehler - bei 11b
++                                //wird der Status im &quot;condition&quot;-Feld
++                                //gespeichert.
++    volatile unsigned condition : 4; //Status
++    volatile uint32_t current_buffer_pointer; //Pointer zu den Daten (bei 0
++                                             //wurden alle Daten &#195;&#188;bertragen)
++    uint32_t next_td; //N&#195;&#164;chster TD
++    uint32_t buffer_end; //Letztes Datenbyte des Puffers
++} __attribute__((packed));
++
++struct ohci_td_desc
++{
++    struct ohci_td *virt;
++    uintptr_t phys;
++    struct ohci_ed_desc *endpoint;
++} __attribute__((packed));
++
++struct cdi_driver *init_ohcd(void);
++void ohci_init(struct cdi_device *cdi_hci);
++
++#endif
+diff --git a/ohci/init.c b/ohci/init.c
+new file mode 100644
+index 0000000..a1ea5a5
+--- /dev/null
++++ b/ohci/init.c
+@@ -0,0 +1,241 @@
++/*****************************************************************************
++* Copyright (c) 2009 Max Reitz                                               *
++*                                                                            *
++* Permission is hereby granted,  free of charge,  to any  person obtaining a *
++* copy of this software and associated documentation files (the &quot;Software&quot;), *
++* to deal in the Software without restriction,  including without limitation *
++* the rights to use,  copy, modify, merge, publish,  distribute, sublicense, *
++* and/or sell copies  of the  Software,  and to permit  persons to whom  the *
++* Software is furnished to do so, subject to the following conditions:       *
++*                                                                            *
++* The above copyright notice and this permission notice shall be included in *
++* all copies or substantial portions of the Software.                        *
++*                                                                            *
++* THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++* IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF MERCHANTABILITY, *
++* FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT SHALL *
++* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++* LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++* FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++* DEALINGS IN THE SOFTWARE.                                                  *
++*****************************************************************************/
++
++#include &lt;stdio.h&gt;
++#include &lt;stdlib.h&gt;
++#include &lt;string.h&gt;
++
++#include &lt;cdi/io.h&gt;
++#include &lt;cdi/lists.h&gt;
++#include &lt;cdi/mempool.h&gt;
++#include &lt;cdi/misc.h&gt;
++#include &lt;cdi/pci.h&gt;
++#include &lt;cdi/usb-hcd.h&gt;
++
++#include &quot;ohci.h&quot;
++#include &quot;ohci-hcd.h&quot;
++#include &quot;ohci-init.h&quot;
++#include &quot;ohci-transfer.h&quot;
++
++extern const struct ohci_functions ohci_functions;
++extern int init_ohci(void);
++
++#define DRIVER_NAME &quot;ohcd&quot;
++
++static struct cdi_usb_hcd driver = {
++    .drv = {
++        .type          = CDI_USB_HCD,
++        .name          = DRIVER_NAME,
++        .devices       = NULL,
++        .init_device   = &amp;ohci_init,
++        .remove_device = NULL,
++        .init          = &amp;init_ohci,
++        .destroy       = NULL
++    }
++};
++
++CDI_DRIVER(DRIVER_NAME, driver)
++
++void find_and_init_ohcis(void)
++{
++    struct ohci *hci;
++    char *name;
++    int ohci_counter = 0;
++    struct cdi_pci_device *dev;
++
++    cdi_usb_hcd_init(&amp;driver);
++
++    cdi_list_t pci_devices = cdi_list_create();
++    cdi_pci_get_all_devices(pci_devices);
++    for (int i = 0; (dev = cdi_list_get(pci_devices, i)) != NULL; i++) {
++        if ((dev-&gt;class_id != 0x0C) || (dev-&gt;subclass_id != 0x03)
++            || (dev-&gt;interface_id != 0x10))
++        {
++            cdi_pci_device_destroy(dev);
++        } else {
++            hci = malloc(sizeof(struct ohci));
++            hci-&gt;cdidev.dev.type = CDI_USB_HCD;
++            name = malloc(7);
++            sprintf(name, &quot;ohci%i&quot;, ohci_counter++);
++            hci-&gt;cdidev.dev.name = (const char *)name;
++            hci-&gt;cdidev.speed = CDI_USB_LOW_SPEED | CDI_USB_FULL_SPEED;
++            hci-&gt;pcidev = dev;
++            cdi_list_push(driver.drv.devices, hci);
++        }
++    }
++
++    cdi_list_destroy(pci_devices);
++
++    driver.find_devices = ohci_functions.find_devices;
++    driver.activate_device = ohci_functions.activate_device;
++    driver.send_packets = ohci_functions.send_packets;
++    driver.add_pipe = ohci_functions.add_pipe;
++}
++
++void ohci_init(struct cdi_device *dev)
++{
++    struct ohci *ohci = (struct ohci *)dev;
++    struct cdi_pci_resource *res;
++    int i;
++    uintptr_t phys_hcca;
++
++    ohci-&gt;memory = NULL;
++    for (i = 0; (res = cdi_list_get(ohci-&gt;pcidev-&gt;resources, i)) != NULL;
++        i++)
++    {
++        if (res-&gt;type == CDI_PCI_MEMORY) {
++            ohci-&gt;memory = cdi_alloc_phys_addr(res-&gt;length, res-&gt;start);
++            if (ohci-&gt;memory == NULL) {
++                d0printf(&quot;Wasn't able to allocate memory.\n&quot;);
++                return;
++            }
++            ohci-&gt;legsup = (void *)((uintptr_t)ohci-&gt;memory + 0x100);
++            break;
++        }
++    }
++    if (ohci-&gt;memory == NULL) {
++        d1printf(&quot;Memory not found!\n&quot;);
++        return;
++    }
++    d1printf(&quot;Memory @ 0x%08X\n&quot;, (uintptr_t)ohci-&gt;memory);
++    if ((ohci-&gt;memory-&gt;hc_revision &amp; 0xFF) != 0x10) {
++        d0printf(&quot;This OHCI might be incompatible with this driver&quot;
++            &quot;(HCI %i.%i, HCD 1.0)\n&quot;, (ohci-&gt;memory-&gt;hc_revision &amp; 0xF0) &gt;&gt; 4,
++            ohci-&gt;memory-&gt;hc_revision &amp; 0xF);
++    }
++    if (cdi_alloc_phys_mem(sizeof(*ohci-&gt;hcca), (void **)&amp;ohci-&gt;hcca,
++        (void **)&amp;phys_hcca) == -1)
++    {
++        d0printf(&quot;Wasn't able to allocate HCCA.\n&quot;);
++        return;
++    }
++    memset(ohci-&gt;hcca, 0, sizeof(*ohci-&gt;hcca));
++
++    d1printf(&quot;IRQ: %i\n&quot;, ohci-&gt;pcidev-&gt;irq);
++    cdi_register_irq(ohci-&gt;pcidev-&gt;irq, &amp;ohci_handler, dev);
++
++    ohci-&gt;ed_pool = mempool_create(64 * sizeof(struct ohci_ed),
++                                   sizeof(struct ohci_ed));
++    if (ohci-&gt;ed_pool == NULL) {
++        d0printf(&quot;Wasn't able to create ED memory pool!\n&quot;);
++        return;
++    }
++
++    ohci-&gt;transfer_pool = mempool_create(48 * (1024 + sizeof(struct ohci_td)),
++                                         1024 + sizeof(struct ohci_td));
++    if (ohci-&gt;transfer_pool == NULL) {
++        d0printf(&quot;Wasn't able to create transfer memory pool!\n&quot;);
++        return;
++    }
++
++    ohci-&gt;memory-&gt;hc_interrupt_disable = OHC_INT_MIE;
++
++    if (ohci-&gt;memory-&gt;hc_control &amp; OHC_CTRL_IR) {
++        d1printf(&quot;Kicking out SMM... &quot;);
++        //&#195;&#132;nderung des &quot;Besitzers&quot; beantragen
++        ohci-&gt;memory-&gt;hc_command_status |= OHC_CMST_OCR;
++        for (i = 0; (ohci-&gt;memory-&gt;hc_control &amp; OHC_CTRL_IR) &amp;&amp; (i &lt; 1000);
++            i++)
++        {
++            cdi_sleep_ms(1);
++        }
++        if (i &lt; 100) {
++            _d1printf(&quot;Went fine.\n&quot;);
++        } else {
++            _d1printf(&quot;Idiot.\n&quot;);
++            ohci-&gt;memory-&gt;hc_control &amp;= ~OHC_CTRL_IR;
++        }
++    } else if ((ohci-&gt;memory-&gt;hc_control &amp; OHC_CTRL_CBSR) != OHC_USB_RESET) {
++        d1printf(&quot;BIOS active\n&quot;);
++        if ((ohci-&gt;memory-&gt;hc_control &amp; OHC_CTRL_CBSR) != OHC_USB_OPERATIONAL)
++        {
++            d1printf(&quot;Activating RESUME...\n&quot;);
++            ohci-&gt;memory-&gt;hc_control =
++                (ohci-&gt;memory-&gt;hc_control &amp; ~OHC_CTRL_CBSR) | OHC_USB_RESUME;
++            cdi_sleep_ms(10);
++        }
++    } else {
++        //Nix, weder BIOS noch SMM
++        cdi_sleep_ms(10); //Reset abwarten
++    }
++
++    if (ohci-&gt;legsup-&gt;hce_control &amp; 1) {
++        d1printf(&quot;USB legacy support activated, but that won't last for&quot;
++            &quot;long...\n&quot;);
++    }
++    //Harhar, that's mine now!
++    ohci-&gt;legsup-&gt;hce_control = 0;
++
++    ohci-&gt;memory-&gt;hc_command_status |= OHC_CMST_RESET;
++    //Normalerweise sollte man den Wert von hc_fm_interval von vor dem Reset
++    //wiederherstellen, aber ich finde das Schwachsinn. Die Werte sind so in
++    //Ordnung, wie sie jetzt sind.
++
++    cdi_sleep_ms(3); //10 &#194;&#181;s f&#195;&#188;r den Reset und 2 ms f&#195;&#188;r Resume
++    if ((ohci-&gt;memory-&gt;hc_control &amp; OHC_CTRL_CBSR) == OHC_USB_SUSPEND) {
++        //Boah...
++        d1printf(&quot;Reset not finished yet...\n&quot;);
++        ohci-&gt;memory-&gt;hc_control =
++            (ohci-&gt;memory-&gt;hc_control &amp; ~OHC_CTRL_CBSR) | OHC_USB_RESUME;
++        cdi_sleep_ms(10);
++    }
++
++    ohci-&gt;memory-&gt;hc_interrupt_disable = OHC_INT_MIE;
++
++    ohci-&gt;memory-&gt;hc_hcca = phys_hcca;
++    ohci-&gt;memory-&gt;hc_interrupt_status = 0xFFFFFFFF;
++    ohci-&gt;memory-&gt;hc_interrupt_enable =
++        OHC_INT_SO   | //Scheduling overrun
++        OHC_INT_WDH  | //Write back done head
++        OHC_INT_RD   | //Resume detected
++        OHC_INT_UE   | //Schwerer Fehler
++        OHC_INT_RHSC | //Root hub status change
++        OHC_INT_MIE;
++    //Eigentlich sollte man alle Transfers aktivieren. Aber wir wollen ja noch
++    //gar keine periodischen Transfers...
++    //Periodisches Zeug deaktivieren
++    ohci-&gt;memory-&gt;hc_control &amp;= ~(OHC_CTRL_PLE | OHC_CTRL_IE);
++    //Control und Bulk aktivieren
++    ohci-&gt;memory-&gt;hc_control |= OHC_CTRL_CLE | OHC_CTRL_BLE;
++    //Merkw&#195;&#188;rdigerweise soll das jetzt nicht auf 10 %, sondern auf 90 % gesetzt
++    //werden. Aber das klingt total bescheuert, weil nicht erkl&#195;&#164;rt wird, wann
++    //man es denn auf 10 % setzen soll. Deshalb machen wir das gleich.
++    ohci-&gt;memory-&gt;hc_periodic_start = 0x4B0;
++
++    d1printf(&quot;Activating HC.\n&quot;);
++
++    //DO IT, FAGGOT!
++    ohci-&gt;memory-&gt;hc_control =
++        (ohci-&gt;memory-&gt;hc_control &amp; ~OHC_CTRL_CBSR) | OHC_USB_OPERATIONAL;
++
++    ohci-&gt;memory-&gt;hc_rh_status |= OHC_RHS_LPSC; //Strom andrehen
++    ohci-&gt;root_ports = ohci-&gt;memory-&gt;hc_rh_descriptor_a &amp; OHC_RHA_NDP;
++    cdi_sleep_ms((ohci-&gt;memory-&gt;hc_rh_descriptor_a &amp; OHC_RHA_POTPGT) &gt;&gt; 23);
++
++    d0printf(&quot;Found %i root ports.\n&quot;, ohci-&gt;root_ports);
++
++    for (i = 0; i &lt; ohci-&gt;root_ports; i++) {
++        ohci-&gt;memory-&gt;hc_rh_port_status[i] |= OHC_RP_CCS; //Deaktivieren
++    }
++
++    ohci-&gt;ed_list = cdi_list_create();
++}
+diff --git a/ohci/main.c b/ohci/main.c
+new file mode 100644
+index 0000000..4b6cd67
+--- /dev/null
++++ b/ohci/main.c
+@@ -0,0 +1,34 @@
++/*****************************************************************************
++* Copyright (c) 2009 Max Reitz                                               *
++*                                                                            *
++* Permission is hereby granted,  free of charge,  to any  person obtaining a *
++* copy of this software and associated documentation files (the &quot;Software&quot;), *
++* to deal in the Software without restriction,  including without limitation *
++* the rights to use,  copy, modify, merge, publish,  distribute, sublicense, *
++* and/or sell copies  of the  Software,  and to permit  persons to whom  the *
++* Software is furnished to do so, subject to the following conditions:       *
++*                                                                            *
++* The above copyright notice and this permission notice shall be included in *
++* all copies or substantial portions of the Software.                        *
++*                                                                            *
++* THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++* IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF MERCHANTABILITY, *
++* FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT SHALL *
++* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++* LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++* FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++* DEALINGS IN THE SOFTWARE.                                                  *
++*****************************************************************************/
++
++#include &lt;cdi/misc.h&gt;
++
++#include &quot;ohci-init.h&quot;
++
++int init_ohci()
++{
++    cdi_init();
++
++    find_and_init_ohcis();
++
++    return 0;
++}
+diff --git a/ohci/transfer.c b/ohci/transfer.c
+new file mode 100644
+index 0000000..dc5d3df
+--- /dev/null
++++ b/ohci/transfer.c
+@@ -0,0 +1,84 @@
++/*****************************************************************************
++* Copyright (c) 2009 Max Reitz                                               *
++*                                                                            *
++* Permission is hereby granted,  free of charge,  to any  person obtaining a *
++* copy of this software and associated documentation files (the &quot;Software&quot;), *
++* to deal in the Software without restriction,  including without limitation *
++* the rights to use,  copy, modify, merge, publish,  distribute, sublicense, *
++* and/or sell copies  of the  Software,  and to permit  persons to whom  the *
++* Software is furnished to do so, subject to the following conditions:       *
++*                                                                            *
++* The above copyright notice and this permission notice shall be included in *
++* all copies or substantial portions of the Software.                        *
++*                                                                            *
++* THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++* IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF MERCHANTABILITY, *
++* FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT SHALL *
++* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++* LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++* FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++* DEALINGS IN THE SOFTWARE.                                                  *
++*****************************************************************************/
++
++#include &lt;stdio.h&gt;
++
++#include &lt;cdi/io.h&gt;
++#include &lt;cdi/list.h&gt;
++#include &lt;cdi/misc.h&gt;
++
++#include &quot;ohci.h&quot;
++
++void ohci_handler(struct cdi_device *cdi_hci)
++{
++    struct ohci *ohci = (struct ohci *)cdi_hci;
++    struct ohci_ed_desc *edsc;
++    struct ohci_td_desc *tdsc;
++    uint32_t status, done = 0;
++    int i, j;
++    uintptr_t phys;
++
++    status = ohci-&gt;memory-&gt;hc_interrupt_status;
++    if (!status) {
++        return; //Wohl nicht f&#195;&#188;r uns
++    }
++
++    if (status &amp; OHC_INT_RHSC) {
++        done |= OHC_INT_RHSC;
++    }
++    if (status &amp; OHC_INT_UE) {
++        d0printf(&quot;Fatal HC error.\n&quot;);
++        ohci-&gt;memory-&gt;hc_command_status |= OHC_CMST_RESET;
++        done |= OHC_INT_UE;
++    }
++    if (status &amp; OHC_INT_SF) {
++        //&#195;&#150;hm... Na ja. Manchmal fragt man sich, ob sich der HC so einsam
++        //f&#195;&#188;hlt, dass er IRQs feuert, obwohl sie deaktiviert sind.
++        done |= OHC_INT_SF;
++    }
++    if (status &amp; OHC_INT_WDH) {
++        //Paket gesendet
++        done |= OHC_INT_WDH;
++        phys = ohci-&gt;hcca-&gt;done_head;
++        for (i = 0; (edsc = cdi_list_get(ohci-&gt;ed_list, i)) != NULL; i++) {
++            for (j = 0; (tdsc = cdi_list_get(edsc-&gt;transfers, j)) != NULL; j++)
++            {
++                if (tdsc-&gt;phys == phys) {
++                    //Das ist der fertige Transfer
++                    cdi_list_remove(edsc-&gt;transfers, j);
++                    free(tdsc);
++                    break;
++                }
++            }
++            if (tdsc != NULL) {
++                //Gefunden
++                break;
++            }
++        }
++    }
++
++    if (status &amp; ~done) {
++        d1printf(&quot;Non-handled interrupt: 0x%08X\n&quot;, status &amp; ~done);
++    }
++
++    ohci-&gt;memory-&gt;hc_interrupt_status = status;
++}
+-- 
+1.6.4.2
+
+</PRE>
+
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000055.html">[cdi-devel] [PATCH] UHCI
+</A></li>
+	<LI>Next message: <A HREF="000057.html">[cdi-devel] [PATCH] USB mass storage device driver
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#56">[ date ]</a>
+              <a href="thread.html#56">[ thread ]</a>
+              <a href="subject.html#56">[ subject ]</a>
+              <a href="author.html#56">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

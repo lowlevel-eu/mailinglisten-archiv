@@ -1,0 +1,138 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] kernel2: Code readonly mappen
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20kernel2%3A%20Code%20readonly%20mappen&In-Reply-To=%3C1275221052-10187-1-git-send-email-toni%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001759.html">
+   <LINK REL="Next"  HREF="001760.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] kernel2: Code readonly mappen</H1>
+    <B>Antoine Kaufmann</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20kernel2%3A%20Code%20readonly%20mappen&In-Reply-To=%3C1275221052-10187-1-git-send-email-toni%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH] kernel2: Code readonly mappen">toni at tyndur.org
+                  </A><BR>
+    <I>So Mai 30 14:04:12 CEST 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001759.html">[tyndur-devel] [PATCH] Libc: Fix fuer EOF-Erkennung in fgets()
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001760.html">[tyndur-devel] [PATCH] kernel2: Code readonly mappen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1749">[ Datum ]</a>
+              <a href="thread.html#1749">[ Thema ]</a>
+              <a href="subject.html#1749">[ Betreff (Subject) ]</a>
+              <a href="author.html#1749">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* kernel2: Code readonly mappen
+
+Signed-off-by: Antoine Kaufmann &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">toni at tyndur.org</A>&gt;
+---
+ src/kernel2/include/mm.h            |    3 +++
+ src/kernel2/src/arch/i386/kernel.ld |    4 ++++
+ src/kernel2/src/arch/i386/mm/virt.c |   15 ++++++++++-----
+ 3 files changed, 17 insertions(+), 5 deletions(-)
+
+diff --git a/src/kernel2/include/mm.h b/src/kernel2/include/mm.h
+index 9ab51f0..ffb68b1 100644
+--- a/src/kernel2/include/mm.h
++++ b/src/kernel2/include/mm.h
+@@ -51,6 +51,9 @@ extern void kernel_phys_end(void);
+ extern void kernel_start(void);
+ extern void kernel_end(void);
+ 
++/* Start des bereichs des Kernels der beschreibbar sein muss */
++extern void kernel_rw_start(void);
++
+ 
+ void pmm_init(struct multiboot_info* multiboot_info);
+ 
+diff --git a/src/kernel2/src/arch/i386/kernel.ld b/src/kernel2/src/arch/i386/kernel.ld
+index 0cb7936..6921bcf 100644
+--- a/src/kernel2/src/arch/i386/kernel.ld
++++ b/src/kernel2/src/arch/i386/kernel.ld
+@@ -20,6 +20,10 @@ SECTIONS
+ 	}
+ 	.data ALIGN(4096) : AT(ADDR(.data) - VIRT_TO_PHYS)
+ 	{
++		/* Um klar zwischen Bereichen unterscheiden zu koennen, die
++		   schreibbar sein muessen, und nur lesbaren, wird davon
++		   ausgegangen, dass alle vor diesem Label nur lesbar sind. */
++		kernel_rw_start = .;
+ 		*(.data)
+ 	}
+ 	.bss ALIGN(4096) : AT(ADDR(.bss) - VIRT_TO_PHYS)
+diff --git a/src/kernel2/src/arch/i386/mm/virt.c b/src/kernel2/src/arch/i386/mm/virt.c
+index d057523..9b0b4ea 100644
+--- a/src/kernel2/src/arch/i386/mm/virt.c
++++ b/src/kernel2/src/arch/i386/mm/virt.c
+@@ -51,12 +51,17 @@ extern page_directory_t page_directory_current;
+  * Die physische Speicherverwaltung muss dazu bereits initialisiert sein.
+  */
+ void vmm_init(mmc_context_t* kernel_context)
+-{ 
++{
++    size_t rosize = kernel_rw_start - kernel_start;
++    size_t rwsize = kernel_end - kernel_rw_start;
++
+     // TODO: 4M-Pages benutzen, wenn in config.h aktiviert
+     // Den Kernel mappen
+-    mmc_map(kernel_context, kernel_start, kernel_phys_start, PTE_W | PTE_P, 
+-        NUM_PAGES((uintptr_t) kernel_end - (uintptr_t) kernel_start));
+-    
++    mmc_map(kernel_context, kernel_start, kernel_phys_start, PTE_P,
++        NUM_PAGES(rosize));
++    mmc_map(kernel_context, kernel_start + rosize,
++        kernel_phys_start + rosize, PTE_P | PTE_W, NUM_PAGES(rwsize));
++
+     // Videospeicher mappen
+     // TODO Usermodus muss die momentan wegen VM86 sehen. Waere wohl besser,
+     // wenn VM86 einen eigenen Adressraum haette.
+@@ -110,7 +115,7 @@ void vmm_init_local(mmc_context_t* kernel_context)
+         &quot;mov %0, %%cr3\n\t&quot;
+         // Paging aktivieren
+         &quot;mov %%cr0, %%eax\n\t&quot;
+-        &quot;or $0x80000000, %%eax\n\t&quot;
++        &quot;or $0x80010000, %%eax\n\t&quot;
+         &quot;mov %%eax, %%cr0\n\t&quot;
+     : : &quot;r&quot; (kernel_context-&gt;page_directory) : &quot;eax&quot;);
+ }
+-- 
+1.6.4.4
+
+</PRE>
+
+
+
+
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001759.html">[tyndur-devel] [PATCH] Libc: Fix fuer EOF-Erkennung in fgets()
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001760.html">[tyndur-devel] [PATCH] kernel2: Code readonly mappen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1749">[ Datum ]</a>
+              <a href="thread.html#1749">[ Thema ]</a>
+              <a href="subject.html#1749">[ Betreff (Subject)]</a>
+              <a href="author.html#1749">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

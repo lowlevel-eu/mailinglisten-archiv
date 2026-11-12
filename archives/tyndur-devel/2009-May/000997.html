@@ -1,0 +1,651 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 4/4] ata: Unterstuetzung fuer DMA
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%204/4%5D%20ata%3A%20Unterstuetzung%20fuer%20DMA&In-Reply-To=%3C20090529134826.GA13064%40alex.local.siol%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="000965.html">
+   <LINK REL="Next"  HREF="000907.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 4/4] ata: Unterstuetzung fuer DMA</H1>
+    <B>Alexander Siol</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%204/4%5D%20ata%3A%20Unterstuetzung%20fuer%20DMA&In-Reply-To=%3C20090529134826.GA13064%40alex.local.siol%3E"
+           TITLE="[tyndur-devel] [PATCH 4/4] ata: Unterstuetzung fuer DMA">alex at tyndur.org
+                  </A><BR>
+    <I>Fr Mai 29 15:48:27 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="000965.html">[tyndur-devel] [PATCH 4/4] ata: Unterstuetzung fuer DMA
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="000907.html">[tyndur-devel] [PATCH 0/3] kedit-Fixes
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#997">[ Datum ]</a>
+              <a href="thread.html#997">[ Thema ]</a>
+              <a href="subject.html#997">[ Betreff (Subject) ]</a>
+              <a href="author.html#997">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>On Mon, May 25, 2009 at 10:40:35AM +0200, Antoine Kaufmann wrote:
+&gt;<i> + ata: Unterstuetzung fuer DMA
+</I>&gt;<i> 
+</I>&gt;<i> Signed-off-by: Antoine Kaufmann &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">toni at tyndur.org</A>&gt;
+</I>&gt;<i> ---
+</I>&gt;<i>  build/config/grub_hd.cfg      |    1 +
+</I>&gt;<i>  src/modules/cdi/ata/ata.c     |   68 ++++++++++++++++-------
+</I>&gt;<i>  src/modules/cdi/ata/device.c  |   26 ++++++++-
+</I>&gt;<i>  src/modules/cdi/ata/device.h  |   53 ++++++++++++++++--
+</I>&gt;<i>  src/modules/cdi/ata/main.c    |   69 ++++++++++++++++++++---
+</I>&gt;<i>  src/modules/cdi/ata/request.c |  122 +++++++++++++++++++++++++++++++++++++++++
+</I>&gt;<i>  6 files changed, 302 insertions(+), 37 deletions(-)
+</I>&gt;<i> 
+</I>&gt;<i> diff --git a/build/config/grub_hd.cfg b/build/config/grub_hd.cfg
+</I>&gt;<i> index f29cd6a..cd0f4f2 100644
+</I>&gt;<i> --- a/build/config/grub_hd.cfg
+</I>&gt;<i> +++ b/build/config/grub_hd.cfg
+</I>&gt;<i> @@ -1,6 +1,7 @@
+</I>&gt;<i>  title tyndur
+</I>&gt;<i>  kernel /boot/tyndur debug=s
+</I>&gt;<i>  module /modules/init boot=file:/
+</I>&gt;<i> +module /modules/pci
+</I>&gt;<i>  module /modules/ata
+</I>&gt;<i>  module /modules/ext2
+</I>&gt;<i>  module /modules/console servmgr:/term servmgr:/term
+</I>&gt;<i> diff --git a/src/modules/cdi/ata/ata.c b/src/modules/cdi/ata/ata.c
+</I>&gt;<i> index 14e777b..0646be9 100644
+</I>&gt;<i> --- a/src/modules/cdi/ata/ata.c
+</I>&gt;<i> +++ b/src/modules/cdi/ata/ata.c
+</I>&gt;<i> @@ -1,5 +1,5 @@
+</I>&gt;<i>  /*  
+</I>&gt;<i> - * Copyright (c) 2007 The tyndur Project. All rights reserved.
+</I>&gt;<i> + * Copyright (c) 2007-2009 The tyndur Project. All rights reserved.
+</I>&gt;<i>   *
+</I>&gt;<i>   * This code is derived from software contributed to the tyndur Project
+</I>&gt;<i>   * by Antoine Kaufmann.
+</I>&gt;<i> @@ -86,6 +86,11 @@ int ata_drv_identify(struct ata_device* dev)
+</I>&gt;<i>          dev-&gt;dev.storage.block_count = id.lba_sector_count;
+</I>&gt;<i>      }
+</I>&gt;<i>  
+</I>&gt;<i> +    // Pruefen ob DMA unterstuetzt wird
+</I>&gt;<i> +    if (id.capabilities.dma) {
+</I>&gt;<i> +        dev-&gt;dma = 1;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i>      // Wenn keiner der LBA-Modi unterstuetzt wird, muss abgebrochen werden, da
+</I>&gt;<i>      // CHS noch nicht implementiert ist.
+</I>&gt;<i>      if (!dev-&gt;lba48 &amp;&amp; !dev-&gt;lba28) {
+</I>&gt;<i> @@ -122,38 +127,59 @@ static int ata_drv_rw_sectors(struct ata_device* dev, int direction,
+</I>&gt;<i>      uint16_t current_count;
+</I>&gt;<i>      void* current_buffer = buffer;
+</I>&gt;<i>      uint64_t lba = start;
+</I>&gt;<i> -
+</I>&gt;<i> +    int max_count;
+</I>&gt;<i>      // Anzahl der Sektoren die noch uebrig sind
+</I>&gt;<i>      size_t count_left = count;
+</I>&gt;<i>  
+</I>&gt;<i> -    // Solange wie noch Sektoren uebrig sind, wird gelesen
+</I>&gt;<i> -    while (count_left &gt; 0) {
+</I>&gt;<i> -        // Entscheiden wieviele Sektoren im aktuellen Durchlauf gelesen werden
+</I>&gt;<i> -        if (count_left &gt; 256) {
+</I>&gt;<i> -            current_count = 256;
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +    // Request vorbereiten
+</I>&gt;<i> +    request.dev = dev;
+</I>&gt;<i> +    request.flags.poll = 0;
+</I>&gt;<i> +    request.flags.ata = 0;
+</I>&gt;<i> +    request.flags.lba = 1;
+</I>&gt;<i> +
+</I>&gt;<i> +    // Richtung festlegen
+</I>&gt;<i> +    if (direction == 0) {
+</I>&gt;<i> +        request.flags.direction = READ;
+</I>&gt;<i> +    } else {
+</I>&gt;<i> +        request.flags.direction = WRITE;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +    if (dev-&gt;dma &amp;&amp; dev-&gt;controller-&gt;dma_use) {
+</I>&gt;<i> +        // DMA
+</I>&gt;<i> +        max_count = ATA_DMA_MAXSIZE / ATA_SECTOR_SIZE;
+</I>&gt;<i> +        if (direction) {
+</I>&gt;<i> +            request.registers.ata.command = WRITE_SECTORS_DMA;
+</I>&gt;<i>          } else {
+</I>&gt;<i> -            current_count = count_left;
+</I>&gt;<i> +            request.registers.ata.command = READ_SECTORS_DMA;
+</I>&gt;<i> +        }
+</I>&gt;<i> +        request.protocol = DMA;
+</I>&gt;<i> +    } else {
+</I>&gt;<i> +        // PIO
+</I>&gt;<i> +        max_count = 256;
+</I>&gt;<i> +        if (direction) {
+</I>&gt;<i> +            request.registers.ata.command = WRITE_SECTORS;
+</I>&gt;<i> +        } else {
+</I>&gt;<i> +            request.registers.ata.command = READ_SECTORS;
+</I>&gt;<i>          }
+</I>&gt;<i> -        
+</I>&gt;<i> -        // Request vorbereiten
+</I>&gt;<i> -        request.dev = dev;
+</I>&gt;<i> -        // TODO: DMA, UltraDMA...
+</I>&gt;<i>          request.protocol = PIO;
+</I>&gt;<i>  
+</I>&gt;<i> -        // FIXME
+</I>&gt;<i> +        // Mit PIO pollen wir lieber, da IRQs dort _wirklich langsam_ sind
+</I>&gt;<i>          request.flags.poll = 1;
+</I>&gt;<i> -        request.flags.ata = 0;
+</I>&gt;<i> -        request.flags.lba = 1;
+</I>&gt;<i> +    }
+</I>&gt;<i>  
+</I>&gt;<i> -        // Richtung festlegen
+</I>&gt;<i> -        if (direction == 0) {
+</I>&gt;<i> -            request.flags.direction = READ;
+</I>&gt;<i> -            request.registers.ata.command = READ_SECTORS;
+</I>&gt;<i> +    // Solange wie noch Sektoren uebrig sind, wird gelesen
+</I>&gt;<i> +    while (count_left &gt; 0) {
+</I>&gt;<i> +        // Entscheiden wieviele Sektoren im aktuellen Durchlauf gelesen werden
+</I>&gt;<i> +        if (count_left &gt; max_count) {
+</I>&gt;<i> +            current_count = max_count;
+</I>&gt;<i>          } else {
+</I>&gt;<i> -            request.flags.direction = WRITE;
+</I>&gt;<i> -            request.registers.ata.command = WRITE_SECTORS;
+</I>&gt;<i> +            current_count = count_left;
+</I>&gt;<i>          }
+</I>&gt;<i>          
+</I>&gt;<i> +
+</I>&gt;<i>          // Achtung: Beim casten nach uint8_t wird bei 256 Sektoren eine 0.
+</I>&gt;<i>          // Das macht aber nichts, da in der Spezifikation festgelegt ist,
+</I>&gt;<i>          // dass 256 Sektoren gelesen werden sollen, wenn im count-Register
+</I>&gt;<i> diff --git a/src/modules/cdi/ata/device.c b/src/modules/cdi/ata/device.c
+</I>&gt;<i> index 7c896b8..4ec7696 100644
+</I>&gt;<i> --- a/src/modules/cdi/ata/device.c
+</I>&gt;<i> +++ b/src/modules/cdi/ata/device.c
+</I>&gt;<i> @@ -231,8 +231,13 @@ void ata_init_controller(struct ata_controller* controller)
+</I>&gt;<i>      }
+</I>&gt;<i>      if (cdi_ioports_alloc(controller-&gt;port_ctl_base, 1) != 0) {
+</I>&gt;<i>          DEBUG(&quot;Fehler beim allozieren der I/O-Ports\n&quot;);
+</I>&gt;<i> -        cdi_ioports_free(controller-&gt;port_cmd_base, 8);
+</I>&gt;<i> -        return;
+</I>&gt;<i> +        goto error_free_cmdbase;
+</I>&gt;<i> +    }
+</I>&gt;<i> +    if (controller-&gt;port_bmr_base &amp;&amp;
+</I>&gt;<i> +        (cdi_ioports_alloc(controller-&gt;port_bmr_base, 8) != 0))
+</I>&gt;<i> +    {
+</I>&gt;<i> +        DEBUG(&quot;ata: Fehler beim allozieren der I/O-Ports\n&quot;);
+</I>&gt;<i> +        goto error_free_ctlbase;
+</I>&gt;<i>      }
+</I>&gt;<i>      
+</I>&gt;<i>      // Da NIEN nicht ueberall sauber funktioniert, muss jetzt trotzdem schon
+</I>&gt;<i> @@ -315,6 +320,23 @@ void ata_init_controller(struct ata_controller* controller)
+</I>&gt;<i>              free(dev);
+</I>&gt;<i>          }
+</I>&gt;<i>      }
+</I>&gt;<i> +
+</I>&gt;<i> +    // Abschliessend wird noch DMA vorbereitet, wenn moeglich
+</I>&gt;<i> +    if (controller-&gt;port_bmr_base) {
+</I>&gt;<i> +        cdi_alloc_phys_mem(sizeof(uint64_t), (void**) &amp;controller-&gt;prdt_virt,
+</I>&gt;<i> +            (void**) &amp;controller-&gt;prdt_phys);
+</I>&gt;<i> +        cdi_alloc_phys_mem(ATA_DMA_MAXSIZE, (void**) &amp;controller-&gt;dma_buf_virt,
+</I>&gt;<i> +            (void**) &amp;controller-&gt;dma_buf_phys);
+</I>&gt;<i> +
+</I>&gt;<i> +        controller-&gt;dma_use = 1;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    return;
+</I>&gt;<i> +
+</I>&gt;<i> +error_free_ctlbase:
+</I>&gt;<i> +    cdi_ioports_free(controller-&gt;port_ctl_base, 1);
+</I>&gt;<i> +error_free_cmdbase:
+</I>&gt;<i> +    cdi_ioports_free(controller-&gt;port_cmd_base, 8);
+</I>&gt;<i>  }
+</I>&gt;<i>  
+</I>&gt;<i>  void ata_remove_controller(struct ata_controller* controller)
+</I>&gt;<i> diff --git a/src/modules/cdi/ata/device.h b/src/modules/cdi/ata/device.h
+</I>&gt;<i> index 54dfb80..36a86d1 100644
+</I>&gt;<i> --- a/src/modules/cdi/ata/device.h
+</I>&gt;<i> +++ b/src/modules/cdi/ata/device.h
+</I>&gt;<i> @@ -1,5 +1,5 @@
+</I>&gt;<i>  /*  
+</I>&gt;<i> - * Copyright (c) 2007 The tyndur Project. All rights reserved.
+</I>&gt;<i> + * Copyright (c) 2007-2009 The tyndur Project. All rights reserved.
+</I>&gt;<i>   *
+</I>&gt;<i>   * This code is derived from software contributed to the tyndur Project
+</I>&gt;<i>   * by Antoine Kaufmann.
+</I>&gt;<i> @@ -48,6 +48,10 @@
+</I>&gt;<i>  
+</I>&gt;<i>  #define ATAPI_ENABLE
+</I>&gt;<i>  
+</I>&gt;<i> +#define PCI_CLASS_ATA           0x01
+</I>&gt;<i> +#define PCI_SUBCLASS_ATA        0x01
+</I>&gt;<i> +#define PCI_VENDOR_VIA          0x1106
+</I>&gt;<i> +
+</I>&gt;<i>  #define ATA_PRIMARY_CMD_BASE    0x1F0
+</I>&gt;<i>  #define ATA_PRIMARY_CTL_BASE    0x3F6
+</I>&gt;<i>  #define ATA_PRIMARY_IRQ         14
+</I>&gt;<i> @@ -76,6 +80,7 @@
+</I>&gt;<i>  // Diese Register werden ueber die port_cmd_base angesprochen
+</I>&gt;<i>  #define REG_DATA                0x0
+</I>&gt;<i>  #define REG_ERROR               0x1
+</I>&gt;<i> +#define REG_FEATURES            0x1
+</I>&gt;<i>  #define REG_SEC_CNT             0x2
+</I>&gt;<i>  #define REG_LBA_LOW             0x3
+</I>&gt;<i>  #define REG_LBA_MID             0x4
+</I>&gt;<i> @@ -110,6 +115,24 @@
+</I>&gt;<i>  #define CONTROL_SRST            (1 &lt;&lt; 2)
+</I>&gt;<i>  #define CONTROL_NIEN            (1 &lt;&lt; 1)
+</I>&gt;<i>  
+</I>&gt;<i> +
+</I>&gt;<i> +// Busmaster-Register (in port_bmr_base)
+</I>&gt;<i> +#define BMR_COMMAND             0x0
+</I>&gt;<i> +#define BMR_STATUS              0x2
+</I>&gt;<i> +#define BMR_PRDT                0x4
+</I>&gt;<i> +
+</I>&gt;<i> +// Bits im Busmaster Command Register
+</I>&gt;<i> +#define BMR_CMD_START           (1 &lt;&lt; 0)
+</I>&gt;<i> +#define BMR_CMD_WRITE           (1 &lt;&lt; 3)
+</I>&gt;<i> +
+</I>&gt;<i> +// Bits im Busmaster Status Register
+</I>&gt;<i> +#define BMR_STATUS_ERROR        (1 &lt;&lt; 1)
+</I>&gt;<i> +#define BMR_STATUS_IRQ          (1 &lt;&lt; 2)
+</I>&gt;<i> +
+</I>&gt;<i> +/// Maximale Groesse eines DMA-Transfers
+</I>&gt;<i> +#define ATA_DMA_MAXSIZE         (64 * 1024)
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i>  // Debug
+</I>&gt;<i>  #ifdef DEBUG_ENABLE
+</I>&gt;<i>      #define DEBUG(fmt, ...) printf(&quot;ata: &quot; fmt, __VA_ARGS__)
+</I>&gt;<i> @@ -320,7 +343,10 @@ struct ata_device {
+</I>&gt;<i>  
+</I>&gt;<i>      // 1 Wenn das Geraet lba28 unterstuetzt
+</I>&gt;<i>      uint8_t                     lba28;
+</I>&gt;<i> -    
+</I>&gt;<i> +
+</I>&gt;<i> +    /// 1 wenn das Geraet DMA unterstuetzt
+</I>&gt;<i> +    uint8_t                     dma;
+</I>&gt;<i> +
+</I>&gt;<i>      // Funktionen fuer den Zugriff auf dieses Geraet
+</I>&gt;<i>      int (*read_sectors) (struct ata_device* dev, uint64_t start, size_t count,
+</I>&gt;<i>          void* dest);
+</I>&gt;<i> @@ -335,14 +361,26 @@ struct ata_controller {
+</I>&gt;<i>      uint8_t                     id;
+</I>&gt;<i>      uint16_t                    port_cmd_base;
+</I>&gt;<i>      uint16_t                    port_ctl_base;
+</I>&gt;<i> +    uint16_t                    port_bmr_base;
+</I>&gt;<i>      uint16_t                    irq;
+</I>&gt;<i> -    uint16_t                    irq_cnt;
+</I>&gt;<i>  
+</I>&gt;<i>      // Wird auf 1 gesetzt wenn IRQs benutzt werden sollen, also das NIEN-Bit im
+</I>&gt;<i>      // Control register nicht aktiviert ist.
+</I>&gt;<i>      int                         irq_use;
+</I>&gt;<i> +    /// Wird auf 1 gesetzt wenn DMA benutzt werden darf
+</I>&gt;<i> +    int                         dma_use;
+</I>&gt;<i>      // HACKKK ;-)
+</I>&gt;<i>      struct ata_device           irq_dev;
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +    /// Physische Adresse der Physical Region Descriptor Table (fuer DMA)
+</I>&gt;<i> +    uint64_t*                   prdt_phys;
+</I>&gt;<i> +    /// Virtuelle Adresse der Physical Region Descriptor Table (fuer DMA)
+</I>&gt;<i> +    uint64_t*                   prdt_virt;
+</I>&gt;<i> +    /// Physische Adresse des DMA-Puffers
+</I>&gt;<i> +    void*                       dma_buf_phys;
+</I>&gt;<i> +    /// Virtuelle Adresse des DMA-Puffers
+</I>&gt;<i> +    void*                       dma_buf_virt;
+</I>&gt;<i>  };
+</I>&gt;<i>  
+</I>&gt;<i>  struct ata_request {
+</I>&gt;<i> @@ -350,7 +388,8 @@ struct ata_request {
+</I>&gt;<i>      
+</I>&gt;<i>      enum {
+</I>&gt;<i>          NON_DATA,
+</I>&gt;<i> -        PIO
+</I>&gt;<i> +        PIO,
+</I>&gt;<i> +        DMA,
+</I>&gt;<i>      } protocol;
+</I>&gt;<i>  
+</I>&gt;<i>      // Flags fuer die Uebertragung
+</I>&gt;<i> @@ -378,10 +417,14 @@ struct ata_request {
+</I>&gt;<i>                  IDENTIFY_PACKET_DEVICE = 0xA1,
+</I>&gt;<i>                  PACKET = 0xA0,
+</I>&gt;<i>                  READ_SECTORS = 0x20,
+</I>&gt;<i> -                WRITE_SECTORS = 0x30
+</I>&gt;<i> +                READ_SECTORS_DMA = 0xC8,
+</I>&gt;<i> +                SET_FEATURES = 0xEF,
+</I>&gt;<i> +                WRITE_SECTORS = 0x30,
+</I>&gt;<i> +                WRITE_SECTORS_DMA = 0xCA,
+</I>&gt;<i>              } command;
+</I>&gt;<i>              uint8_t count;
+</I>&gt;<i>              uint64_t lba;
+</I>&gt;<i> +            uint8_t features;
+</I>&gt;<i>          } ata;
+</I>&gt;<i>      } registers;
+</I>&gt;<i>  
+</I>&gt;<i> diff --git a/src/modules/cdi/ata/main.c b/src/modules/cdi/ata/main.c
+</I>&gt;<i> index 750f7b2..97b470d 100644
+</I>&gt;<i> --- a/src/modules/cdi/ata/main.c
+</I>&gt;<i> +++ b/src/modules/cdi/ata/main.c
+</I>&gt;<i> @@ -1,5 +1,5 @@
+</I>&gt;<i>  /*  
+</I>&gt;<i> - * Copyright (c) 2007 The tyndur Project. All rights reserved.
+</I>&gt;<i> + * Copyright (c) 2007-2009 The tyndur Project. All rights reserved.
+</I>&gt;<i>   *
+</I>&gt;<i>   * This code is derived from software contributed to the tyndur Project
+</I>&gt;<i>   * by Antoine Kaufmann.
+</I>&gt;<i> @@ -39,6 +39,7 @@
+</I>&gt;<i>  
+</I>&gt;<i>  #include &quot;cdi/storage.h&quot;
+</I>&gt;<i>  #include &quot;cdi/lists.h&quot;
+</I>&gt;<i> +#include &quot;cdi/pci.h&quot;
+</I>&gt;<i>  
+</I>&gt;<i>  #include &quot;device.h&quot;
+</I>&gt;<i>  
+</I>&gt;<i> @@ -48,18 +49,18 @@ static const char* driver_storage_name = &quot;ata&quot;;
+</I>&gt;<i>  static const char* driver_scsi_name = &quot;atapi&quot;;
+</I>&gt;<i>  static cdi_list_t controller_list = NULL;
+</I>&gt;<i>  
+</I>&gt;<i> -static void ata_driver_init(void);
+</I>&gt;<i> +static void ata_driver_init(int argc, char* argv[]);
+</I>&gt;<i>  static void ata_driver_destroy(struct cdi_driver* driver);
+</I>&gt;<i>  static void atapi_driver_destroy(struct cdi_driver* driver);
+</I>&gt;<i>  
+</I>&gt;<i>  #ifdef CDI_STANDALONE
+</I>&gt;<i> -int main(void)
+</I>&gt;<i> +int main(int argc, char* argv[])
+</I>&gt;<i>  #else
+</I>&gt;<i> -int init_ata(void)
+</I>&gt;<i> +int init_ata(int argc, char* argv[])
+</I>&gt;<i>  #endif
+</I>&gt;<i>  {
+</I>&gt;<i>      cdi_init();
+</I>&gt;<i> -    ata_driver_init();
+</I>&gt;<i> +    ata_driver_init(argc, argv);
+</I>&gt;<i>      cdi_storage_driver_register((struct cdi_storage_driver*) &amp;driver_storage);
+</I>&gt;<i>      cdi_scsi_driver_register((struct cdi_scsi_driver*) &amp;driver_scsi);
+</I>&gt;<i>  
+</I>&gt;<i> @@ -73,9 +74,14 @@ int init_ata(void)
+</I>&gt;<i>  /**
+</I>&gt;<i>   * Initialisiert die Datenstrukturen fuer den sis900-Treiber
+</I>&gt;<i>   */
+</I>&gt;<i> -static void ata_driver_init()
+</I>&gt;<i> +static void ata_driver_init(int argc, char* argv[])
+</I>&gt;<i>  {
+</I>&gt;<i>      struct ata_controller* controller;
+</I>&gt;<i> +    uint16_t busmaster_regbase = 0;
+</I>&gt;<i> +    struct cdi_pci_device* pci_dev;
+</I>&gt;<i> +    cdi_list_t pci_devices;
+</I>&gt;<i> +    int i;
+</I>&gt;<i> +    int j;
+</I>&gt;<i>  
+</I>&gt;<i>      // Konstruktor der Vaterklasse
+</I>&gt;<i>      cdi_storage_driver_init((struct cdi_storage_driver*) &amp;driver_storage);
+</I>&gt;<i> @@ -99,11 +105,55 @@ static void ata_driver_init()
+</I>&gt;<i>      
+</I>&gt;<i>      // Liste mit Controllern initialisieren
+</I>&gt;<i>      controller_list = cdi_list_create();
+</I>&gt;<i> -    
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +    // PCI-Geraet fuer Controller finden
+</I>&gt;<i> +    pci_devices = cdi_list_create();
+</I>&gt;<i> +    cdi_pci_get_all_devices(pci_devices);
+</I>&gt;<i> +    for (i = 0; (pci_dev = cdi_list_get(pci_devices, i)) &amp;&amp; !busmaster_regbase;
+</I>&gt;<i> +        i++)
+</I>&gt;<i> +    {
+</I>&gt;<i> +        struct cdi_pci_resource* res;
+</I>&gt;<i> +
+</I>&gt;<i> +        if ((pci_dev-&gt;class_id != PCI_CLASS_ATA) ||
+</I>&gt;<i> +            (pci_dev-&gt;subclass_id != PCI_SUBCLASS_ATA))
+</I>&gt;<i> +        {
+</I>&gt;<i> +            continue;
+</I>&gt;<i> +        }
+</I>&gt;<i> +
+</I>&gt;<i> +        // Jetzt noch die Ressource finden mit den Busmaster-Registern
+</I>&gt;<i> +        // TODO: Das funktioniert so vermutlich nicht ueberall, da es
+</I>&gt;<i> +        // warscheinlich auch Kontroller mit nur einem Kanal gibt und solche bei
+</I>&gt;<i> +        // denen die BM-Register im Speicher gemappt sind
+</I>&gt;<i> +        for (j = 0; (res = cdi_list_get(pci_dev-&gt;resources, j)); j++) {
+</I>&gt;<i> +            if ((res-&gt;type == CDI_PCI_IOPORTS) &amp;&amp; (res-&gt;length == 16)) {
+</I>&gt;<i> +                busmaster_regbase = res-&gt;start;
+</I>&gt;<i> +                break;
+</I>&gt;<i> +            }
+</I>&gt;<i> +        }
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    // Kaputte VIA-Kontroller sollten nur PIO benutzen, da es bei DMA zu
+</I>&gt;<i> +    // haengern kommt. Dabei handelt es sich um den Kontroller 82C686B
+</I>&gt;<i> +    if (pci_dev &amp;&amp; (pci_dev-&gt;vendor_id == PCI_VENDOR_VIA) &amp;&amp;
+</I>&gt;<i> +        (pci_dev-&gt;device_id == 0x686))
+</I>&gt;<i> +    {
+</I>&gt;<i> +        busmaster_regbase = 0;
+</I>&gt;<i> +    } else {
+</I>&gt;<i> +        // Wenn der nodma-Parameter uebergeben wurde, deaktivieren wir dma auch
+</I>&gt;<i> +        for (i = 1; i &lt; argc; i++) {
+</I>&gt;<i> +            if (!strcmp(argv[i], &quot;nodma&quot;)) {
+</I>&gt;<i> +                busmaster_regbase = 0;
+</I>&gt;<i> +                break;
+</I>&gt;<i> +            }
+</I>&gt;<i> +        }
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i>      // Primaeren Controller vorbereiten
+</I>&gt;<i> -    controller = malloc(sizeof(*controller));
+</I>&gt;<i> +    controller = calloc(1, sizeof(*controller));
+</I>&gt;<i>      controller-&gt;port_cmd_base = ATA_PRIMARY_CMD_BASE;
+</I>&gt;<i>      controller-&gt;port_ctl_base = ATA_PRIMARY_CTL_BASE;
+</I>&gt;<i> +    controller-&gt;port_bmr_base = busmaster_regbase;
+</I>&gt;<i>      controller-&gt;irq = ATA_PRIMARY_IRQ;
+</I>&gt;<i>      controller-&gt;id = 0;
+</I>&gt;<i>      controller-&gt;storage = (struct cdi_storage_driver*) &amp;driver_storage;
+</I>&gt;<i> @@ -112,9 +162,10 @@ static void ata_driver_init()
+</I>&gt;<i>      cdi_list_push(controller_list, controller);
+</I>&gt;<i>      
+</I>&gt;<i>      // Sekundaeren Controller vorbereiten
+</I>&gt;<i> -    controller = malloc(sizeof(*controller));
+</I>&gt;<i> +    controller = calloc(1, sizeof(*controller));
+</I>&gt;<i>      controller-&gt;port_cmd_base = ATA_SECONDARY_CMD_BASE;
+</I>&gt;<i>      controller-&gt;port_ctl_base = ATA_SECONDARY_CTL_BASE;
+</I>&gt;<i> +    controller-&gt;port_bmr_base = (busmaster_regbase ? busmaster_regbase : 0);
+</I>
+Okay... wenn busmaster_regbase == 0, dann explizit 0 setzen? Bitte so wie beim Primären machen ;)
+
+&gt;<i>      controller-&gt;irq = ATA_SECONDARY_IRQ;
+</I>&gt;<i>      controller-&gt;id = 1;
+</I>&gt;<i>      controller-&gt;storage = (struct cdi_storage_driver*) &amp;driver_storage;
+</I>&gt;<i> diff --git a/src/modules/cdi/ata/request.c b/src/modules/cdi/ata/request.c
+</I>&gt;<i> index 90e0d67..957661e 100644
+</I>&gt;<i> --- a/src/modules/cdi/ata/request.c
+</I>&gt;<i> +++ b/src/modules/cdi/ata/request.c
+</I>&gt;<i> @@ -120,6 +120,9 @@ static int ata_request_command(struct ata_request* request)
+</I>&gt;<i>      // TODO: HOB
+</I>&gt;<i>      ata_reg_outb(ctrl, REG_CONTROL, control);
+</I>&gt;<i>  
+</I>&gt;<i> +    // Features-Register schreiben
+</I>&gt;<i> +    ata_reg_outb(ctrl, REG_FEATURES, request-&gt;registers.ata.features);
+</I>&gt;<i> +
+</I>&gt;<i>      // Count-Register schrieben
+</I>&gt;<i>      ata_reg_outb(ctrl, REG_SEC_CNT, request-&gt;registers.ata.count);
+</I>&gt;<i>      
+</I>&gt;<i> @@ -415,6 +418,109 @@ int ata_protocol_pio_out(struct ata_request* request)
+</I>&gt;<i>  }
+</I>&gt;<i>  
+</I>&gt;<i>  /**
+</I>&gt;<i> + * Initialisiert DMA fuer einen Transfer
+</I>&gt;<i> + */
+</I>&gt;<i> +static int ata_request_dma_init(struct ata_request* request)
+</I>&gt;<i> +{
+</I>&gt;<i> +    struct ata_device* dev = request-&gt;dev;
+</I>&gt;<i> +    struct ata_controller* ctrl = dev-&gt;controller;
+</I>&gt;<i> +    uint64_t size = request-&gt;block_size * request-&gt;block_count;
+</I>&gt;<i> +
+</I>&gt;<i> +    *ctrl-&gt;prdt_virt = (uint32_t) ctrl-&gt;dma_buf_phys;
+</I>&gt;<i> +    // Groesse nicht ueber 64K, 0 == 64K
+</I>&gt;<i> +    *ctrl-&gt;prdt_virt |= (size &amp; (ATA_DMA_MAXSIZE - 1)) &lt;&lt; 32L;
+</I>&gt;<i> +    // Letzter Eintrag in PRDT
+</I>&gt;<i> +    *ctrl-&gt;prdt_virt |= (uint64_t) 1L &lt;&lt; 63L;
+</I>&gt;<i> +
+</I>&gt;<i> +    // Die laufenden Transfers anhalten
+</I>&gt;<i> +    cdi_outb(ctrl-&gt;port_bmr_base + BMR_COMMAND, 0);
+</I>&gt;<i> +    cdi_outb(ctrl-&gt;port_bmr_base + BMR_STATUS,
+</I>&gt;<i> +        cdi_inb(ctrl-&gt;port_bmr_base + BMR_STATUS) | BMR_STATUS_ERROR |
+</I>&gt;<i> +        BMR_STATUS_IRQ);
+</I>&gt;<i> +
+</I>&gt;<i> +    // Adresse der PRDT eintragen
+</I>&gt;<i> +    cdi_outl(ctrl-&gt;port_bmr_base + BMR_PRDT, (uint32_t) ctrl-&gt;prdt_phys);
+</I>&gt;<i> +
+</I>&gt;<i> +    if (request-&gt;flags.direction != READ) {
+</I>&gt;<i> +        memcpy(ctrl-&gt;dma_buf_virt, request-&gt;buffer, size);
+</I>&gt;<i> +    }
+</I>&gt;<i> +    return 1;
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +/**
+</I>&gt;<i> + * Verarbeitet einen ATA-Request bei dem Daten ueber DMA uebertragen werden
+</I>&gt;<i> + * sollen
+</I>&gt;<i> + */
+</I>&gt;<i> +static int ata_protocol_dma(struct ata_request* request)
+</I>&gt;<i> +{
+</I>&gt;<i> +    struct ata_device* dev = request-&gt;dev;
+</I>&gt;<i> +    struct ata_controller* ctrl = dev-&gt;controller;
+</I>&gt;<i> +
+</I>&gt;<i> +    // Aktueller Status im Protokoll
+</I>&gt;<i> +    enum {
+</I>&gt;<i> +        IRQ_WAIT,
+</I>&gt;<i> +        CHECK_STATUS,
+</I>&gt;<i> +    } state;
+</I>&gt;<i> +
+</I>&gt;<i> +    // Wozu das lesen und dieser Register gut ist, weiss ich nicht, doch ich
+</I>&gt;<i> +    // habe es so in verschiedenen Treibern gesehen, deshalb gehe ich mal davon
+</I>&gt;<i> +    // aus, dass es notwendig ist.
+</I>&gt;<i> +    cdi_inb(ctrl-&gt;port_bmr_base + BMR_COMMAND);
+</I>&gt;<i> +    cdi_inb(ctrl-&gt;port_bmr_base + BMR_STATUS);
+</I>&gt;<i> +    // Busmastering starten
+</I>&gt;<i> +    if (request-&gt;flags.direction != READ) {
+</I>&gt;<i> +        cdi_outb(ctrl-&gt;port_bmr_base + BMR_COMMAND, BMR_CMD_START |
+</I>&gt;<i> +            BMR_CMD_WRITE);
+</I>&gt;<i> +    } else {
+</I>&gt;<i> +        cdi_outb(ctrl-&gt;port_bmr_base + BMR_COMMAND, BMR_CMD_START);
+</I>&gt;<i> +    }
+</I>&gt;<i> +    cdi_inb(ctrl-&gt;port_bmr_base + BMR_COMMAND);
+</I>&gt;<i> +    cdi_inb(ctrl-&gt;port_bmr_base + BMR_STATUS);
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +    if (request-&gt;flags.poll) {
+</I>&gt;<i> +        state = CHECK_STATUS;
+</I>&gt;<i> +    } else {
+</I>&gt;<i> +        state = IRQ_WAIT;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    while (1) {
+</I>&gt;<i> +        switch (state) {
+</I>&gt;<i> +            case IRQ_WAIT:
+</I>&gt;<i> +                // Auf IRQ warten
+</I>&gt;<i> +                if (!ata_wait_irq(ctrl, ATA_IRQ_TIMEOUT)) {
+</I>&gt;<i> +                    request-&gt;error = IRQ_TIMEOUT;
+</I>&gt;<i> +                    DEBUG(&quot;dma IRQ-Timeout\n&quot;);
+</I>&gt;<i> +                    return 0;
+</I>&gt;<i> +                }
+</I>&gt;<i> +
+</I>&gt;<i> +                state = CHECK_STATUS;
+</I>&gt;<i> +                break;
+</I>&gt;<i> +
+</I>&gt;<i> +            case CHECK_STATUS: {
+</I>&gt;<i> +                uint8_t status = ata_reg_inb(ctrl, REG_STATUS);
+</I>&gt;<i> +
+</I>&gt;<i> +                // Sicherstellen dass der Transfer abgeschlossen ist. Bei
+</I>&gt;<i> +                // polling ist das hier noch nicht umbedingt der Fall.
+</I>&gt;<i> +                if ((status &amp; (STATUS_BSY | STATUS_DRQ)) == 0) {
+</I>&gt;<i> +                    cdi_inb(ctrl-&gt;port_bmr_base + BMR_STATUS);
+</I>&gt;<i> +                    cdi_outb(ctrl-&gt;port_bmr_base + BMR_COMMAND, 0);
+</I>&gt;<i> +                    goto out_success;
+</I>&gt;<i> +                }
+</I>&gt;<i> +                break;
+</I>&gt;<i> +            }
+</I>&gt;<i> +        }
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +out_success:
+</I>&gt;<i> +    if (request-&gt;flags.direction == READ) {
+</I>&gt;<i> +        memcpy(request-&gt;buffer, ctrl-&gt;dma_buf_virt,
+</I>&gt;<i> +            request-&gt;block_size * request-&gt;block_count);
+</I>&gt;<i> +    }
+</I>&gt;<i> +    return 1;
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +/**
+</I>&gt;<i>   * Fuehrt einen ATA-Request aus.
+</I>&gt;<i>   *
+</I>&gt;<i>   * @return 1 Wenn der Request erfolgreich bearbeitet wurde, 0 sonst
+</I>&gt;<i> @@ -422,6 +528,13 @@ int ata_protocol_pio_out(struct ata_request* request)
+</I>&gt;<i>  int ata_request(struct ata_request* request)
+</I>&gt;<i>  {
+</I>&gt;<i>     // printf(&quot;ata: [%d:%d] Request command=%x count=%x lba=%llx protocol=%x\n&quot;, request-&gt;dev-&gt;controller-&gt;id, request-&gt;dev-&gt;id, request-&gt;registers.ata.command, request-&gt;registers.ata.count, request-&gt;registers.ata.lba, request-&gt;protocol);
+</I>&gt;<i> +
+</I>&gt;<i> +    // Bei einem DMA-Request muss der DMA-Controller erst vorbereitet werden
+</I>&gt;<i> +    if ((request-&gt;protocol == DMA) &amp;&amp; !ata_request_dma_init(request)) {
+</I>&gt;<i> +        DEBUG(&quot;ata: Fehler beim Initialisieren des DMA-Controllers\n&quot;);
+</I>&gt;<i> +        return 0;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i>      // Befehl ausfuehren
+</I>&gt;<i>      if (!ata_request_command(request)) {
+</I>&gt;<i>          DEBUG(&quot;Fehler bei der Befehlsausfuehrung\n&quot;);
+</I>&gt;<i> @@ -447,6 +560,15 @@ int ata_request(struct ata_request* request)
+</I>&gt;<i>                  return 0;
+</I>&gt;<i>              }
+</I>&gt;<i>              break;
+</I>&gt;<i> +
+</I>&gt;<i> +        case DMA:
+</I>&gt;<i> +            if (!ata_protocol_dma(request)) {
+</I>&gt;<i> +                return 0;
+</I>&gt;<i> +            }
+</I>&gt;<i> +            break;
+</I>&gt;<i> +
+</I>&gt;<i> +        default:
+</I>&gt;<i> +            return 0;
+</I>&gt;<i>      }
+</I>&gt;<i>      return 1;
+</I>&gt;<i>  }
+</I>&gt;<i> -- 
+</I>&gt;<i> 1.6.0.6
+</I>&gt;<i> 
+</I>
+Ansonsten ok, nachdem was ich gesehen hab ;) Rein damit.
+
+-- 
+Alexander Siol
+<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">alex at tyndur.org</A>
+<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">dunklermeuchler at gmail.com</A>
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 197 bytes
+Beschreibung: Digital signature
+URL         : &lt;<A HREF="http://list.tyndur.org/pipermail/tyndur-devel/attachments/20090529/308f5c16/attachment.pgp">http://list.tyndur.org/pipermail/tyndur-devel/attachments/20090529/308f5c16/attachment.pgp</A>&gt;
+</PRE>
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="000965.html">[tyndur-devel] [PATCH 4/4] ata: Unterstuetzung fuer DMA
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="000907.html">[tyndur-devel] [PATCH 0/3] kedit-Fixes
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#997">[ Datum ]</a>
+              <a href="thread.html#997">[ Thema ]</a>
+              <a href="subject.html#997">[ Betreff (Subject)]</a>
+              <a href="author.html#997">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

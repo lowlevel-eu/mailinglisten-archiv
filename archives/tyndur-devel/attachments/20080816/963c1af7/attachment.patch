@@ -1,0 +1,192 @@
+Index: trunk/src/modules/vterm/input.c
+===================================================================
+--- trunk.orig/src/modules/vterm/input.c
++++ trunk/src/modules/vterm/input.c
+@@ -98,8 +98,9 @@ static void rpc_kbd_callback(pid_t pid, 
+     if ((pid != kbc_pid) || (data_size != 2)) {
+         return;
+     }
+-
++    p();
+     send_key_to_vterm(vterm, kbd_data[0], !kbd_data[1]);
++    v();
+ }
+ 
+ /**
+@@ -119,6 +120,8 @@ static void send_key_to_vterm(vterminal_
+         .altgr      = FALSE
+     };
+     keymap_entry_t* e;
++    int len;
++    char buf[32];
+     wchar_t c = 0;
+ 
+     // Modifier-Tasten Verarbeiten
+@@ -152,19 +155,11 @@ static void send_key_to_vterm(vterminal_
+         return;
+     }
+ 
+-    // FIXME: Ist nur temporaer da, damit Pfeiltasten und andere Spezialtasten
+-    // funktionieren wie bisher.
+-    switch (keycode) {
+-        case KEYCODE_ARROW_UP:      vterm_process_input("\0H", 2); return;
+-        case KEYCODE_ARROW_DOWN:    vterm_process_input("\0P", 2); return;
+-        case KEYCODE_ARROW_LEFT:    vterm_process_input("\0K", 2); return;
+-        case KEYCODE_ARROW_RIGHT:   vterm_process_input("\0M", 2); return;
+-        case KEYCODE_PAGE_UP:       vterm_process_input("\0I", 2); return;
+-        case KEYCODE_PAGE_DOWN:     vterm_process_input("\0Q", 2); return;
+-        case KEYCODE_INSERT:        vterm_process_input("\0R", 2); return;
+-        case KEYCODE_HOME:          vterm_process_input("\0G", 2); return;
+-        case KEYCODE_END:           vterm_process_input("\0O", 2); return;
+-        case KEYCODE_DELETE:        vterm_process_input("\0S", 2); return;
++    // Eingabe an vt100-Emulation weiterleiten
++    len = vt100_process_input(current_vterm, keycode, buf, sizeof(buf));
++    if (len != -1) {
++        vterm_process_input(buf, len);
++        return;
+     }
+ 
+     // Zeichen auswaehlen
+Index: trunk/src/modules/vterm/vt100_input.c
+===================================================================
+--- /dev/null
++++ trunk/src/modules/vterm/vt100_input.c
+@@ -0,0 +1,113 @@
++/*
++ * Copyright (c) 2008 The LOST Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the LOST Project
++ * by Antoine Kaufmann.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. All advertising materials mentioning features or use of this software
++ *    must display the following acknowledgement:
++ *     This product includes software developed by the LOST Project
++ *     and its contributors.
++ * 4. Neither the name of the LOST Project nor the names of its
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <string.h>
++#include <kbd.h>
++
++#include "vterm.h"
++
++
++/**
++ * Eingabe fuer vt100-Emulation verarbeiten
++ *
++ * @param vterm     VTerm-Handle
++ * @param keycode   Keycode der gedrueckten Taste
++ * @param buffer    Puffer in dem das Resultat abgelegt werden kann
++ * @param buffer_sz Groesse des Puffers
++ *
++ * @return Anzahl der Zeichen die neu im Puffer sind oder -1 wenn die Emulation
++ *         nichts mit der Taste anfangen kann
++ */
++int vt100_process_input(vterminal_t* vterm, uint8_t keycode, char* buffer,
++    size_t buffer_sz)
++{
++    const char* res = NULL;
++
++    // TODO: vt52-Mode und Cursor Key Mode
++    switch (keycode) {
++        case KEYCODE_ARROW_UP:
++            // vt52: <ESC>A  w CKM: \033[A  wo CKM: \033OA
++            res = "\033[A";
++            break;
++
++        case KEYCODE_ARROW_DOWN:
++            // vt52: <ESC>B  w CKM: \033[B  wo CKM: \033OB
++            res = "\033[B";
++            break;
++
++        case KEYCODE_ARROW_RIGHT:
++            // vt52: <ESC>C  w CKM: \033[C  wo CKM: \033OC
++            res = "\033[C";
++            break;
++
++        case KEYCODE_ARROW_LEFT:
++            // vt52: <ESC>D  w CKM: \033[D  wo CKM: \033OD
++            res = "\033[D";
++            break;
++
++        case KEYCODE_HOME:
++            // TODO: Wo ist der definiert? Der originale vt100 scheint keine
++            // solche Taste gehabt zu haben (Sequenz von Linux wird hier benutzt)
++            res = "\033[H";
++            break;
++
++        case KEYCODE_END:
++            // TODO: Siehe KEYCODE_HOME
++            res = "\033[F";
++            break;
++
++        case KEYCODE_PAGE_UP:
++            // TODO: Siehe KEYCODE_HOME
++            res = "\033[5~";
++            break;
++
++        case KEYCODE_PAGE_DOWN:
++            // TODO: Siehe KEYCODE_HOME
++            res = "\033[6~";
++            break;
++
++        case KEYCODE_DELETE:
++            // TODO: Siehe KEYCODE_HOME
++            res = "\033[3~";
++    }
++
++    if (res) {
++        strncpy(buffer, res, buffer_sz);
++        return strlen(res);
++    }
++
++    return -1;
++}
++
+Index: trunk/src/modules/vterm/vterm.h
+===================================================================
+--- trunk.orig/src/modules/vterm/vterm.h
++++ trunk/src/modules/vterm/vterm.h
+@@ -219,6 +219,20 @@ extern inline void buffer_position(vterm
+     dest_pos->column = screen_pos.column;
+ }
+ 
++/**
++ * Eingabe fuer vt100-Emulation verarbeiten
++ *
++ * @param vterm     VTerm-Handle
++ * @param keycode   Keycode der gedrueckten Taste
++ * @param buffer    Puffer in dem das Resultat abgelegt werden kann
++ * @param buffer_sz Groesse des Puffers
++ *
++ * @return Anzahl der Zeichen die neu im Puffer sind oder -1 wenn die Emulation
++ *         nichts mit der Taste anfangen kann
++ */
++int vt100_process_input(vterminal_t* vterm, uint8_t keycode, char* buffer,
++    size_t buffer_sz);
++
+ 
+ /// Ausgabe in vt100-Emulation verarbeiten
+ void vt100_process_output(vterminal_t* vterm, char* data, size_t length);

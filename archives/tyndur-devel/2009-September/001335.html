@@ -1,0 +1,237 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 2/3] vterm: Tastaturbelegung aenderbar machen
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%202/3%5D%20vterm%3A%20Tastaturbelegung%20aenderbar%20machen&In-Reply-To=%3C1252149678-24099-3-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001348.html">
+   <LINK REL="Next"  HREF="001349.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 2/3] vterm: Tastaturbelegung aenderbar machen</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%202/3%5D%20vterm%3A%20Tastaturbelegung%20aenderbar%20machen&In-Reply-To=%3C1252149678-24099-3-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 2/3] vterm: Tastaturbelegung aenderbar machen">kevin at tyndur.org
+                  </A><BR>
+    <I>Sa Sep  5 13:21:17 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001348.html">[tyndur-devel] [PATCH 1/3] vterm: include-Verzeichnis anlegen
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001349.html">[tyndur-devel] [PATCH 2/3] vterm: Tastaturbelegung aenderbar machen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1335">[ Datum ]</a>
+              <a href="thread.html#1335">[ Thema ]</a>
+              <a href="subject.html#1335">[ Betreff (Subject) ]</a>
+              <a href="author.html#1335">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ vterm: Ueber die Datei vterm:/keymap kann die Tastaturbelegung
+  veraendert werden
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/vterm/include/keymap.h |   18 +++++++++++++
+ src/modules/vterm/keymap.c         |   50 ++++++++++++++++++++++++++++++++++++
+ src/modules/vterm/lostio.c         |   10 +++++++
+ src/modules/vterm/vterm.c          |    4 +++
+ src/modules/vterm/vterm.h          |    1 +
+ 5 files changed, 83 insertions(+), 0 deletions(-)
+
+diff --git a/src/modules/vterm/include/keymap.h b/src/modules/vterm/include/keymap.h
+index 668067e..dcbc0ba 100644
+--- a/src/modules/vterm/include/keymap.h
++++ b/src/modules/vterm/include/keymap.h
+@@ -37,6 +37,7 @@
+ #define _KEYMAP_H_
+ #include &lt;stdint.h&gt;
+ #include &lt;stddef.h&gt;
++#include &lt;lostio.h&gt;
+ 
+ /**
+  * Eintrag in der Keymap
+@@ -55,5 +56,22 @@ typedef struct keymap_entry {
+  */
+ keymap_entry_t* keymap_get(uint8_t keycode);
+ 
++/**
++ * Legt die vterm:/keymap im Verzeichnisbaum an
++ */
++void keymap_init(void);
++
++/**
++ * LostIO-Handller um die Tastaturbelegung zu lesen
++ */
++size_t keymap_read(lostio_filehandle_t* file, void* buf,
++    size_t blocksize, size_t blockcount);
++
++/**
++ * LostIO-Handler um die Tastaturbelegung zu aendern
++ */
++size_t keymap_write(lostio_filehandle_t* file, size_t blocksize,
++    size_t blockcount, void* data);
++
+ #endif // ifndef _KEYMAP_H_
+ 
+diff --git a/src/modules/vterm/keymap.c b/src/modules/vterm/keymap.c
+index 4b5846f..c1881bd 100644
+--- a/src/modules/vterm/keymap.c
++++ b/src/modules/vterm/keymap.c
+@@ -33,6 +33,10 @@
+  * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
++#include &lt;io.h&gt;
++#include &lt;string.h&gt;
++
++#include &quot;vterm.h&quot;
+ #include &quot;keymap.h&quot;
+ 
+ keymap_entry_t keymap[] = {
+@@ -176,3 +180,49 @@ keymap_entry_t* keymap_get(uint8_t keycode)
+     return &amp;keymap[keycode];
+ }
+ 
++/**
++ * Legt die vterm:/keymap im Verzeichnisbaum an
++ */
++void keymap_init(void)
++{
++    stdout = NULL;
++    vfstree_create_node(&quot;/keymap&quot;, LOSTIO_TYPES_KEYMAP, 0, NULL, 0);
++}
++
++/**
++ * LostIO-Handller um die Tastaturbelegung zu lesen
++ */
++size_t keymap_read(lostio_filehandle_t* file, void* buf,
++    size_t blocksize, size_t blockcount)
++{
++    size_t size = blocksize * blockcount;
++
++    if (file-&gt;pos + size &gt;= sizeof(keymap)) {
++        size = sizeof(keymap) - file-&gt;pos;
++        file-&gt;flags |= LOSTIO_FLAG_EOF;
++    }
++
++    memcpy(buf, ((uint8_t*) keymap) + file-&gt;pos, size);
++    file-&gt;pos += size;
++
++    return size;
++}
++
++/**
++ * LostIO-Handler um die Tastaturbelegung zu aendern
++ */
++size_t keymap_write(lostio_filehandle_t* file, size_t blocksize,
++    size_t blockcount, void* buf)
++{
++    size_t size = blocksize * blockcount;
++
++    if (file-&gt;pos + size &gt;= sizeof(keymap)) {
++        size = sizeof(keymap) - file-&gt;pos;
++        file-&gt;flags |= LOSTIO_FLAG_EOF;
++    }
++
++    memcpy(((uint8_t*) keymap) + file-&gt;pos, buf, size);
++    file-&gt;pos += size;
++
++    return size;
++}
+diff --git a/src/modules/vterm/lostio.c b/src/modules/vterm/lostio.c
+index a835d6a..1470fa7 100644
+--- a/src/modules/vterm/lostio.c
++++ b/src/modules/vterm/lostio.c
+@@ -35,8 +35,11 @@
+ #include &lt;stdlib.h&gt;
+ #include &lt;syscall.h&gt;
+ #include &lt;string.h&gt;
++
+ #include &quot;vterm.h&quot;
+ #include &quot;lostio.h&quot;
++#include &quot;keymap.h&quot;
++
+ /// Handler fuer Lesen aus in
+ size_t terminal_read(lostio_filehandle_t* handle, void* buf,
+     size_t blocksize, size_t blockcount);
+@@ -83,6 +86,13 @@ void init_lostio_interface()
+     typehandle-&gt;link        = NULL;
+     typehandle-&gt;unlink      = NULL;
+     lostio_register_typehandle(typehandle);
++
++    // Typehandle fuer Keymaps
++    typehandle = calloc(1, sizeof(typehandle_t));
++    typehandle-&gt;id          = LOSTIO_TYPES_KEYMAP;
++    typehandle-&gt;read        = &amp;keymap_read;
++    typehandle-&gt;write       = &amp;keymap_write;
++    lostio_register_typehandle(typehandle);
+ }
+ 
+ /**
+diff --git a/src/modules/vterm/vterm.c b/src/modules/vterm/vterm.c
+index d3fcd7f..d27fbc6 100644
+--- a/src/modules/vterm/vterm.c
++++ b/src/modules/vterm/vterm.c
+@@ -41,6 +41,7 @@
+ #include &quot;vterm.h&quot;
+ #include &quot;sleep.h&quot;
+ #include &quot;init.h&quot;
++#include &quot;keymap.h&quot;
+ 
+ 
+ /// Hier kommen die Eingaben fuer all die virtuellen Terminals her
+@@ -67,6 +68,9 @@ int main(int argc, char* argv[])
+         return -1;
+     }
+ 
++    // Tastaturbelegung konfigurierbar machen
++    keymap_init();
++
+     // Auf Anfragen warten
+     while(TRUE) {
+         wait_for_rpc();
+diff --git a/src/modules/vterm/vterm.h b/src/modules/vterm/vterm.h
+index d5149da..0871db9 100644
+--- a/src/modules/vterm/vterm.h
++++ b/src/modules/vterm/vterm.h
+@@ -39,6 +39,7 @@
+ 
+ #define LOSTIO_TYPES_OUT 255
+ #define LOSTIO_TYPES_IN 254
++#define LOSTIO_TYPES_KEYMAP 253
+ 
+ #define SCREEN_WIDTH_MAX 80
+ #define SCREEN_HEIGHT_MAX 25
+-- 
+1.6.0.2
+
+</PRE>
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001348.html">[tyndur-devel] [PATCH 1/3] vterm: include-Verzeichnis anlegen
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001349.html">[tyndur-devel] [PATCH 2/3] vterm: Tastaturbelegung aenderbar machen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1335">[ Datum ]</a>
+              <a href="thread.html#1335">[ Thema ]</a>
+              <a href="subject.html#1335">[ Betreff (Subject)]</a>
+              <a href="author.html#1335">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

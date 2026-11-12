@@ -1,0 +1,1388 @@
+diff -urNp tmp/dir.c iso9660/dir.c
+--- tmp/dir.c	1970-01-01 01:00:00.000000000 +0100
++++ iso9660/dir.c	2008-09-20 20:39:36.000000000 +0200
+@@ -0,0 +1,165 @@
++/*
++ * iso9660 - An iso9660 CDI driver with Rockridge support
++ *
++ * Copyright (C) 2008 Janosch Gräf
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the Free
++ * Software Foundation; either version 3 of the License, or (at your option)
++ * any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program; if not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include <sys/types.h>
++#include <time.h>
++#include <sys/stat.h>
++
++#include "cdi/fs.h"
++#include "cdi/lists.h"
++#include "cdi/cache.h"
++
++#include "directory_record.h"
++#include "volume_descriptor.h"
++#include "iso9660def.h"
++
++#ifdef ISO9660_USE_ROCKRIDGE
++  #include "rockridge.h"
++#endif
++
++#include "iso9660_cdi.h"
++
++#ifdef ISO9660_LOWER_FILENAMES
++  #include <ctype.h>
++#endif
++
++/**
++ * Parse ISO9660 name
++ *  @param ident Identifier
++ *  @param len Length of Identifier
++ *  @return Name (should be passed to free())
++ */
++static char *parse_name(char *ident,size_t len) {
++  if (ident[len-2]==';') len -= 2;
++  if (ident[len-1]=='.') len--;
++  char *name = memcpy(malloc(len+1),ident,len);
++#ifdef ISO9660_LOWER_FILENAMES
++  size_t i;
++  for (i=0;i<len;i++) name[i] = tolower(name[i]);
++#endif
++  name[len] = 0;
++  return name;
++}
++
++static cdi_fs_res_class_t parse_class(mode_t mode,cdi_fs_res_type_t *special) {
++  cdi_fs_res_class_t class = CDI_FS_CLASS_FILE;
++  if (S_ISBLK(mode)) {
++    class = CDI_FS_CLASS_SPECIAL;
++    if (special!=NULL) *special = CDI_FS_BLOCK;
++  }
++  else if (S_ISCHR(mode)) {
++    class = CDI_FS_CLASS_SPECIAL;
++    if (special!=NULL) *special = CDI_FS_BLOCK;
++  }
++  else if (S_ISFIFO(mode)) {
++    class = CDI_FS_CLASS_SPECIAL;
++    if (special!=NULL) *special = CDI_FS_FIFO;
++  }
++  else if (S_ISSOCK(mode)) {
++    class = CDI_FS_CLASS_SPECIAL;
++    if (special!=NULL) *special = CDI_FS_SOCKET;
++  }
++  else if (S_ISREG(mode)) class = CDI_FS_CLASS_FILE;
++  else if (S_ISDIR(mode)) class = CDI_FS_CLASS_DIR;
++  else if (S_ISLNK(mode)) class = CDI_FS_CLASS_LINK;
++  return class;
++}
++
++static time_t parse_date(struct iso9660_dirrec_date *date) {
++  struct tm tm = {
++    .tm_sec = date->second,
++    .tm_min = date->minute,
++    .tm_hour = date->hour,
++    .tm_mday = date->day,
++    .tm_mon = date->month-1,
++    .tm_year = date->second
++  };
++  return mktime(&tm);
++}
++
++struct iso9660_fs_res *iso9660_dirrec_load(struct iso9660_dirrec *dirrec,struct iso9660_fs_res *parent,struct iso9660_voldesc_prim *voldesc) {
++  char *name = NULL;
++  time_t ctime = 0;
++  time_t atime = 0;
++  time_t mtime = 0;
++  cdi_fs_res_class_t class = 0;
++  cdi_fs_res_type_t type = 0;
++  mode_t mode;
++
++#ifdef ISO9660_USE_ROCKRIDGE
++  if (iso9660_rockridge_scan(dirrec,&name,&mode,NULL,NULL,NULL,&atime,&ctime,&mtime)==0) {
++    class = parse_class(mode,&type);
++  }
++  else {
++    name = NULL;
++    class = 0;
++#endif
++    ctime = parse_date(&(dirrec->date_creation));
++    atime = ctime;
++    mtime = ctime;
++#ifdef ISO9660_USE_ROCKRIDGE
++  }
++#endif
++  if (name==NULL) name = parse_name(dirrec->identifier,dirrec->identifier_length);
++  if (class==0) class = (dirrec->flags&ISO9660_DIRREC_DIR)?CDI_FS_CLASS_DIR:CDI_FS_CLASS_FILE;
++
++  struct iso9660_fs_res *new = iso9660_fs_res_create(name,parent,class,type);
++  if (voldesc!=NULL) new->voldesc = voldesc;
++  new->ctime = ctime;
++  new->atime = atime;
++  new->mtime = mtime;
++  new->data_sector = dirrec->data_sector;
++  new->data_size = dirrec->data_size;
++
++  free(name);
++  return new;
++}
++
++cdi_list_t iso9660_dir_load(struct iso9660_fs_res *res) {
++  fprintf(stderr,"iso9660_dir_load(0x%x(%s))\n",res,res->res.name);
++  struct iso9660_dirrec *dirrec;
++  size_t i = 0;
++  cdi_list_t dirlist = cdi_list_create();
++  size_t curpos = 0;
++
++  while (1) {
++    uint8_t size;
++
++    iso9660_read(res,curpos,1,&size);
++    //cdi_cache_entry_read(res->cache_entry,curpos,1,&size);
++    if (size==0) break;
++
++    dirrec = malloc(size);
++    iso9660_read(res,curpos,size,dirrec);
++    //cdi_cache_entry_read(res->cache_entry,curpos,size,dirrec);
++
++    if (i>1) cdi_list_push(dirlist,iso9660_dirrec_load(dirrec,res,NULL));
++
++    curpos += size;
++    i++;
++  }
++
++  return dirlist;
++}
++
++cdi_list_t iso9660_fs_dir_list(struct cdi_fs_stream *stream) {
++  struct iso9660_fs_res *res = (struct iso9660_fs_res*)stream->res;
++
++  return res->res.children;
++}
+diff -urNp tmp/directory_record.h iso9660/directory_record.h
+--- tmp/directory_record.h	1970-01-01 01:00:00.000000000 +0100
++++ iso9660/directory_record.h	2008-09-20 20:39:36.000000000 +0200
+@@ -0,0 +1,93 @@
++/*
++ * iso9660 - An iso9660 CDI driver with Rockridge support
++ *
++ * Copyright (C) 2008 Janosch Gräf
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the Free
++ * Software Foundation; either version 3 of the License, or (at your option)
++ * any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program; if not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef _DIRECTORY_RECORD_H_
++#define _DIRECTORY_RECORD_H_
++
++#include <stdint.h>
++
++struct iso9660_dirrec_date {
++  // Number of years since 1900
++  uint8_t year;
++
++  // Month (1=January, 2=February)
++  uint8_t month;
++
++  // Day of month
++  uint8_t day;
++
++  // Hour
++  uint8_t hour;
++
++  // Minute
++  uint8_t minute;
++
++  // Second
++  uint8_t second;
++
++  // GMT offset (in 15min intervals)
++  int8_t gmtoff;
++} __attribute__ ((packed));
++
++#define ISO9660_DIRREC_HIDDEN   1
++#define ISO9660_DIRREC_DIR      2
++#define ISO9660_DIRREC_ASSOC    4
++#define ISO9660_DIRREC_RECFMT   8
++#define ISO9660_DIRREC_PERM     16
++#define ISO9660_DIRREC_NOTFINAL 128
++
++struct iso9660_dirrec {
++  // Size of this record (must be even)
++  uint8_t record_size;
++
++  // Number of sectors in extended attribute record
++  uint8_t num_sectors_extattrrec;
++
++  // First sector for file/directory data (0 if empty)
++  uint32_t data_sector;
++  uint32_t data_sector_be;
++
++  // File/directory data size
++  uint32_t data_size;
++  uint32_t data_size_be;
++
++  // Date of creation
++  struct iso9660_dirrec_date date_creation;
++
++  // File flags
++  uint8_t flags;
++
++  // Unit size for interleaved files (should be 0)
++  uint8_t interleaved_unit_size;
++
++  // Gap size for interleaved files (should be 0)
++  uint8_t interleaved_gap_size;
++
++  // Volume sequence number
++  uint16_t volume_seq;
++  uint16_t volume_seq_be;
++
++  // Identifier length
++  uint8_t identifier_length;
++
++  // Identifier
++  uint8_t identifier[1];
++} __attribute__ ((packed));
++
++#endif
+diff -urNp tmp/file.c iso9660/file.c
+--- tmp/file.c	1970-01-01 01:00:00.000000000 +0100
++++ iso9660/file.c	2008-09-20 20:39:09.000000000 +0200
+@@ -0,0 +1,43 @@
++/*
++ * iso9660 - An iso9660 CDI driver with Rockridge support
++ *
++ * Copyright (C) 2008 Janosch Gräf
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the Free
++ * Software Foundation; either version 3 of the License, or (at your option)
++ * any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program; if not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include "cdi/fs.h"
++#include "cdi/cache.h"
++
++#include "iso9660_cdi.h"
++
++/**
++ * Reads from file
++ *  @param stream CDI FS stream
++ *  @param start Offset in flie
++ *  @param size How many bytes to read
++ *  @param buffer Buffer to store data in
++ *  @return How many bytes read
++ */
++size_t iso9660_fs_file_read(struct cdi_fs_stream *stream,uint64_t start,size_t size,void *buffer) {
++  fprintf(stderr,"iso9660_fs_file_read(0x%x,0x%x,0x%x,0x%x,0x%x)\n",stream,start,size,buffer);
++  struct iso9660_fs_res *res = (struct iso9660_fs_res*)stream->res;
++
++  if (start>res->data_size) return 0;
++  if (start+size>res->data_size) size = res->data_size-start;
++
++  iso9660_read(res,start,size,buffer);
++  //cdi_cache_entry_read(res->cache_entry,start,size,buffer);
++  return size;
++}
+diff -urNp tmp/init.c iso9660/init.c
+--- tmp/init.c	1970-01-01 01:00:00.000000000 +0100
++++ iso9660/init.c	2008-09-20 20:39:11.000000000 +0200
+@@ -0,0 +1,58 @@
++/*
++ * iso9660 - An iso9660 CDI driver with Rockridge support
++ *
++ * Copyright (C) 2008 Janosch Gräf
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the Free
++ * Software Foundation; either version 3 of the License, or (at your option)
++ * any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program; if not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include <sys/types.h>
++#include <stddef.h>
++
++#include "cdi/fs.h"
++#include "cdi/cache.h"
++
++#include "iso9660_cdi.h"
++
++#include "volume_descriptor.h"
++
++/**
++ * Initializes a ISO9660 filesystem
++ *  @param fs Filesystem to initialize
++ *  @return If initialization was successful
++ */
++int iso9660_fs_init(struct cdi_fs_filesystem *fs) {
++  fprintf(stderr,"iso9660_fs_init(0x%x)\n",fs);
++  struct iso9660_voldesc_prim *voldesc = malloc(sizeof(struct iso9660_voldesc_prim));
++  if (iso9660_voldesc_load(fs,ISO9660_VOLDESC_PRIM,voldesc)!=-1) {
++    struct iso9660_fs_res *root_res = iso9660_dirrec_load(&voldesc->root_dir,NULL,voldesc);
++    root_res->cache = cdi_cache_create(voldesc->sector_size,0,iso9660_sector_read_cache,NULL,fs);
++    fs->root_res = (struct cdi_fs_res*)root_res;
++    return 1;
++  }
++  else return 0;
++}
++
++/**
++ * Destroys a FS
++ *  @param fs Filesystem to destroy
++ *  @return If destroy was successful
++ */
++int iso9660_fs_destroy(struct cdi_fs_filesystem *fs) {
++  fprintf(stderr,"iso9660_fs_destroy(0x%x)\n",fs);
++  struct iso9660_fs_res *root_res = (struct iso9660_fs_res*)(fs->root_res);
++  free(root_res->voldesc);
++  cdi_cache_destroy(root_res->cache);
++  return iso9660_fs_res_destroy(root_res);
++}
+diff -urNp tmp/iso9660_cdi.h iso9660/iso9660_cdi.h
+--- tmp/iso9660_cdi.h	1970-01-01 01:00:00.000000000 +0100
++++ iso9660/iso9660_cdi.h	2008-09-20 20:39:13.000000000 +0200
+@@ -0,0 +1,94 @@
++/*
++ * iso9660 - An iso9660 CDI driver with Rockridge support
++ *
++ * Copyright (C) 2008 Janosch Gräf
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the Free
++ * Software Foundation; either version 3 of the License, or (at your option)
++ * any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program; if not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef _ISO9660_CDI_H_
++#define _ISO9660_CDI_H_
++
++#include <sys/types.h>
++#include <stdint.h>
++
++#include "cdi/fs.h"
++#include "cdi/cache.h"
++#include "cdi/lists.h"
++
++#include "iso9660def.h"
++#include "volume_descriptor.h"
++
++#include <stdio.h>
++
++// ISO9660 Resource
++struct iso9660_fs_res {
++  struct cdi_fs_res res;
++
++  // Creation time
++  time_t ctime;
++
++  // Access time
++  time_t atime;
++
++  // Modification time
++  time_t mtime;
++
++  // First sector with the resource data
++  uint64_t data_sector;
++
++  // Size of resource data
++  uint32_t data_size;
++
++  // File class
++  cdi_fs_res_class_t class;
++
++  // Primary volume descriptor
++  struct iso9660_voldesc_prim *voldesc;
++
++  // Cache
++  struct cdi_cache *cache;
++};
++
++// init.c
++int iso9660_fs_init(struct cdi_fs_filesystem *fs);
++int iso9660_fs_destroy(struct cdi_fs_filesystem *fs);
++
++// res.c
++struct iso9660_fs_res *iso9660_fs_res_create(const char *name,struct iso9660_fs_res *parent,cdi_fs_res_class_t class,cdi_fs_res_type_t type);
++int iso9660_fs_res_destroy(struct iso9660_fs_res *res);
++int iso9660_fs_res_load(struct cdi_fs_stream *stream);
++int iso9660_fs_res_unload(struct cdi_fs_stream *stream);
++int64_t iso9660_fs_res_meta_read(struct cdi_fs_stream *stream,cdi_fs_meta_t meta);
++
++// file.c
++size_t iso9660_fs_file_read(struct cdi_fs_stream *stream,uint64_t start,size_t size,void *buffer);
++
++// dir.c
++cdi_list_t iso9660_dir_load(struct iso9660_fs_res *res);
++struct iso9660_fs_res *iso9660_dirrec_load(struct iso9660_dirrec *dirrec,struct iso9660_fs_res *parent,struct iso9660_voldesc_prim *voldesc);
++cdi_list_t iso9660_fs_dir_list(struct cdi_fs_stream *stream);
++
++// Sector
++#define iso9660_sector_read(fs,start,size,buffer) cdi_fs_data_read(fs,start,size,buffer)
++size_t iso9660_read(struct iso9660_fs_res *res,size_t pos,size_t size,void *buffer);
++size_t iso9660_sector_read_cache(struct cdi_cache *cache,uint64_t block,size_t count,void *dest,void *prv);
++
++// Resources
++extern struct cdi_fs_res_res    iso9660_fs_res_res;
++extern struct cdi_fs_res_file   iso9660_fs_res_file;
++extern struct cdi_fs_res_dir    iso9660_fs_res_dir;
++
++
++#endif
+diff -urNp tmp/iso9660def.h iso9660/iso9660def.h
+--- tmp/iso9660def.h	1970-01-01 01:00:00.000000000 +0100
++++ iso9660/iso9660def.h	2008-09-20 20:39:13.000000000 +0200
+@@ -0,0 +1,38 @@
++/*
++ * iso9660 - An iso9660 CDI driver with Rockridge support
++ *
++ * Copyright (C) 2008 Janosch Gräf
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the Free
++ * Software Foundation; either version 3 of the License, or (at your option)
++ * any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program; if not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef _ISO9660DEF_H_
++#define _ISO9660DEF_H_
++
++// Default sector size. Used to load volume descriptors
++#define ISO9660_DEFAULT_SECTOR_SIZE 2048
++
++// Number of first used sector (first volume descriptor)
++#define ISO9660_FIRST_SECTOR        16
++
++// Define if you want to use lower filenames
++// (if you don't use an extension that supports lower filenames)
++#define ISO9660_LOWER_FILENAMES
++
++#ifndef ISO9660_USE_ROCKRIDGE
++  // Define if you want to use Rockridge extension
++  #define ISO9660_USE_ROCKRIDGE
++#endif
++
++#endif
+diff -urNp tmp/main.c iso9660/main.c
+--- tmp/main.c	1970-01-01 01:00:00.000000000 +0100
++++ iso9660/main.c	2008-09-20 20:39:16.000000000 +0200
+@@ -0,0 +1,73 @@
++/*
++ * iso9660 - An iso9660 CDI driver with Rockridge support
++ *
++ * Copyright (C) 2008 Janosch Gräf
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the Free
++ * Software Foundation; either version 3 of the License, or (at your option)
++ * any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program; if not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include "cdi/fs.h"
++
++#include "iso9660_cdi.h"
++
++struct iso9660_driver {
++  struct cdi_fs_driver drv;
++};
++
++static struct iso9660_driver iso9660_driver;
++static const char* driver_name = "iso9660";
++
++static int iso9660_driver_init(struct iso9660_driver *driver);
++static void iso9660_driver_destroy(struct iso9660_driver *driver);
++
++#ifdef CDI_STANDALONE
++int main()
++#else
++int init_iso9660()
++#endif
++{
++    cdi_init();
++
++    if (iso9660_driver_init(&iso9660_driver)!=0) return -1;
++    cdi_fs_driver_register((struct cdi_fs_driver*)&iso9660_driver);
++
++#ifdef CDI_STANDALONE
++    cdi_run_drivers();
++#endif
++
++    return 0;
++}
++
++/**
++ * Initialisiert die Datenstrukturen fuer den iso9660-Treiber
++ */
++static int iso9660_driver_init(struct iso9660_driver *driver) {
++    // Konstruktor der Vaterklasse
++    cdi_fs_driver_init((struct cdi_fs_driver*)driver);
++
++    // Namen setzen
++    driver->drv.drv.name = driver_name;
++    driver->drv.fs_init = iso9660_fs_init;
++    driver->drv.fs_destroy = iso9660_fs_destroy;
++    driver->drv.drv.destroy = iso9660_driver_destroy;
++    return 0;
++}
++
++/**
++ * Deinitialisiert die Datenstrukturen fuer den iso9660-Treiber
++ */
++static void iso9660_driver_destroy(struct iso9660_driver* driver)
++{
++    cdi_fs_driver_destroy((struct cdi_fs_driver*)driver);
++}
+diff -urNp tmp/Makefile iso9660/Makefile
+--- tmp/Makefile	1970-01-01 01:00:00.000000000 +0100
++++ iso9660/Makefile	2008-09-20 20:14:09.000000000 +0200
+@@ -0,0 +1,13 @@
++-include ../../Makefile.config
++
++all:
++	$(CC) -o iso9660 *.c -lcdi
++	$(STRIP) iso9660
++	cp iso9660 ../../files/bin
++
++debug:
++	$(CC) -o iso9660 *.c -lcdi
++	$(OBJDUMP) -d -S iso9660 > iso9660.objdump
++
++clean:
++	rm iso9660
+diff -urNp tmp/res.c iso9660/res.c
+--- tmp/res.c	1970-01-01 01:00:00.000000000 +0100
++++ iso9660/res.c	2008-09-20 20:39:26.000000000 +0200
+@@ -0,0 +1,150 @@
++/*
++ * iso9660 - An iso9660 CDI driver with Rockridge support
++ *
++ * Copyright (C) 2008 Janosch Gräf
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the Free
++ * Software Foundation; either version 3 of the License, or (at your option)
++ * any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program; if not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include <sys/types.h>
++#include <string.h>
++#include <stdlib.h>
++#include <time.h>
++
++#include "cdi/lists.h"
++#include "cdi/fs.h"
++#include "cdi/cache.h"
++
++#include "volume_descriptor.h"
++
++#include "iso9660_cdi.h"
++
++/**
++ * Creates a new resource
++ *  @param name Name of resource
++ *  @param parent Parent resource
++ *  @param class File class
++ *  @param type Special file type
++ *  @return ISO9660 class
++ */
++struct iso9660_fs_res *iso9660_fs_res_create(const char *name,struct iso9660_fs_res *parent,cdi_fs_res_class_t class,cdi_fs_res_type_t type) {
++  fprintf(stderr,"iso9660_fs_res_create(%s,0x%x,%d)\n",name,parent,class);
++  struct iso9660_fs_res *res = malloc(sizeof(struct iso9660_fs_res));
++
++  memset(res,0,sizeof(struct iso9660_fs_res));
++  res->res.name = strdup(name);
++  res->res.res = &iso9660_fs_res_res;
++  res->res.parent = (struct cdi_fs_res*)parent;
++  res->class = class;
++  res->res.type = type;
++  if (class==CDI_FS_CLASS_DIR) res->res.dir = &iso9660_fs_res_dir;
++  else res->res.file = &iso9660_fs_res_file;
++  res->res.flags.read = 1;
++  res->res.flags.execute = 1;
++  res->res.flags.browse = 1;
++  res->res.flags.read_link = 1;
++
++  if (parent!=NULL) {
++    res->voldesc = parent->voldesc;
++    res->cache = parent->cache;
++  }
++  return res;
++}
++
++/**
++ * Destroys a resource
++ *  @param res ISO9660 resource
++ *  @return 0=success; -1=failure
++ */
++int iso9660_fs_res_destroy(struct iso9660_fs_res *res) {
++  fprintf(stderr,"iso9660_fs_res_destroy(0x%x)\n",res);
++  free(res->res.name);
++  if (res->res.children!=NULL) {
++    size_t i;
++    struct iso9660_fs_res *child;
++    for (i=0;(child = cdi_list_get(res->res.children,i));i++) iso9660_fs_res_destroy(child);
++    cdi_list_destroy(res->res.children);
++  }
++  return 0;
++}
++
++/**
++ * Loads a resource
++ *  @param stream CDI FS stream
++ *  @return 0=success; -1=failure
++ */
++int iso9660_fs_res_load(struct cdi_fs_stream *stream) {
++  struct iso9660_fs_res *res = (struct iso9660_fs_res*)stream->res;
++
++  if (!res->res.loaded) {
++    // Create cache
++    //size_t i;
++    //for (i=0;i<res->data_size;i+=res->voldesc->sector_size) cdi_cache_entry_new(res->cache,res->data_offset+i,res->voldesc->sector_size);
++
++    if (res->class==CDI_FS_CLASS_DIR) res->res.children = iso9660_dir_load(res);
++    else res->res.children = cdi_list_create();
++    res->res.loaded = 1;
++  }
++  return 1;
++}
++
++/**
++ * Unloads a resource
++ *  @param stream CDI FS stream
++ *  @return 0=success; -1=failure
++ */
++int iso9660_fs_res_unload(struct cdi_fs_stream *stream) {
++  struct iso9660_fs_res *res = (struct iso9660_fs_res*)stream->res;
++
++  if (res->res.loaded) {
++    // Destroy children
++    struct iso9660_fs_res *child;
++    while (child = cdi_list_pop(res->res.children)) iso9660_fs_res_destroy(child);
++    cdi_list_destroy(res->res.children);
++
++    res->res.loaded = 0;
++  }
++  return 1;
++}
++
++/**
++ * Reads meta data from resource
++ *  @param stream CDI FS stream
++ *  @param meta Type of meta data
++ *  @return Meta data
++ */
++int64_t iso9660_fs_res_meta_read(struct cdi_fs_stream *stream,cdi_fs_meta_t meta) {
++  struct iso9660_fs_res *res = (struct iso9660_fs_res*)stream->res;
++  switch (meta) {
++    case CDI_FS_META_SIZE:
++      return res->data_size;
++
++    case CDI_FS_META_USEDBLOCKS:
++      return (res->data_size-1)/res->voldesc->sector_size+1;
++
++    case CDI_FS_META_BESTBLOCKSZ:
++    case CDI_FS_META_BLOCKSZ:
++      return res->voldesc->sector_size;
++
++    case CDI_FS_META_CREATETIME:
++      return res->ctime;
++
++    case CDI_FS_META_ACCESSTIME:
++      return res->atime;
++
++    case CDI_FS_META_CHANGETIME:
++      return res->mtime;
++  }
++  return 0;
++}
+diff -urNp tmp/resources.c iso9660/resources.c
+--- tmp/resources.c	1970-01-01 01:00:00.000000000 +0100
++++ iso9660/resources.c	2008-09-20 20:39:27.000000000 +0200
+@@ -0,0 +1,38 @@
++/*
++ * iso9660 - An iso9660 CDI driver with Rockridge support
++ *
++ * Copyright (C) 2008 Janosch Gräf
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the Free
++ * Software Foundation; either version 3 of the License, or (at your option)
++ * any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program; if not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include "iso9660_cdi.h"
++
++struct cdi_fs_res_res iso9660_fs_res_res = {
++    .load = iso9660_fs_res_load,
++    .unload = iso9660_fs_res_unload,
++    .meta_read = iso9660_fs_res_meta_read,
++};
++
++struct cdi_fs_res_file iso9660_fs_res_file = {
++    // Prinzipiell haben wir nur ausfuehrbare Dateien, der Rest wird mit den
++    // Berechtigungen geregelt
++    .executable = 1,
++
++    .read = iso9660_fs_file_read,
++};
++
++struct cdi_fs_res_dir iso9660_fs_res_dir = {
++    .list = iso9660_fs_dir_list,
++};
+diff -urNp tmp/rockridge.c iso9660/rockridge.c
+--- tmp/rockridge.c	1970-01-01 01:00:00.000000000 +0100
++++ iso9660/rockridge.c	2008-09-20 20:40:59.000000000 +0200
+@@ -0,0 +1,89 @@
++/*
++ * iso9660 - An iso9660 CDI driver with Rockridge support
++ *
++ * Copyright (C) 2008 Janosch Gräf
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the Free
++ * Software Foundation; either version 3 of the License, or (at your option)
++ * any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program; if not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include "iso9660def.h"
++#ifdef ISO9660_USE_ROCKRIDGE
++
++#include <stdint.h>
++#include <stddef.h>
++#include <string.h>
++#include <stdlib.h>
++#include <ctype.h>
++
++#include "cdi/lists.h"
++
++#include "rockridge.h"
++#include "directory_record.h"
++
++/**
++ * Scans system use area in directory record for rockridge entries
++ *  @param dirrec Directory record
++ *  @param _name Reference for POSIX name
++ *  @param mode Reference for file mode
++ *  @param uid Reference for UID
++ *  @param gid Reference for GID
++ *  @param nlink Reference for number of hardlinks
++ *  @param atime Reference for access time
++ *  @param ctime Reference for createtion time
++ *  @param mtime Reference for modification time
++ *  @return 0=success; -1=failure
++ */
++int iso9660_rockridge_scan(struct iso9660_dirrec *dirrec,char **_name,mode_t *mode,uid_t *uid,gid_t *gid,nlink_t *nlink,time_t *atime,time_t *ctime,time_t *mtime) {
++  struct iso9660_rockridge *sue = ((void*)(dirrec->identifier))+dirrec->identifier_length;
++  if ((((uintptr_t)sue)&1)==1) sue = ((void*)sue)+1;
++
++  if (sue->sig!=ISO9660_ROCKRIDGE_SIG_RR) return -1;
++
++  char *name = NULL;
++  size_t name_size = 0;
++
++  while (sue->sig!=ISO9660_ROCKRIDGE_SIG_ST && sue->sig!=0 && ((uintptr_t)sue-(uintptr_t)dirrec)+4<dirrec->record_size) {
++    if (sue->sig==ISO9660_ROCKRIDGE_SIG_PX) {
++      struct iso9660_rockridge_px *sue_px = (struct iso9660_rockridge_px*)sue;
++      if (mode!=NULL) *mode = sue_px->mode;
++      if (nlink!=NULL) *nlink = sue_px->nlink;
++      if (uid!=NULL) *uid = sue_px->uid;
++      if (gid!=NULL) *gid = sue_px->gid;
++    }
++    else if (sue->sig==ISO9660_ROCKRIDGE_SIG_NM) {
++      struct iso9660_rockridge_nm *sue_nm = (struct iso9660_rockridge_nm*)sue;
++      if (sue_nm->flags&ISO9660_ROCKRIDGE_NAMEFLAG_CURRENT) *_name = strdup(".");
++      else if (sue_nm->flags&ISO9660_ROCKRIDGE_NAMEFLAG_PARENT) *_name = strdup("..");
++      else {
++        size_t part_size = sue->size-offsetof(struct iso9660_rockridge_nm,name);
++        name = realloc(name,name_size+part_size+1);
++        memcpy(name+name_size,sue_nm->name,part_size);
++        name_size += part_size;
++      }
++    }
++    sue = ((void*)sue)+sue->size;
++  }
++
++  if (name!=NULL) {
++    if (_name!=NULL) {
++      name[name_size] = 0;
++      *_name = name;
++    }
++    else free(name);
++  }
++
++  return 0;
++}
++
++#endif
+diff -urNp tmp/rockridge.h iso9660/rockridge.h
+--- tmp/rockridge.h	1970-01-01 01:00:00.000000000 +0100
++++ iso9660/rockridge.h	2008-09-20 20:39:28.000000000 +0200
+@@ -0,0 +1,160 @@
++/*
++ * iso9660 - An iso9660 CDI driver with Rockridge support
++ *
++ * Copyright (C) 2008 Janosch Gräf
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the Free
++ * Software Foundation; either version 3 of the License, or (at your option)
++ * any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program; if not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef _ISO9660_ROCKRIDGE_H_
++#define _ISO9660_ROCKRIDGE_H_
++
++#include <sys/types.h>
++#include <stdint.h>
++
++#include "directory_record.h"
++
++#define ISO9660_ROCKRIDGE_VERSION 1
++
++#define ISO9660_ROCKRIDGE_SL_FLAG_LAST 1
++
++#define ISO9660_ROCKRIDGE_NAMEFLAG_CONTINUE 1
++#define ISO9660_ROCKRIDGE_NAMEFLAG_CURRENT  2
++#define ISO9660_ROCKRIDGE_NAMEFLAG_PARENT   4
++#define ISO9660_ROCKRIDGE_NAMEFLAG_ROOT     8
++
++#define ISO9660_ROCKRIDGE_TFFLAG_CREATION   1
++#define ISO9660_ROCKRIDGE_TFFLAG_MODIFY     2
++#define ISO9660_ROCKRIDGE_TFFLAG_ACCESS     4
++#define ISO9660_ROCKRIDGE_TFFLAG_ATTRIBUTES 8
++#define ISO9660_ROCKRIDGE_TFFLAG_BACKUP     16
++#define ISO9660_ROCKRIDGE_TFFLAG_EXPIRATION 32
++#define ISO9660_ROCKRIDGE_TFFLAG_EFFECTIVE  64
++#define ISO9660_ROCKRIDGE_TFFLAG_LONGFORM   128
++
++#define ISO9660_ROCKRIDGE_SIG_SP ('S'|('P'<<8))
++#define ISO9660_ROCKRIDGE_SIG_ST ('S'|('T'<<8))
++#define ISO9660_ROCKRIDGE_SIG_RR ('R'|('R'<<8)) ///< @todo Actually the SUE must start with SP and not with RR
++#define ISO9660_ROCKRIDGE_SIG_PX ('P'|('X'<<8))
++#define ISO9660_ROCKRIDGE_SIG_PN ('P'|('N'<<8))
++#define ISO9660_ROCKRIDGE_SIG_SL ('S'|('L'<<8))
++#define ISO9660_ROCKRIDGE_SIG_NM ('N'|('M'<<8))
++#define ISO9660_ROCKRIDGE_SIG_CL ('C'|('L'<<8))
++#define ISO9660_ROCKRIDGE_SIG_PL ('P'|('L'<<8))
++#define ISO9660_ROCKRIDGE_SIG_RE ('R'|('E'<<8))
++#define ISO9660_ROCKRIDGE_SIG_RF ('R'|('F'<<8))
++#define ISO9660_ROCKRIDGE_SIG_SF ('S'|('F'<<8))
++
++// Rockridge System Use Entry
++struct iso9660_rockridge {
++  // Field signature
++  uint16_t sig;
++
++  // Size of field
++  uint8_t size;
++
++  // Version
++  uint8_t version;
++} __attribute__ ((packed));
++
++///< @todo Actually the SUE must start with SP and not with RR
++struct iso9660_rockridge_rr {
++  // Size: 5
++  struct iso9660_rockridge header;
++  uint8_t unknown;
++} __attribute__ ((packed));
++
++// Rockridge System Use Entry for file permissions
++struct iso9660_rockridge_px {
++  // Size: 44
++  struct iso9660_rockridge header;
++
++  // File mode (like in sys/stat.h)
++  uint32_t mode;
++  uint32_t mode_be;
++
++  // Number of links (like in sys/stat.h)
++  uint32_t nlink;
++  uint32_t nlink_be;
++
++  // Owner UID
++  uint32_t uid;
++  uint32_t uid_be;
++
++  // Owner GID
++  uint32_t gid;
++  uint32_t gid_be;
++
++  // File serial number
++  uint32_t serial;
++  uint32_t serial_be;
++} __attribute__ ((packed));
++
++// Rockridge System Use Entry for device nodes
++struct iso9660_rockridge_pn {
++  // Size: 20
++  struct iso9660_rockridge header;
++
++  // Device number
++  uint32_t devhi;
++  uint32_t devhi_be;
++  uint32_t devlo;
++  uint32_t devlo_be;
++} __attribute__ ((packed));
++
++// Rockridge SL Component
++struct iso9660_rockridge_sl_component {
++  uint8_t flags;
++  uint8_t len;
++  uint8_t content[0];
++} __attribute__ ((packed));
++
++// Rockridge System Use Entry for symbolic links
++struct iso9660_rockridge_sl {
++  // Size:
++  struct iso9660_rockridge header;
++
++  // Flags
++  uint8_t flags;
++
++  // Component Area
++  struct iso9660_rockridge_sl_component component_area[0];
++} __attribute__ ((packed));
++
++// Rockridge System Use Entry for POSIX names
++struct iso9660_rockridge_nm {
++  // Size:
++  struct iso9660_rockridge header;
++
++  // Flags
++  uint8_t flags;
++
++  // Name content
++  uint8_t name[1];
++} __attribute__ ((packed));
++
++// Rockridge System Use Entry for timestamps
++struct iso9660_rockridge_tf {
++  // Size:
++  struct iso9660_rockridge header;
++
++  // Flags (Type of timestamp
++  uint8_t flags;
++
++  /// @todo
++} __attribute__ ((packed));
++
++int iso9660_rockridge_scan(struct iso9660_dirrec *dirrec,char **_name,mode_t *mode,uid_t *uid,gid_t *gid,nlink_t *nlink,time_t *atime,time_t *ctime,time_t *mtime);
++
++#endif
+diff -urNp tmp/sector.c iso9660/sector.c
+--- tmp/sector.c	1970-01-01 01:00:00.000000000 +0100
++++ iso9660/sector.c	2008-09-20 20:39:29.000000000 +0200
+@@ -0,0 +1,85 @@
++/*
++ * iso9660 - An iso9660 CDI driver with Rockridge support
++ *
++ * Copyright (C) 2008 Janosch Gräf
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the Free
++ * Software Foundation; either version 3 of the License, or (at your option)
++ * any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program; if not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include <stdint.h>
++
++#include "cdi/fs.h"
++#include "cdi/cache.h"
++
++#include "iso9660def.h"
++
++#include "iso9660_cdi.h"
++
++/**
++ * Reads data from device for cache
++ *  @param cache CDI cache
++ *  @param block Block to read
++ *  @param count How many blocks to read
++ *  @param dest Buffer to store data in
++ *  @param prv Private data (CDI filesystem)
++ *  @return 0=success; -1=failure
++ */
++size_t iso9660_sector_read_cache(struct cdi_cache *cache,uint64_t block,size_t count,void *dest,void *prv) {
++  fprintf(stderr,"iso9660_sector_read_cache(0x%x,0x%x,0x%x,0x%x,0x%x,0x%x)\n",cache,block,count,dest,prv);
++  uint64_t start = ((uint64_t)block)*ISO9660_DEFAULT_SECTOR_SIZE;
++  size_t size = count*ISO9660_DEFAULT_SECTOR_SIZE;
++  return iso9660_sector_read(prv,start,size,dest)/ISO9660_DEFAULT_SECTOR_SIZE;
++}
++
++/**
++ * Read data from resource
++ *  @param res Resource to read data from
++ *  @param pos Position in resource
++ *  @param size How many bytes to read
++ *  @param Buffer Buffer to store data in
++ *  @return How many bytes read
++ */
++size_t iso9660_read(struct iso9660_fs_res *res,size_t pos,size_t size,void *buffer) {
++  size_t block = pos/res->voldesc->sector_size;
++  size_t offset = pos%res->voldesc->sector_size;
++  size_t rem_size = size;
++
++  while (rem_size>0) {
++    //fprintf(stderr,"Block: 0x%x\n",res->data_sector+block++);
++    struct cdi_cache_block *cache_block = cdi_cache_block_get(res->cache,res->data_sector+block++);
++    size_t cur_size = rem_size>res->voldesc->sector_size?res->voldesc->sector_size:rem_size;
++    memcpy(buffer,cache_block->data+offset,cur_size);
++    cdi_cache_block_release(res->cache,cache_block);
++    buffer += cur_size;
++    rem_size -= cur_size;
++    offset = 0;
++  }
++
++  return size;
++}
++
++/*
++int iso9660_sector_read_cache(struct cdi_cache *cache,uint64_t block,size_t count,void *dest,void *prv) {
++  struct cdi_fs_filesystem *fs = prv;
++  struct iso9660_fs_res *res = (struct iso9660_fs_res*)fs->root_res;
++  uint64_t start = ((uint64_t)block)*ISO9660_DEFAULT_SECTOR_SIZE;
++  size_t size = count*ISO9660_DEFAULT_SECTOR_SIZE;
++  uint64_t maxsize = ((uint64_t)res->voldesc->num_sectors)*res->voldesc->sector_size;
++
++  if (start>maxsize) return 0;
++  if (start+size>maxsize) size = maxsize-start;
++
++  return iso9660_sector_read(prv,start,size,dest)==size?0:-1;
++}
++*/
+diff -urNp tmp/volume_descriptor.c iso9660/volume_descriptor.c
+--- tmp/volume_descriptor.c	1970-01-01 01:00:00.000000000 +0100
++++ iso9660/volume_descriptor.c	2008-09-20 20:39:30.000000000 +0200
+@@ -0,0 +1,69 @@
++/*
++ * iso9660 - An iso9660 CDI driver with Rockridge support
++ *
++ * Copyright (C) 2008 Janosch Gräf
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the Free
++ * Software Foundation; either version 3 of the License, or (at your option)
++ * any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program; if not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include <stdint.h>
++
++#include "cdi/fs.h"
++
++#include "iso9660_cdi.h"
++
++#include "iso9660def.h"
++#include "volume_descriptor.h"
++
++/**
++ * Checks signature of volume descriptor
++ *  @param sig Signature
++ *  @return If signature is right
++ */
++static int iso9660_voldesc_checksig(uint8_t sig[6]) {
++  size_t i;
++  char right[6] = {'C','D','0','0','1',1};
++  for (i=0;i<6;i++) {
++    if (sig[i]!=right[i]) return 0;
++  }
++  return 1;
++}
++
++/**
++ * Loads a volume descriptor
++ *  @param fs Filesystem
++ *  @param type Type of volume descriptor
++ *  @param buf Buffer for volume descriptor
++ *  @return 0=success; -1=failure
++ */
++int iso9660_voldesc_load(struct cdi_fs_filesystem *fs,iso9660_voldesc_type_t type,void *buf) {
++  fprintf(stderr,"iso9660_voldesc_load(0x%x,%d,0x%x)\n",fs,type,buf);
++  struct iso9660_voldesc header;
++  size_t i;
++
++  for (i=ISO9660_FIRST_SECTOR;header.type!=type && header.type!=ISO9660_VOLDESC_TERM;i++) {
++    iso9660_sector_read(fs,i*ISO9660_DEFAULT_SECTOR_SIZE,sizeof(header),&header);
++    if (!iso9660_voldesc_checksig(header.signature)) return -1;
++  }
++  i--;
++
++  if (header.type==type) {
++    iso9660_sector_read(fs,i*ISO9660_DEFAULT_SECTOR_SIZE,sizeof(struct iso9660_voldesc_prim),buf);
++    return 0;
++  }
++  else {
++    fprintf(stderr,"Volume Descriptor: Wrong type: %d\n",header.type);
++    return -1;
++  }
++}
+diff -urNp tmp/volume_descriptor.h iso9660/volume_descriptor.h
+--- tmp/volume_descriptor.h	1970-01-01 01:00:00.000000000 +0100
++++ iso9660/volume_descriptor.h	2008-09-20 20:38:23.000000000 +0200
+@@ -0,0 +1,160 @@
++/*
++ * iso9660 - An iso9660 CDI driver with Rockridge support
++ *
++ * Copyright (C) 2008 Janosch Gräf
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the Free
++ * Software Foundation; either version 3 of the License, or (at your option)
++ * any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program; if not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef _VOLUME_DESCRIPTOR_H_
++#define _VOLUME_DESCRIPTOR_H_
++
++#include <stdint.h>
++
++#include "directory_record.h"
++
++typedef enum {
++  ISO9660_VOLDESC_TERM = 255,
++  ISO9660_VOLDESC_PRIM = 1
++} iso9660_voldesc_type_t;
++
++struct iso9660_voldesc {
++  iso9660_voldesc_type_t type:8;
++  uint8_t signature[6];
++} __attribute__ ((packed));
++
++struct i9660_voldesc_date {
++  // Year (as ASCII)
++  uint32_t year[4];
++
++  // Month (as ASCII; 01=January, 02=February...)
++  uint8_t month[2];
++
++  // Day of month (as ASCII)
++  uint8_t day[2];
++
++  // Hour (as ASCII)
++  uint8_t hour[2];
++
++  // Minute (as ASCII)
++  uint8_t minute[2];
++
++  // Second (as ASCII)
++  uint8_t second[2];
++
++  // Centisecond (as ASCII; hundredths of a second)
++  uint8_t centisecond[2];
++
++  // Offset to GMT (in 15min intervals)
++  int8_t gmtoff;
++} __attribute__ ((packed));
++
++struct iso9660_voldesc_prim {
++  // Volume Descriptor Header
++  struct iso9660_voldesc header;
++
++  // Zeros (0)
++  uint8_t zero1;
++
++  // System Identifier
++  uint8_t system_identifier[32];
++
++  // Volume Identifier
++  uint8_t volume_identifier[32];
++
++  // Zeros (0)
++  uint8_t zero2[8];
++
++  // Total number of sectors
++  uint32_t num_sectors;
++  uint32_t num_sectors_be;
++
++  // Zeros (0)
++  uint8_t zero3[32];
++
++  // Set size (1)
++  uint16_t set_size;
++  uint16_t set_size_be;
++
++  // Sequence number (1)
++  uint16_t seq_num;
++  uint16_t seq_num_be;
++
++  // Sector size (must be 2048)
++  uint16_t sector_size;
++  uint16_t sector_size_be;
++
++  // Size of path table
++  uint32_t pathtable_size;
++  uint32_t pathtable_size_be;
++
++  // First sectors of each path table
++  uint32_t pathtable1_sector;
++  uint32_t pathtable2_sector;
++  uint32_t pathtable1_sector_be;
++  uint32_t pathtable2_sector_be;
++
++  // Root directory record
++  struct iso9660_dirrec root_dir;
++
++  // Volume Set Identifier
++  uint8_t volume_set_identifier[128];
++
++  // Publisher Identifier
++  uint8_t publisher_identifier[128];
++
++  // Data Preparer Identifier
++  uint8_t datapreparer_identifier[128];
++
++  // Application Identifier
++  uint8_t application_identifier[128];
++
++  // Copyright File Identifier
++  uint8_t copyright_file_identifier[37];
++
++  // Abstract File Identifier
++  uint8_t abstract_file_identifier[37];
++
++  // Bibliographical File Identifier
++  uint8_t bibliographical_file_identifier[37];
++
++  // Date of volume creation
++  struct i9660_voldesc_date date_creation;
++
++  // Date of most recent modification
++  struct i9660_voldesc_date date_modification;
++
++  // Date when volume expires
++  struct i9660_voldesc_date date_expire;
++
++  // Date when volume is effective
++  struct i9660_voldesc_date date_effective;
++#if 0
++  // Ones (1)
++  uint8_t one1;
++
++  // Zeros (0)
++  uint8_t zero4;
++
++  // Reserved (usally 0)
++  uint8_t reserved[512];
++
++  // Zeros (0)
++  uint8_t zero5[653];
++#endif
++} __attribute__ ((packed));
++
++int iso9660_voldesc_load(struct cdi_fs_filesystem *fs,iso9660_voldesc_type_t type,void *buf);
++
++#endif

@@ -1,0 +1,152 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 1/2] init: parse_cmdline() auslagern
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%201/2%5D%20init%3A%20parse_cmdline%28%29%20auslagern&In-Reply-To=%3C1258152555-6535-2-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001468.html">
+   <LINK REL="Next"  HREF="001477.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 1/2] init: parse_cmdline() auslagern</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%201/2%5D%20init%3A%20parse_cmdline%28%29%20auslagern&In-Reply-To=%3C1258152555-6535-2-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 1/2] init: parse_cmdline() auslagern">kevin at tyndur.org
+                  </A><BR>
+    <I>Fr Nov 13 23:49:14 CET 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001468.html">[tyndur-devel] [PATCH 0/2] init: Umgebungsvariablen per Multiboot	setzen
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001477.html">[tyndur-devel] [PATCH 1/2] init: parse_cmdline() auslagern
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1469">[ Datum ]</a>
+              <a href="thread.html#1469">[ Thema ]</a>
+              <a href="subject.html#1469">[ Betreff (Subject) ]</a>
+              <a href="author.html#1469">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* init: Allgemeinen Parser fuer init-Optionen hinzugefuegt und das Parsen
+  von boot=... darauf umgestellt
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/init/init.c |   67 ++++++++++++++++++++++++++++++++--------------
+ 1 files changed, 46 insertions(+), 21 deletions(-)
+
+diff --git a/src/modules/init/init.c b/src/modules/init/init.c
+index 8a7c30d..1627054 100644
+--- a/src/modules/init/init.c
++++ b/src/modules/init/init.c
+@@ -87,7 +87,50 @@ extern void init_envvars(void);
+ 
+ list_t* service_list;
+ 
+-        
++/**
++ * Verarbeitet die Kommandozeilenoptionen fuer init
++ */
++void parse_cmdline(void)
++{
++    char* cmdline = get_cmdline();
++    char* s;
++
++    // Defaultwerte setzen
++    setenv(&quot;CWD&quot;, &quot;floppy:/devices/fd0|fat:/&quot;, 1);
++    setenv(&quot;PATH&quot;, &quot;floppy:/devices/fd0|fat:/apps&quot;, 1);
++
++    // Den Programmnamen ('init') wegschneiden
++    s = strtok(cmdline, &quot; &quot;);
++
++    // Der Rest sind durch Leezeichen getrennte Optionen
++    while ((s = strtok(NULL, &quot; &quot;))) {
++        char* key = s;
++        char* value = strchr(s, '=');
++
++        if (value) {
++            *value = '\0';
++            value++;
++        }
++
++        if (!strcmp(key, &quot;boot&quot;)) {
++
++            if (!value) {
++                printf(&quot;init: boot= benoetigt einen Wert\n&quot;);
++                continue;
++            }
++
++            setenv(&quot;CWD&quot;, value, 1);
++
++            // Fuer $PATH wird noch apps angehaengt
++            size_t boot_size = strlen(value);
++            char path[boot_size + 5];
++            memcpy(path, value, boot_size);
++            memcpy(path + boot_size, &quot;apps&quot;, 5);
++            setenv(&quot;PATH&quot;, path, 1);
++        }
++    }
++}
++
+ void _start(dword modules)
+ {
+     puts(&quot;\n\033[1;33mtyndur-Init $Rev$ \033[0;37m\n&quot;);
+@@ -99,26 +142,8 @@ void _start(dword modules)
+     service_list = list_create();
+     init_envvars();
+ 
+-    char* cmdline = get_cmdline();
+-    char* boot = strstr(cmdline, &quot;boot=&quot;);
+-    if (boot == NULL) {
+-        setenv(&quot;CWD&quot;, &quot;floppy:/devices/fd0|fat:/&quot;, 1);
+-        setenv(&quot;PATH&quot;, &quot;floppy:/devices/fd0|fat:/apps&quot;, 1);
+-    } else {
+-        boot += 5;
+-        
+-        setenv(&quot;CWD&quot;, boot, 1);
+-
+-        // Fuer $PATH wird noch apps angehaengt
+-        size_t boot_size = strlen(boot);
+-        char path[boot_size + 5];
+-        memcpy(path, boot, boot_size);
+-        memcpy(path + boot_size, &quot;apps&quot;, 5);
+-        setenv(&quot;PATH&quot;, path, 1);
+-        
+-        boot -= 5;
+-    }
+-    
++    parse_cmdline();
++
+     register_message_handler(&quot;SERV_REG&quot;, &amp;rpc_service_register);
+     register_message_handler(&quot;SERV_GET&quot;, &amp;rpc_service_get);
+     register_message_handler(&quot;SERV_NAM&quot;, &amp;rpc_service_get_name);
+-- 
+1.6.0.2
+
+</PRE>
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001468.html">[tyndur-devel] [PATCH 0/2] init: Umgebungsvariablen per Multiboot	setzen
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001477.html">[tyndur-devel] [PATCH 1/2] init: parse_cmdline() auslagern
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1469">[ Datum ]</a>
+              <a href="thread.html#1469">[ Thema ]</a>
+              <a href="subject.html#1469">[ Betreff (Subject)]</a>
+              <a href="author.html#1469">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

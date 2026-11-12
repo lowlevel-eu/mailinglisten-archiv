@@ -1,0 +1,175 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] kirc: Input-Parsing
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20kirc%3A%20Input-Parsing&In-Reply-To=%3C20091210075228.57022rswhdewptpo%40mail.famkaufmann.info%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001518.html">
+   <LINK REL="Next"  HREF="001524.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] kirc: Input-Parsing</H1>
+    <B>Alexander H. Kluth</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20kirc%3A%20Input-Parsing&In-Reply-To=%3C20091210075228.57022rswhdewptpo%40mail.famkaufmann.info%3E"
+           TITLE="[tyndur-devel] kirc: Input-Parsing">hartmut at tyndur.org
+                  </A><BR>
+    <I>Do Dez 10 07:52:28 CET 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001518.html">[tyndur-devel] [PATCH] Pascal-RTL: DeleteFile() implementiert
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001524.html">[tyndur-devel] kirc: Input-Parsing
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1522">[ Datum ]</a>
+              <a href="thread.html#1522">[ Thema ]</a>
+              <a href="subject.html#1522">[ Betreff (Subject) ]</a>
+              <a href="author.html#1522">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ kirc.pas: Befehle werden nun geparsed
++ kirc.pas: Kürzel wie /cs oder /voice implementiert
++ kirc.pas: Direkte Befehle können nur noch via /irc geschickt werden
+! kirc.pas: Server auf irc.euirc.net geändert
++ kirc.pas: Channel-Frage hinzugefügt (#lost als Standardchannel)
++ kirc.pas: Bei Ende des MOTD wird der gewollte Channel gejoint
+
+Signed-off-by: Alexander H. Kluth &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">hartmut at tyndur.org</A>&gt;
+---
+  src/modules/pas/kirc/kirc.pas |   65  
++++++++++++++++++++++++++++++++++++++----
+  1 files changed, 59 insertions(+), 6 deletions(-)
+
+diff --git a/src/modules/pas/kirc/kirc.pas b/src/modules/pas/kirc/kirc.pas
+index 7b6ad9b..a44a228 100644
+--- a/src/modules/pas/kirc/kirc.pas
++++ b/src/modules/pas/kirc/kirc.pas
+@@ -74,6 +74,12 @@ begin
+          ReadLn(nick);
+      until NickIsValid(nick);
+
++	Write('Channel :');
++	ReadLn(channel);
++	if channel = '' then begin
++		channel := '#lost';
++	end;
++
+      conn := FileOpen('tcpip:/'+server+':'+port, fmOpenReadWrite);
+
+      if conn = -1 then begin
+@@ -213,6 +219,11 @@ begin
+                  + msg, 7);
+          end;
+      end
++
++	// 376 leutet das Ende des MOTD ein
++	else if command = '376' then begin
++		WriteConn(conn, 'JOIN ' + channel);
++	end
+      else if command = 'ERROR' then begin
+          theIRCWindow.Incoming(line, 12);
+      end
+@@ -238,12 +249,56 @@ begin
+              theIRCWindow.Incoming('Ungueltiger Befehl: ' + line, 12);
+          end;
+      end else begin
+-        if line[1] = '/' then begin
+-            WriteConn(conn, Copy(line, 2, length(line)) + #10);
++        // Wir brauchen so etwas wie TStringList in der RTL
++        // Höhö, das kennen wir doch aus kedit: Wir prüfen
++        // per LeftStr, ob es ein (uns bekanntest) Kommando ist
++        if LeftStr(line, 3) = '/ns' then begin
++            command := 'PRIVMSG NickServ :' + Copy(line, 5, length(line))
++                + #10;
++        end else if LeftStr(line, 3) = '/cs' then begin
++            command := 'PRIVMSG ChanServ :' + Copy(line, 5, length(line)) +
++                #10;
++        end else if LeftStr(line, 6) = '/voice' then begin
++            // mit Copy(line, 7...) spare ich mir ein zusätzliches + &quot; &quot; +
++            command := 'MODE ' + channel + ' +v ' + Copy(line, 8,
++                length(line)) + #10;
++        end else if LeftStr(line, 8) = '/devoice' then begin
++            command := 'MODE ' + channel + ' -v ' + Copy(line, 8,
++                length(line)) + #10;
++        end else if LeftStr(line, 3) = '/op' then begin
++            command := 'MODE ' + channel + ' +o ' + Copy(line, 8,
++                length(line)) + #10;
++        end else if LeftStr(line, 5) = '/deop' then begin
++            command := 'MODE ' + channel + ' -o ' + Copy(line, 8,
++                length(line)) + #10;
++        end else if LeftStr(line, 6) = '/admin' then begin
++            command := 'MODE ' + channel + ' +a ' + Copy(line, 8,
++                length(line)) + #10;
++        end else if LeftStr(line, 8) = '/deadmin' then begin
++            command := 'MODE ' + channel + ' -a ' + Copy(line, 8,
++                length(line)) + #10;
++        end else if LeftStr(line, 5) = '/kick' then begin
++            space := Pos(' ', Copy(line, 7, length(line)));
++
++            command := 'KICK ' + channel + ' ' + Copy(line, 7, space-1) +
++                ' :' + Copy(line, space+1, length(line)) + #10;
++        end else if LeftStr(line, 4) = '/ban' then begin
++            command := 'MODE ' + channel + ' +b ' + Copy(line, 6,
++                length(line)) + '!*@*' + #10;
++        end else if LeftStr(line, 6) = '/unban' then begin
++            command := 'MODE ' + channel + ' -b ' + Copy(line, 8,
++                length(line)) + '!*@*' + #10;
++        end else if LeftStr(line, 6) = '/42' then begin
++            theIRCWindow.title := 'The Answer to Life, the Universe,  
+and Everything is ... 42';
++		end else if LeftStr(line, 4) = '/irc' then begin
++			command := Copy(line, 6, length(line));
+          end else begin
+-            theIRCWindow.Incoming('&lt;' + nick + '&gt; ' + line+#10, 7);
+-            WriteConn(conn, 'PRIVMSG '+channel+' :'+line+#10);
++			space := Pos(' ', line);
++
++            theIRCWindow.Incoming('Unbekannter Befehl ' + Copy(line,  
+0, space), 12);
+          end;
++
++		WriteConn(conn, command);
+      end;
+  end;
+
+@@ -260,8 +315,6 @@ begin
+      theIRCWindow.commandHandler := @EvaluateIRCCommand;
+      theIRCWindow.Draw(false);
+
+-    channel := '';
+-
+      inBuffer := '';
+      outBuffer := '';
+      while not FileEof(conn) do begin
+-- 
+1.6.5.1.1367.gcd48
+
+</PRE>
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001518.html">[tyndur-devel] [PATCH] Pascal-RTL: DeleteFile() implementiert
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001524.html">[tyndur-devel] kirc: Input-Parsing
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1522">[ Datum ]</a>
+              <a href="thread.html#1522">[ Thema ]</a>
+              <a href="subject.html#1522">[ Betreff (Subject)]</a>
+              <a href="author.html#1522">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

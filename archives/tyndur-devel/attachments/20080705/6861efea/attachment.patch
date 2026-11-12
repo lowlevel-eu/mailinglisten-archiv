@@ -1,0 +1,1146 @@
+Index: trunk/src/modules/include/lostio.h
+===================================================================
+--- trunk.orig/src/modules/include/lostio.h
++++ trunk/src/modules/include/lostio.h
+@@ -112,7 +112,7 @@ typedef struct
+     bool            (*pre_open)(char**, byte, pid_t,io_resource_t*);
+     void            (*post_open)(lostio_filehandle_t*);
+ 
+-    read_hdl_reply  (*read)(lostio_filehandle_t*,size_t,size_t);
++    size_t          (*read)(lostio_filehandle_t*,void*,size_t,size_t);
+     size_t          (*write)(lostio_filehandle_t*,size_t,size_t,void*);
+     int             (*seek)(lostio_filehandle_t*,uint64_t,int);
+     int             (*close)(lostio_filehandle_t*);
+Index: trunk/src/modules/lib/lostio/handler.c
+===================================================================
+--- trunk.orig/src/modules/lib/lostio/handler.c
++++ trunk/src/modules/lib/lostio/handler.c
+@@ -93,18 +93,16 @@ void rpc_io_open(pid_t pid, dword correl
+         {
+             // Erst muessen wir an den Pfad kommen. Das geht durch Lesen des
+             // Symlinks.
+-            read_hdl_reply read_reply;
+-            read_reply.size = 0;
+-
+             typehandle_t* typehandle = get_typehandle(filehandle->node->type);
+             if((typehandle == NULL) || (typehandle->read == NULL)) {
+                 io_res.id = 0;
+             } else {
+                 // FIXME: Diese Hartkodierte Laenge ist garnicht gut.
+-                read_reply = typehandle->read(filehandle, 1, 1024);
++                uint8_t buf[1024];
++                size_t size = typehandle->read(filehandle, buf, 1, 1024);
+ 
+-                if (read_reply.size != 0) {
+-                    char* path = (char*) read_reply.data;
++                if (size != 0) {
++                    char* path = (char*) buf;
+                     char msg[strlen(path) + 2];
+                     msg[0] = *attr;
+                     memcpy(msg + 1, path, strlen(path) + 1);
+@@ -182,31 +180,33 @@ void rpc_io_read(pid_t pid, dword correl
+         read_request->blockcount = 1024 / read_request->blocksize;
+     }
+ 
+-    if((typehandle != NULL) && (typehandle->read != NULL))
+-    {
+-        read_hdl_reply reply = typehandle->read(filehandle, read_request->blocksize, read_request->blockcount);
+-        
+-        if (read_request->shared_mem_id == 0) {
+-            rpc_send_response(pid, correlation_id, reply.size, (char*)(reply.
+-                data));
+-        } else {
+-            void* shm_ptr = open_shared_memory(read_request->shared_mem_id);
+-            if (reply.size > read_request->blocksize * read_request->
+-                blockcount)
+-            {
+-                reply.size = read_request->blocksize * read_request->
+-                    blockcount;
+-            }
+-            memcpy(shm_ptr, reply.data, reply.size);
+-            close_shared_memory(read_request->shared_mem_id);
+-            rpc_send_response(pid, correlation_id, sizeof(reply.size), (char*)
+-                &reply.size);
+-        }
+-    }
+-    else
+-    {
++    // Wenn kein Handler fuer read registriert ist, abbrechen
++    if ((typehandle == NULL) || (typehandle->read == NULL)) {
+         rpc_send_dword_response(pid, correlation_id, 0);
++        return;
+     }
++
++    // Falls kein Shared Memory uebergeben wurde, temporaeren Buffer auf dem
++    // Stack anlegen und per RPC zurueckschicken
++    if (read_request->shared_mem_id == 0) {
++        uint8_t buf[read_request->blocksize * read_request->blockcount];
++        size_t size = typehandle->read(filehandle, buf,
++            read_request->blocksize, read_request->blockcount);
++
++        rpc_send_response(pid, correlation_id, size, (char*) buf);
++        return;
++    }
++
++    // Ansonsten direkt in den SHM einlesen
++    void* shm_ptr = open_shared_memory(read_request->shared_mem_id);
++    size_t size = typehandle->read(filehandle, shm_ptr,
++            read_request->blocksize, read_request->blockcount);
++    close_shared_memory(read_request->shared_mem_id);
++
++/*            printf("size = %d, ptr = %p, value = %d\n",
++        sizeof(reply.size), &reply.size, reply.size);
++    fflush(stdout);*/
++    rpc_send_dword_response(pid, correlation_id, size);
+     //v();
+ }
+ 
+Index: trunk/src/modules/cdi/lib/storage.c
+===================================================================
+--- trunk.orig/src/modules/cdi/lib/storage.c
++++ trunk/src/modules/cdi/lib/storage.c
+@@ -19,8 +19,8 @@
+ static void lostio_mst_if_init();
+ static int lostio_mst_if_newdev(struct cdi_storage_device* device);
+ 
+-static read_hdl_reply lostio_mst_read_handler(lostio_filehandle_t* fh,
+-    size_t blocksize, size_t blockcount);
++static size_t lostio_mst_read_handler(lostio_filehandle_t* fh,
++    void* buf, size_t blocksize, size_t blockcount);
+ static size_t lostio_mst_write_handler(lostio_filehandle_t* fh,
+     size_t blocksize, size_t blockcount, void* data);
+ static int lostio_mst_seek_handler(lostio_filehandle_t* fh, uint64_t offset,
+@@ -223,35 +223,27 @@ static int lostio_mst_if_newdev(struct c
+ /**
+  * Lesehandler fuer LostIO
+  */
+-static read_hdl_reply lostio_mst_read_handler(lostio_filehandle_t* fh,
+-    size_t blocksize, size_t blockcount)
++static size_t lostio_mst_read_handler(lostio_filehandle_t* fh,
++    void* buf, size_t blocksize, size_t blockcount)
+ {
+     struct cdi_storage_device* device = (struct cdi_storage_device*) fh->node->
+         data;
+     size_t size = blocksize * blockcount;
+-    read_hdl_reply reply;
+-    // FIXME: Das sollte wirklich mal in LostIO gefixt werden
+-    static void* read_buffer = NULL;
+-    
++
+     // Groesse anpassen, wenn ueber das Medium hinaus gelesen werden soll
+     if (size > (device->block_count * device->block_size - fh->pos)) {
+         size = device->block_count * device->block_size - fh->pos;
+     }
+ 
+-    // Buffergroesse anpassen
+-    read_buffer = realloc(read_buffer, size);
+-
+-    if (cdi_storage_read(device, fh->pos, size, read_buffer) != 0) {
+-        reply.data = NULL;
+-        reply.size = 0;
++    // In den uebergebenen Buffer einlesen
++    if (cdi_storage_read(device, fh->pos, size, buf) != 0) {
+         printf("read_error");
+-    } else {
+-        reply.data = read_buffer;
+-        reply.size = size;
+-        fh->pos += size;
++        return 0;
+     }
+ 
+-    return reply;
++    fh->pos += size;
++
++    return size;
+ }
+ 
+ /**
+Index: trunk/src/modules/console/console.c
+===================================================================
+--- trunk.orig/src/modules/console/console.c
++++ trunk/src/modules/console/console.c
+@@ -53,7 +53,7 @@ void rpc_console_set(pid_t pid, dword co
+ 
+ 
+ /// LostIO-Handler zum auslesen der Pfade
+-read_hdl_reply stdin_read (lostio_filehandle_t* file, size_t blocksize,
++size_t stdin_read (lostio_filehandle_t* file, void* buf, size_t blocksize,
+     size_t blockcount);
+ 
+ /// Enstprechendes Typehandle
+@@ -190,11 +190,10 @@ static console_t* get_console(pid_t pid,
+  * LostIO-Handler der von den Prozessen benutzt wird, um an ihre
+  * standard Ein- und Ausgabekanaele zu kommen.
+  */
+-read_hdl_reply stdin_read (lostio_filehandle_t *file, size_t blocksize,
++size_t stdin_read (lostio_filehandle_t *file, void* buf, size_t blocksize,
+     size_t blockcount)
+ {
+     console_t* console = get_console(file->pid, TRUE);
+-    read_hdl_reply ret;
+     char* path = NULL;
+ 
+     // Im Feld fuer die Groesse des LostIO-Nodes Speichern wir eine
+@@ -204,11 +203,11 @@ read_hdl_reply stdin_read (lostio_fileha
+         case 0:
+             path = console->stdin;
+             break;
+-        
++
+         case 1:
+             path = console->stdout;
+             break;
+-        
++
+         case 2:
+             path = console->stderr;
+             break;
+@@ -216,12 +215,9 @@ read_hdl_reply stdin_read (lostio_fileha
+ 
+     // Wenn kein Pfad gesetzt ist muss auch nichts zurückgeben werden. ;-)
+     if (path == NULL) {
+-        ret.data = NULL;
+-        ret.size = 0;
+-        return ret;
++        return 0;
+     }
+ 
+-    
+     // Groesse berechnen und pruefen ob die gewuenschte Menge ausreicht, wenn
+     // nicht, wird garnichts gesendet. Dies ist sicherlich noch nicht das gelbe
+     // vom Ei, aber ich befuerchte mit dem aktuellen LostIO wird es da etwas
+@@ -229,18 +225,14 @@ read_hdl_reply stdin_read (lostio_fileha
+     size_t totalsize = blocksize * blockcount;
+     size_t path_length = strlen(path);
+     if (totalsize < path_length) {
+-        ret.data = NULL;
+-        ret.size = 0;
+-        v();
+-        return ret;
++        return 0;
+     }
+-    
++
+     // Falls der Platz ausreicht werden die noetigen Daten gesendet
+     // FIXME: Wenn irgend ein d00fer Prozess auf die Idee kommt, den Pfad genau
+     // nach dieser Instruktion zu setzen, dann rummsts ;-)
+-    ret.data = path;
+-    ret.size = path_length;
+-    return ret;
++    memcpy(buf, path, path_length);
++    return path_length;
+ }
+ 
+ /**
+Index: trunk/src/modules/fat/file.c
+===================================================================
+--- trunk.orig/src/modules/fat/file.c
++++ trunk/src/modules/fat/file.c
+@@ -79,11 +79,11 @@ void fat_create_symlink(lostio_filehandl
+ /**
+  * fread() auf einem FAT-Handle
+  */
+-read_hdl_reply fat_file_read_handler(lostio_filehandle_t* filehandle, size_t blocksize, size_t blockcount)
++size_t fat_file_read_handler(lostio_filehandle_t* filehandle, void* buf,
++    size_t blocksize, size_t blockcount)
+ {
+     p();
+     fat_res_info_t* res_info = filehandle->node->data;
+-    read_hdl_reply reply;
+     qword size = blocksize * blockcount;
+ 
+     //Wenn die Datei noch nicht geladen ist, dann ist es jetzt hoechste Zeit es
+@@ -110,8 +110,8 @@ read_hdl_reply fat_file_read_handler(los
+     }
+     
+     //Antwort zusammenbauen
+-    reply.size = size;
+-    reply.data = (void*) ((dword)(res_info->data) + (dword)filehandle->pos);
++    memcpy(buf, (void*) ((dword)(res_info->data) + (dword)filehandle->pos),
++        size);
+     
+     //Position vorwaerts bewegen
+     filehandle->pos += size;
+@@ -128,7 +128,7 @@ read_hdl_reply fat_file_read_handler(los
+     }
+ 
+     v();
+-    return reply;
++    return size;
+ }
+ 
+ 
+Index: trunk/src/modules/fat/include/fat.h
+===================================================================
+--- trunk.orig/src/modules/fat/include/fat.h
++++ trunk/src/modules/fat/include/fat.h
+@@ -197,7 +197,8 @@ void fat_res_post_open_handler(lostio_fi
+ 
+ int fat_file_seek_handler(lostio_filehandle_t* filehandle, uint64_t offset,
+     int origin);
+-read_hdl_reply fat_file_read_handler(lostio_filehandle_t* filehandle, size_t blocksize, size_t blockcount);
++size_t fat_file_read_handler(lostio_filehandle_t* filehandle,
++    void* buf, size_t blocksize, size_t blockcount);
+ size_t fat_file_write_handler(lostio_filehandle_t* filehandle, size_t blocksize, size_t blockcount, void* data);
+ int fat_file_close_handler(lostio_filehandle_t* filehandle);
+ 
+Index: trunk/src/modules/floppy/floppy.c
+===================================================================
+--- trunk.orig/src/modules/floppy/floppy.c
++++ trunk/src/modules/floppy/floppy.c
+@@ -151,10 +151,12 @@ bool    floppy_seek(byte cylinder);
+ bool    floppy_read_sector(dword lba, void *data);
+ bool    floppy_write_sector(dword lba, void *data);
+ 
+-read_hdl_reply  floppy_read_handler(lostio_filehandle_t* filehandle, size_t blocksize, size_t blockcount);
+-size_t          floppy_write_handler(lostio_filehandle_t* filehandle, size_t blocksize, size_t blockcount, void* data);
+-int             floppy_seek_handler(lostio_filehandle_t* filehandle,
+-                    uint64_t offset, int origin);
++size_t  floppy_read_handler(lostio_filehandle_t* filehandle, void* buf,
++            size_t blocksize, size_t blockcount);
++size_t  floppy_write_handler(lostio_filehandle_t* filehandle,
++            size_t blocksize, size_t blockcount, void* data);
++int     floppy_seek_handler(lostio_filehandle_t* filehandle,
++            uint64_t offset, int origin);
+ 
+ static void start_motor_shutdown_timeout();
+ 
+@@ -913,26 +915,30 @@ bool floppy_write_sector(dword lba, void
+ }
+ 
+ 
+-read_hdl_reply  floppy_read_handler(lostio_filehandle_t* filehandle, size_t blocksize, size_t blockcount)
++size_t floppy_read_handler(lostio_filehandle_t* filehandle, void* buf,
++    size_t blocksize, size_t blockcount)
+ {
+-    read_hdl_reply reply;
+     // Nur lock reicht hier nicht, da sonst das ganze blockiert wird
+     if (locked(&floppy_lock)) {
+-        reply.data = NULL;
+-        reply.size = 0;
+-        return reply;
++        return 0;
+     } else {
+         lock(&floppy_lock);
+     }
+     
+     size_t size = blocksize * blockcount;
++
++    // Nur ganze Sektoren lesen
++    if (size % 512) {
++        printf("Floppy: size = %d ist nicht aligned!\n", size);
++        return 0;
++    }
+     
+     if(size + filehandle->pos > filehandle->node->size)
+     {
+         size = filehandle->node->size - filehandle->pos;
+     }
+     
+-    size_t read_end = size + filehandle->pos;
++    //size_t read_end = size + filehandle->pos;
+ 
+     //Startsektor berechnen
+     dword sector_start = filehandle->pos / 512;
+@@ -942,36 +948,26 @@ read_hdl_reply  floppy_read_handler(lost
+     }*/
+     
+     //Sektorenanzahl berechnen
+-    dword sector_count = (read_end / 512) - (filehandle->pos / 512) + 1;
++    dword sector_count = size / 512; //(read_end / 512) - (filehandle->pos / 512) + 1;
+     /*if()
+     {
+         sector_count++;
+     }*/
+     //printf("RPC: floppy read %d sectors\n", sector_count);
+-    
+-    //Buffer allokieren
+-    static byte* buffer = NULL;
+-    buffer = realloc(buffer, sector_count * 512);
+-    
+-    
++
+     // Das Laufwerk aktivieren
+     floppy_select_drive((uintptr_t) filehandle->node->data);
+ 
+     int i;
+-    reply.data = (void*) (buffer + (filehandle->pos % 512));
+-    reply.size = size;
+     for(i = 0; i < sector_count; i++)
+     {
+-        if(floppy_read_sector(sector_start + i, (void*)((dword)buffer + 512 * i)) == FALSE)
+-        {
+-            //TODO: Gelesene daten Mitsenden
+-            reply.data = NULL;
+-            reply.size = 0;
++        if(floppy_read_sector(sector_start + i, buf + (512 * i)) == FALSE) {
++            return 0;
+         }
+     }
+-        
++
+     filehandle->pos += size;
+-    
++
+     //Auf EOF ueberpruefen
+     if(filehandle->pos == filehandle->node->size)
+     {
+@@ -980,7 +976,7 @@ read_hdl_reply  floppy_read_handler(lost
+ 
+     start_motor_shutdown_timeout();
+     unlock(&floppy_lock);
+-    return reply;
++    return size;
+ }
+ 
+ 
+Index: trunk/src/modules/vterm/lostio.c
+===================================================================
+--- trunk.orig/src/modules/vterm/lostio.c
++++ trunk/src/modules/vterm/lostio.c
+@@ -37,8 +37,8 @@
+ #include "vterm.h"
+ #include "lostio.h"
+ /// Handler fuer Lesen aus in
+-read_hdl_reply terminal_read(lostio_filehandle_t* handle, size_t blocksize,
+-    size_t blockcount);
++size_t terminal_read(lostio_filehandle_t* handle, void* buf,
++    size_t blocksize, size_t blockcount);
+ 
+ /// Handler fuer schreiben in out
+ size_t terminal_write(lostio_filehandle_t* handle, size_t blocksize,
+@@ -100,33 +100,23 @@ size_t terminal_write(lostio_filehandle_
+ /**
+  * LostIO-Handller um aus dem Eingabekanal zu lesen
+  */
+-read_hdl_reply terminal_read(lostio_filehandle_t* file, size_t blocksize,
+-    size_t blockcount)
++size_t terminal_read(lostio_filehandle_t* file, void* buf,
++    size_t blocksize, size_t blockcount)
+ {
+     p();
+     size_t size = blocksize * blockcount;
+     vterminal_t* vterm = (vterminal_t*) file->node->data;
+ 
+-    read_hdl_reply reply;
+-    reply.data = NULL;
+-    reply.size = 0;
+-
+     if (vterm->in_buffer_size == 0) {
+         v();
+-        return reply;
++        return 0;
+     }
+     
+     if (vterm->in_buffer_size < size) {
+         size = vterm->in_buffer_size;
+     }
+ 
+-    char* new_data = realloc(file->data, size);
+-    if (new_data == NULL) {
+-        v();
+-        return reply;
+-    }
+-    file->data = new_data;
+-    memcpy(file->data, vterm->in_buffer, size);
++    memcpy(buf, vterm->in_buffer, size);
+     
+     vterm->in_buffer_size -= size;
+     vterm->in_node->size = vterm->in_buffer_size;
+@@ -139,10 +129,8 @@ read_hdl_reply terminal_read(lostio_file
+         vterm->in_buffer = NULL;
+     }
+ 
+-    reply.data = file->data;
+-    reply.size = size;
+     v();
+-    return reply;
++    return size;
+ }
+ 
+ /**
+Index: trunk/src/modules/kbc/keyboard.c
+===================================================================
+--- trunk.orig/src/modules/kbc/keyboard.c
++++ trunk/src/modules/kbc/keyboard.c
+@@ -170,9 +170,9 @@ size_t kbd_buffer_pos;
+ byte* kbd_ascii_buffer;
+ byte* kbd_work_buffer;
+ 
+-read_hdl_reply  kbd_read_handler(lostio_filehandle_t* filehandle,
+-                                 size_t blocksize,
+-                                 size_t blockcount);
++size_t kbd_read_handler(lostio_filehandle_t* filehandle, void* buf,
++    size_t blocksize, size_t blockcount);
++
+ void kbd_send_cmd(byte cmd);
+ 
+ // Keyboard wird initialisiert
+@@ -310,28 +310,25 @@ void kbd_irq_handler() {
+ }
+ 
+ 
+-read_hdl_reply  kbd_read_handler(lostio_filehandle_t* filehandle, size_t blocksize, size_t blockcount)
++size_t kbd_read_handler(lostio_filehandle_t* filehandle, void* buf,
++    size_t blocksize, size_t blockcount)
+ {
+-    read_hdl_reply reply;
+-    //byte type = (dword) (filehandle->node->data);
+     size_t size = blocksize * blockcount;
+-    
++
+     p();
+     if(size > kbd_buffer_pos)
+     {
+         size = kbd_buffer_pos;
+     }
+ 
+-    
+-    reply.size = size;
+-    reply.data = kbd_work_buffer;
+-
+     memcpy(kbd_work_buffer, kbd_ascii_buffer, size);
+     memmove(kbd_ascii_buffer, (void*) ((dword)kbd_ascii_buffer + size), kbd_buffer_pos - size);
+ 
++    memcpy(buf, kbd_work_buffer, size);
++
+     kbd_buffer_pos -= size;
+     v();
+-    
+-    return reply;
++
++    return size;
+ }
+ 
+Index: trunk/src/modules/kbc/mouse.c
+===================================================================
+--- trunk.orig/src/modules/kbc/mouse.c
++++ trunk/src/modules/kbc/mouse.c
+@@ -23,7 +23,6 @@ byte buttons_pressed = 0;
+ byte buttons_released = 0;
+ int rel_x = 0;
+ int rel_y = 0;
+-byte data_buffer[12];
+ byte cb_buffer[12];
+ 
+ FILE **cbfiles = 0;
+@@ -219,25 +218,20 @@ void mouse_irq_handler()
+     }
+ }
+ 
+-read_hdl_reply  mouse_read_handler(lostio_filehandle_t* filehandle,
+-                                   size_t blocksize,
+-                                   size_t blockcount)
++size_t mouse_read_handler(lostio_filehandle_t* filehandle, void* buf,
++    size_t blocksize, size_t blockcount)
+ {
+-    read_hdl_reply reply;
+     size_t size = blocksize * blockcount;
++    uint8_t* data_buffer = buf;
++
+     if (size < 12)
+     {
+         //Festgelegte Größe der Ausgabe
+         //TODO: Nur Position abfragen (Größe = 8)?
+-        reply.size = 0;
+-        reply.data = 0;
+-        return reply;
++        return 0;
+     }
+-    
++
+     p();
+-    
+-    reply.size = 11;
+-    reply.data = data_buffer;
+ 
+     ((int*)data_buffer)[0] = rel_x;
+     rel_x = 0;
+@@ -251,7 +245,7 @@ read_hdl_reply  mouse_read_handler(losti
+     data_buffer[11] = 0;
+     v();
+     
+-    return reply;
++    return 11;
+ }
+ 
+ size_t mouse_callback_handler(lostio_filehandle_t *file, size_t blocksize,
+Index: trunk/src/modules/kbc/mouse.h
+===================================================================
+--- trunk.orig/src/modules/kbc/mouse.h
++++ trunk/src/modules/kbc/mouse.h
+@@ -12,9 +12,9 @@ void mouse_install();
+ 
+ void mouse_irq_handler();
+ 
+-read_hdl_reply  mouse_read_handler(lostio_filehandle_t* filehandle,
+-                                   size_t blocksize,
+-                                   size_t blockcount);
++size_t mouse_read_handler(lostio_filehandle_t* filehandle, void* buf,
++    size_t blocksize, size_t blockcount);
++
+ size_t mouse_callback_handler(lostio_filehandle_t *file, size_t blocksize,
+     size_t blockcount, void *data);
+ 
+Index: trunk/src/modules/fat/resource.c
+===================================================================
+--- trunk.orig/src/modules/fat/resource.c
++++ trunk/src/modules/fat/resource.c
+@@ -285,6 +285,7 @@ lostio_filehandle_t* fat_mount_source(ch
+     char* bpb_path = NULL;
+     char* new_path = NULL;
+     lostio_filehandle_t* filehandle;
++    uint8_t sector[512];
+     
+     if(
+         (pipe_source == NULL) ||
+@@ -325,12 +326,15 @@ lostio_filehandle_t* fat_mount_source(ch
+         
+         //BIOS-Parameterblock einlesen
+         fseek(pipe_source, 0, SEEK_SET);
+-        if (fread(&(rootdir_handle->bios_parameter_block), 1, sizeof(fat_bios_parameter_block_t), pipe_source) != sizeof(fat_bios_parameter_block_t)) {
++        if (fread(sector, 1, 512, pipe_source) != 512) {
+             puts("[  FAT  ] Konnte den BIOS-Parameterblock nicht vollstaendig einlesen!");
+             vfstree_delete_node(resid_dir);
+             return NULL;
+         }
+-        
++
++        memcpy(&rootdir_handle->bios_parameter_block, sector,
++            sizeof(fat_bios_parameter_block_t));
++
+         // Sektoranzahl suchen. Wenn < 0x10000 dann liegt sie im
+         // bios_parameter_block.total_sector_count sonst in
+         // bios_parameter_block.total_sector_count_32
+@@ -341,8 +345,7 @@ lostio_filehandle_t* fat_mount_source(ch
+         }
+         //Ueberpruefen ob es sich uberhaupt um FAT handelt
+         char fs_type[3];
+-        fseek(pipe_source, 54, SEEK_SET);
+-        fread(fs_type, 1, 3, pipe_source);
++        memcpy(fs_type, &sector[54], 3);
+ 
+         if ((fs_type[0] != 'F') || (fs_type[1] != 'A') || (fs_type[2] != 'T'))
+         {
+Index: trunk/src/modules/cdi/lib/fs/fs.c
+===================================================================
+--- trunk.orig/src/modules/cdi/lib/fs/fs.c
++++ trunk/src/modules/cdi/lib/fs/fs.c
+@@ -40,12 +40,14 @@
+ 
+ #define CDI_TYPEHANDLE 200
+ 
++struct cdi_fs_driver* the_one_and_only_driver = NULL;
+ 
+ bool lostio_not_found_handler(char** path, byte args, pid_t pid,
+     io_resource_t* source);
+ bool lostio_pre_open_handler(char** path, byte args, pid_t pid,
+     io_resource_t* source);
+-read_hdl_reply lostio_read_handler(lostio_filehandle_t* fh, size_t bs, size_t bc);
++size_t lostio_read_handler(lostio_filehandle_t* fh, void* buf,
++    size_t bs, size_t bc);
+ int lostio_seek_handler(lostio_filehandle_t* fh, uint64_t offset, int origin);
+ 
+ typehandle_t cdi_typehandle = {
+@@ -85,6 +87,11 @@ void cdi_fs_driver_destroy(struct cdi_fs
+ 
+ void cdi_fs_driver_register(struct cdi_fs_driver* driver)
+ {
++    if (the_one_and_only_driver) {
++        return;
++    }
++
++    the_one_and_only_driver = driver;
+     cdi_driver_register((struct cdi_driver*) driver);
+ }
+ 
+Index: trunk/src/modules/cdi/lib/fs/lostio_if.c
+===================================================================
+--- trunk.orig/src/modules/cdi/lib/fs/lostio_if.c
++++ trunk/src/modules/cdi/lib/fs/lostio_if.c
+@@ -51,6 +51,8 @@
+ 
+ static bool fs_fill_dir(vfstree_node_t* node);
+ 
++extern struct cdi_fs_driver* the_one_and_only_driver;
++
+ /**
+  * Diese Funktion generiert den Root-Pfad zu einem Source-Handle
+  *
+@@ -142,9 +144,10 @@ static bool fs_read_tree(struct cdi_fs_f
+     struct cdi_fs_stream* dh;
+ 
+     // Dirhandle = Verknuepfung zwischen LIO und Treiber
++    // FIXME Dahinter kommen eigentlich noch private Daten des Treibers...
+     dh = malloc(sizeof(*dh));
+     dh->fs = fs;
+-    dh->res = NULL; /* FIXME Woher bekommt man das Rootverzeichnis? */
++    dh->res = fs->root_res;
+ 
+     get_root_path(fs->device, rp);
+     if ((!vfstree_create_node(rp, CDI_TYPEHANDLE, 0, dh,
+@@ -167,7 +170,7 @@ out_err:
+ static bool fs_mount(io_resource_t* source)
+ {
+     struct cdi_fs_filesystem* fs = malloc(sizeof(*fs));
+-    struct cdi_fs_driver* drv = NULL; /* FIXME Woher? */
++    struct cdi_fs_driver* drv = the_one_and_only_driver;
+ 
+     // FIXME ;-)
+     fs->device = malloc(sizeof(*source));
+@@ -282,10 +285,10 @@ bool lostio_pre_open_handler(char** path
+     return TRUE;
+ }
+ 
+-read_hdl_reply lostio_read_handler(lostio_filehandle_t* fh, size_t bs, size_t bc)
++size_t lostio_read_handler(lostio_filehandle_t* fh, void* buf,
++    size_t bs, size_t bc)
+ {
+-    static read_hdl_reply reply = {.data = NULL, .size = 0};
+-    size_t size;
++    size_t size = 0;
+     struct cdi_fs_stream* dh = fh->node->data;
+ 
+     if (dh->res->file == NULL) {
+@@ -299,14 +302,12 @@ read_hdl_reply lostio_read_handler(losti
+         size = fh->node->size - fh->pos;
+     }
+     if (size == 0) {
+-        reply.size = 0;
+         goto out;
+     }
+ 
+-    reply.data = realloc(reply.data, size);
+-    reply.size = dh->res->file->read(dh, fh->pos, size, reply.data);
++    size = dh->res->file->read(dh, fh->pos, size, buf);
+ 
+-    fh->pos += reply.size;
++    fh->pos += size;
+     if(fh->pos >= fh->node->size) {
+         fh->flags |= LOSTIO_FLAG_EOF;
+     } else {
+@@ -315,7 +316,7 @@ read_hdl_reply lostio_read_handler(losti
+ 
+ out:
+     v();
+-    return reply;
++    return size;
+ }
+ 
+ int lostio_seek_handler(lostio_filehandle_t* fh, uint64_t offset, int origin)
+Index: trunk/src/modules/ext2/include/lostio_if.h
+===================================================================
+--- trunk.orig/src/modules/ext2/include/lostio_if.h
++++ trunk/src/modules/ext2/include/lostio_if.h
+@@ -61,7 +61,7 @@ bool lostio_pre_open_handler(char** path
+ void lostio_post_open_handler(lostio_filehandle_t* filehandle);
+ 
+ ///
+-read_hdl_reply lostio_read_handler(lostio_filehandle_t* filehandle,
++size_t lostio_read_handler(lostio_filehandle_t* filehandle, void* buf,
+     size_t blocksize, size_t blockcount);
+ 
+ ///
+@@ -69,7 +69,7 @@ size_t lostio_write_handler(lostio_fileh
+     size_t blocksize, size_t blockcount, void* data);
+ 
+ /// Handler zum auslesen eines Symlinks
+-read_hdl_reply lostio_read_symlink_handler(lostio_filehandle_t* filehandle,
++size_t lostio_read_symlink_handler(lostio_filehandle_t* filehandle, void* buf,
+     size_t blocksize, size_t blockcount);
+ 
+ /// Handler zum ueberschreiben eines Symlinks
+Index: trunk/src/modules/ext2/lostio_if.c
+===================================================================
+--- trunk.orig/src/modules/ext2/lostio_if.c
++++ trunk/src/modules/ext2/lostio_if.c
+@@ -521,13 +521,12 @@ void lostio_post_open_handler(lostio_fil
+ /**
+  * Handler fuer Lesezugriff auf dateien
+  */
+-read_hdl_reply lostio_read_handler(lostio_filehandle_t* filehandle,
++size_t lostio_read_handler(lostio_filehandle_t* filehandle, void* buf,
+     size_t blocksize, size_t blockcount)
+ {
+     p();
+     //printf("read_start");
+     // Rueckgabewert, ein grosser Hack
+-    static read_hdl_reply reply = {.data = NULL};
+     size_t size = blocksize * blockcount;
+     
+     dir_handle_t* dir_handle = (dir_handle_t*) filehandle->node->data;
+@@ -537,8 +536,7 @@ read_hdl_reply lostio_read_handler(losti
+     if (!ext2_ih_init(dir_handle->root_handle, &inode, dir_handle->inode)) {
+         v();
+         printf("earlyend1");
+-        reply.size = 0;
+-        return reply;
++        return 0;
+     }
+     
+     // Datenmenge wenn noetig beschneiden
+@@ -551,20 +549,16 @@ read_hdl_reply lostio_read_handler(losti
+     // Wenn's nichts zu lesen gibt ist hier Endstation
+     if (size == 0) {
+         ext2_ih_destroy(dir_handle->root_handle, &inode);
+-        reply.size = 0;
+         v();
+-        return reply;
++        return 0;
+     }
+ 
+-    // Buffer anpassen
+-    reply.data = realloc(reply.data, size);
+-    
+     // Daten einlesen
+-    reply.size = ext2_inode_data_read(dir_handle->root_handle, &inode,
+-        filehandle->pos, size, reply.data);
++    size = ext2_inode_data_read(dir_handle->root_handle, &inode,
++        filehandle->pos, size, buf);
+     //printf("Effektif gelesen: %d\n", reply.size);
+     // Position erneuern
+-    filehandle->pos += reply.size;
++    filehandle->pos += size;
+     
+     // Wenn noetig EOF-Flag setzen
+     if(filehandle->pos == inode.data->size) {
+@@ -575,7 +569,7 @@ read_hdl_reply lostio_read_handler(losti
+     
+     ext2_ih_destroy(dir_handle->root_handle, &inode);
+     v();
+-    return reply;
++    return size;
+ }
+ 
+ /**
+@@ -767,39 +761,36 @@ int lost_close_handler(lostio_filehandle
+ /**
+  * Handler fuer Lesezugriff auf Symlinks
+  */
+-read_hdl_reply lostio_read_symlink_handler(lostio_filehandle_t* filehandle,
++size_t lostio_read_symlink_handler(lostio_filehandle_t* filehandle, void* buf,
+     size_t blocksize, size_t blockcount)
+ {
++    size_t size = 0;
++    ext2_ih_t inode;
++    dir_handle_t* dir_handle;
++
+     p();
+     puts("read symlink...");
++
+     // Rueckgabewert, ein grosser Hack
+-    static read_hdl_reply reply = {.data = NULL};
+-    dir_handle_t* dir_handle = (dir_handle_t*) filehandle->node->data;
+-    ext2_ih_t inode;
+-    
++    dir_handle = (dir_handle_t*) filehandle->node->data;
++
+     // Zuerst brauchen wir mal den Inode
+     if (!ext2_ih_init(dir_handle->root_handle, &inode, dir_handle->inode)) {
+-        reply.size = 0;
+         goto end;
+     }
+-    
+-    // Buffer anpassen
+-    reply.data = realloc(reply.data, inode.data->size);
+-    
++
+     // Daten einlesen
+-    reply.size = inode.data->size;
++    size = inode.data->size;
+ 
+-    if (ext2_symlink_read(dir_handle->root_handle, &inode, reply.size,
+-        reply.data) != 0)
+-    {
++    if (ext2_symlink_read(dir_handle->root_handle, &inode, size, buf) != 0) {
+         puts("Fehler beim einlesen des Symlinks");
+-        reply.size = 0;
++        size = 0;
+     }
+ 
+     ext2_ih_destroy(dir_handle->root_handle, &inode);
+ end:
+     v();
+-    return reply;
++    return size;
+ }
+ 
+ /**
+Index: trunk/src/modules/newext2/lostio_if.c
+===================================================================
+--- trunk.orig/src/modules/newext2/lostio_if.c
++++ trunk/src/modules/newext2/lostio_if.c
+@@ -314,9 +314,9 @@ bool lostio_pre_open_handler(char** path
+     return TRUE;
+ }
+ 
+-read_hdl_reply lostio_read_handler(lostio_filehandle_t* fh, size_t bs, size_t bc)
++size_t lostio_read_handler(lostio_filehandle_t* fh, void* buf,
++    size_t bs, size_t bc)
+ {
+-    static read_hdl_reply reply = {.data = NULL, .size = 0};
+     size_t size;
+     ext2_inode_t* inode = fh->node->data;
+ 
+@@ -331,13 +331,10 @@ read_hdl_reply lostio_read_handler(losti
+         size = fh->node->size - fh->pos;
+     }
+     if (!size) {
+-        reply.size = 0;
+         goto out;
+     }
+ 
+-    reply.size = size;
+-    reply.data = realloc(reply.data, reply.size);
+-    ext2_inode_readdata(inode, fh->pos, size, reply.data);
++    ext2_inode_readdata(inode, fh->pos, size, buf);
+ 
+     fh->pos += size;
+     if(fh->pos >= fh->node->size) {
+@@ -348,7 +345,7 @@ read_hdl_reply lostio_read_handler(losti
+ 
+ out:
+     v();
+-    return reply;
++    return size;
+ }
+ 
+ size_t lostio_write_handler(lostio_filehandle_t* fh, size_t bs, size_t bc,
+Index: trunk/src/modules/newext2/lostio_if.h
+===================================================================
+--- trunk.orig/src/modules/newext2/lostio_if.h
++++ trunk/src/modules/newext2/lostio_if.h
+@@ -53,7 +53,7 @@ bool lostio_not_found_handler(char** pat
+ bool lostio_pre_open_handler(char** path, byte args, pid_t pid,
+     io_resource_t* pipe_source);
+ 
+-read_hdl_reply lostio_read_handler(lostio_filehandle_t* fh, size_t bs,
++size_t lostio_read_handler(lostio_filehandle_t* fh, void* buf, size_t bs,
+     size_t bc);
+ 
+ size_t lostio_write_handler(lostio_filehandle_t* fh, size_t bs, size_t bc,
+Index: trunk/src/modules/tcpip/lostio_if.c
+===================================================================
+--- trunk.orig/src/modules/tcpip/lostio_if.c
++++ trunk/src/modules/tcpip/lostio_if.c
+@@ -70,11 +70,11 @@
+ 
+ typehandle_t typehandle;
+ 
+-bool            lostio_tcp_not_found(char**, byte, pid_t,io_resource_t*);
+-bool            lostio_tcp_pre_open(char**, byte, pid_t,io_resource_t*);
+-read_hdl_reply  lostio_tcp_read(lostio_filehandle_t*,size_t,size_t);
+-size_t          lostio_tcp_write(lostio_filehandle_t*,size_t,size_t,void*);
+-int             lostio_tcp_close(lostio_filehandle_t*);
++bool   lostio_tcp_not_found(char**, byte, pid_t,io_resource_t*);
++bool   lostio_tcp_pre_open(char**, byte, pid_t,io_resource_t*);
++size_t lostio_tcp_read(lostio_filehandle_t*,void*,size_t,size_t);
++size_t lostio_tcp_write(lostio_filehandle_t*,size_t,size_t,void*);
++int    lostio_tcp_close(lostio_filehandle_t*);
+ 
+ void init_lostio_interface()
+ {
+@@ -178,15 +178,11 @@ bool lostio_tcp_pre_open(char** path, by
+     return TRUE;
+ }
+ 
+-read_hdl_reply lostio_tcp_read
+-    (lostio_filehandle_t* fh, size_t blocksize ,size_t count)
++size_t lostio_tcp_read(lostio_filehandle_t* fh, void* buf,
++    size_t blocksize, size_t count)
+ {
+-    read_hdl_reply reply = {
+-        .data = NULL,
+-        .size = 0
+-    };
+-
+     struct tcp_connection* conn = fh->node->data;
++    struct tcp_in_buffer* buffer;
+     size_t size = blocksize * count;
+ 
+     p();
+@@ -194,34 +190,32 @@ read_hdl_reply lostio_tcp_read
+     if ((conn->status == TCPS_CLOSED) && (list_is_empty(conn->to_lostio))) {
+         fh->flags |= LOSTIO_FLAG_EOF;
+     }
+-     
+-    struct tcp_in_buffer* buffer;
++
+     do {
+         buffer = list_get_element_at(conn->to_lostio, 0);
+-        
++
+         if (buffer == NULL) {
+             v();
+-            return reply;
++            return 0;
+         }
+ 
+         if (buffer->seq == buffer->size) {
+             list_pop(conn->to_lostio);
+             continue;
+         }
+-    
++
+     } while(buffer->seq == buffer->size);
+ 
+     if (buffer->size - buffer->seq <= size) {
+         size = buffer->size - buffer->seq;
+     }
+ 
+-    reply.data = buffer->data + buffer->seq;
+-    reply.size = size;
++    memcpy(buf, buffer->data + buffer->seq, size);
+ 
+     buffer->seq += size;
+-    
++
+     v();
+-    return reply;
++    return size;
+ }
+ 
+ size_t lostio_tcp_write
+Index: trunk/src/modules/lib/lostio/types/directory.c
+===================================================================
+--- trunk.orig/src/modules/lib/lostio/types/directory.c
++++ trunk/src/modules/lib/lostio/types/directory.c
+@@ -42,8 +42,10 @@
+ #include "lostio.h"
+ 
+ 
+-read_hdl_reply  dir_read(lostio_filehandle_t* filehandle, size_t blocksize, size_t blockcount);
+-int             dir_seek(lostio_filehandle_t* filehandle, uint64_t offset,
++size_t dir_read(lostio_filehandle_t* filehandle, void* buf,
++    size_t blocksize, size_t blockcount);
++
++int dir_seek(lostio_filehandle_t* filehandle, uint64_t offset,
+     int origin);
+ 
+ /**
+@@ -79,30 +81,25 @@ void lostio_type_directory_use()
+ 
+ 
+ /**
+- *
++ * Verzeichniseintraege lesen
+  */
+-read_hdl_reply dir_read(lostio_filehandle_t* filehandle, size_t blocksize, size_t blockcount)
++size_t dir_read(lostio_filehandle_t* filehandle, void* buf,
++    size_t blocksize, size_t blockcount)
+ {
+-    read_hdl_reply reply;
+     vfstree_node_t* node;
++    size_t size = blockcount;
+     int i;
+ 
+-    
+-    reply.size = blockcount;
+     //Ueberpruefen, ob die angegebene Groesse > Dateigroesse
+-    if((filehandle->pos + reply.size) > filehandle->node->size)
++    if((filehandle->pos + size) > filehandle->node->size)
+     {
+-        reply.size = filehandle->node->size - filehandle->pos;
++        size = filehandle->node->size - filehandle->pos;
+     }
+-    
+-    
+-    reply.size *= sizeof(io_direntry_t);
+-    reply.data = malloc(reply.size);
+-    io_direntry_t* direntry = (io_direntry_t*) reply.data;
+-    
+-   
+ 
+-    for(i = 0; i < (reply.size / sizeof(io_direntry_t)); i++)
++    size *= sizeof(io_direntry_t);
++    io_direntry_t* direntry = (io_direntry_t*) buf;
++
++    for(i = 0; i < (size / sizeof(io_direntry_t)); i++)
+     {
+         node = list_get_element_at(filehandle->node->children, i + filehandle->pos);
+         //printf("[ LOSTIO ] Direntry '%s'\n", node->name);
+@@ -125,7 +122,7 @@ read_hdl_reply dir_read(lostio_filehandl
+     }
+     
+     
+-    filehandle->pos += reply.size / sizeof(io_direntry_t);
++    filehandle->pos += size / sizeof(io_direntry_t);
+     
+     //Auf EOF ueberpruefen
+     if(filehandle->pos >= filehandle->node->size) {
+@@ -135,7 +132,7 @@ read_hdl_reply dir_read(lostio_filehandl
+     }
+ 
+ 
+-    return reply;
++    return size;
+ }
+ 
+ 
+Index: trunk/src/modules/lib/lostio/types/ramfile.c
+===================================================================
+--- trunk.orig/src/modules/lib/lostio/types/ramfile.c
++++ trunk/src/modules/lib/lostio/types/ramfile.c
+@@ -41,8 +41,11 @@
+ #include "collections.h"
+ #include "lostio.h"
+ 
+-read_hdl_reply  ramfile_read(lostio_filehandle_t* filehandle, size_t blocksize, size_t blockcount);
+-size_t          ramfile_write(lostio_filehandle_t* filehandle, size_t blocksize, size_t blockcount, void* data);
++size_t ramfile_read(lostio_filehandle_t* filehandle, void* buf,
++    size_t blocksize, size_t blockcount);
++size_t ramfile_write(lostio_filehandle_t* filehandle,
++    size_t blocksize, size_t blockcount, void* data);
++
+ int ramfile_seek(lostio_filehandle_t* filehandle, uint64_t offset, int origin);
+ 
+ /**
+@@ -76,33 +79,31 @@ void lostio_type_ramfile_use_as(typeid_t
+ 
+ 
+ /**
+- *
++ * Aus einer Ramfile lesen
+  */
+-read_hdl_reply ramfile_read(lostio_filehandle_t* filehandle, size_t blocksize, size_t blockcount)
++size_t ramfile_read(lostio_filehandle_t* filehandle, void* buf,
++    size_t blocksize, size_t blockcount)
+ {
+-    read_hdl_reply reply;
+     size_t remaining = filehandle->node->size - filehandle->pos;
+-
+-    reply.data = filehandle->node->data + filehandle->pos;
++    size_t size;
+ 
+     //Ueberpruefen, ob die angegebene Groesse > Dateigroesse
+-    if(blocksize * blockcount > remaining)
+-    {
+-        reply.size = remaining;
+-    }
+-    else
+-    {
+-        reply.size = blocksize * blockcount;
++    if(blocksize * blockcount > remaining) {
++        size = remaining;
++    } else {
++        size = blocksize * blockcount;
+     }
+ 
+-    filehandle->pos += reply.size;
++    memcpy(buf, filehandle->node->data + filehandle->pos, size);
++
++    filehandle->pos += size;
++
+     //Auf EOF ueberpruefen
+-    if(filehandle->pos == filehandle->node->size)
+-    {
++    if(filehandle->pos == filehandle->node->size) {
+         filehandle->flags |= LOSTIO_FLAG_EOF;
+     }
+-    
+-    return reply;
++
++    return size;
+ }
+ 
+ 

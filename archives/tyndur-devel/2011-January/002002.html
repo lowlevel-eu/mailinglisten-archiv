@@ -1,0 +1,401 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 5/7] libc: Erstellen und Auslesen von PPBs
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%205/7%5D%20libc%3A%20Erstellen%20und%20Auslesen%20von%20PPBs&In-Reply-To=%3C20110108161551.GF7079%40neo.geekcave.lan%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002000.html">
+   <LINK REL="Next"  HREF="002003.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 5/7] libc: Erstellen und Auslesen von PPBs</H1>
+    <B>Antoine Kaufmann</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%205/7%5D%20libc%3A%20Erstellen%20und%20Auslesen%20von%20PPBs&In-Reply-To=%3C20110108161551.GF7079%40neo.geekcave.lan%3E"
+           TITLE="[tyndur-devel] [PATCH 5/7] libc: Erstellen und Auslesen von PPBs">toni at tyndur.org
+                  </A><BR>
+    <I>Sa Jan  8 17:15:52 CET 2011</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002000.html">[tyndur-devel] [PATCH 2/2] Makefile: lbuilds-env und *-pascal targets nur im Hauptmakefile
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002003.html">[tyndur-devel] [PATCH 6/7] libc: crt0.c: argv aus PPB auslesen, falls vorhanden
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2002">[ Datum ]</a>
+              <a href="thread.html#2002">[ Thema ]</a>
+              <a href="subject.html#2002">[ Betreff (Subject) ]</a>
+              <a href="author.html#2002">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>On Wed, Dec 29 14:12, Kevin Wolf wrote:
+&gt;<i> + libc: Funktionen zum Erstellen und zum anschließend Auslesen eines
+</I>&gt;<i>   Prozessparameterblocks
+</I>&gt;<i> 
+</I>&gt;<i> Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+</I>&gt;<i> ---
+</I>&gt;<i>  src/modules/include/init.h |    7 +
+</I>&gt;<i>  src/modules/lib/param.c    |  264 ++++++++++++++++++++++++++++++++++++++++++++
+</I>&gt;<i>  2 files changed, 271 insertions(+), 0 deletions(-)
+</I>&gt;<i>  create mode 100644 src/modules/lib/param.c
+</I>&gt;<i> 
+</I>&gt;<i> diff --git a/src/modules/include/init.h b/src/modules/include/init.h
+</I>&gt;<i> index d431cee..eb29b3a 100644
+</I>&gt;<i> --- a/src/modules/include/init.h
+</I>&gt;<i> +++ b/src/modules/include/init.h
+</I>&gt;<i> @@ -30,11 +30,13 @@
+</I>&gt;<i>  
+</I>&gt;<i>  #include &lt;types.h&gt;
+</I>&gt;<i>  #include &lt;stdio.h&gt;
+</I>&gt;<i> +#include &lt;stdbool.h&gt;
+</I>&gt;<i>  
+</I>&gt;<i>  #define INIT_PID 1
+</I>&gt;<i>  
+</I>&gt;<i>  extern void stdio_init(void);
+</I>&gt;<i>  
+</I>&gt;<i> +struct proc_param_block;
+</I>&gt;<i>  
+</I>&gt;<i>  void init_service_register(char* name);
+</I>&gt;<i>  pid_t init_service_get(char* name);
+</I>&gt;<i> @@ -42,10 +44,15 @@ char *init_service_get_name(pid_t pid);
+</I>&gt;<i>  
+</I>&gt;<i>  void init_process_exit(int result);
+</I>&gt;<i>  pid_t init_execute(const char* cmd);
+</I>&gt;<i> +int ppb_from_argv(const char* const argv[]);
+</I>&gt;<i>  
+</I>&gt;<i>  int cmdline_get_argc(const char* args);
+</I>&gt;<i>  void cmdline_copy_argv(char* args, const char** argv, size_t argc);
+</I>&gt;<i>  
+</I>&gt;<i> +bool ppb_is_valid(struct proc_param_block* ppb, size_t ppb_size);
+</I>&gt;<i> +int ppb_get_argc(struct proc_param_block* ppb, size_t ppb_size);
+</I>&gt;<i> +void ppb_copy_argv(struct proc_param_block* ppb, size_t ppb_size,
+</I>&gt;<i> +    char** argv, int argc);
+</I>&gt;<i>  
+</I>&gt;<i>  
+</I>&gt;<i>  #ifdef _USE_START_
+</I>&gt;<i> diff --git a/src/modules/lib/param.c b/src/modules/lib/param.c
+</I>&gt;<i> new file mode 100644
+</I>&gt;<i> index 0000000..c3a4f60
+</I>&gt;<i> --- /dev/null
+</I>&gt;<i> +++ b/src/modules/lib/param.c
+</I>&gt;<i> @@ -0,0 +1,264 @@
+</I>&gt;<i> +/*
+</I>&gt;<i> + * Copyright (c) 2010 The tyndur Project. All rights reserved.
+</I>&gt;<i> + *
+</I>&gt;<i> + * This code is derived from software contributed to the tyndur Project
+</I>&gt;<i> + * by Kevin Wolf.
+</I>&gt;<i> + *
+</I>&gt;<i> + * Redistribution and use in source and binary forms, with or without
+</I>&gt;<i> + * modification, are permitted provided that the following conditions
+</I>&gt;<i> + * are met:
+</I>&gt;<i> + * 1. Redistributions of source code must retain the above copyright
+</I>&gt;<i> + *    notice, this list of conditions and the following disclaimer.
+</I>&gt;<i> + * 2. Redistributions in binary form must reproduce the above copyright
+</I>&gt;<i> + *    notice, this list of conditions and the following disclaimer in the
+</I>&gt;<i> + *    documentation and/or other materials provided with the distribution.
+</I>&gt;<i> + *
+</I>&gt;<i> + * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+</I>&gt;<i> + * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+</I>&gt;<i> + * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+</I>&gt;<i> + * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
+</I>&gt;<i> + * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+</I>&gt;<i> + * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+</I>&gt;<i> + * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+</I>&gt;<i> + * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+</I>&gt;<i> + * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+</I>&gt;<i> + * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+</I>&gt;<i> + * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+</I>&gt;<i> + */
+</I>&gt;<i> +
+</I>&gt;<i> +#include &lt;stdlib.h&gt;
+</I>&gt;<i> +#include &lt;string.h&gt;
+</I>&gt;<i> +#include &lt;errno.h&gt;
+</I>&gt;<i> +
+</I>&gt;<i> +#include &lt;syscall.h&gt;
+</I>&gt;<i> +#include &lt;page.h&gt;
+</I>&gt;<i> +
+</I>&gt;<i> +enum ppb_entry_type {
+</I>&gt;<i> +    PPB_CMDLINE_ARG = 1,
+</I>&gt;<i> +    PPB_ENV_VAR,
+</I>&gt;<i> +};
+</I>&gt;<i> +
+</I>&gt;<i> +struct ppb_entry {
+</I>&gt;<i> +    enum ppb_entry_type type;
+</I>&gt;<i> +    ptrdiff_t           value;
+</I>&gt;<i> +    size_t              len;
+</I>&gt;<i> +};
+</I>&gt;<i> +
+</I>&gt;<i> +struct proc_param_block {
+</I>&gt;<i> +    size_t              num;
+</I>&gt;<i> +    struct ppb_entry    entries[];
+</I>&gt;<i> +};
+</I>&gt;<i> +
+</I>&gt;<i> +struct ppb_builder {
+</I>&gt;<i> +    struct proc_param_block*    ppb;
+</I>&gt;<i> +    size_t                      ppb_dir_size;
+</I>&gt;<i> +    size_t                      ppb_dir_used;
+</I>&gt;<i> +    size_t                      ppb_data_used;
+</I>&gt;<i> +};
+</I>&gt;<i> +
+</I>&gt;<i> +extern pid_t __init_exec(const char* cmd, int ppb_shm_id);
+</I>
+Wofür ist denn das genau gut?
+
+&gt;<i> +
+</I>&gt;<i> +static struct ppb_builder* ppb_builder_init(void)
+</I>&gt;<i> +{
+</I>&gt;<i> +    struct ppb_builder* b;
+</I>&gt;<i> +
+</I>&gt;<i> +    b = malloc(sizeof(*b));
+</I>&gt;<i> +    if (b == NULL) {
+</I>&gt;<i> +        return NULL;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>
+Hm wozu brauchst du hier ueberhaupt ganze Pages? Wenn ich das richtig
+sehe, dann wird das ganze doch am Ende eh in einen SHM-Puffer kopiert
+und dann freigegeben?
+
+&gt;<i> +    b-&gt;ppb              = mem_allocate(PAGE_SIZE, 0);
+</I>&gt;<i> +    b-&gt;ppb_dir_size     = PAGE_SIZE;
+</I>&gt;<i> +    b-&gt;ppb_dir_used     = sizeof(struct proc_param_block);
+</I>&gt;<i> +    b-&gt;ppb_data_used    = 0;
+</I>&gt;<i> +
+</I>&gt;<i> +    memset(b-&gt;ppb, 0, PAGE_SIZE);
+</I>&gt;<i> +
+</I>&gt;<i> +    return b;
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +static void* pgrealloc(void* old, size_t old_size, size_t new_size)
+</I>&gt;<i> +{
+</I>&gt;<i> +    void* new;
+</I>&gt;<i> +
+</I>&gt;<i> +    new = mem_allocate(new_size, 0);
+</I>&gt;<i> +    if (new == NULL) {
+</I>&gt;<i> +        return NULL;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    memcpy(new, old, old_size);
+</I>&gt;<i> +    mem_free(old, old_size);
+</I>
+Hier eventuell noch ein
+memset(((char*) new) + old_size, 0, new_size - old_size), oder?
+
+&gt;<i> +
+</I>&gt;<i> +    return new;
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +static int ppb_add_entry(struct ppb_builder* b, enum ppb_entry_type type,
+</I>&gt;<i> +    const void* value, size_t len)
+</I>&gt;<i> +{
+</I>&gt;<i> +    size_t used;
+</I>&gt;<i> +    int index;
+</I>&gt;<i> +    void* new;
+</I>&gt;<i> +
+</I>&gt;<i> +    /* Verzeichnis vergroessern falls noetig */
+</I>&gt;<i> +    used = b-&gt;ppb_dir_used + sizeof(struct ppb_entry);
+</I>&gt;<i> +
+</I>&gt;<i> +    if (used &gt; b-&gt;ppb_dir_size) {
+</I>&gt;<i> +        new = pgrealloc(b-&gt;ppb, b-&gt;ppb_dir_size, NUM_PAGES(used));
+</I>&gt;<i> +        if (new == NULL) {
+</I>&gt;<i> +            return -ENOMEM;
+</I>&gt;<i> +        }
+</I>&gt;<i> +
+</I>&gt;<i> +        b-&gt;ppb = new;
+</I>&gt;<i> +        b-&gt;ppb_dir_size = NUM_PAGES(b-&gt;ppb_dir_used);
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    /* Daten eintragen */
+</I>&gt;<i> +    index = b-&gt;ppb-&gt;num++;
+</I>&gt;<i> +    b-&gt;ppb-&gt;entries[index].type  = type;
+</I>&gt;<i> +    b-&gt;ppb-&gt;entries[index].value = (ptrdiff_t) value;
+</I>&gt;<i> +    b-&gt;ppb-&gt;entries[index].len   = len;
+</I>&gt;<i> +
+</I>&gt;<i> +    b-&gt;ppb_dir_used += sizeof(struct ppb_entry);
+</I>&gt;<i> +    b-&gt;ppb_data_used += len;
+</I>&gt;<i> +
+</I>&gt;<i> +    return 0;
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +static int ppb_builder_finish(struct ppb_builder* b)
+</I>&gt;<i> +{
+</I>&gt;<i> +    int shm;
+</I>&gt;<i> +    size_t size;
+</I>&gt;<i> +    uint8_t* p;
+</I>&gt;<i> +    int i, num_entries;
+</I>&gt;<i> +    ptrdiff_t offset;
+</I>&gt;<i> +    struct ppb_entry* entry;
+</I>&gt;<i> +
+</I>&gt;<i> +    /* Shared Memory anlegen */
+</I>&gt;<i> +    size = b-&gt;ppb_dir_used + b-&gt;ppb_data_used;
+</I>&gt;<i> +
+</I>&gt;<i> +    shm = create_shared_memory(size);
+</I>&gt;<i> +    if (shm &lt; 0) {
+</I>&gt;<i> +        return shm;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    p = open_shared_memory(shm);
+</I>&gt;<i> +    if (p == NULL) {
+</I>&gt;<i> +        return -ENOMEM;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    /* Daten kopieren*/
+</I>&gt;<i> +    num_entries = b-&gt;ppb-&gt;num;
+</I>&gt;<i> +    offset = b-&gt;ppb_dir_used;
+</I>&gt;<i> +
+</I>&gt;<i> +    for (i = 0; i &lt; num_entries; i++) {
+</I>&gt;<i> +        entry = &amp;b-&gt;ppb-&gt;entries[i];
+</I>&gt;<i> +        memcpy(p + offset, (void*) entry-&gt;value, entry-&gt;len);
+</I>&gt;<i> +        entry-&gt;value = offset;
+</I>&gt;<i> +        offset += entry-&gt;len;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    memcpy(p, b-&gt;ppb, b-&gt;ppb_dir_used);
+</I>&gt;<i> +
+</I>&gt;<i> +    /* Strukturen freigeben */
+</I>&gt;<i> +    mem_free(b-&gt;ppb, NUM_PAGES(b-&gt;ppb_dir_used));
+</I>&gt;<i> +    free(b);
+</I>&gt;<i> +
+</I>&gt;<i> +    return shm;
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +int ppb_from_argv(const char* const argv[])
+</I>&gt;<i> +{
+</I>&gt;<i> +    struct ppb_builder* b;
+</I>&gt;<i> +    int shm;
+</I>&gt;<i> +    const char* const* p;
+</I>&gt;<i> +
+</I>&gt;<i> +    b = ppb_builder_init();
+</I>&gt;<i> +    if (b == NULL) {
+</I>&gt;<i> +        errno = ENOMEM;
+</I>&gt;<i> +        return -1;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    p = argv;
+</I>&gt;<i> +    while (*p != NULL) {
+</I>&gt;<i> +        ppb_add_entry(b, PPB_CMDLINE_ARG, *p, strlen(*p) + 1);
+</I>&gt;<i> +        p++;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    shm = ppb_builder_finish(b);
+</I>&gt;<i> +    if (shm &lt; 0) {
+</I>&gt;<i> +        errno = -shm;
+</I>&gt;<i> +        return -1;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    return shm;
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +bool ppb_is_valid(struct proc_param_block* ppb, size_t ppb_size)
+</I>&gt;<i> +{
+</I>&gt;<i> +    size_t offset;
+</I>&gt;<i> +    size_t len;
+</I>&gt;<i> +    int i;
+</I>&gt;<i> +
+</I>&gt;<i> +    len = sizeof(*ppb) + ppb-&gt;num + sizeof(*ppb-&gt;entries);
+</I>
+Ich glaube das sollte ein * sein:    ^
+
+&gt;<i> +    if (ppb_size &lt; len) {
+</I>&gt;<i> +        return false;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    ppb_size -= len;
+</I>&gt;<i> +    for (i = 0; i &lt; ppb-&gt;num; i++) {
+</I>&gt;<i> +        len = ppb-&gt;entries[i].len;
+</I>&gt;<i> +        if (ppb_size &lt; len) {
+</I>&gt;<i> +            return false;
+</I>&gt;<i> +        }
+</I>&gt;<i> +
+</I>&gt;<i> +        offset = ppb-&gt;entries[i].value;
+</I>&gt;<i> +        if (offset &gt; ppb_size || offset + len &gt; ppb_size) {
+</I>
+Müsstest du hier nicht mit dem originalen ppb_size vergleichen?
+
+&gt;<i> +            return false;
+</I>&gt;<i> +        }
+</I>&gt;<i> +
+</I>&gt;<i> +        ppb_size -= len;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    return true;
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +int ppb_get_argc(struct proc_param_block* ppb, size_t ppb_size)
+</I>&gt;<i> +{
+</I>&gt;<i> +    int i;
+</I>&gt;<i> +    int argc = 0;
+</I>&gt;<i> +
+</I>&gt;<i> +    if (!ppb_is_valid(ppb, ppb_size)) {
+</I>&gt;<i> +        return -EINVAL;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    for (i = 0; i &lt; ppb-&gt;num; i++) {
+</I>&gt;<i> +        if (ppb-&gt;entries[i].type == PPB_CMDLINE_ARG) {
+</I>&gt;<i> +            argc++;
+</I>&gt;<i> +        }
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    return argc;
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i> +void ppb_copy_argv(struct proc_param_block* ppb, size_t ppb_size,
+</I>&gt;<i> +    char** argv, int argc)
+</I>&gt;<i> +{
+</I>&gt;<i> +    int i;
+</I>&gt;<i> +    int arg;
+</I>&gt;<i> +
+</I>&gt;<i> +    if (!ppb_is_valid(ppb, ppb_size)) {
+</I>&gt;<i> +        return;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    arg = 0;
+</I>&gt;<i> +    for (i = 0; i &lt; ppb-&gt;num; i++) {
+</I>&gt;<i> +        if (ppb-&gt;entries[i].type == PPB_CMDLINE_ARG) {
+</I>&gt;<i> +            argv[arg++] = ((char*) ppb) + ppb-&gt;entries[i].value;
+</I>&gt;<i> +            if (arg == argc) {
+</I>&gt;<i> +                break;
+</I>&gt;<i> +            }
+</I>&gt;<i> +        }
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    argv[argc] = NULL;
+</I>&gt;<i> +}
+</I>
+Aber ich glaube von der Idee her finde ich das gut.
+
+-- 
+Antoine Kaufmann
+&lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">toni at famkaufmann.info</A>&gt;
+-------------- nächster Teil --------------
+Ein Dateianhang mit Binärdaten wurde abgetrennt...
+Dateiname   : nicht verfügbar
+Dateityp    : application/pgp-signature
+Dateigröße  : 198 bytes
+Beschreibung: nicht verfügbar
+URL         : &lt;<A HREF="http://list.tyndur.org/pipermail/tyndur-devel/attachments/20110108/a7449eda/attachment-0001.pgp">http://list.tyndur.org/pipermail/tyndur-devel/attachments/20110108/a7449eda/attachment-0001.pgp</A>&gt;
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002000.html">[tyndur-devel] [PATCH 2/2] Makefile: lbuilds-env und *-pascal targets nur im Hauptmakefile
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002003.html">[tyndur-devel] [PATCH 6/7] libc: crt0.c: argv aus PPB auslesen, falls vorhanden
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2002">[ Datum ]</a>
+              <a href="thread.html#2002">[ Thema ]</a>
+              <a href="subject.html#2002">[ Betreff (Subject)]</a>
+              <a href="author.html#2002">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

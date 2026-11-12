@@ -1,0 +1,144 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] kernel2: Code zum vorbereiten eines Threads	in Funkiton auslagern
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20kernel2%3A%20Code%20zum%20vorbereiten%20eines%20Threads%0A%09in%20Funkiton%20auslagern&In-Reply-To=%3C1285094353-22379-6-git-send-email-toni%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001827.html">
+   <LINK REL="Next"  HREF="001837.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] kernel2: Code zum vorbereiten eines Threads	in Funkiton auslagern</H1>
+    <B>Antoine Kaufmann</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20kernel2%3A%20Code%20zum%20vorbereiten%20eines%20Threads%0A%09in%20Funkiton%20auslagern&In-Reply-To=%3C1285094353-22379-6-git-send-email-toni%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH] kernel2: Code zum vorbereiten eines Threads	in Funkiton auslagern">toni at tyndur.org
+                  </A><BR>
+    <I>Di Sep 21 20:39:10 CEST 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001827.html">[tyndur-devel] [PATCH] kernel2: pm_scheduler_yield()
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001837.html">[tyndur-devel] [PATCH] kernel2: Code zum vorbereiten eines Threads in Funkiton auslagern
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1828">[ Datum ]</a>
+              <a href="thread.html#1828">[ Thema ]</a>
+              <a href="subject.html#1828">[ Betreff (Subject) ]</a>
+              <a href="author.html#1828">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* kernel2: Wenn wir den Code, der die Ausfuehrung eines Threads
+           vorbereitet aus dem Interrupt-Handler in eine eigene Funktion
+           auslagern, koennen wir die spaeter auch zum Initialisieren
+           des Multitaskings benutzen.
+
+Signed-off-by: Antoine Kaufmann &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">toni at tyndur.org</A>&gt;
+---
+ src/kernel2/include/im.h        |    1 +
+ src/kernel2/src/interrupts/im.c |   38 +++++++++++++++++++++++++-------------
+ 2 files changed, 26 insertions(+), 13 deletions(-)
+
+diff --git a/src/kernel2/include/im.h b/src/kernel2/include/im.h
+index abe6ffb..05f7200 100644
+--- a/src/kernel2/include/im.h
++++ b/src/kernel2/include/im.h
+@@ -56,6 +56,7 @@ void im_disable_irq(uint8_t irq);
+ 
+ void im_end_of_interrupt(uint8_t interrupt);
+ interrupt_stack_frame_t* im_handler(interrupt_stack_frame_t* isf);
++interrupt_stack_frame_t* im_prepare_current_thread(void);
+ 
+ bool im_add_handler(uint32_t intr, pm_process_t* handler);
+ 
+diff --git a/src/kernel2/src/interrupts/im.c b/src/kernel2/src/interrupts/im.c
+index 0379d30..57e260f 100644
+--- a/src/kernel2/src/interrupts/im.c
++++ b/src/kernel2/src/interrupts/im.c
+@@ -184,20 +184,8 @@ interrupt_stack_frame_t* im_handler(interrupt_stack_frame_t* isf)
+ 
+     thread = current_thread;
+     if (thread != old_thread) {
+-        interrupt_stack_frame_t* user_isf = thread-&gt;user_isf;
+         old_thread-&gt;kernel_stack = isf;
+-        new_isf = thread-&gt;kernel_stack;
+-
+-        cpu_get_current()-&gt;tss.ss0 = 2 &lt;&lt; 3;
+-        if (user_isf-&gt;eflags &amp; 0x20000) {
+-            cpu_get_current()-&gt;tss.esp0 =
+-                (uintptr_t) user_isf + sizeof(struct vm86_isf);
+-        } else {
+-            cpu_get_current()-&gt;tss.esp0 =
+-                (uintptr_t) user_isf + sizeof(interrupt_stack_frame_t);
+-        }
+-
+-        mmc_activate(&amp;thread-&gt;process-&gt;context);
++        new_isf = im_prepare_current_thread();
+     }
+ 
+     im_end_of_interrupt(int_num);
+@@ -205,6 +193,30 @@ interrupt_stack_frame_t* im_handler(interrupt_stack_frame_t* isf)
+ }
+ 
+ /**
++ * Aktuellen Thread zum laufen vorbereiten nach einem Thread-Wechsel. Konkret
++ * TSS befuellen, in den richtigen Speicherkontext wechseln, und den Interrupt-
++ * Stack-Frame raussuchen.
++ */
++interrupt_stack_frame_t* im_prepare_current_thread(void)
++{
++    pm_thread_t* thread = current_thread;
++    interrupt_stack_frame_t* user_isf = thread-&gt;user_isf;
++
++    cpu_get_current()-&gt;tss.ss0 = 2 &lt;&lt; 3;
++    if (user_isf-&gt;eflags &amp; 0x20000) {
++        cpu_get_current()-&gt;tss.esp0 =
++            (uintptr_t) user_isf + sizeof(struct vm86_isf);
++    } else {
++        cpu_get_current()-&gt;tss.esp0 =
++            (uintptr_t) user_isf + sizeof(interrupt_stack_frame_t);
++    }
++
++    mmc_activate(&amp;thread-&gt;process-&gt;context);
++
++    return thread-&gt;kernel_stack;
++}
++
++/**
+  * Wird beim Loeschen eines Prozesses aufgerufen. Entfernt den Prozess aus der
+  * Interrupthandlertabelle.
+  */
+-- 
+1.6.4.4
+
+</PRE>
+
+
+
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001827.html">[tyndur-devel] [PATCH] kernel2: pm_scheduler_yield()
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001837.html">[tyndur-devel] [PATCH] kernel2: Code zum vorbereiten eines Threads in Funkiton auslagern
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1828">[ Datum ]</a>
+              <a href="thread.html#1828">[ Thema ]</a>
+              <a href="subject.html#1828">[ Betreff (Subject)]</a>
+              <a href="author.html#1828">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

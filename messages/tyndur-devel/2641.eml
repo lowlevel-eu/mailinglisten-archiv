@@ -1,0 +1,124 @@
+Delivered-To: mlmmj-tyndur-devel
+Received: from sv1.famkaufmann.info [176.9.73.67]
+	by a9b8c5461646 with IMAP (fetchmail-6.3.26)
+	for <mlmmj@localhost> (single-drop); Sun, 14 Mar 2021 16:16:55 +0000 (GMT)
+Received: from localhost ([172.29.0.7])
+	by sv1.famkaufmann.info with LMTP
+	id yBm5D742TmBEYgAALHnFKQ
+	(envelope-from <kevin@tyndur.org>)
+	for <mlmmj-tyndur-devel>; Sun, 14 Mar 2021 16:15:58 +0000
+Delivered-To: tyndur-devel@tyndur.org
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=tyndur.org; s=key2;
+	t=1615738558; h=from:from:reply-to:reply-to:subject:subject:date:date:
+	 message-id:message-id:to:to:cc:mime-version:mime-version:
+	 content-type:content-type:
+	 content-transfer-encoding:content-transfer-encoding:
+	 in-reply-to:in-reply-to:references:references;
+	bh=u1eH/X3tXtKgqbsw+pyONKhGqe7ADrMqrjy6x3T51es=;
+	b=l5Yxcz+QnNpx1m9hgBTy7xd0ioK3XBLmDuaxNxajJDdY325mYXNAl3y+ABh2p8/65GgRnQ
+	YTYXKRs0vDSGitZI8+GuIMtCUyZfK5cjeR5936SSRZnM8OBCJUw4H6KdYxePEHk9hBc7yQ
+	/IoK1qj4mjYws4IIEp58JYOgY2MX9y0=
+Received: 
+	by sv1.famkaufmann.info (OpenSMTPD) with ESMTPSA id b775993d (TLSv1.3:TLS_AES_256_GCM_SHA384:256:NO)
+	for <tyndur-devel@tyndur.org>;
+	Sun, 14 Mar 2021 16:15:58 +0000 (UTC)
+Date: Sun, 14 Mar 2021 17:15:54 +0100
+From: Kevin Wolf <kevin@tyndur.org>
+To: tyndur-Patches <tyndur-devel@tyndur.org>
+Subject: Re: [PATCH v2 1/2] libc: Zentralisieren der strtoxxx-Funktionen
+Message-ID: <20210314161554.GA3725@localhost.localdomain>
+References: <20210304194839.64983-1-mayerNico256@gmail.com>
+ <20210312231610.GA5262@faunus.fritz.box>
+ <7b6607b4-0523-5c7a-1d45-bf267169b4d2@gmail.com>
+Errors-To: toni@tyndur.org
+Precedence: list
+Reply-To: tyndur-Patches <tyndur-devel@tyndur.org>
+List-Id: tyndur-Patches <tyndur-devel.tyndur.org>
+List-Unsubscribe: <mailto:tyndur-devel+unsubscribe@tyndur.org>
+List-Post: <mailto:tyndur-devel@tyndur.org>
+List-Help: <mailto:tyndur-devel+help@tyndur.org>
+List-Subscribe: <mailto:tyndur-devel+subscribe@tyndur.org>
+List-Owner: <mailto:toni@tyndur.org>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=iso-8859-1
+Content-Disposition: inline
+Content-Transfer-Encoding: 8bit
+In-Reply-To: <7b6607b4-0523-5c7a-1d45-bf267169b4d2@gmail.com>
+
+Am 14.03.2021 um 15:24 hat Nico Mayer geschrieben:
+> Hallo Kevin,
+> 
+> vielen Dank für dein ausführliches Review.
+> 
+> Eine Sache verstehe ich aktuell noch nicht:
+> 
+> Am 13.03.21 um 00:18 schrieb Kevin Wolf:
+> > > -        if (retval > (max_val - digit) / base) {
+> > > -            overflow = 1;
+> > > +        if (neg) {
+> > > +            if (result > (min_val - digit) / base) {
+> > > +                errno = ERANGE;
+> > > +                overflow = 1;
+> > > +            }
+> > Hier wird es knifflig. Ich weiß nicht genau, was du hier checkst. Mal
+> > versuchen zu analysieren, was hier passiert:
+> > 
+> > min_val ist unsigned long long, digit ist int. Für die Subtraktion wird
+> > digit nach unsigned long long konvertiert, d.h. wir rechnen unsigned.
+> > 
+> > Die unsigned-Varianten lügen hier und geben ihren Maximalwert statt 0
+> > als min_val. In diesem Fall tut der Code also dasselbe wie der
+> > else-Block. Ich glaube, negative und positive Werte gleich zu parsen ist
+> > richtig.
+> > 
+> > Die signed-Varianten übergeben für min_val ihr Minimum (also eine
+> > negative Zahl), allerdings konvertiert zu einem unsigned long long, der
+> > den Wert nicht repräsentieren kann.
+> > 
+> > Damit haben wir als Obergrenze für result * base + digit:
+> > 
+> > * für strtoll(): ULLONG_MAX - LLONG_MIN = (2^64 - 1) - 2^63 = 2^63 - 1
+> > * für strtol(): ULLONG_MAX - LONG_MIN = (2^64 - 1) - 2^32
+> > 
+> > Ersteres ist falsch, weil -2^63 als Eingabe funktionieren sollte, aber
+> > so ERANGE setzt. Alle anderen Werte sollten in Ordnung sein.
+> > 
+> > Zweiteres ist vollkommener Blödsinn und lässt viel zu große Eingaben zu.
+> > 
+> Der Codeabschnitt sollte eigentlich wie die "max_neg"-Lösung funktionieren.
+> Mein zentraler Gedanke von diesem Codeabschitt war, dass das Bitmuster der
+> Zahl durch die "signed->unsigned" Konvertierung" nicht geändert wird.
+> 
+> Daher:
+> 
+> (unsigned long long)LONG_MIN == 0x80000000
+
+Das hier ist nicht richtig. Du bekommst Sign Extension und damit:
+
+(unsigned long long) LONG_MIN == ffffffff80000000
+
+Wenn du das ganze auf deinem x86_64-Rechner probiert hast, kriegst du
+das Problem nicht, weil long da schon 64 Bit ist. Aber auf i386 geht das
+schief.
+
+Der vollständigkeit halber, im C-Standard ist das so definiert, kommt
+aber aufs selbe raus:
+
+    Otherwise, if the new type is unsigned, the value is converted by
+    repeatedly adding or subtracting one more than the maximum value
+    that can be represented in the new type until the value is in the
+    range of the new type.60)
+
+> (unsigned long long)LLONG_MIN == 0x8000000000000000
+> 
+> 
+> Jetzt verstehe ich nicht ganz, wie du in deinem Review die Obergrenzen
+> berechnest. Warum wird das jeweilige Minimum von ULLONG_MAX abgezogen?
+> 
+> Die Testfälle werde ich nochmal überprüfen. Vielleicht auch ganz cool wäre
+> hier die Nutzung von Gcov. So könnte man bestimmen, wie gut getestet wird.
+
+Meine Rechnung in der letzten Mail war off by one, aber macht es jetzt
+mehr Sinn für dich?
+
+Kevin

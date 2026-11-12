@@ -1,0 +1,422 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] Multiple IRQs, USB-Image
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20Multiple%20IRQs%2C%20USB-Image&In-Reply-To=%3C1257192537-2181-1-git-send-email-max%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001458.html">
+   <LINK REL="Next"  HREF="001460.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] Multiple IRQs, USB-Image</H1>
+    <B>max at tyndur.org</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20Multiple%20IRQs%2C%20USB-Image&In-Reply-To=%3C1257192537-2181-1-git-send-email-max%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH] Multiple IRQs, USB-Image">max at tyndur.org
+                  </A><BR>
+    <I>Mo Nov  2 21:08:57 CET 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001458.html">[tyndur-devel] [PATCH] pci: Konfigurationsspeicherzugriff
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001460.html">[tyndur-devel] [PATCH] !kernel2: kprintf included &lt;stdarg.h&gt; statt	#defines
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1459">[ Datum ]</a>
+              <a href="thread.html#1459">[ Thema ]</a>
+              <a href="subject.html#1459">[ Betreff (Subject) ]</a>
+              <a href="author.html#1459">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>From: Max Reitz &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">max at tyndur.org</A>&gt;
+
+* Mit dem Makro MAX_INTERRUPTS in intr.c kann man jetzt die
+  maximale Anzahl von Handlern pro IRQ definieren
++ MÃ¶glichkeit zur Erstellung eines Diskettenimages, das dann
+  (unter QEMU) per USB gebootet werden kann
+
+Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">max at tyndur.org</A>&gt;
+---
+ Makefile                  |    8 +++--
+ build/config/grub_usb.cfg |    9 +++++
+ build/config/image_usb.sh |    1 +
+ build/scripts/image_usb   |   86 +++++++++++++++++++++++++++++++++++++++++++++
+ buildmk.sh                |    3 ++
+ src/kernel/src/intr.c     |   79 ++++++++++++++++++++++++++++++++---------
+ 6 files changed, 165 insertions(+), 21 deletions(-)
+ create mode 100644 build/config/grub_usb.cfg
+ create mode 100644 build/config/image_usb.sh
+ create mode 100755 build/scripts/image_usb
+
+diff --git a/Makefile b/Makefile
+index 9b63409..251450a 100644
+--- a/Makefile
++++ b/Makefile
+@@ -5,7 +5,7 @@ PPC=fpc -n -Cn -CX -Ttyndur  -Fu../lib/units -Fu../units
+ ASM_ELF=nasm -felf -O99 
+ ASM_BIN=nasm -fbin -O99
+ 
+-BUILD_ROOT=/home/kevin/entwicklung/tyndur/build/output
++BUILD_ROOT=/home/lfs/tyndur/build/output
+ BUILD_DIR=$(BUILD_ROOT)
+ 
+ AS=as -32
+@@ -22,11 +22,10 @@ obj:
+ 
+ subdirs:
+ 	$(MAKE) --no-print-directory -sC doc
+-	$(MAKE) --no-print-directory -sC patches
+ 	$(MAKE) --no-print-directory -sC src
+ 
+ clean:
+-	rm -f *.o *.a *.mod
++	rm -f *.o *.a *.mod *.ppu link.res ppas.sh tyndur
+ 	for file in *; do if [ -f &quot;$$file/Makefile&quot; -a \( ! -f &quot;$$file/.nobuild&quot; -o -f &quot;$$file/.ignorenobuild&quot; \) ]; then $(MAKE) -sC &quot;$$file&quot; clean; rm &quot;$$file/Makefile&quot;; fi done  
+ 
+ .SILENT: all makefiles subdirs obj clean clean_root updateroot image-floppy image-hd test-qemu test-qemu-hd
+@@ -49,6 +48,9 @@ image-hd: updateroot
+ image-cdrom: updateroot
+ 	build/scripts/image_cdrom
+ 
++image-usb: updateroot
++	build/scripts/image_usb
++
+ test-qemu: image-floppy
+ 	qemu -serial stdio -fda build/images/floppy.img -boot a -net user -net nic,model=rtl8139 | tee qemu-serial.log
+ 
+diff --git a/build/config/grub_usb.cfg b/build/config/grub_usb.cfg
+new file mode 100644
+index 0000000..0b2adcb
+--- /dev/null
++++ b/build/config/grub_usb.cfg
+@@ -0,0 +1,9 @@
++title tyndur
++kernel /boot/tyndur debug=s
++module /modules/init boot=file:/
++module /modules/pci
++module /modules/usb
++module /modules/fat
++module /modules/console servmgr:/term servmgr:/term
++module /modules/servmgr usb-msc:/msd0|fat:/ vterm:/vterm8/out pci usb-msc fat console
++boot
+diff --git a/build/config/image_usb.sh b/build/config/image_usb.sh
+new file mode 100644
+index 0000000..984dac2
+--- /dev/null
++++ b/build/config/image_usb.sh
+@@ -0,0 +1 @@
++IMAGE_PATH=&quot;build/images/usb-floppy.img&quot;
+diff --git a/build/scripts/image_usb b/build/scripts/image_usb
+new file mode 100755
+index 0000000..8ad3725
+--- /dev/null
++++ b/build/scripts/image_usb
+@@ -0,0 +1,86 @@
++#!/bin/bash
++
++# Copyright (c) 2008 The tyndur Project. All rights reserved.
++#
++# This code is derived from software contributed to the tyndur Project
++# by Antoine Kaufmann.
++#
++# Redistribution and use in source and binary forms, with or without
++# modification, are permitted provided that the following conditions
++# are met:
++# 1. Redistributions of source code must retain the above copyright
++#    notice, this list of conditions and the following disclaimer.
++# 2. Redistributions in binary form must reproduce the above copyright
++#    notice, this list of conditions and the following disclaimer in the
++#    documentation and/or other materials provided with the distribution.
++# 3. All advertising materials mentioning features or use of this software
++#    must display the following acknowledgement:
++#     This product includes software developed by the tyndur Project
++#     and its contributors.
++# 4. Neither the name of the tyndur Project nor the names of its
++#    contributors may be used to endorse or promote products derived
++#    from this software without specific prior written permission.
++#
++# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++# ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++# TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++# PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++# CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++# EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++# PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++# OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++# WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++# OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++# ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++
++ROOT=build/root
++ROOT_COMMON=build/root-common
++ROOT_FLOPPY=build/root-floppy
++ROOT_LOCAL=build/root-local
++
++export PATH=$PATH:/usr/local/sbin:/usr/sbin:/sbin
++
++source build/config/image_usb.sh
++export LOST_BUILDMK_ROOT=&quot;`pwd`&quot;
++source config.sh
++
++
++export MTOOLSRC=lostmtools.conf
++
++# Konfigurationsdatei fuer mtools generieren
++cat &lt;&lt; EOF &gt; $MTOOLSRC
++drive l:
++    file=&quot;$IMAGE_PATH&quot; cylinders=80 heads=2 sectors=18 filter
++EOF
++
++# Wenn das Image neu erstellt werden muss, kommen noch ein paar schritte mehr
++# dazu.
++NEW=0
++if ! [ -f $IMAGE_PATH ]; then
++    # Leeres Image erstellen und formatieren
++    dd if=/dev/zero of=$IMAGE_PATH bs=1024 count=1440
++    mformat l:
++    NEW=1
++fi
++
++
++mcopy -D o -s $ROOT/* $ROOT_COMMON/* $ROOT_FLOPPY/* l:/
++mcopy -D o -s $ROOT_LOCAL/* l:/
++
++# Grub-Konfiguration kopieren
++mcopy -D o build/config/grub_usb.cfg l:/boot/grub/menu.lst
++
++if [ $NEW -ne 0 ]; then
++    # Grub kopieren und installieren
++    mmd -D s l:/boot/grub
++    mcopy -D o $LOST_GRUB_STAGESDIR/stage? l:/boot/grub/
++
++    $LOST_TOOLS_GRUB --batch &lt;&lt;EOF
++    device (fd0) $IMAGE_PATH
++    root (fd0)
++    setup (fd0)
++EOF
++fi
++
++# Konfigurationsdatei fuer mtools wieder loeschen
++rm -f $MTOOLSRC
+diff --git a/buildmk.sh b/buildmk.sh
+index 4e3cd85..0315c12 100644
+--- a/buildmk.sh
++++ b/buildmk.sh
+@@ -249,6 +249,9 @@ image-hd: updateroot
+ image-cdrom: updateroot
+ 	build/scripts/image_cdrom
+ 
++image-usb: updateroot
++	build/scripts/image_usb
++
+ test-qemu: image-floppy
+ 	$LOST_TOOLS_QEMU -serial stdio -fda build/images/floppy.img -boot a -net user -net nic,model=rtl8139 | tee qemu-serial.log
+ 
+diff --git a/src/kernel/src/intr.c b/src/kernel/src/intr.c
+index 9fa3ff3..30566db 100644
+--- a/src/kernel/src/intr.c
++++ b/src/kernel/src/intr.c
+@@ -55,6 +55,8 @@
+ #include &quot;vm86.h&quot;
+ #include &quot;tss.h&quot;
+ 
++#define MAX_INTERRUPTS 4
++
+ typedef struct {
+   word lsb_handler;
+   word selector;
+@@ -65,8 +67,8 @@ typedef struct {
+ 
+ gate_descriptor idt[IDT_SIZE];
+ 
+-pfIrqHandler irq_handlers[16] = { 0 }; // für jeden IRQ genau ein Handler. Wenn es keinen Handler gibt, ist der entsprechende Wert 0.
+-struct task * intr_handling_task[256] = { NULL };
++pfIrqHandler irq_handlers[16] = { 0 }; // fï¿½r jeden IRQ genau ein Handler. Wenn es keinen Handler gibt, ist der entsprechende Wert 0.
++static struct task * intr_handling_task[256][MAX_INTERRUPTS] = { { NULL } };
+ 
+ void handle_irq(int irq, dword* esp);
+ 
+@@ -120,7 +122,7 @@ dword irqs_to_send[16];
+ extern dword kernel_pd_id;
+ 
+ /*
+- * gibt einen neuen Wert für esp zurck
++ * gibt einen neuen Wert fï¿½r esp zurck
+  */
+ dword handle_int(dword esp)
+ {
+@@ -146,7 +148,7 @@ dword handle_int(dword esp)
+     }
+     else
+     {
+-        // TODO: Abstürzen, denn diese Interrupts dürften nicht aufgerufen werden
++        // TODO: Abstï¿½rzen, denn diese Interrupts dï¿½rften nicht aufgerufen werden
+     }
+ 
+     send_irqs(&amp;esp);
+@@ -186,8 +188,8 @@ dword handle_int(dword esp)
+ 
+ /**
+  * Legt eine IDT an und installiert die Exception Handler. Nicht genutzte
+- * Einträge werden mit Verweisen auf den Null-Handler initalisiert.
+- * Anschließend wird die IDT geladen.
++ * Eintrï¿½ge werden mit Verweisen auf den Null-Handler initalisiert.
++ * Anschlieï¿½end wird die IDT geladen.
+  */
+ void init_idt() {
+   int i;
+@@ -265,9 +267,9 @@ void init_idt() {
+   outb_wait(PIC1_DATA, 0x00);
+   outb_wait(PIC2_DATA, 0x00);
+ 
+-  // Handler für den System Call installieren
++  // Handler fï¿½r den System Call installieren
+   // TODO: SOllte eigentlich ein IDT_TRAP_GATE sein, aber irgendwo ist da 
+-  // noch ein Problem, das dann für einen Page Fault sorgt, wenn ich zu
++  // noch ein Problem, das dann fï¿½r einen Page Fault sorgt, wenn ich zu
+   // schnell tippe...
+   set_intr(SYSCALL_INTERRUPT, 0x08, syscall_stub, 3, IDT_INTERRUPT_GATE);
+   //set_intr(SYSCALL_INTERRUPT, 0x08, syscall_stub, 3, IDT_TRAP_GATE);
+@@ -348,6 +350,8 @@ int release_irq(int irq)
+ 
+ void handle_irq(int irq, dword* esp)
+ {
++    int i;
++
+     //if (irq &gt; 0) {
+     //    kprintf(&quot;Interrupt 0x%x\n&quot;, irq + IRQ_BASE);
+     //}
+@@ -361,7 +365,7 @@ void handle_irq(int irq, dword* esp)
+         }
+     }*/
+         
+-    // IRQs 7 und 15 können unabsichtlich aufgerufen werden
++    // IRQs 7 und 15 kï¿½nnen unabsichtlich aufgerufen werden
+     // In diesem Fall beim PIC nachschauen, ob wirklich was zu verarbeiten 
+     // ist, ansonsten gleich wieder abbrechen.
+     if ((irq == 7) || (irq == 15))
+@@ -378,7 +382,13 @@ void handle_irq(int irq, dword* esp)
+         }
+     }
+             
+-    if (intr_handling_task[irq + IRQ_BASE] != NULL)  
++    for (i = 0; i &lt; MAX_INTERRUPTS; i++) {
++        if (intr_handling_task[irq + IRQ_BASE][i] != NULL) {
++            i = -1;
++            break;
++        }
++    }
++    if (i == -1)
+     {
+         //kprintf(&quot;IRQ-Verarbeitung durch ein Modul\n&quot;);
+         irqs_to_send[irq]++;
+@@ -401,8 +411,17 @@ send_eoi:
+ 
+ void set_intr_handling_task(byte intr, struct task * task)
+ {
++    int i;
++
+     //kprintf(&quot;Interrupt %d wird jetzt von Task %d behandelt\n&quot;, intr, task-&gt;pid);
+-    intr_handling_task[intr] = task;
++    for (i = 0; i &lt; MAX_INTERRUPTS; i++) {
++        if ((intr_handling_task[intr][i] == NULL) ||
++            (i == MAX_INTERRUPTS - 1))
++        {
++            intr_handling_task[intr][i] = task;
++            break;
++        }
++    }
+ }
+ 		
+ void handle_exception(dword* esp)
+@@ -426,7 +445,7 @@ void handle_exception(dword* esp)
+         case 14:
+             cr2 = read_cr2();
+             diff = (cr2 &gt;&gt; PAGE_SHIFT) - (isf-&gt;esp &gt;&gt; PAGE_SHIFT);
+-            // Ueberprüfen ob der Pagefault durch einen Stackoverflow
++            // Ueberprï¿½fen ob der Pagefault durch einen Stackoverflow
+             // hervorgerufen wurde
+             if ((diff &gt;= -2) &amp;&amp; (diff &lt;= 2)
+                 &amp;&amp; (current_task != NULL)
+@@ -440,7 +459,7 @@ void handle_exception(dword* esp)
+             break;
+     }
+     
+-    // Prüfen, ob ein VM86-Task die Exception ausgelöst hat, und evtl reagieren
++    // Prï¿½fen, ob ein VM86-Task die Exception ausgelï¿½st hat, und evtl reagieren
+     if (isf-&gt;eflags &amp; 0x20000) {
+         if (vm86_exception(esp)) {
+             return;
+@@ -513,15 +532,39 @@ void handle_exception(dword* esp)
+ void send_irqs(dword* esp) 
+ {
+     dword irq;
++    int tsk = 0, may[4], gen;
++
+     for (irq = 0; irq &lt; 16; irq++)
+     {
+         dword rpc_data = irq + IRQ_BASE;
++        for (tsk = 0; tsk &lt; MAX_INTERRUPTS; tsk++) {
++            if (intr_handling_task[irq + IRQ_BASE][tsk] == NULL) {
++                may[tsk] = 0;
++            } else {
++                may[tsk] = 1;
++            }
++        }
+         while (irqs_to_send[irq] &gt; 0) {
+-            schedule_to_task(intr_handling_task[irq + IRQ_BASE], esp);
+-            if (!fastrpc_irq(intr_handling_task[irq + IRQ_BASE], 0, 0, 4, 
+-                (char*) &amp;rpc_data, irq)) 
+-            {
+-                //kprintf(&quot;SYSCALL_RPC = FALSE&quot;);
++            for (tsk = 0; tsk &lt; MAX_INTERRUPTS; tsk++) {
++                if (!may[tsk]) {
++                    continue;
++                }
++                schedule_to_task(intr_handling_task[irq + IRQ_BASE][tsk], esp);
++                if (!fastrpc_irq(intr_handling_task[irq + IRQ_BASE][tsk], 0, 0, 4, 
++                    (char*) &amp;rpc_data, irq)) 
++                {
++                    //kprintf(&quot;SYSCALL_RPC = FALSE&quot;);
++                    may[tsk] = 0;
++                }
++            }
++            gen = 0;
++            for (tsk = 0; tsk &lt; MAX_INTERRUPTS; tsk++) {
++                if (may[tsk]) {
++                    gen = 1;
++                    break;
++                }
++            }
++            if (!gen) {
+                 break;
+             }
+             //kprintf(&quot;IRQ-Handler aufgerufen&quot;);
+-- 
+1.6.5
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001458.html">[tyndur-devel] [PATCH] pci: Konfigurationsspeicherzugriff
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001460.html">[tyndur-devel] [PATCH] !kernel2: kprintf included &lt;stdarg.h&gt; statt	#defines
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1459">[ Datum ]</a>
+              <a href="thread.html#1459">[ Thema ]</a>
+              <a href="subject.html#1459">[ Betreff (Subject)]</a>
+              <a href="author.html#1459">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

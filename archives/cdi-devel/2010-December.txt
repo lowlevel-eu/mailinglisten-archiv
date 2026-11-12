@@ -1,0 +1,1922 @@
+From kevin at tyndur.org  Sun Dec  5 17:35:05 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 5 Dec 2010 17:35:05 +0100
+Subject: [cdi-devel] [PATCH] ata: Fix bus master direction flag
+In-Reply-To: <1290863908-5147-1-git-send-email-kevin@tyndur.org>
+References: <1290863908-5147-1-git-send-email-kevin@tyndur.org>
+Message-ID: <20101205163504.GA32066@silvanus>
+
+On Sat, Nov 27, 2010 at 02:18:28PM +0100, Kevin Wolf wrote:
+> ! ata: Bit 3 in the Bus Master IDE Command Register is set if the DMA
+>   transfer is a bus master write, i.e. read from disk and write to
+>   memory. Current code got that wrong and sets it for writes to the
+>   disk.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+There haven't been any Acks for this patch yet, but on the other hand
+nobody has objected either, so I'm going to commit this now.
+
+Kevin
+
+From max at tyndur.org  Tue Dec 21 16:31:54 2010
+From: max at tyndur.org (max at tyndur.org)
+Date: Tue, 21 Dec 2010 16:31:54 +0100
+Subject: [cdi-devel] [PATCH 0/2] CDI.audio
+Message-ID: <1292945516-28203-1-git-send-email-max@tyndur.org>
+
+This small series adds the CDI.audio header as proposed before with
+some slight changes as well as a first driver using this interface.
+
+Max
+
+
+From max at tyndur.org  Tue Dec 21 16:31:55 2010
+From: max at tyndur.org (max at tyndur.org)
+Date: Tue, 21 Dec 2010 16:31:55 +0100
+Subject: [cdi-devel] [PATCH 1/2] CDI.audio
+In-Reply-To: <1292945516-28203-1-git-send-email-max@tyndur.org>
+References: <1292945516-28203-1-git-send-email-max@tyndur.org>
+Message-ID: <1292945516-28203-2-git-send-email-max@tyndur.org>
+
+From: Max Reitz <max at tyndur.org>
+
+This adds the CDI.audio header for sound I/O drivers.
+
+Signed-off-by: Max Reitz <max at tyndur.org>
+---
+ include/cdi/audio.h |  419 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 files changed, 419 insertions(+), 0 deletions(-)
+ create mode 100644 include/cdi/audio.h
+
+diff --git a/include/cdi/audio.h b/include/cdi/audio.h
+new file mode 100644
+index 0000000..c12d5d0
+--- /dev/null
++++ b/include/cdi/audio.h
+@@ -0,0 +1,419 @@
++/*
++ * Copyright (c) 2010 Max Reitz
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it
++ * and/or modify it under the terms of the Do What The Fuck You Want
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * http://sam.zoy.org/projects/COPYING.WTFPL for more details.
++ */
++
++/**
++ * \german
++ * Treiber f??r Soundkarten
++ * \endgerman
++ * \english
++ * Sound card drivers
++ * \endenglish
++ * \defgroup audio
++ */
++/*\@{*/
++
++#ifndef _CDI_AUDIO_H_
++#define _CDI_AUDIO_H_
++
++#include <stddef.h>
++#include <stdint.h>
++
++#include "cdi.h"
++#include "cdi/lists.h"
++#include "cdi/mem.h"
++
++/**
++ * \german
++ * M??gliche Sampleformate (also Integer vorzeichenbehaftet/vorzeichenlos,
++ * Gleitkommazahlen, Gr????e eines Samples, ...).
++ * Wenn nicht anders gekennzeichnet, wird Little Endian verwendet.
++ * \endgerman
++ * \english
++ * Possible sample formats (i.e., signed/unsigned integer, floating point
++ * numbers, one sample's size, ...).
++ * Little endian is used, unless marked otherwise.
++ * \endenglish
++ */
++typedef enum {
++    // 16 bit signed integer
++    CDI_AUDIO_16SI = 0,
++    // 8 bit signed integer
++    CDI_AUDIO_8SI,
++    // 32 bit signed integer
++    CDI_AUDIO_32SI
++} cdi_audio_sample_format_t;
++
++/**
++ * \german
++ * Abspielposition eines Kanals. Enth??lt den Index des aktuellen Puffers und
++ * des aktuell abgespielten Frames.
++ * \endgerman
++ * \english
++ * A stream's playback position. Contains the index of both the current buffer
++ * and the frame being played.
++ * \endenglish
++ */
++typedef struct cdi_audio_position {
++    size_t buffer;
++    size_t frame;
++} cdi_audio_position_t;
++
++/**
++ * \german
++ * Status eines Kanals.
++ * \endgerman
++ * \english
++ * A stream's status.
++ * \endenglish
++ */
++typedef enum {
++    /**
++     * \german
++     * Angehalten
++     * \endgerman
++     * \english
++     * Stopped
++     * \endenglish
++     */
++    CDI_AUDIO_STOP = 0,
++    /**
++     * \german
++     * Entweder abspielen oder aufnehmen, je nach Typ.
++     * \endgerman
++     * \english
++     * According to the device type either playing or recording.
++     * \endenglish
++     */
++    CDI_AUDIO_PLAY = 1
++} cdi_audio_status_t;
++
++/**
++ * \german
++ * Beschreibt ein CDI.audio-Ger??t, also Tonabspiel- oder Aufnahmehardware.
++ * Bietet eine Soundkarte beide Funktionen an, so muss sie in zwei CDI.audio-
++ * Ger??te aufgeteilt werden.
++ * \endgerman
++ * \english
++ * Describes a CDI.audio device, i.e. a playback or recording device. If a
++ * sound card provides both functions, the driver must register one CDI.audio
++ * device per function.
++ * \endenglish
++ */
++struct cdi_audio_device {
++    struct cdi_device dev;
++
++    /**
++     * \german
++     * Ist dieser Wert ungleich 0, so handelt es sich um ein Aufnahmeger??t,
++     * es kann nur gelesen werden. Ist er 0, dann k??nnen nur T??ne abgespielt
++     * werden.
++     * \endgerman
++     * \english
++     * If this value is not 0, this device is a recording device, thus one can
++     * only read data. Otherwise, only play back is possible.
++     * \endenglish
++     */
++    int record;
++
++    /**
++     * \german
++     * Abspielger??te k??nnen mehrere logische Kan??le anbieten, die vom Ger??t
++     * zusammengemixt werden. Ist dem nicht der Fall oder handelt es sich um
++     * ein Aufnahmeger??t, dann ist die Gr????e dieser Liste genau 1. Sie enth??lt
++     * Elemente des Typs struct cdi_audio_stream.
++     * \endgerman
++     * \english
++     * Play back devices may provide several logical streams which are mixed by
++     * the device. If this is either not true or it is a recording device, the
++     * list's size is exactly 1. It contains elements of type
++     * struct cdi_audio_stream.
++     * \endenglish
++     */
++    cdi_list_t streams;
++};
++
++/**
++ * \german
++ * Beschreibt einen Kanal eines CDI.audio-Ger??ts.
++ * Jeder Kanal besteht aus einer Reihe von Puffern mit abzuspielenden Samples,
++ * die hintereinander und in einer Schleife abgespielt werden.
++ * \endgerman
++ * \english
++ * Describes a CDI.audio device's stream.
++ * Each stream consists of a set of buffers containing samples being played
++ * consecutively and as a loop.
++ * \endenglish
++ */
++struct cdi_audio_stream {
++    /**
++     * \german
++     * Ger??t, zu dem dieser Kanal geh??rt.
++     * \endgerman
++     * \english
++     * Device to which this stream belongs.
++     * \endenglish
++     */
++    struct cdi_audio_device* device;
++
++    /**
++     * \german
++     * Gibt die Anzahl der verf??gbaren Datenpuffer an.
++     * \endgerman
++     * \english
++     * Contains the number of available data buffers.
++     * \endenglish
++     */
++    size_t num_buffers;
++
++    /**
++     * \german
++     * Gibt die Anzahl von Samples pro Datenpuffer an.
++     * \endgerman
++     * \english
++     * Contains the number of samples per buffer.
++     * \endenglish
++     */
++    size_t buffer_size;
++
++    /**
++     * \german
++     * Bei 0 kann die Samplerate eingestellt werden. Ansonsten kann sie nicht
++     * ver??ndert werden und hat einen festen (hier angegebenen) Wert (in Hz).
++     * \endgerman
++     * \english
++     * If 0, the sample rate is adjustable. Otherwise, it isn't and is set to
++     * a fixed value in Hz (which is given here).
++     * \endenglish
++     */
++    int fixed_sample_rate;
++
++    /**
++     * \german
++     * Format der Samples in den Puffern.
++     * \endgerman
++     * \english
++     * Format of the samples contained in the buffers.
++     * \endenglish
++     */
++    cdi_audio_sample_format_t sample_format;
++};
++
++struct cdi_audio_driver {
++    struct cdi_driver drv;
++
++    /**
++     * \german
++     *
++     * ??bertr??gt Daten von oder zu einem Puffer eines Ger??ts (bei
++     * Aufnahmeger??ten wird empfangen, sonst gesendet). Es werden so viele
++     * Bytes ??bertragen, wie in den Puffer passen (abh??ngig von Sampleformat und
++     * Anzahl der Samples pro Puffer).
++     *
++     * @param stream Kanal, der angesprochen werden soll.
++     * @param buffer Der dort zu verwendende Puffer.
++     * @param memory Speicher, mit dem die Daten ausgetauscht werden sollen.
++     * @param offset Offset im Puffer (in Samples), an den die Daten kopiert
++     *               werden (es wird nur so viel kopiert, bis das Ende des
++     *               Puffers erreicht wird), wird bei Aufnahmeger??ten ignoriert.
++     *
++     * @return 0 bei Erfolg, -1 im Fehlerfall.
++     *
++     * \endgerman
++     * \english
++     *
++     * Sends or receives data to/from a device's buffer (receives from recording
++     * devices, sends otherwise). The amount of data transmitted equals the
++     * buffer's size (depends on the sample format and the number of samples per
++     * buffer) reduced by the offset.
++     *
++     * @param stream Stream to be used.
++     * @param buffer Buffer to be used.
++     * @param memory Memory buffer being either source or destination.
++     * @param offset The content from memory is copied to the buffer respecting
++     *               this offset (in samples) in the buffer. Thus, the data is
++     *               copied to this offset until the end of the buffer has been
++     *               reached (recording devices ignore this).
++     *
++     * @return 0 on success, -1 on error.
++     *
++     * \endenglish
++     */
++    int (*transfer_data)(struct cdi_audio_stream* stream, size_t buffer,
++        struct cdi_mem_area* memory, size_t offset);
++
++    /**
++     * \german
++     *
++     * H??lt ein CDI.audio-Ger??t an oder l??sst es aufnehmen bzw. abspielen. Wird
++     * es angehalten, so wird die Position automatisch auf den Anfang des ersten
++     * Puffers gesetzt.
++     *
++     * @param device Das Ger??t
++     * @param status Zu setzender Status.
++     *
++     * @return Tats??chlicher neuer Status.
++     *
++     * \endgerman
++     * \english
++     *
++     * Stops a CDI.audio device or makes it record or play, respectively. If it
++     * is stopped, its position is automatically set to the beginning of the
++     * first buffer.
++     *
++     * @param device The device
++     * @param status Status to be set.
++     *
++     * @return Actual new status.
++     *
++     * \endenglish
++     */
++    cdi_audio_status_t (*change_device_status)(struct cdi_audio_device* device,
++        cdi_audio_status_t status);
++
++    /**
++     * \german
++     *
++     * Setzt die Lautst??rke eines Kanals.
++     *
++     * @param volume 0x00 ist stumm, 0xFF ist volle Lautst??rke.
++     *
++     * \endgerman
++     * \english
++     *
++     * Sets a stream's volume.
++     *
++     * @param volume 0x00 is mute, 0xFF is full volume.
++     *
++     * \endenglish
++     */
++    void (*set_volume)(struct cdi_audio_stream* stream, uint8_t volume);
++
++    /**
++     * \german
++     *
++     * Ver??ndert die Samplerate eines Kanals.
++     *
++     * @param stream Anzupassender Kanal.
++     * @param sample_rate Neue Samplerate, ist der Wert nichtpositiv, dann wird
++     *                    die aktuelle Samplerate nicht ver??ndert.
++     *
++     * @return Gibt die tats??chliche neue Samplerate zur??ck (kann vom Parameter
++     *         abweichen und wird es bei nichtpositivem auch).
++     *
++     * \endgerman
++     * \english
++     *
++     * Changes a stream's sample rate.
++     *
++     * @param stream Stream to be adjusted.
++     * @param sample_rate New sample rate, if nonpositive, the current sample
++     *                    rate won't be changed.
++     *
++     * @return Returns the actual new sample rate (may differ from the parameter
++     *         and will, if the latter was nonpositive).
++     *
++     * \endenglish
++     */
++    int (*set_sample_rate)(struct cdi_audio_stream* stream, int sample_rate);
++
++    /**
++     * \german
++     *
++     * Gibt die aktuelle Abspiel-/Aufnahmeposition des Kanals zur??ck.
++     *
++     * @param stream Abzufragender Kanal.
++     * @param position Zeiger zu einer Struktur, die den Index des aktuellen
++     *                 Puffers und des derzeit abgespielten Frames empf??ngt.
++     *
++     * \endgerman
++     * \english
++     *
++     * Returns the stream's current playback/recording position.
++     *
++     * @param stream Stream to be queried.
++     * @param position Pointer to a structure receiving the index of both the
++     *                 current buffer and the frame played right now.
++     *
++     * \endenglish
++     */
++    void (*get_position)(struct cdi_audio_stream* stream,
++        cdi_audio_position_t* position);
++
++    /**
++     * \german
++     *
++     * Ver??ndert die Anzahl der von einem CDI.audio-Ger??t verwendeten Channel
++     * (da dies die Gr????e der Frames ver??ndert, kann auch die Anzahl der
++     * tats??chlich verwendeten Samples in einem Puffer ver??ndert werden:
++     * Betr??gt diese Maximalzahl z. B. 0xFFFF, dann k??nnen bei zwei Channeln
++     * nur 0xFFFE Samples verwendet werden (da es keine halben Frames gibt)).
++     *
++     * @param dev CDI.audio-Ger??t
++     * @param channels Anzahl der zu verwendenden Channels (bei ung??ltigem Wert
++     *                 wird am Ger??t nichts ver??ndert).
++     *
++     * @return Jetzt tats??chlich benutzte Channelanzahl.
++     *
++     * \endgerman
++     * \english
++     *
++     * Changes the number of channels used by a CDI.audio device (this changes
++     * the frames' size, hence the number of actually used samples per buffer
++     * may be changed, too: If this size equals e.g. 0xFFFF, only 0xFFFE samples
++     * are used when working with two channels (because there is no half of a
++     * frame)).
++     *
++     * @param dev CDI.audio device
++     * @param channels Number of channels to be used (if invalid, nothing will
++     *                 be changed).
++     *
++     * @return Actually used number of channels now.
++     *
++     * \endenglish
++     */
++    int (*set_number_of_channels)(struct cdi_audio_device* dev, int channels);
++};
++
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * \german
++ *
++ * Wird vom Treiber aufgerufen, wenn die Bearbeitung eines Puffers abgeschlossen
++ * wurde (komplett abgespielt oder aufgenommen). Darf auch aus einer ISR heraus
++ * aufgerufen werden.
++ *
++ * @param stream Kanal, den es betrifft.
++ * @param buffer Pufferindex, der bearbeitet wurde.
++ *
++ * \endgerman
++ * \english
++ *
++ * Is called by a driver when having completed a buffer (i.e., completely played
++ * or recorded). May be called by an ISR.
++ *
++ * @param stream Stream being concerned.
++ * @param buffer Index of the completed buffer.
++ *
++ * \endenglish
++ */
++void cdi_audio_buffer_completed(struct cdi_audio_stream* stream, size_t buffer);
++
++#ifdef __cplusplus
++}; // extern "C"
++#endif
++
++#endif
++
++/*\@}*/
++
+-- 
+1.7.1
+
+
+From max at tyndur.org  Tue Dec 21 16:31:56 2010
+From: max at tyndur.org (max at tyndur.org)
+Date: Tue, 21 Dec 2010 16:31:56 +0100
+Subject: [cdi-devel] [PATCH 2/2] CDI.audio: AC97
+In-Reply-To: <1292945516-28203-1-git-send-email-max@tyndur.org>
+References: <1292945516-28203-1-git-send-email-max@tyndur.org>
+Message-ID: <1292945516-28203-3-git-send-email-max@tyndur.org>
+
+From: Max Reitz <max at tyndur.org>
+
+This adds an AC97 sound output driver using the CDI.audio interface.
+
+Signed-off-by: Max Reitz <max at tyndur.org>
+---
+ ac97/device.c |  311 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ ac97/device.h |  115 +++++++++++++++++++++
+ ac97/main.c   |   65 ++++++++++++
+ 3 files changed, 491 insertions(+), 0 deletions(-)
+ create mode 100644 ac97/device.c
+ create mode 100644 ac97/device.h
+ create mode 100644 ac97/main.c
+
+diff --git a/ac97/device.c b/ac97/device.c
+new file mode 100644
+index 0000000..b43d01c
+--- /dev/null
++++ b/ac97/device.c
+@@ -0,0 +1,311 @@
++/******************************************************************************
++ * Copyright (c) 2010 Max Reitz                                               *
++ *                                                                            *
++ * Permission is hereby granted,  free of charge,  to any person  obtaining a *
++ * copy of this software and associated documentation files (the "Software"), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
++ * and/or  sell copies of the  Software,  and to permit  persons to whom  the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED,  INCLUDING BUT NOT LIMITED TO THE WARRANTIES  OF MERCHANTABILITY, *
++ * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH  THE SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "cdi.h"
++#include "cdi/audio.h"
++#include "cdi/io.h"
++#include "cdi/lists.h"
++#include "cdi/mem.h"
++#include "cdi/misc.h"
++#include "cdi/pci.h"
++
++#include "device.h"
++
++#define SAMPLES_PER_BUFFER 0xFFFE
++
++static void ac97_isr(struct cdi_device* device);
++
++struct cdi_device* ac97_init_device(struct cdi_bus_data* bus_data)
++{
++    struct cdi_pci_device* pci = (struct cdi_pci_device*) bus_data;
++
++    // Search for a usable device
++    if ((pci->vendor_id != 0x8086) || ((pci->device_id != 0x2415) &&
++        (pci->device_id != 0x2425) &&  (pci->device_id != 0x2445)))
++    {
++        return NULL;
++    }
++
++    struct ac97_device* dev = calloc(1, sizeof(*dev));
++
++    cdi_pci_alloc_ioports(pci);
++
++    // Get the I/O resources (NAMBAR and NABMBAR)
++    struct cdi_pci_resource* res;
++    int i;
++    for (i = 0; (res = cdi_list_get(pci->resources, i)); i++) {
++        if (res->type == CDI_PCI_IOPORTS) {
++            if (!res->index) {
++                dev->nambar = res->start;
++            } else if (res->index == 1) {
++                dev->nabmbar = res->start;
++            }
++        }
++    }
++
++    if (!dev->nambar || !dev->nabmbar) {
++        free(dev);
++        cdi_pci_free_ioports(pci);
++        return NULL;
++    }
++
++    #ifdef CDI_PCI_DIRECT_ACCESS
++    // If possible, activate the I/O resources and the busmaster capability
++    cdi_pci_config_writew(pci, 4, cdi_pci_config_readw(pci, 4) | 5);
++    #endif
++
++    struct ac97_card* ac97_card = malloc(sizeof(*ac97_card));
++    struct ac97_stream* ac97_stream = malloc(sizeof(*ac97_stream));
++
++    // Define the CDI.audio sound card
++    ac97_card->card.record = 0;
++    ac97_card->card.streams = cdi_list_create();
++    ac97_card->device = dev;
++
++    // And the only stream
++    ac97_stream->stream.device = &ac97_card->card;
++    ac97_stream->stream.num_buffers = 32;
++    ac97_stream->stream.buffer_size = SAMPLES_PER_BUFFER;
++    ac97_stream->stream.sample_format = CDI_AUDIO_16SI;
++
++    ac97_stream->device = dev;
++
++    dev->output = &ac97_stream->stream;
++
++    cdi_list_push(ac97_card->card.streams, ac97_stream);
++
++    // Register the IRQ
++    cdi_register_irq(pci->irq, &ac97_isr, &ac97_card->card.dev);
++
++    // Reset the card
++    cdi_outw(dev->nambar + NAM_RESET, 42);
++
++    cdi_sleep_ms(100);
++
++    // And still something...
++    cdi_outw(dev->nabmbar + NABM_PICONTROL, 0x02);
++    cdi_outw(dev->nabmbar + NABM_POCONTROL, 0x02);
++    cdi_outw(dev->nabmbar + NABM_MCCONTROL, 0x02);
++
++    cdi_sleep_ms(100);
++
++    // Set volume to 100 %
++    cdi_outw(dev->nambar + NAM_MASTER_VOLUME, 0x0000);
++    cdi_outw(dev->nambar + NAM_MONO_VOLUME, 0x00);
++    cdi_outw(dev->nambar + NAM_PC_BEEP, 0x00);
++    cdi_outw(dev->nambar + NAM_PCM_VOLUME, 0x0000);
++
++    cdi_sleep_ms(10);
++
++    // Test if sample rate is adjustable
++    if (!(cdi_inw(dev->nambar + NAM_EXT_AUDIO_ID) & 1)) {
++        // No it isn't; it's fixed to 48 kHz
++        ac97_stream->stream.fixed_sample_rate = 48000;
++    } else {
++        // Yes, it is
++        ac97_stream->stream.fixed_sample_rate = 0;
++
++        // Use that capability (Variable Audio Rate)
++        cdi_outw(dev->nambar + NAM_EXT_AUDIO_STC,
++            cdi_inw(dev->nambar + NAM_EXT_AUDIO_STC) | 1);
++
++        cdi_sleep_ms(10);
++
++        // Set the sample rate to 44.1 kHz
++        cdi_outw(dev->nambar + NAM_FRONT_SPLRATE, 44100);
++        cdi_outw(dev->nambar + NAM_LR_SPLRATE, 44100);
++    }
++
++    // TODO: Error handling
++
++    // Allocate the buffer descriptor array
++    struct cdi_mem_area* bd = cdi_mem_alloc(32 * sizeof(dev->bd[0]),
++        3 | CDI_MEM_DMA_4G | CDI_MEM_PHYS_CONTIGUOUS);
++
++    dev->bd  = bd->vaddr;
++    dev->vbd = calloc(32, sizeof(dev->vbd[0]));
++
++    for (i = 0; i < 32; i++)
++    {
++        // Allocate each buffer
++        struct cdi_mem_area* buffer = cdi_mem_alloc(SAMPLES_PER_BUFFER * 4,
++            12 | CDI_MEM_DMA_4G | CDI_MEM_PHYS_CONTIGUOUS);
++
++        dev->bd[i].buffer = buffer->paddr.items->start;
++        dev->bd[i].length = SAMPLES_PER_BUFFER;
++        // Generate an IRQ on completion
++        dev->bd[i].flags = FLAG_IOC;
++        dev->vbd[i] = buffer->vaddr;
++
++        // Zero the buffer
++        memset(buffer->vaddr, 0, SAMPLES_PER_BUFFER * 4);
++    }
++
++    // Set the base address of the descriptor array
++    cdi_outl(dev->nabmbar + NABM_POBDBAR, bd->paddr.items->start);
++
++    // Return the new device
++    return &ac97_card->card.dev;
++}
++
++void ac97_remove_device(struct cdi_device* device)
++{
++    // TODO: Well...
++    (void) device;
++}
++
++int ac97_transfer_data(struct cdi_audio_stream* stream, size_t buffer,
++    struct cdi_mem_area* memory, size_t offset)
++{
++    // Check if buffer index is valid
++    if (buffer >= 32) {
++        return -1;
++    }
++
++    if (offset >= SAMPLES_PER_BUFFER) {
++        return -1;
++    }
++
++    struct ac97_stream* s = (struct ac97_stream*) stream;
++
++    // Copy the content to the AC97 buffer
++    memcpy((uint16_t*) s->device->vbd[buffer] + offset, memory->vaddr,
++        (SAMPLES_PER_BUFFER - offset) * 2);
++
++    return 0;
++}
++
++cdi_audio_status_t ac97_change_status(struct cdi_audio_device* device,
++    cdi_audio_status_t status)
++{
++    struct ac97_device* dev = ((struct ac97_card*) device)->device;
++
++    if (status == CDI_AUDIO_PLAY) {
++        // Start playback
++        cdi_outb(dev->nabmbar + NABM_POCONTROL, 0x11);
++        // Set last valid buffer index to 31
++        cdi_outb(dev->nabmbar + NABM_POLVI, 31);
++    } else if (status == CDI_AUDIO_STOP) {
++        // Stop playback
++        cdi_outb(dev->nabmbar + NABM_POCONTROL, 0x00);
++    }
++
++    // Returns whether the card is active or not
++    return cdi_inb(dev->nabmbar + NABM_POCONTROL) & 0x1;
++}
++
++void ac97_set_volume(struct cdi_audio_stream* stream, uint8_t volume)
++{
++    struct ac97_device* dev = ((struct ac97_stream*) stream)->device;
++
++    // Calculate the AC97 volume (which is 63 - (volume * 63 / 255))
++    int rvolume = volume * 63;
++    rvolume /= 255;
++
++    rvolume = 63 - rvolume;
++
++    // And set it
++    cdi_outw(dev->nambar + NAM_MASTER_VOLUME, (rvolume << 8) | rvolume);
++}
++
++int ac97_set_sample_rate(struct cdi_audio_stream* stream, int sample_rate)
++{
++    struct ac97_device* dev = ((struct ac97_stream*) stream)->device;
++
++    if (stream->fixed_sample_rate) {
++        // If the sample rate cannot be adjustet, return the fixed value
++        return stream->fixed_sample_rate;
++    }
++
++    if (sample_rate > 0) {
++        // Try to set the requested sample rate
++        cdi_outw(dev->nambar + NAM_FRONT_SPLRATE, sample_rate);
++        cdi_outw(dev->nambar + NAM_LR_SPLRATE, sample_rate);
++
++        cdi_sleep_ms(10);
++    }
++
++    // And return the actual rate set
++    return cdi_inw(dev->nambar + NAM_FRONT_SPLRATE);
++}
++
++void ac97_get_position(struct cdi_audio_stream* stream,
++    cdi_audio_position_t* position)
++{
++    struct ac97_device* dev = ((struct ac97_stream*) stream)->device;
++
++    position->buffer = cdi_inb(dev->nabmbar + NABM_POCIV);
++    // POPICB contains the number of samples not yet read from the buffer,
++    // we are required to return the number of frames played
++    position->frame =
++        (SAMPLES_PER_BUFFER - cdi_inw(dev->nabmbar + NABM_POPICB)) / 2;
++}
++
++int ac97_set_channel_count(struct cdi_audio_device* dev, int channels)
++{
++    (void) dev;
++    (void) channels;
++
++    // TODO: Is that really fixed or is there any way to use e.g. mono?
++    return 2;
++}
++
++static void ac97_isr(struct cdi_device* device)
++{
++    struct ac97_device* dev = ((struct ac97_card*) device)->device;
++    static int last_buf = 0;
++
++    int pi = cdi_inb(dev->nabmbar + NABM_PISTATUS) & 0x1C;
++    int po = cdi_inb(dev->nabmbar + NABM_POSTATUS) & 0x1C;
++    int mc = cdi_inb(dev->nabmbar + NABM_MCSTATUS) & 0x1C;
++
++    // Check if just anything happened
++    if (!pi && !po && !mc) {
++        return;
++    }
++
++    // Tell the card we handled everything (no, we don't, but who cares).
++    cdi_outb(dev->nabmbar + NABM_PISTATUS, pi);
++    cdi_outb(dev->nabmbar + NABM_POSTATUS, po);
++    cdi_outb(dev->nabmbar + NABM_MCSTATUS, mc);
++
++    if (po & (1 << 3)) {
++        int current = cdi_inb(dev->nabmbar + NABM_POCIV);
++
++        if (current == last_buf) {
++            // This happens sometimes, though I don't know why (for the last
++            // buffer, i.e. buffer 30). This fix is at least enough for qemu.
++            current = (current + 1) & 0x1F;
++            cdi_outb(dev->nabmbar + NABM_POCONTROL, 0x11);
++        }
++
++        last_buf = current;
++
++        // Tell the CDI library about the finished buffer
++        cdi_audio_buffer_completed(dev->output, (current - 1) & 0x1F);
++    }
++}
++
+diff --git a/ac97/device.h b/ac97/device.h
+new file mode 100644
+index 0000000..823f545
+--- /dev/null
++++ b/ac97/device.h
+@@ -0,0 +1,115 @@
++/******************************************************************************
++ * Copyright (c) 2010 Max Reitz                                               *
++ *                                                                            *
++ * Permission is hereby granted,  free of charge,  to any person  obtaining a *
++ * copy of this software and associated documentation files (the "Software"), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
++ * and/or  sell copies of the  Software,  and to permit  persons to whom  the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED,  INCLUDING BUT NOT LIMITED TO THE WARRANTIES  OF MERCHANTABILITY, *
++ * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH  THE SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#ifndef DEVICE_H
++#define DEVICE_H
++
++#include <stddef.h>
++#include <stdint.h>
++
++#include "cdi.h"
++#include "cdi/audio.h"
++#include "cdi/mem.h"
++#include "cdi/pci.h"
++
++// Some I/O port offsets
++// NAMBAR
++#define NAM_RESET          0x0000
++#define NAM_MASTER_VOLUME  0x0002
++#define NAM_MONO_VOLUME    0x0006
++#define NAM_PC_BEEP        0x000A
++#define NAM_PCM_VOLUME     0x0018
++#define NAM_EXT_AUDIO_ID   0x0028
++#define NAM_EXT_AUDIO_STC  0x002A
++#define NAM_FRONT_SPLRATE  0x002C
++#define NAM_LR_SPLRATE     0x0032
++// NABMBAR
++#define NABM_POBDBAR       0x0010
++#define NABM_POCIV         0x0014
++#define NABM_POLVI         0x0015
++#define NABM_PISTATUS      0x0006
++#define NABM_POSTATUS      0x0016
++#define NABM_MCSTATUS      0x0026
++#define NABM_POPICB        0x0018
++#define NABM_PICONTROL     0x000B
++#define NABM_POCONTROL     0x001B
++#define NABM_MCCONTROL     0x002B
++#define NABM_GLB_STAT      0x0030
++
++// Buffer flags which may be set
++// Buffer underrun policy: If set, output 0 after the last sample, if there's no
++// new buffer; else, output the last sample.
++#define FLAG_BUP (1 << 14)
++// Interrupt on completion: Request an interrupt when having completed the
++// buffer
++#define FLAG_IOC (1 << 15)
++
++// A descriptor describing a buffer
++struct buf_desc
++{
++    // Physical address
++    uint32_t buffer;
++    // Number of samples contained
++    uint16_t length;
++    // Flags (BUP and/or IOC)
++    uint16_t flags;
++} __attribute__((packed));
++
++// A structure describing an AC97 card
++struct ac97_device {
++    // The two I/O spaces
++    uint16_t nambar, nabmbar;
++
++    // The buffer descriptor array
++    struct buf_desc* bd;
++    // The buffer's virtual addresses
++    void** vbd;
++
++    // Pointer to the output stream
++    struct cdi_audio_stream* output;
++};
++
++struct ac97_stream {
++    struct cdi_audio_stream stream;
++    struct ac97_device* device;
++};
++
++struct ac97_card {
++    struct cdi_audio_device card;
++    struct ac97_device* device;
++};
++
++struct cdi_device* ac97_init_device(struct cdi_bus_data* bus_data);
++void ac97_remove_device(struct cdi_device* device);
++
++int ac97_transfer_data(struct cdi_audio_stream* stream, size_t buffer,
++    struct cdi_mem_area* memory, size_t offset);
++cdi_audio_status_t ac97_change_status(struct cdi_audio_device* device,
++    cdi_audio_status_t status);
++void ac97_set_volume(struct cdi_audio_stream* stream, uint8_t volume);
++int ac97_set_sample_rate(struct cdi_audio_stream* stream, int sample_rate);
++void ac97_get_position(struct cdi_audio_stream* stream,
++    cdi_audio_position_t* position);
++int ac97_set_channel_count(struct cdi_audio_device* dev, int channels);
++
++#endif
++
+diff --git a/ac97/main.c b/ac97/main.c
+new file mode 100644
+index 0000000..5afa557
+--- /dev/null
++++ b/ac97/main.c
+@@ -0,0 +1,65 @@
++/******************************************************************************
++ * Copyright (c) 2010 Max Reitz                                               *
++ *                                                                            *
++ * Permission is hereby granted,  free of charge,  to any person  obtaining a *
++ * copy of this software and associated documentation files (the "Software"), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use, copy,  modify, merge, publish,  distribute, sublicense, *
++ * and/or  sell copies of the  Software,  and to permit  persons to whom  the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED,  INCLUDING BUT NOT LIMITED TO THE WARRANTIES  OF MERCHANTABILITY, *
++ * FITNESS  FOR A PARTICULAR  PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH  THE SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#include "cdi/audio.h"
++
++#include "device.h"
++
++#define DRIVER_NAME "ac97"
++
++static struct cdi_audio_driver driver;
++
++static int ac97_driver_init(void)
++{
++    cdi_driver_init(&driver.drv);
++
++    return 0;
++}
++
++static int ac97_driver_destroy(void)
++{
++    cdi_driver_destroy(&driver.drv);
++
++    return 0;
++}
++
++static struct cdi_audio_driver driver = {
++    .drv = {
++        .name          = DRIVER_NAME,
++        .type          = CDI_AUDIO,
++        .bus           = CDI_PCI,
++        .init          = ac97_driver_init,
++        .destroy       = ac97_driver_destroy,
++        .init_device   = ac97_init_device,
++        .remove_device = ac97_remove_device
++    },
++
++    .transfer_data          = ac97_transfer_data,
++    .change_device_status   = ac97_change_status,
++    .set_volume             = ac97_set_volume,
++    .set_sample_rate        = ac97_set_sample_rate,
++    .get_position           = ac97_get_position,
++    .set_number_of_channels = ac97_set_channel_count
++};
++
++CDI_DRIVER(DRIVER_NAME, driver)
++
+-- 
+1.7.1
+
+
+From kevin at tyndur.org  Tue Dec 21 17:27:37 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Tue, 21 Dec 2010 17:27:37 +0100
+Subject: [cdi-devel] [PATCH 1/2] CDI.audio
+In-Reply-To: <1292945516-28203-2-git-send-email-max@tyndur.org>
+References: <1292945516-28203-1-git-send-email-max@tyndur.org>
+	<1292945516-28203-2-git-send-email-max@tyndur.org>
+Message-ID: <20101221162737.GA4872@silvanus>
+
+On Tue, Dec 21, 2010 at 04:31:55PM +0100, max at tyndur.org wrote:
+> From: Max Reitz <max at tyndur.org>
+> 
+> This adds the CDI.audio header for sound I/O drivers.
+> 
+> Signed-off-by: Max Reitz <max at tyndur.org>
+
+
+> + * \english
+> + *
+> + * Is called by a driver when having completed a buffer (i.e., completely played
+> + * or recorded). May be called by an ISR.
+> + *
+> + * @param stream Stream being concerned.
+> + * @param buffer Index of the completed buffer.
+> + *
+> + * \endenglish
+> + */
+> +void cdi_audio_buffer_completed(struct cdi_audio_stream* stream, size_t buffer);
+
+As discussed on IRC, buffer is redundant here because neither sound cards
+nor my ears support out-of-order execution. ;-)
+
+Anyway, I've written a driver for the interface and it seems to work
+reasonably well, so:
+
+Acked-by: Kevin Wolf <kevin at tyndur.org>
+
+From kevin at tyndur.org  Tue Dec 21 17:35:00 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Tue, 21 Dec 2010 17:35:00 +0100
+Subject: [cdi-devel] [PATCH 2/2] CDI.audio: AC97
+In-Reply-To: <1292945516-28203-3-git-send-email-max@tyndur.org>
+References: <1292945516-28203-1-git-send-email-max@tyndur.org>
+	<1292945516-28203-3-git-send-email-max@tyndur.org>
+Message-ID: <20101221163459.GB4872@silvanus>
+
+On Tue, Dec 21, 2010 at 04:31:56PM +0100, max at tyndur.org wrote:
+> From: Max Reitz <max at tyndur.org>
+> 
+> This adds an AC97 sound output driver using the CDI.audio interface.
+> 
+> Signed-off-by: Max Reitz <max at tyndur.org>
+
+Not reviewed in detail, but successfully tested with tyndur on qemu and VBox.
+
+Acked-by: Kevin Wolf <kevin at tyndur.org>
+
+From kevin at tyndur.org  Tue Dec 21 18:24:20 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Tue, 21 Dec 2010 18:24:20 +0100
+Subject: [cdi-devel] [PATCH 3/2] hdaudio: Driver for Intel HD Audio
+In-Reply-To: <1292945516-28203-1-git-send-email-max@tyndur.org>
+References: <1292945516-28203-1-git-send-email-max@tyndur.org>
+Message-ID: <1292952260-8884-1-git-send-email-kevin@tyndur.org>
+
++ hdaudio: Added a CDI driver for Intel HD Audio. Tested on qemu and
+  VirtualBox.
+
+Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+---
+ hdaudio/device.h  |  195 ++++++++++++++++++
+ hdaudio/main.c    |  566 +++++++++++++++++++++++++++++++++++++++++++++++++++++
+ include/cdi/pci.h |    4 +
+ 3 files changed, 765 insertions(+), 0 deletions(-)
+ create mode 100644 hdaudio/device.h
+ create mode 100644 hdaudio/main.c
+
+diff --git a/hdaudio/device.h b/hdaudio/device.h
+new file mode 100644
+index 0000000..8552521
+--- /dev/null
++++ b/hdaudio/device.h
+@@ -0,0 +1,195 @@
++/*
++ * Copyright (c) 2010 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef DEVICE_H
++#define DEVICE_H
++
++#include <stdint.h>
++
++#include "cdi/audio.h"
++#include "cdi/mem.h"
++
++#define BDL_SIZE                      4
++#define BUFFER_SIZE             0x10000
++
++#define BDL_BYTES_ROUNDED \
++    ((BDL_SIZE * sizeof(struct hda_bdl_entry) + 127) & ~127)
++
++#define SAMPLES_PER_BUFFER (BUFFER_SIZE / 2)
++
++/** HD Audio Memory Mapped Registers */
++enum hda_reg {
++    REG_GCTL        = 0x08, ///< GCTL - Global Control
++    REG_WAKEEN      = 0x0c, ///< WAKEEN - Wake Enable
++    REG_STATESTS    = 0x0e, ///< STATESTS - State Change Status
++    REG_INTCTL      = 0x20, ///< INTCTL - Interrupt Control
++    REG_INTSTS      = 0x24, ///< INTSTS - Interrupt Status
++
++    REG_CORBLBASE   = 0x40, ///< CORBLBASE - CORB Lower Base Address
++    REG_CORBUBASE   = 0x44, ///< CORBUBASE - CORB Upper Base Address
++    REG_CORBWP      = 0x48, ///< CORBWP - CORB Write Pointer
++    REG_CORBRP      = 0x4a, ///< CORBRP - CORB Read Pointer
++    REG_CORBCTL     = 0x4c, ///< CORBCTL - CORB Control
++    REG_CORBSIZE    = 0x4e, ///< CORBSIZE - CORB size
++
++    REG_RIRBLBASE   = 0x50, ///< RIRBLBASE - RIRB Lower Base Address
++    REG_RIRBUBASE   = 0x54, ///< RIRBUBASE - RIRB Upper Base Address
++    REG_RIRBWP      = 0x58, ///< RIRBWP - RIRB Write Pointer
++    REG_RINTCNT     = 0x5a, ///< RINTCNT - Respone Interrupt Count
++    REG_RIRBCTL     = 0x5c, ///< RIRBCTL - RIRB Control
++    REG_RIRBSTS     = 0x5d, ///< RIRBSTS - RIRB Interrupt Status
++    REG_RIRBSIZE    = 0x5e, ///< RIRBSIZE - RIRB size
++
++    REG_DPLBASE     = 0x70, ///< DPLBASE - DMA Position Lower Base Address
++    REG_DPUBASE     = 0x74, ///< DPUBASE - DMA Posiition Upper Base Address
++
++    REG_O0_CTLL     = 0x100,    ///< Output 0 - Control Lower
++    REG_O0_CTLU     = 0x102,    ///< Output 0 - Control Upper
++    REG_O0_STS      = 0x103,    ///< Output 0 - Status
++    REG_O0_CBL      = 0x108,    ///< Output 0 - Cyclic Buffer Length
++    REG_O0_STLVI    = 0x10c,    ///< Output 0 - Last Valid Index
++    REG_O0_BDLPL    = 0x118,    ///< Output 0 - BDL Pointer Lower
++    REG_O0_BDLPU    = 0x11c,    ///< Output 0 - BDL Pointer Upper
++};
++
++/* GCTL bits */
++enum hda_reg_gctl {
++    GCTL_RESET  =   (1 << 0),
++};
++
++/* CORBCTL bits */
++enum hda_reg_corbctl {
++    CORBCTL_CORBRUN = (1 << 1),
++};
++
++/* RIRBCTL bits */
++enum hda_reg_rirbctl {
++    RIRBCTL_RIRBRUN = (1 << 1),
++};
++
++/* Stream Descriptor Control Register bits */
++enum hda_reg_sdctl {
++    SDCTL_RUN   =   0x2, ///< Enable DMA Engine
++    SDCTL_IOCE  =   0x4, ///< Enable Interrupt on Complete
++};
++
++/** Represents an address of an output widget */
++struct hda_output {
++    struct cdi_audio_stream stream;
++
++    uint8_t     codec;
++    uint16_t    nid;
++
++    uint32_t    sample_rate;
++    int         num_channels;
++};
++
++/** Buffer Descriptor List Entry */
++struct hda_bdl_entry {
++    uint64_t paddr;
++    uint32_t length;
++    uint32_t flags;
++} __attribute__((packed));
++
++/** Represents the state of an HD Audio PCI card */
++struct hda_device {
++    struct cdi_audio_device audio;
++
++    struct hda_output output;
++
++    struct cdi_mem_area* mmio;
++    uintptr_t mmio_base;
++
++
++    struct cdi_mem_area*    rings;          ///< Buffer for CORB and RIRB
++    uint32_t*               corb;           ///< Command Outbound Ring Buffer
++    volatile uint64_t*      rirb;           ///< Response Inbound Ring Buffer
++    struct hda_bdl_entry*   bdl;            ///< Buffer Descriptor List
++    volatile uint64_t*      dma_pos;        ///< DMA Position in Current Buffer
++
++    size_t                  corb_entries;   ///< Number of CORB entries
++    size_t                  rirb_entries;   ///< Number of RIRB entries
++    uint16_t                rirbrp;         ///< RIRB Read Pointer
++
++    struct cdi_mem_area*    buffer;
++    int                     buffers_completed;
++};
++
++static inline void reg_outl(struct hda_device* hda, int reg, uint32_t value) {
++    volatile uint32_t* mmio = (uint32_t*) ((uint8_t*) hda->mmio->vaddr + reg);
++    *mmio = value;
++}
++
++static inline uint32_t reg_inl(struct hda_device* hda, int reg) {
++    volatile uint32_t* mmio = (uint32_t*) ((uint8_t*) hda->mmio->vaddr + reg);
++    return *mmio;
++}
++
++
++static inline void reg_outw(struct hda_device* hda, int reg, uint16_t value) {
++    volatile uint16_t* mmio = (uint16_t*) ((uint8_t*) hda->mmio->vaddr + reg);
++    *mmio = value;
++}
++
++static inline uint16_t reg_inw(struct hda_device* hda, int reg) {
++    volatile uint16_t* mmio = (uint16_t*) ((uint8_t*) hda->mmio->vaddr + reg);
++    return *mmio;
++}
++
++
++static inline void reg_outb(struct hda_device* hda, int reg, uint8_t value) {
++    volatile uint8_t* mmio = (uint8_t*) ((uint8_t*) hda->mmio->vaddr + reg);
++    *mmio = value;
++}
++
++static inline uint8_t reg_inb(struct hda_device* hda, int reg) {
++    volatile uint8_t* mmio = (uint8_t*) ((uint8_t*) hda->mmio->vaddr + reg);
++    return *mmio;
++}
++
++enum codec_verbs {
++    VERB_GET_PARAMETER      = 0xf0000,
++    VERB_SET_STREAM_CHANNEL = 0x70600,
++    VERB_SET_FORMAT         = 0x20000,
++    VERB_SET_AMP_GAIN_MUTE  = 0x30000,
++};
++
++enum codec_parameters {
++    PARAM_NODE_COUNT        = 0x04,
++    PARAM_AUDIO_WID_CAP     = 0x09,
++};
++
++enum sample_format {
++    SR_48_KHZ               = 0,
++    SR_44_KHZ               = (1 << 14),
++    BITS_32                 = (4 <<  4),
++    BITS_16                 = (1 <<  4),
++};
++
++
++#endif
+diff --git a/hdaudio/main.c b/hdaudio/main.c
+new file mode 100644
+index 0000000..ce9e506
+--- /dev/null
++++ b/hdaudio/main.c
+@@ -0,0 +1,566 @@
++/*
++ * Copyright (c) 2010 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Kevin Wolf.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include <stdlib.h>
++#include <string.h>
++
++#include "cdi/pci.h"
++#include "cdi/misc.h"
++
++#include "device.h"
++
++#define DRIVER_NAME "hdaudio"
++
++#undef DEBUG
++
++#ifdef DEBUG
++#define DPRINTF(fmt, ...) \
++    do { stdout = NULL; printf(DRIVER_NAME ": " fmt, ##__VA_ARGS__); } while(0)
++#else
++#define DPRINTF(...) do {} while(0)
++#endif
++
++static struct cdi_audio_driver driver;
++
++static void hda_handle_interrupt(struct cdi_device* device)
++{
++    struct hda_device* hda = (struct hda_device*) device;
++    uint32_t isr = reg_inl(hda, REG_INTSTS);
++    uint8_t sts = reg_inb(hda, REG_O0_STS);
++
++    DPRINTF("hda_handle_interrupt, status %x, O0 status %x [%d]\n",
++        isr, sts, hda->buffers_completed);
++
++    /* An interrupt for stream 1 means that a buffer has completed */
++    if (sts & 0x4) {
++        cdi_audio_buffer_completed(&hda->output.stream,
++            hda->buffers_completed);
++
++        hda->buffers_completed++;
++        hda->buffers_completed %= BDL_SIZE;
++    }
++
++    /* Reset interrupt status registers */
++    reg_outl(hda, REG_INTSTS, isr);
++    reg_outb(hda, REG_O0_STS, sts);
++}
++
++static void setup_corb(struct hda_device* hda)
++{
++    uint8_t reg;
++    uint64_t corb_base;
++
++    reg = reg_inb(hda, REG_CORBSIZE);
++
++    /* Check CORB size capabilities and choose the largest size */
++    if (reg & (1 << 6)) {
++        hda->corb_entries = 256;
++        reg |= 0x2;
++    } else if (reg & (1 << 5)) {
++        hda->corb_entries = 16;
++        reg |= 0x1;
++    } else if (reg & (1 << 4)) {
++        hda->corb_entries = 2;
++        reg |= 0x0;
++    } else {
++        printf("hdaudio: No supported CORB size!\n");
++    }
++
++    reg_outb(hda, REG_CORBSIZE, reg);
++
++    /* Set CORB base address */
++    corb_base = (uintptr_t) hda->rings->paddr.items[0].start + 0;
++    reg_outl(hda, REG_CORBLBASE, corb_base & 0xffffffff);
++    reg_outl(hda, REG_CORBUBASE, corb_base >> 32);
++
++    /* Start DMA engine */
++    reg_outb(hda, REG_CORBCTL, 0x02);
++}
++
++static void setup_rirb(struct hda_device* hda)
++{
++    uint8_t reg;
++    uint64_t rirb_base;
++
++    reg = reg_inb(hda, REG_RIRBSIZE);
++
++    /* Check RIRB size capabilities and choose the largest size */
++    if (reg & (1 << 6)) {
++        hda->rirb_entries = 256;
++        reg |= 0x2;
++    } else if (reg & (1 << 5)) {
++        hda->rirb_entries = 16;
++        reg |= 0x1;
++    } else if (reg & (1 << 4)) {
++        hda->rirb_entries = 2;
++        reg |= 0x0;
++    } else {
++        printf("hdaudio: No supported RIRB size!\n");
++    }
++
++    reg_outb(hda, REG_RIRBSIZE, reg);
++
++    /* Set RIRB base address */
++    rirb_base = (uintptr_t) hda->rings->paddr.items[0].start + 1024;
++    reg_outl(hda, REG_RIRBLBASE, rirb_base & 0xffffffff);
++    reg_outl(hda, REG_RIRBUBASE, rirb_base >> 32);
++
++    reg_outb(hda, REG_RINTCNT, 0x42); /* TODO Is this only needed for qemu? */
++
++    /* Start DMA engine */
++    reg_outb(hda, REG_RIRBCTL, 0x02);
++}
++
++static void corb_write(struct hda_device* hda, uint32_t verb)
++{
++    uint16_t wp = reg_inw(hda, REG_CORBWP) & 0xff;
++    uint16_t rp;
++    uint16_t next;
++
++    /* Wait until there's a free entry in the CORB */
++    next = (wp + 1) % hda->corb_entries;
++
++    do {
++        rp = reg_inw(hda, REG_CORBRP) & 0xff;
++    } while (next == rp);
++
++    /* Write to CORB */
++    hda->corb[next] = verb;
++    reg_outw(hda, REG_CORBWP, next);
++}
++
++static void rirb_read(struct hda_device* hda, uint64_t* response)
++{
++    uint16_t wp;
++    uint16_t rp = hda->rirbrp;
++
++    /* Wait for an unread entry in the RIRB */
++    do {
++       wp = reg_inw(hda, REG_RIRBWP) & 0xff;
++    } while (wp == rp);
++
++    /* Read from RIRB */
++    rp = (rp + 1) % hda->rirb_entries;
++    hda->rirbrp = rp;
++
++    *response = hda->rirb[rp];
++    reg_outb(hda, REG_RIRBSTS, 0x5); /* TODO Is this only needed for qemu? */
++}
++
++static uint32_t codec_query(struct hda_device* hda, int codec, int nid,
++    uint32_t payload)
++{
++    uint64_t response;
++    uint32_t verb =
++        ((codec & 0xf) << 28) |
++        ((nid & 0xff) << 20) |
++        (payload & 0xfffff);
++
++    corb_write(hda, verb);
++    rirb_read(hda, &response);
++
++    return response & 0xffffffff;
++}
++
++static void configure_output_widget(struct hda_device* hda)
++{
++    /* Set sample format */
++    codec_query(hda, hda->output.codec, hda->output.nid,
++        VERB_SET_FORMAT |
++        BITS_16 | hda->output.sample_rate |
++        (hda->output.num_channels - 1));
++}
++
++static void init_output_widget(struct hda_device* hda)
++{
++    /* CDI stream properties */
++    hda->output.stream.device = &hda->audio;
++    hda->output.stream.num_buffers = BDL_SIZE;
++    hda->output.stream.buffer_size = BUFFER_SIZE / 2;
++    hda->output.stream.sample_format = CDI_AUDIO_16SI;
++
++    /* Select the right HDA stream/channel (0:0) */
++    codec_query(hda, hda->output.codec, hda->output.nid,
++        VERB_SET_STREAM_CHANNEL | 0x10);
++
++    /* Set sample rate etc. */
++    hda->output.sample_rate = SR_48_KHZ;
++    hda->output.num_channels = 2;
++    configure_output_widget(hda);
++}
++
++static int find_output_widget(struct hda_device* hda, int codec)
++{
++    uint32_t param;
++    int num_fg, num_widgets;
++    int fg_start, widgets_start;
++    int i, j;
++
++    param = codec_query(hda, codec, 0, VERB_GET_PARAMETER | PARAM_NODE_COUNT);
++
++    num_fg = param & 0xff;
++    fg_start = (param >> 16) & 0xff;
++
++    DPRINTF("    %d function groups starting at ID %d\n", num_fg, fg_start);
++
++    for (i = 0; i < num_fg; i++) {
++        param = codec_query(hda, codec, fg_start + i,
++            VERB_GET_PARAMETER | PARAM_NODE_COUNT);
++
++        num_widgets = param & 0xff;
++        widgets_start = (param >> 16) & 0xff;
++
++        DPRINTF("    %d widgets starting at ID %d\n",
++            num_widgets, widgets_start);
++        for (j = 0; i < num_widgets; j++) {
++            param = codec_query(hda, codec, widgets_start + j,
++                VERB_GET_PARAMETER | PARAM_AUDIO_WID_CAP);
++            if ((param != 0) && ((param & 0xf00000) == 0)) {
++                DPRINTF("    Audio output at ID %d!\n", widgets_start + j);
++
++                hda->output.codec = codec;
++                hda->output.nid = widgets_start + j;
++
++                return 0;
++            }
++        }
++    }
++
++    return -1;
++}
++
++static void hda_enumerate_codecs(struct hda_device* hda)
++{
++    uint16_t statests;
++    int i;
++
++    DPRINTF("hda_enumerate_codecs\n");
++    statests = reg_inw(hda, REG_STATESTS);
++
++    /*
++     * Our model of the hardware is completely wrong: Our hda_device is the PCI
++     * card when in fact it should be a device on an HDA bus which is provided
++     * by the PCI device. This mean that we're limited to using a single
++     * output.
++     *
++     * So let's just pick the first output widget and use that one.
++     */
++    for (i = 0; i < 15; i++) {
++        if ((statests & (1 << i))) {
++            DPRINTF("   Found codec at %d\n", i);
++            if (find_output_widget(hda, i)) {
++                return;
++            }
++        }
++    }
++}
++
++static void hda_reset(struct hda_device* hda)
++{
++    DPRINTF("hda_reset\n");
++
++    /* Must clear CORB/RIRB RUN bits before reset */
++    reg_outl(hda, REG_CORBCTL, 0);
++    reg_outl(hda, REG_RIRBCTL, 0);
++    while ((reg_inl(hda, REG_CORBCTL) & CORBCTL_CORBRUN)
++        || (reg_inl(hda, REG_RIRBCTL) & RIRBCTL_RIRBRUN));
++
++    /* Reset the CRST bit and wait until hardware is in reset */
++    reg_outl(hda, REG_GCTL, 0);
++    while ((reg_inl(hda, REG_GCTL) & GCTL_RESET));
++
++    /* TODO Need a delay here? */
++
++    /* Take the hardware out of reset */
++    reg_outl(hda, REG_GCTL, GCTL_RESET);
++    while ((reg_inl(hda, REG_GCTL) & GCTL_RESET) == 0);
++
++    /* We want to get all interrupts */
++    reg_outw(hda, REG_WAKEEN, 0xffff);
++    reg_outl(hda, REG_INTCTL, 0x800000ff);
++
++    /* Setup data structures */
++    setup_corb(hda);
++    setup_rirb(hda);
++    DPRINTF("CORB size: %d entries; RIRB size: %d entries\n",
++        hda->corb_entries, hda->rirb_entries);
++
++    /* Need to wait 25 frames (521 ??s) before enumerating codecs */
++    cdi_sleep_ms(1);
++    hda_enumerate_codecs(hda);
++}
++
++static void init_stream_descriptor(struct hda_device* hda)
++{
++    uint64_t bdl_base, dma_pos_base;
++    int i;
++
++    /* Set some Stream Descriptor registers for Output 0 */
++    reg_outb(hda, REG_O0_CTLU, 0x10);
++    reg_outl(hda, REG_O0_CBL, BDL_SIZE * BUFFER_SIZE);
++    reg_outw(hda, REG_O0_STLVI, BDL_SIZE - 1);
++
++    /* Setup Buffer Description List */
++    bdl_base = (uintptr_t) hda->rings->paddr.items[0].start + 3072;
++    reg_outl(hda, REG_O0_BDLPL, bdl_base & 0xffffffff);
++    reg_outl(hda, REG_O0_BDLPU, bdl_base >> 32);
++
++    for (i = 0; i < BDL_SIZE; i++) {
++        hda->bdl[i].paddr =
++            hda->buffer->paddr.items[0].start + (i * BUFFER_SIZE);
++        hda->bdl[i].length = BUFFER_SIZE;
++        hda->bdl[i].flags = 1;
++    }
++
++    memset(hda->buffer->vaddr, 0, BDL_SIZE * BUFFER_SIZE);
++
++    /* Initialise DMA Position in Buffer structure */
++    for (i = 0; i < 8; i++) {
++        hda->dma_pos[i] = 0;
++    }
++
++    dma_pos_base = (uintptr_t) hda->rings->paddr.items[0].start + 3072
++        + BDL_BYTES_ROUNDED;
++    reg_outl(hda, REG_DPLBASE, (dma_pos_base & 0xffffffff) | 0x1); /* TODO */
++    reg_outl(hda, REG_DPUBASE, dma_pos_base >> 32);
++}
++
++static struct cdi_device* hda_init_device(struct cdi_bus_data* bus_data)
++{
++    struct cdi_pci_device* pci = (struct cdi_pci_device*) bus_data;
++    struct hda_device* hda;
++    int i;
++
++    /* Check PCI class/subclass */
++    if (pci->class_id != PCI_CLASS_MULTIMEDIA ||
++        pci->subclass_id != PCI_SUBCLASS_MM_HDAUDIO)
++    {
++        return NULL;
++    }
++
++    /* Initialise device structure */
++    hda = calloc(1, sizeof(*hda));
++
++    hda->rings = cdi_mem_alloc(1024 + 2048 + BDL_BYTES_ROUNDED + 128,
++        CDI_MEM_PHYS_CONTIGUOUS | 7);
++    if (hda->rings == NULL) {
++        goto fail;
++    }
++
++    hda->corb       = (uint32_t*) ((uintptr_t) hda->rings->vaddr + 0);
++    hda->rirb       = (uint64_t*) ((uintptr_t) hda->rings->vaddr + 1024);
++    hda->bdl        = (void*    ) ((uintptr_t) hda->rings->vaddr + 3072);
++    hda->dma_pos    = (uint64_t*) ((uintptr_t) hda->rings->vaddr + 3072
++                        + BDL_BYTES_ROUNDED);
++
++    hda->buffer = cdi_mem_alloc(BDL_SIZE * BUFFER_SIZE,
++        CDI_MEM_PHYS_CONTIGUOUS | 7);
++    if (hda->buffer == NULL) {
++        goto fail;
++    }
++
++    /* Get information from PCI config space */
++    cdi_list_t reslist = pci->resources;
++    struct cdi_pci_resource* res;
++    for (i = 0; (res = cdi_list_get(reslist, i)); i++) {
++        if (res->type == CDI_PCI_MEMORY) {
++            hda->mmio = cdi_mem_map(res->start, res->length);
++            if (hda->mmio == NULL) {
++                goto fail;
++            }
++        }
++    }
++
++    cdi_register_irq(pci->irq, hda_handle_interrupt, &hda->audio.dev);
++    cdi_pci_alloc_ioports(pci);
++
++    /* Initialise hardware */
++    hda_reset(hda);
++    init_output_widget(hda);
++    init_stream_descriptor(hda);
++
++    hda->audio.record = 0;
++    hda->audio.streams = cdi_list_create();
++    cdi_list_push(hda->audio.streams, &hda->output.stream);
++
++    driver.set_volume(&hda->output.stream, 255);
++
++    return &hda->audio.dev;
++
++fail:
++    if (hda->buffer) {
++        cdi_mem_free(hda->buffer);
++    }
++    if (hda->rings) {
++        cdi_mem_free(hda->rings);
++    }
++
++    free(hda);
++    return NULL;
++}
++
++static void hda_remove_device(struct cdi_device* device)
++{
++    /* TODO */
++}
++
++
++static int hda_driver_init(void)
++{
++    cdi_driver_init(&driver.drv);
++
++    return 0;
++}
++
++static int hda_driver_destroy(void)
++{
++    cdi_driver_destroy(&driver.drv);
++
++    return 0;
++}
++
++static void hda_set_volume(struct cdi_audio_stream* stream, uint8_t volume)
++{
++    struct hda_device* hda = (struct hda_device*) stream->device;
++    int meta = 0xb000; /* Output Amp, Left and Right */
++
++    if (volume == 0) {
++        /* Set the mute bit */
++        volume = 0x80;
++    } else {
++        /* Scale to 7-bit value */
++        volume >>= 1;
++    }
++
++    codec_query(hda, hda->output.codec, hda->output.nid,
++        VERB_SET_AMP_GAIN_MUTE | meta | volume);
++}
++
++static int hda_set_sample_rate(struct cdi_audio_stream* stream,
++    int sample_rate)
++{
++    struct hda_device* hda = (struct hda_device*) stream->device;
++
++    switch (sample_rate) {
++        case 44100:
++            hda->output.sample_rate = SR_44_KHZ;
++            break;
++        default:
++            sample_rate = 48000;
++            hda->output.sample_rate = SR_48_KHZ;
++            break;
++    }
++
++    configure_output_widget(hda);
++
++    return sample_rate;
++}
++
++static int hda_set_channel_count(struct cdi_audio_device* dev, int channels)
++{
++    struct hda_device* hda = (struct hda_device*) dev;
++
++    if (channels < 1 || channels > 2) {
++        channels = 2;
++    }
++
++    hda->output.num_channels = channels;
++    configure_output_widget(hda);
++
++    return channels;
++}
++
++static int hda_transfer_data(struct cdi_audio_stream* stream, size_t buffer,
++    struct cdi_mem_area* memory, size_t offset)
++{
++    struct hda_device* hda = (struct hda_device*) stream->device;
++
++    DPRINTF("hda_transfer_data: buf %d, off %d\n", buffer, offset);
++
++    if (buffer >= BDL_SIZE || offset >= SAMPLES_PER_BUFFER) {
++        return -1;
++    }
++
++    memcpy((uint8_t*)hda->buffer->vaddr + buffer * BUFFER_SIZE + (offset * 2),
++        memory->vaddr,
++        (SAMPLES_PER_BUFFER - offset) * 2);
++
++    return 0;
++}
++
++static cdi_audio_status_t hda_change_status(struct cdi_audio_device* device,
++    cdi_audio_status_t status)
++{
++    struct hda_device* hda = (struct hda_device*) device;
++    uint16_t ctl;
++
++    DPRINTF("hda_change_status: %d\n", status);
++
++    if (status == CDI_AUDIO_PLAY) {
++        ctl = SDCTL_RUN | SDCTL_IOCE;
++    } else {
++        ctl = 0;
++    }
++
++    reg_outw(hda, REG_O0_CTLL, ctl);
++
++    return status;
++}
++
++static void hda_get_position(struct cdi_audio_stream* stream,
++    cdi_audio_position_t* position)
++{
++    struct hda_device* hda = (struct hda_device*) stream->device;
++    uint32_t pos = hda->dma_pos[4] & 0xffffffff;
++
++    position->buffer = pos / BUFFER_SIZE;
++    position->frame = (pos % BUFFER_SIZE) / 2;
++
++    DPRINTF("hda_get_position: %d/%d\n", position->buffer, position->frame);
++}
++
++static struct cdi_audio_driver driver = {
++    .drv = {
++        .name           = DRIVER_NAME,
++        .type           = CDI_AUDIO,
++        .bus            = CDI_PCI,
++        .init           = hda_driver_init,
++        .destroy        = hda_driver_destroy,
++        .init_device    = hda_init_device,
++        .remove_device  = hda_remove_device,
++    },
++
++    .set_volume             = hda_set_volume,
++    .set_sample_rate        = hda_set_sample_rate,
++    .set_number_of_channels = hda_set_channel_count,
++    .transfer_data          = hda_transfer_data,
++    .change_device_status   = hda_change_status,
++    .get_position           = hda_get_position,
++};
++
++CDI_DRIVER(DRIVER_NAME, driver)
+diff --git a/include/cdi/pci.h b/include/cdi/pci.h
+index 23bea62..d60a105 100644
+--- a/include/cdi/pci.h
++++ b/include/cdi/pci.h
+@@ -17,6 +17,10 @@
+ #include <cdi-osdep.h>
+ #include <cdi/lists.h>
+ 
++#define PCI_CLASS_MULTIMEDIA      0x04
++#define PCI_SUBCLASS_MM_HDAUDIO   0x03
++
++
+ /**
+  * \german
+  * Beschreibt ein PCI-Ger??t
+-- 
+1.6.0.2
+
+
+From max at tyndur.org  Tue Dec 21 20:41:51 2010
+From: max at tyndur.org (Max Reitz)
+Date: Tue, 21 Dec 2010 20:41:51 +0100
+Subject: [cdi-devel] [PATCH 3/2] hdaudio: Driver for Intel HD Audio
+In-Reply-To: <1292952260-8884-1-git-send-email-kevin@tyndur.org>
+References: <1292945516-28203-1-git-send-email-max@tyndur.org>
+	<1292952260-8884-1-git-send-email-kevin@tyndur.org>
+Message-ID: <4D1102FF.8000500@tyndur.org>
+
+Kevin Wolf wrote:
+> + hdaudio: Added a CDI driver for Intel HD Audio. Tested on qemu and
+>   VirtualBox.
+> 
+> Signed-off-by: Kevin Wolf <kevin at tyndur.org>
+
+My qemu says this works (on t?ndur), thus:
+
+Acked-by: Max Reitz <max at tyndur.org>
+
+From kevin at tyndur.org  Thu Dec 23 11:55:53 2010
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Thu, 23 Dec 2010 11:55:53 +0100
+Subject: [cdi-devel] [PATCH 0/2] CDI.audio
+In-Reply-To: <1292945516-28203-1-git-send-email-max@tyndur.org>
+References: <1292945516-28203-1-git-send-email-max@tyndur.org>
+Message-ID: <20101223105552.GA5577@silvanus>
+
+On Tue, Dec 21, 2010 at 04:31:54PM +0100, max at tyndur.org wrote:
+> This small series adds the CDI.audio header as proposed before with
+> some slight changes as well as a first driver using this interface.
+> 
+> Max
+
+Thanks, applied all to master (including the hdaudio patch I added to
+the series).
+
+Kevin
+

@@ -1,0 +1,210 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 3/6] LostIOv2: close-Event an	Userspace-Services weitergeben
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%203/6%5D%20LostIOv2%3A%20close-Event%20an%0A%09Userspace-Services%20weitergeben&In-Reply-To=%3C1421098871-25847-4-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002479.html">
+   <LINK REL="Next"  HREF="002481.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 3/6] LostIOv2: close-Event an	Userspace-Services weitergeben</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%203/6%5D%20LostIOv2%3A%20close-Event%20an%0A%09Userspace-Services%20weitergeben&In-Reply-To=%3C1421098871-25847-4-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 3/6] LostIOv2: close-Event an	Userspace-Services weitergeben">kevin at tyndur.org
+                  </A><BR>
+    <I>Mo Jan 12 22:41:08 CET 2015</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002479.html">[tyndur-devel] [PATCH 2/6] kernel2: Non-seekable Ressourcen nur einmal öffnen
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002481.html">[tyndur-devel] [PATCH 4/6] kernel2: pwrite braucht nicht immer ein	RMW
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2480">[ Datum ]</a>
+              <a href="thread.html#2480">[ Thema ]</a>
+              <a href="subject.html#2480">[ Betreff (Subject) ]</a>
+              <a href="author.html#2480">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ LIOv2: Neue Operation close für Userspace-Services. Für die meisten
+  Treiber ist das nicht nützlich, weil sie nichts von Streams wissen,
+  aber non-seekable Ressourcen sind nur genau einmal geöffnet und ein
+  close-Handler muss sie zurücksetzen, damit sie nach dem nächsten
+  open() damit klarkommen, dass das Offset wieder bei 0 ist.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/include/syscall_structs.h         | 15 +++++++++++++++
+ src/kernel2/src/syscalls/lio_server.c | 20 ++++++++++++++++++++
+ src/modules/include/lostio.h          |  3 +++
+ src/modules/lib/lostio/lio_server.c   | 16 ++++++++++++++++
+ 4 files changed, 54 insertions(+)
+
+diff --git a/src/include/syscall_structs.h b/src/include/syscall_structs.h
+index 060d82e..e43295b 100644
+--- a/src/include/syscall_structs.h
++++ b/src/include/syscall_structs.h
+@@ -281,6 +281,11 @@ enum lio_opcode {
+      * Uebersetzungstabelle befuellen
+      */
+     LIO_OP_MAP = 14,
++
++    /**
++     * Stream der Ressource wird geschlossen
++     */
++    LIO_OP_CLOSE = 15,
+ };
+ 
+ /// Flags fuer Operationen
+@@ -338,6 +343,16 @@ struct lio_op_load_children {
+     void* opaque;
+ } __attribute__((packed));
+ 
++struct lio_op_close {
++    struct lio_op op;
++
++    /// Nummer der Ressource, die geschlossen wird
++    lio_usp_resource_t resource;
++
++    /// Wert des Opaque-Felds der betreffenden Ressource
++    void* opaque;
++} __attribute__((packed));
++
+ struct lio_op_read {
+     struct lio_op op;
+ 
+diff --git a/src/kernel2/src/syscalls/lio_server.c b/src/kernel2/src/syscalls/lio_server.c
+index 5a7e6a9..0ead479 100644
+--- a/src/kernel2/src/syscalls/lio_server.c
++++ b/src/kernel2/src/syscalls/lio_server.c
+@@ -54,6 +54,7 @@ struct cache_block_handle {
+ 
+ static struct lio_resource* load_root(struct lio_tree* tree);
+ static int load_children(struct lio_resource* res);
++static void close(struct lio_stream* stream);
+ static int read(struct lio_resource* res, uint64_t offset,
+     size_t bytes, void* buf);
+ static int write(struct lio_resource* res, uint64_t offset,
+@@ -137,6 +138,7 @@ int syscall_lio_srv_service_register(const char* name, size_t name_len,
+     service-&gt;name = strdup(name);
+     service-&gt;lio_ops.load_root = load_root;
+     service-&gt;lio_ops.load_children = load_children;
++    service-&gt;lio_ops.close = close;
+     service-&gt;lio_ops.read = read;
+     service-&gt;lio_ops.write = write;
+     service-&gt;lio_ops.make_file = make_file;
+@@ -563,6 +565,24 @@ static int load_children(struct lio_resource* res)
+     return result;
+ }
+ 
++static void close(struct lio_stream* stream)
++{
++    struct lio_resource* res = stream-&gt;res;
++    struct lio_op_close* oc;
++
++    oc = (struct lio_op_close*) alloc_op(res, sizeof(*oc));
++    if (oc == NULL) {
++        return;
++    }
++
++    oc-&gt;op.opcode = LIO_OP_CLOSE;
++    oc-&gt;resource = res-&gt;usp_id;
++    oc-&gt;opaque = res-&gt;opaque;
++    oc-&gt;op.flags |= LIO_OPFL_USP;
++
++    commit_op(res, &amp;oc-&gt;op, NULL);
++}
++
+ static int read(struct lio_resource* res, uint64_t offset,
+     size_t bytes, void* buf)
+ {
+diff --git a/src/modules/include/lostio.h b/src/modules/include/lostio.h
+index 1357ca3..5846be6 100644
+--- a/src/modules/include/lostio.h
++++ b/src/modules/include/lostio.h
+@@ -257,6 +257,9 @@ struct lio_driver {
+     /// Kindressoucren einer Ressource laden
+     int (*load_children)(struct lio_resource* res);
+ 
++    /// Stream der Ressource wurde geschlossen
++    void (*close)(struct lio_resource* res);
++
+     /// Daten aus einer Ressource in den Cache laden
+     int (*read)(struct lio_resource* res, uint64_t offset,
+         size_t bytes, void* buf);
+diff --git a/src/modules/lib/lostio/lio_server.c b/src/modules/lib/lostio/lio_server.c
+index e1b919a..64206f5 100644
+--- a/src/modules/lib/lostio/lio_server.c
++++ b/src/modules/lib/lostio/lio_server.c
+@@ -52,6 +52,7 @@ static void process_op(struct lio_service* service, struct lio_op* op);
+ // Operationen
+ static void op_load_root(struct lio_service* service, struct lio_op* op);
+ static void op_load_children(struct lio_service* service, struct lio_op* op);
++static void op_close(struct lio_service* service, struct lio_op* op);
+ static void op_read(struct lio_service* service, struct lio_op* op);
+ static void op_write(struct lio_service* service, struct lio_op* op);
+ static void op_make_file(struct lio_service* service, struct lio_op* op);
+@@ -144,6 +145,10 @@ static void process_op(struct lio_service* service, struct lio_op* op)
+             op_load_children(service, op);
+             break;
+ 
++        case LIO_OP_CLOSE:
++            op_close(service, op);
++            break;
++
+         case LIO_OP_READ:
+             op_read(service, op);
+             break;
+@@ -242,6 +247,17 @@ static void op_load_children(struct lio_service* service, struct lio_op* op)
+     lio_srv_op_done(op, ret, 0);
+ }
+ 
++static void op_close(struct lio_service* service, struct lio_op* op)
++{
++    struct lio_op_close* oc = (struct lio_op_close*) op;
++    struct lio_resource* res = (struct lio_resource*) oc-&gt;opaque;
++
++    if (service-&gt;lio_ops.close) {
++        service-&gt;lio_ops.close(res);
++    }
++    lio_srv_op_done(op, 0, 0);
++}
++
+ static void op_read(struct lio_service* service, struct lio_op* op)
+ {
+     struct lio_op_read* or = (struct lio_op_read*) op;
+-- 
+2.1.2
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002479.html">[tyndur-devel] [PATCH 2/6] kernel2: Non-seekable Ressourcen nur einmal öffnen
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002481.html">[tyndur-devel] [PATCH 4/6] kernel2: pwrite braucht nicht immer ein	RMW
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2480">[ Datum ]</a>
+              <a href="thread.html#2480">[ Thema ]</a>
+              <a href="subject.html#2480">[ Betreff (Subject)]</a>
+              <a href="author.html#2480">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

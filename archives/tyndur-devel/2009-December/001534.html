@@ -1,0 +1,346 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 2/9] lpt: ScanFile in Klasse ausgelagert
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%202/9%5D%20lpt%3A%20ScanFile%20in%20Klasse%20ausgelagert&In-Reply-To=%3C1260725504-9035-3-git-send-email-toni%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001555.html">
+   <LINK REL="Next"  HREF="001576.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 2/9] lpt: ScanFile in Klasse ausgelagert</H1>
+    <B>Antoine Kaufmann</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%202/9%5D%20lpt%3A%20ScanFile%20in%20Klasse%20ausgelagert&In-Reply-To=%3C1260725504-9035-3-git-send-email-toni%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 2/9] lpt: ScanFile in Klasse ausgelagert">toni at tyndur.org
+                  </A><BR>
+    <I>So Dez 13 18:31:37 CET 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001555.html">[tyndur-devel] [PATCH 1/9] lpt: Aktuellste und nicht erste Version installieren
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001576.html">[tyndur-devel] [PATCH 2/9] lpt: ScanFile in Klasse ausgelagert
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1534">[ Datum ]</a>
+              <a href="thread.html#1534">[ Thema ]</a>
+              <a href="subject.html#1534">[ Betreff (Subject) ]</a>
+              <a href="author.html#1534">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* lpt: ScanFile in Klasse ausgelagert, damit die Parserfunktion spaeter
+       auch fuer die Paketinformationen benutzt werden kann.
+
+Signed-off-by: Antoine Kaufmann &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">toni at tyndur.org</A>&gt;
+---
+ src/modules/pas/lpt/helpers.pas |   87 +--------------------
+ src/modules/pas/lpt/pkglist.pas |  161 +++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 166 insertions(+), 82 deletions(-)
+ create mode 100644 src/modules/pas/lpt/pkglist.pas
+
+diff --git a/src/modules/pas/lpt/helpers.pas b/src/modules/pas/lpt/helpers.pas
+index b26ff4b..67b02ed 100644
+--- a/src/modules/pas/lpt/helpers.pas
++++ b/src/modules/pas/lpt/helpers.pas
+@@ -2,7 +2,8 @@ unit helpers;
+ {$MODE ObjFPC}
+ 
+ interface
+-uses crt, sysutils, dos, classes, tar, packages, tcpip, http, multilang;
++uses crt, sysutils, dos, classes, tar, packages, tcpip, http, multilang,
++    pkglist;
+ 
+ procedure ScanFile(pkgset: TPackageSet; filename, repository: String);
+ procedure DrawProgress(http: HTTPRequest);
+@@ -127,88 +128,10 @@ end;
+ 
+ procedure ScanFile(pkgset: TPackageSet; filename, repository: String);
+ var
+-    f: Text;
+-    line: String;
+-    status: integer;
+-
+-    pkg: TPackage;
+-    section: TPackageSection;
+-    version: TPackageVersion;
++    plp: TPkglistParser;
+ begin
+-    Assign(f, filename);
+-    Reset(f);
+-    status := 0;
+-    pkg := nil;
+-    try
+-        while not eof(f) do begin
+-            ReadLn(f, line);
+-
+-            if line = '' then begin
+-                continue;
+-            end;
+-
+-            case line[1] of
+-                'P':
+-                    begin
+-                        status := 1;
+-                        pkg := pkgset.add(Copy(line, 3, length(line)));
+-                    end;
+-                'D':
+-                    if status = 1 then begin
+-                        pkg.desc := Copy(line, 3, length(line));
+-                    end else begin
+-                        raise EPackageFileFormat.create(
+-                            'D in status ' + IntToStr(status));
+-                    end;
+-                'S':
+-                    if status &gt;= 1 then begin
+-                        status := 2;
+-                        section := pkg.add(Copy(line, 3, length(line)));
+-                    end else begin
+-                        raise EPackageFileFormat.create(
+-                            'S in status ' + IntToStr(status));
+-                    end;
+-                'V':
+-                    if status &gt;= 2 then begin
+-                        status := 3;
+-                        version := section.add(Copy(line, 3, length(line)));
+-                        version.pkg := pkg;
+-                        version.section := section;
+-                        version.repository := repository;
+-                    end else begin
+-                        raise EPackageFileFormat.create(
+-                            'V in status ' + IntToStr(status));
+-                    end;
+-                's':
+-                    if status &gt;= 3 then begin
+-                        version.size := StrToInt(Copy(line, 3, length(line)));
+-                    end else begin
+-                        raise EPackageFileFormat.create(
+-                            's in status ' + IntToStr(status));
+-                    end;
+-                'd':
+-                    if status &gt;= 3 then begin
+-                        if length(line) &lt; 2 then begin
+-                            raise EPackageFileFormat.create(
+-                                'Einsames d');
+-                        end;
+-
+-                        version.addDependency(line[2], Copy(line, 4, length(line)));
+-
+-                    end else begin
+-                        raise EPackageFileFormat.create(
+-                            'd in status ' + IntToStr(status));
+-                    end;
+-                else
+-                    begin
+-                        raise EPackageFileFormat.create(
+-                            'Unbekannter Schluessel: ' + line[1]);
+-                    end;
+-            end;
+-        end;
+-    finally
+-        Close(f);
+-    end;
++    plp := TPkglistParser.create(pkgset);
++    plp.ProcessFile(filename, repository);
+ end;
+ 
+ procedure Untar(tar: TTarArchive; targetpath: String = 'file:/');
+diff --git a/src/modules/pas/lpt/pkglist.pas b/src/modules/pas/lpt/pkglist.pas
+new file mode 100644
+index 0000000..996bd9d
+--- /dev/null
++++ b/src/modules/pas/lpt/pkglist.pas
+@@ -0,0 +1,161 @@
++unit pkglist;
++{$MODE ObjFPC}
++
++interface
++uses classes, sysutils, packages;
++
++type
++    TPkglistParser = class
++        private
++            status:     Integer;
++            package:    TPackage;
++            section:    TPackageSection;
++            version:    TPackageVersion;
++            pkgset:     TPackageSet;
++
++        public
++            (**
++             * Konstruktor.
++             *
++             * @param ps PakageSet in dem die angegebenen Pakete erfasst werden
++             *           sollen.
++             *)
++            constructor Create(ps: TPackageSet);
++
++            (**
++             * Einzelne Zeile der pkglist verarbeiten.
++             *
++             * @param line Zeile
++             * @param repo Repository-Url, die in den Paketen eingetragen werden
++             *             soll.
++             *)
++            procedure ProcessLine(line, repo: String);
++
++            (**
++             * pkglist-Datei verarbeiten
++             *
++             * @param path Pfad zur Datei
++             * @param repo Repository-Url, die in den Paketen eingetragen werden
++             *             soll.
++             *)
++            procedure ProcessFile(path, repo: String);
++    end;
++
++implementation
++
++(**
++ * Konstruktor.
++ *
++ * @param ps PakageSet in dem die angegebenen Pakete erfasst werden
++ *           sollen.
++ *)
++constructor TPkglistParser.Create(ps: TPackageSet);
++begin
++    status  := 0;
++    package := nil;
++    section := nil;
++    version := nil;
++    pkgset  := ps;
++end;
++
++(**
++ * Einzelne Zeile der pkglist verarbeiten.
++ *
++ * @param line Zeile
++ * @param repo Repository-Url, die in den Paketen eingetragen werden
++ *             soll.
++ *)
++procedure TPkglistParser.ProcessLine(line, repo: String);
++begin
++    if line = '' then begin
++        Exit;
++    end;
++
++    case line[1] of
++        'P':
++            begin
++                status := 1;
++                package := pkgset.add(Copy(line, 3, length(line)));
++            end;
++        'D':
++            if status = 1 then begin
++                package.desc := Copy(line, 3, length(line));
++            end else begin
++                raise EPackageFileFormat.create(
++                    'D in status ' + IntToStr(status));
++            end;
++        'S':
++            if status &gt;= 1 then begin
++                status := 2;
++                section := package.add(Copy(line, 3, length(line)));
++            end else begin
++                raise EPackageFileFormat.create(
++                    'S in status ' + IntToStr(status));
++            end;
++        'V':
++            if status &gt;= 2 then begin
++                status := 3;
++                version := section.add(Copy(line, 3, length(line)));
++                version.pkg := package;
++                version.section := section;
++                version.repository := repo;
++            end else begin
++                raise EPackageFileFormat.create(
++                    'V in status ' + IntToStr(status));
++            end;
++        's':
++            if status &gt;= 3 then begin
++                version.size := StrToInt(Copy(line, 3, length(line)));
++            end else begin
++                raise EPackageFileFormat.create(
++                    's in status ' + IntToStr(status));
++            end;
++        'd':
++            if status &gt;= 3 then begin
++                if length(line) &lt; 2 then begin
++                    raise EPackageFileFormat.create(
++                        'Einsames d');
++                end;
++
++                version.addDependency(line[2], Copy(line, 4, length(line)));
++
++            end else begin
++                raise EPackageFileFormat.create(
++                    'd in status ' + IntToStr(status));
++            end;
++        else
++            begin
++                raise EPackageFileFormat.create(
++                    'Unbekannter Schluessel: ' + line[1]);
++            end;
++    end;
++end;
++
++
++(**
++ * pkglist-Datei verarbeiten
++ *
++ * @param path Pfad zur Datei
++ * @param repo Repository-Url, die in den Paketen eingetragen werden
++ *             soll.
++ *)
++procedure TPkglistParser.ProcessFile(path, repo: String);
++var
++    f: Text;
++    l: String;
++begin
++    Assign(f, path);
++    Reset(f);
++
++    try
++        while not Eof(f) do begin
++            ReadLn(f, l);
++            ProcessLine(l, repo);
++        end;
++    finally
++        Close(f);
++    end;
++end;
++
++begin
++end.
+-- 
+1.6.3.3
+
+</PRE>
+
+
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001555.html">[tyndur-devel] [PATCH 1/9] lpt: Aktuellste und nicht erste Version installieren
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001576.html">[tyndur-devel] [PATCH 2/9] lpt: ScanFile in Klasse ausgelagert
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1534">[ Datum ]</a>
+              <a href="thread.html#1534">[ Thema ]</a>
+              <a href="subject.html#1534">[ Betreff (Subject)]</a>
+              <a href="author.html#1534">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

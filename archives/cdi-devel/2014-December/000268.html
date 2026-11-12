@@ -1,0 +1,315 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH v2 5/5] ahci: Add CD-ROM support
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%20v2%205/5%5D%20ahci%3A%20Add%20CD-ROM%20support&In-Reply-To=%3C1419792866-11944-6-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000267.html">
+   <LINK REL="Next"  HREF="000263.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH v2 5/5] ahci: Add CD-ROM support</H1>
+    <B>Kevin Wolf</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%20v2%205/5%5D%20ahci%3A%20Add%20CD-ROM%20support&In-Reply-To=%3C1419792866-11944-6-git-send-email-kevin%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH v2 5/5] ahci: Add CD-ROM support">kevin at tyndur.org
+       </A><BR>
+    <I>Sun Dec 28 19:54:26 CET 2014</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000267.html">[cdi-devel] [PATCH v2 4/5] ahci: Controller and hard disk support
+</A></li>
+        <LI>Next message: <A HREF="000263.html">[cdi-devel] [PATCH v2 1/5] cdi/misc.h: Add CDI_BUILD_BUG_ON() macro
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#268">[ date ]</a>
+              <a href="thread.html#268">[ thread ]</a>
+              <a href="subject.html#268">[ subject ]</a>
+              <a href="author.html#268">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">kevin at tyndur.org</A>&gt;
+---
+ ahci/ahci.h |   10 +++++
+ ahci/disk.c |  110 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++--
+ ahci/main.c |   13 +++++++
+ 3 files changed, 130 insertions(+), 3 deletions(-)
+
+diff --git a/ahci/ahci.h b/ahci/ahci.h
+index 46e8fd5..24a830b 100644
+--- a/ahci/ahci.h
++++ b/ahci/ahci.h
+@@ -29,6 +29,7 @@
+ #include &lt;stdint.h&gt;
+ 
+ #include &quot;cdi/storage.h&quot;
++#include &quot;cdi/scsi.h&quot;
+ #include &quot;cdi/mem.h&quot;
+ 
+ #define BIT(x) (1 &lt;&lt; x)
+@@ -45,6 +46,7 @@ enum {
+     ATA_CMD_READ_DMA_EXT        = 0x25,
+     ATA_CMD_WRITE_DMA           = 0xca,
+     ATA_CMD_WRITE_DMA_EXT       = 0x35,
++    ATA_CMD_PACKET              = 0xa0,
+     ATA_CMD_IDENTIFY_DEVICE     = 0xec,
+ };
+ 
+@@ -119,6 +121,7 @@ enum {
+ enum {
+     SATA_SIG_DISK       = 0x00000101,
+     SATA_SIG_PACKET     = 0xeb140101,
++    SATA_SIG_QEMU_CD    = 0xeb140000, /* Broken value in qemu &lt; 2.2 */
+ };
+ 
+ struct ahci_port {
+@@ -162,6 +165,11 @@ struct ahci_disk {
+     bool                        lba48;
+ };
+ 
++struct ahci_atapi {
++    struct cdi_scsi_device      scsi;
++    struct ahci_disk            disk;
++};
++
+ enum {
+     FIS_TYPE_H2D            = 0x27,
+     FIS_TYPE_D2H            = 0x34,
+@@ -276,6 +284,7 @@ struct ahci_prd {
+ enum {
+     CMD_HEADER_F_FIS_LENGTH_5_DW    = (5 &lt;&lt; 0),
+     CMD_HEADER_F_WRITE              = (1 &lt;&lt; 6),
++    CMD_HEADER_F_ATAPI              = (1 &lt;&lt; 5),
+ };
+ 
+ struct cmd_header {
+@@ -331,6 +340,7 @@ void ahci_port_comreset(struct ahci_device* ahci, int port);
+ 
+ /* ahci/disk.c */
+ extern struct cdi_storage_driver ahci_disk_driver;
++extern struct cdi_scsi_driver ahci_atapi_driver;
+ 
+ 
+ #endif
+diff --git a/ahci/disk.c b/ahci/disk.c
+index 0879f20..aeeb65a 100644
+--- a/ahci/disk.c
++++ b/ahci/disk.c
+@@ -33,6 +33,7 @@
+ #include &quot;ahci.h&quot;
+ 
+ #define DISK_DRIVER_NAME &quot;ahci-disk&quot;
++#define ATAPI_DRIVER_NAME &quot;ahci-cd&quot;
+ 
+ /**
+  * This function is called for any requests (even succeeding ones). Its job is
+@@ -72,7 +73,7 @@ static int ahci_request_handle_error(struct ahci_disk* disk, uint32_t is)
+ }
+ 
+ static int ahci_request(struct ahci_disk* disk, int cmd, uint64_t lba,
+-                        uint64_t bytes, struct cdi_mem_area* buf)
++                        uint64_t bytes, struct cdi_mem_area* buf, void* acmd)
+ {
+     struct ahci_port *port = &amp;disk-&gt;ahci-&gt;port[disk-&gt;port];
+     uint32_t flags, device;
+@@ -106,10 +107,17 @@ static int ahci_request(struct ahci_disk* disk, int cmd, uint64_t lba,
+         .dbc        = bytes - 1,
+     };
+ 
++    if (acmd != NULL) {
++        memcpy(port-&gt;cmd_table-&gt;acmd, acmd, 16);
++    }
++
+     flags = CMD_HEADER_F_FIS_LENGTH_5_DW;
+     if (cmd == ATA_CMD_WRITE_DMA || cmd == ATA_CMD_WRITE_DMA_EXT) {
+         flags |= CMD_HEADER_F_WRITE;
+     }
++    if (cmd == ATA_CMD_PACKET) {
++        flags |= CMD_HEADER_F_ATAPI;
++    }
+ 
+     port-&gt;cmd_list[0] = (struct cmd_header) {
+         .flags      = flags,
+@@ -147,7 +155,7 @@ static int ahci_identify(struct ahci_disk* disk)
+         return -1;
+     }
+ 
+-    ret = ahci_request(disk, ATA_CMD_IDENTIFY_DEVICE, 0, 512, buf);
++    ret = ahci_request(disk, ATA_CMD_IDENTIFY_DEVICE, 0, 512, buf, NULL);
+     if (ret == 0) {
+         words = buf-&gt;vaddr;
+         disk-&gt;lba48 = !!(words[86] &amp; (1 &lt;&lt; 10));
+@@ -186,7 +194,7 @@ static int ahci_rw_blocks(struct cdi_storage_device* device, uint64_t start,
+         memcpy(buf-&gt;vaddr, buffer, bs * count);
+     }
+ 
+-    ret = ahci_request(disk, cmd, start, bs * count, buf);
++    ret = ahci_request(disk, cmd, start, bs * count, buf, NULL);
+ 
+     if (ret == 0 &amp;&amp; read) {
+         memcpy(buffer, buf-&gt;vaddr, bs * count);
+@@ -348,6 +356,88 @@ static int ahci_disk_driver_destroy(void)
+     return 0;
+ }
+ 
++static struct cdi_device* atapi_init_device(struct cdi_bus_data* bus_data)
++{
++    struct ahci_bus_data* ahci_bus_data = (struct ahci_bus_data*) bus_data;
++    struct ahci_atapi* atapi;
++    struct ahci_disk* disk;
++
++    if (bus_data-&gt;bus_type != CDI_AHCI) {
++        return NULL;
++    }
++
++    atapi = calloc(1, sizeof(*atapi));
++    disk = &amp;atapi-&gt;disk;
++    disk-&gt;ahci = ahci_bus_data-&gt;ahci;
++    disk-&gt;port = ahci_bus_data-&gt;port;
++    disk-&gt;storage.block_size = 2048;
++
++    if (ahci_disk_init(disk) &lt; 0) {
++        goto fail;
++    }
++
++    atapi-&gt;scsi.type = CDI_STORAGE;
++    atapi-&gt;scsi.dev.driver = &amp;ahci_atapi_driver.drv;
++    asprintf((char**) &amp;atapi-&gt;scsi.dev.name, &quot;atapi%d&quot;, disk-&gt;port);
++
++    cdi_scsi_device_init(&amp;atapi-&gt;scsi);
++
++    return &amp;atapi-&gt;scsi.dev;
++
++fail:
++    free(atapi);
++    return NULL;
++}
++
++static void atapi_remove_device(struct cdi_device* device)
++{
++    /* TODO */
++}
++
++/**
++ * Initialises the AHCI ATAPI driver
++ */
++static int ahci_atapi_driver_init(void)
++{
++    cdi_scsi_driver_init(&amp;ahci_atapi_driver);
++    return 0;
++}
++
++/**
++ * Deinitialises the AHCI ATAPI driver
++ */
++static int ahci_atapi_driver_destroy(void)
++{
++    cdi_scsi_driver_destroy(&amp;ahci_atapi_driver);
++
++    /* TODO Deinitialise all devices */
++
++    return 0;
++}
++
++int ahci_scsi_request(struct cdi_scsi_device* scsi,
++                      struct cdi_scsi_packet* packet)
++{
++    struct ahci_atapi* atapi = (struct ahci_atapi*) scsi;
++    struct ahci_disk* disk = &amp;atapi-&gt;disk;
++    struct cdi_mem_area* buf;
++    int ret;
++
++    buf = cdi_mem_alloc(packet-&gt;bufsize,
++                        CDI_MEM_PHYS_CONTIGUOUS | CDI_MEM_DMA_4G | 1);
++    if (buf == NULL) {
++        return -1;
++    }
++
++    memcpy(buf-&gt;vaddr, packet-&gt;buffer, packet-&gt;bufsize);
++    ret = ahci_request(disk, ATA_CMD_PACKET, 0, packet-&gt;bufsize, buf,
++                       packet-&gt;command);
++    memcpy(packet-&gt;buffer, buf-&gt;vaddr, packet-&gt;bufsize);
++
++    cdi_mem_free(buf);
++    return ret;
++}
++
+ 
+ struct cdi_storage_driver ahci_disk_driver = {
+     .drv = {
+@@ -363,4 +453,18 @@ struct cdi_storage_driver ahci_disk_driver = {
+     .write_blocks       = ahci_write_blocks,
+ };
+ 
++struct cdi_scsi_driver ahci_atapi_driver = {
++    .drv = {
++        .type           = CDI_SCSI,
++        .bus            = CDI_AHCI,
++        .name           = ATAPI_DRIVER_NAME,
++        .init           = ahci_atapi_driver_init,
++        .destroy        = ahci_atapi_driver_destroy,
++        .init_device    = atapi_init_device,
++        .remove_device  = atapi_remove_device,
++    },
++    .request            = ahci_scsi_request,
++};
++
+ CDI_DRIVER(DISK_DRIVER_NAME, ahci_disk_driver)
++CDI_DRIVER(ATAPI_DRIVER_NAME, ahci_atapi_driver)
+diff --git a/ahci/main.c b/ahci/main.c
+index 6a69775..1afc03c 100644
+--- a/ahci/main.c
++++ b/ahci/main.c
+@@ -120,6 +120,19 @@ static int ahci_init_hardware(struct ahci_device* ahci)
+                                                 &amp;ahci_disk_driver.drv);
+                 break;
+             }
++            case SATA_SIG_QEMU_CD:
++            case SATA_SIG_PACKET: {
++                struct ahci_bus_data bus_data = {
++                    .cdi = {
++                        .bus_type   = CDI_AHCI,
++                    },
++                    .ahci = ahci,
++                    .port = port,
++                };
++                cdi_provide_device_internal_drv(&amp;bus_data.cdi,
++                                                &amp;ahci_atapi_driver.drv);
++                break;
++            }
+             default:
+                 printf(&quot;ahci: Can't handle device with signature %x&quot;, sig);
+                 break;
+-- 
+1.7.7
+
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000267.html">[cdi-devel] [PATCH v2 4/5] ahci: Controller and hard disk support
+</A></li>
+	<LI>Next message: <A HREF="000263.html">[cdi-devel] [PATCH v2 1/5] cdi/misc.h: Add CDI_BUILD_BUG_ON() macro
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#268">[ date ]</a>
+              <a href="thread.html#268">[ thread ]</a>
+              <a href="subject.html#268">[ subject ]</a>
+              <a href="author.html#268">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

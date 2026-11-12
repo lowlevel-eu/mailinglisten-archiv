@@ -1,0 +1,170 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 06/11] kernel2: on_destroy-Handler für Threads
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_06/11%3D5D_kernel2%3D3A_on%3D5Fdestro%3F%3D%0A%09%3D%3Futf-8%3Fq%3Fy-Handler_f%3DC3%3DBCr_Threads%3F%3D&In-Reply-To=%3C1388708813-23390-7-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002451.html">
+   <LINK REL="Next"  HREF="002453.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 06/11] kernel2: on_destroy-Handler für Threads</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_06/11%3D5D_kernel2%3D3A_on%3D5Fdestro%3F%3D%0A%09%3D%3Futf-8%3Fq%3Fy-Handler_f%3DC3%3DBCr_Threads%3F%3D&In-Reply-To=%3C1388708813-23390-7-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 06/11] kernel2: on_destroy-Handler für Threads">kevin at tyndur.org
+                  </A><BR>
+    <I>Fr Jan  3 01:26:48 CET 2014</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002451.html">[tyndur-devel] [PATCH 05/11] kernel2: pm_scheduler_kern_yield()
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002453.html">[tyndur-devel] [PATCH 07/11] kernel2: pm_thread_block() mit	wartenden Threads
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2452">[ Datum ]</a>
+              <a href="thread.html#2452">[ Thema ]</a>
+              <a href="subject.html#2452">[ Betreff (Subject) ]</a>
+              <a href="author.html#2452">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ kernel2: Eventhandler für das Beenden von Threads, analog zum schon
+  bestehenden on_destroy für Prozesse
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/kernel2/include/tasks.h    |   11 +++++++++++
+ src/kernel2/src/tasks/thread.c |   30 ++++++++++++++++++++++++++++++
+ 2 files changed, 41 insertions(+), 0 deletions(-)
+
+diff --git a/src/kernel2/include/tasks.h b/src/kernel2/include/tasks.h
+index 55caae6..d4096bb 100644
+--- a/src/kernel2/include/tasks.h
++++ b/src/kernel2/include/tasks.h
+@@ -146,9 +146,16 @@ typedef struct {
+ 
+     /// Gesetzt, wenn der Thread beim Beenden den gesamten Prozess beendet
+     bool is_main_thread;
++
++    /**
++     * Eine Liste von Eventhandlern, die beim Loeschen des Threads
++     * aufgerufen werden
++     */
++    list_t* on_destroy;
+ } pm_thread_t;
+ 
+ typedef void (*pm_process_destroy_handler)(pm_process_t* process, void* prv);
++typedef void (*pm_thread_destroy_handler)(pm_thread_t* thread, void* prv);
+ 
+ extern list_t* process_list;
+ 
+@@ -187,6 +194,10 @@ bool pm_unblock_rpc(pm_process_t* task, pid_t blocked_by);
+ void pm_register_on_destroy(pm_process_t* process,
+     pm_process_destroy_handler handler, void* prv);
+ 
++/// Handler fuer das Loeschen des Threads registrieren
++void pm_thread_register_on_destroy(pm_thread_t* thread,
++    pm_thread_destroy_handler handler, void* prv);
++
+ /// Entfernt den gegebenen Task aus allen RPC-Backlinks
+ void rpc_destroy_task_backlinks(pm_process_t* destroyed_process);
+ 
+diff --git a/src/kernel2/src/tasks/thread.c b/src/kernel2/src/tasks/thread.c
+index a2d01bf..676a930 100644
+--- a/src/kernel2/src/tasks/thread.c
++++ b/src/kernel2/src/tasks/thread.c
+@@ -44,6 +44,11 @@
+ #include &quot;lock.h&quot;
+ #include &quot;cpu.h&quot;
+ 
++struct on_destroy_info {
++    pm_thread_destroy_handler handler;
++    void* prv;
++};
++
+ static tid_t next_tid = 1;
+ 
+ static tid_t generate_tid(void)
+@@ -80,6 +85,9 @@ pm_thread_t* pm_thread_create(pm_process_t* process, vaddr_t entry)
+     
+     // Ein Pointer auf den Prozess im Thread hinterlegen
+     thread-&gt;process = process;
++
++    // Eventhandlerlisten anlegen
++    thread-&gt;on_destroy = list_create();
+     
+     // Der Lock wird gesperrt initialisiert
+     thread-&gt;lock = 1;
+@@ -158,6 +166,7 @@ pm_thread_t* pm_thread_create(pm_process_t* process, vaddr_t entry)
+  */
+ void pm_thread_destroy(pm_thread_t* thread)
+ {
++    struct on_destroy_info* info;
+     // TODO Andere Threads beenden, falls thread-&gt;is_main_thread
+ 
+     // Zuerst muss der Thread angehalten werden
+@@ -169,6 +178,13 @@ void pm_thread_destroy(pm_thread_t* thread)
+     // Beim Scheduler abmelden
+     pm_scheduler_delete(thread);
+ 
++    // Eventhandler ausfuehren
++    while ((info = list_pop(thread-&gt;on_destroy))) {
++        info-&gt;handler(thread, info-&gt;prv);
++        free(info);
++    }
++    list_destroy(thread-&gt;on_destroy);
++
+     // Wir brauchen immer einen gueltigen aktiven Thread, sonst kommt der
+     // Interrupthandler durcheinander und kann bei Exceptions im Kernel keine
+     // ordentliche Meldung mehr anzeigen.
+@@ -313,3 +329,17 @@ bool pm_thread_unblock(pm_thread_t* thread)
+     unlock(&amp;thread-&gt;lock);
+     return result;
+ }
++
++/**
++ * Handler fuer das Loeschen des Threads registrieren
++ */
++void pm_thread_register_on_destroy(pm_thread_t* thread,
++    pm_thread_destroy_handler handler, void* prv)
++{
++    struct on_destroy_info* info = malloc(sizeof(*info));
++
++    info-&gt;handler = handler;
++    info-&gt;prv = prv;
++
++    list_push(thread-&gt;on_destroy, info);
++}
+-- 
+1.7.7
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002451.html">[tyndur-devel] [PATCH 05/11] kernel2: pm_scheduler_kern_yield()
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002453.html">[tyndur-devel] [PATCH 07/11] kernel2: pm_thread_block() mit	wartenden Threads
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2452">[ Datum ]</a>
+              <a href="thread.html#2452">[ Thema ]</a>
+              <a href="subject.html#2452">[ Betreff (Subject)]</a>
+              <a href="author.html#2452">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

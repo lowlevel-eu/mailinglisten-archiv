@@ -1,0 +1,168 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH] libext2: Don't destroy boot loader
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH%3D5D_libext2%3D3A_Don%3D27t_destroy_boot%3F%3D%0A%09%3D%3Futf-8%3Fq%3F_loader%3F%3D&In-Reply-To=%3C1388668941-12894-1-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   
+   <LINK REL="Next"  HREF="000258.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH] libext2: Don't destroy boot loader</H1>
+    <B>Kevin Wolf</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH%3D5D_libext2%3D3A_Don%3D27t_destroy_boot%3F%3D%0A%09%3D%3Futf-8%3Fq%3F_loader%3F%3D&In-Reply-To=%3C1388668941-12894-1-git-send-email-kevin%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH] libext2: Don't destroy boot loader">kevin at tyndur.org
+       </A><BR>
+    <I>Thu Jan  2 14:22:21 CET 2014</I>
+    <P><UL>
+        
+        <LI>Next message: <A HREF="000258.html">[cdi-devel] [PATCH] libext2: Don't destroy boot loader
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#257">[ date ]</a>
+              <a href="thread.html#257">[ thread ]</a>
+              <a href="subject.html#257">[ subject ]</a>
+              <a href="author.html#257">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>The first 1024 bytes on the disk must be left alone. If they are part of
+the first block, they need to be included in the write request of each
+superblock update because the cache works only at the granularity of
+filesystem blocks.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">kevin at tyndur.org</A>&gt;
+---
+
+Imported from libext2.git, translated commit message for cdi.git
+
+ ext2/libext2/fs.c           |   21 +++++++++++++++++----
+ ext2/libext2/include/ext2.h |    3 +++
+ ext2/libext2/superblock.c   |   14 ++++++++++++--
+ 3 files changed, 32 insertions(+), 6 deletions(-)
+
+diff --git a/ext2/libext2/fs.c b/ext2/libext2/fs.c
+index 33b033f..e5c5482 100644
+--- a/ext2/libext2/fs.c
++++ b/ext2/libext2/fs.c
+@@ -66,11 +66,18 @@ static int fs_check_fast(ext2_fs_t* fs)
+ int ext2_fs_mount(ext2_fs_t* fs)
+ {
+     fs-&gt;sb = malloc(sizeof(ext2_superblock_t));
++    fs-&gt;boot_sectors = malloc(1024);
++
++    if (!fs-&gt;sb || !fs-&gt;boot_sectors) {
++        goto fail;
++    }
+ 
+     if (!ext2_sb_read(fs, fs-&gt;sb)) {
+-        free(fs-&gt;sb);
+-        fs-&gt;sb = NULL;
+-        return 0;
++        goto fail;
++    }
++
++    if (!fs-&gt;dev_read(0, 1024, fs-&gt;boot_sectors, fs-&gt;dev_private)) {
++        goto fail;
+     }
+ 
+     fs-&gt;cache_handle = fs-&gt;cache_create(fs, ext2_sb_blocksize(fs-&gt;sb));
+@@ -88,6 +95,12 @@ int ext2_fs_mount(ext2_fs_t* fs)
+     }
+ #endif
+     return 1;
++
++fail:
++    free(fs-&gt;boot_sectors);
++    free(fs-&gt;sb);
++    fs-&gt;sb = NULL;
++    return 0;
+ }
+ 
+ int ext2_fs_unmount(ext2_fs_t* fs)
+@@ -97,6 +110,7 @@ int ext2_fs_unmount(ext2_fs_t* fs)
+         return 0;
+     }
+ 
++    free(fs-&gt;boot_sectors);
+     free(fs-&gt;sb);
+     fs-&gt;cache_destroy(fs-&gt;cache_handle);
+     fs-&gt;sb = fs-&gt;cache_handle = NULL;
+@@ -107,4 +121,3 @@ void ext2_fs_sync(ext2_fs_t* fs)
+ {
+     fs-&gt;cache_sync(fs-&gt;cache_handle);
+ }
+-
+diff --git a/ext2/libext2/include/ext2.h b/ext2/libext2/include/ext2.h
+index cde8b41..6dc0ab0 100644
+--- a/ext2/libext2/include/ext2.h
++++ b/ext2/libext2/include/ext2.h
+@@ -158,6 +158,9 @@ typedef struct ext2_fs {
+ 
+     /// Letzte allozierte Blocknummer
+     uint64_t block_prev_alloc;
++
++    /// Der Inhalt der ersten 1024 Bytes auf dem Ger&#228;t
++    void* boot_sectors;
+ } ext2_fs_t;
+ 
+ /**
+diff --git a/ext2/libext2/superblock.c b/ext2/libext2/superblock.c
+index 973b26e..5e9e3d5 100644
+--- a/ext2/libext2/superblock.c
++++ b/ext2/libext2/superblock.c
+@@ -130,8 +130,18 @@ int ext2_sb_update(ext2_fs_t* fs, ext2_superblock_t* sb)
+             blocks_per_group) * block_size;
+ 
+         block = fs-&gt;cache_block(fs-&gt;cache_handle, start / block_size, 1);
+-        memcpy(block-&gt;data + (start % block_size), sb,
+-            sizeof(ext2_superblock_t));
++        if (i == 0 &amp;&amp; block_size &gt; 1024) {
++            memcpy(block-&gt;data, fs-&gt;boot_sectors, 1024);
++            memcpy(block-&gt;data + 1024, sb, sizeof(ext2_superblock_t));
++            memset(block-&gt;data + 1024 + sizeof(ext2_superblock_t), 0,
++                   block_size - 1024 - sizeof(ext2_superblock_t));
++        } else if (i == 0) {
++            memcpy(block-&gt;data, sb, sizeof(ext2_superblock_t));
++        } else {
++            memcpy(block-&gt;data, sb, sizeof(ext2_superblock_t));
++            memset(block-&gt;data + sizeof(ext2_superblock_t), 0,
++                   block_size - sizeof(ext2_superblock_t));
++        }
+         fs-&gt;cache_block_free(block, 1);
+     }
+ 
+-- 
+1.7.7
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	
+	<LI>Next message: <A HREF="000258.html">[cdi-devel] [PATCH] libext2: Don't destroy boot loader
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#257">[ date ]</a>
+              <a href="thread.html#257">[ thread ]</a>
+              <a href="subject.html#257">[ subject ]</a>
+              <a href="author.html#257">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

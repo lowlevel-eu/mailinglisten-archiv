@@ -1,0 +1,805 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] cdi: Behanndlung von Parititionen in	CDI-Bibliothek verschoben
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20cdi%3A%20Behanndlung%20von%20Parititionen%20in%0A%09CDI-Bibliothek%20verschoben&In-Reply-To=%3C1263749873-2817-1-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="001641.html">
+   <LINK REL="Next"  HREF="001643.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] cdi: Behanndlung von Parititionen in	CDI-Bibliothek verschoben</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20cdi%3A%20Behanndlung%20von%20Parititionen%20in%0A%09CDI-Bibliothek%20verschoben&In-Reply-To=%3C1263749873-2817-1-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH] cdi: Behanndlung von Parititionen in	CDI-Bibliothek verschoben">kevin at tyndur.org
+                  </A><BR>
+    <I>So Jan 17 18:37:53 CET 2010</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="001641.html">[tyndur-devel] [PATCH] SMP: An den richtigen Stellen nach der FPS	suchen
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="001643.html">[tyndur-devel] [PATCH] kernel: Kooperatives Multitasking repariert
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#1642">[ Datum ]</a>
+              <a href="thread.html#1642">[ Thema ]</a>
+              <a href="subject.html#1642">[ Betreff (Subject) ]</a>
+              <a href="author.html#1642">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* cdi: Die Erkennung von Partitionen hat in ata nichts zu suchen. ata
+  stellt jetzt nur noch ein Geraet bereit und die CDI-Bibliothek erkennt
+  Paritionen darauf und erstellt die entsprechenden LostIO-Knoten.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/modules/cdi/ata/device.c       |   57 --------------
+ src/modules/cdi/ata/libpartition.c |   86 ----------------------
+ src/modules/cdi/ata/libpartition.h |   58 ---------------
+ src/modules/cdi/lib/libpartition.c |  142 ++++++++++++++++++++++++++++++++++++
+ src/modules/cdi/lib/libpartition.h |   64 ++++++++++++++++
+ src/modules/cdi/lib/scsi/disk.c    |    8 +-
+ src/modules/cdi/lib/storage.c      |   92 ++++++++++++++---------
+ 7 files changed, 267 insertions(+), 240 deletions(-)
+ delete mode 100644 src/modules/cdi/ata/libpartition.c
+ delete mode 100644 src/modules/cdi/ata/libpartition.h
+ create mode 100644 src/modules/cdi/lib/libpartition.c
+ create mode 100644 src/modules/cdi/lib/libpartition.h
+
+diff --git a/src/modules/cdi/ata/device.c b/src/modules/cdi/ata/device.c
+index 7339d65..dd087c3 100644
+--- a/src/modules/cdi/ata/device.c
++++ b/src/modules/cdi/ata/device.c
+@@ -36,7 +36,6 @@
+ #include &quot;cdi/scsi.h&quot;
+ 
+ #include &quot;device.h&quot;
+-#include &quot;libpartition.h&quot;
+ 
+ // IRQ-Handler
+ static inline void ata_controller_irq(struct cdi_device* dev);
+@@ -157,59 +156,6 @@ int ata_wait_irq(struct ata_controller* controller, uint32_t timeout)
+     return 1;
+ }
+ 
+-/**
+- * Partitionstabelle auf einem ATA-Geraet verarbeiten
+- */
+-void ata_parse_partitions(struct ata_device* dev)
+-{
+-    struct partition_table partition_table;
+-    uint8_t mbr[ATA_SECTOR_SIZE];
+-    int i;
+-
+-    // Die Partitionstabelle liegt im MBR
+-    if (!dev-&gt;read_sectors(dev, 0, 1, mbr)) {
+-        DEBUG(&quot;Fehler beim Einlesen der Partitionstabelle&quot;);
+-        return;
+-    }
+-
+-    // Partitionstabelle Verarbeiten
+-    if (!partition_table_fill(&amp;partition_table, mbr)) {
+-        DEBUG(&quot;Fehler beim Verarbeiten der Partitionstabelle&quot;);
+-        return;
+-    }
+-
+-    // Ansonsten wird die Tabelle jetzt verarbeitet
+-    for (i = 0; i &lt; 4; i++) {
+-        if (partition_table.entries[i].used) {
+-            // Erweiterter Eintrag =&gt; ueberspringen
+-            if (partition_table.entries[i].type == PARTITION_TYPE_EXTENDED) {
+-                DEBUG(&quot;TODO Erweiterte Partitionstabelleneintraege\n&quot;);
+-                continue;
+-            }
+-            
+-            struct ata_partition* partition = malloc(sizeof(*partition));
+-            partition-&gt;realdev = dev;
+-            partition-&gt;null = NULL;
+-            partition-&gt;start = partition_table.entries[i].start;
+-            partition-&gt;dev.storage.block_size = ATA_SECTOR_SIZE;
+-            partition-&gt;dev.storage.block_count = partition_table.entries[i].size;
+-            DEBUG(&quot;Partition von %d bis %d\n&quot;, partition-&gt;start, partition-&gt;dev.storage.block_count + partition-&gt;start - 1);
+-            asprintf((char**) &amp;(partition-&gt;dev.storage.dev.name), &quot;ata%01d%01d_p%01d&quot;,
+-                (uint32_t) dev-&gt;controller-&gt;id, dev-&gt;id, cdi_list_size(dev-&gt;
+-                partition_list));
+-
+-            // Geraet registrieren
+-            partition-&gt;dev.storage.dev.driver = &amp;dev-&gt;controller-&gt;storage-&gt;drv;
+-            ata_init_device((struct ata_device*) partition);
+-            cdi_list_push(dev-&gt;controller-&gt;storage-&gt;drv.devices, partition);
+-
+-            // An Partitionsliste fuer das aktuelle Geraet anhaengen
+-            cdi_list_push(dev-&gt;partition_list, partition);
+-        }
+-    }
+-}
+-
+-
+ 
+ 
+ /**
+@@ -296,9 +242,6 @@ void ata_init_controller(struct ata_controller* controller)
+                 asprintf((char**) &amp;(dev-&gt;dev.storage.dev.name), &quot;ata%01d%01d&quot;,
+                     (uint32_t) controller-&gt;id, i);
+ 
+-                // Partitionen parsen
+-                ata_parse_partitions(dev);
+-
+                 // Geraet registrieren
+                 dev-&gt;dev.storage.dev.driver = &amp;controller-&gt;storage-&gt;drv;
+                 ata_init_device(dev);
+diff --git a/src/modules/cdi/ata/libpartition.c b/src/modules/cdi/ata/libpartition.c
+deleted file mode 100644
+index 17c41e1..0000000
+--- a/src/modules/cdi/ata/libpartition.c
++++ /dev/null
+@@ -1,86 +0,0 @@
+-/*
+- * Copyright (c) 2007 The tyndur Project. All rights reserved.
+- *
+- * This code is derived from software contributed to the tyndur Project
+- * by Antoine Kaufmann.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+- * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+- * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
+- * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+- * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+- * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+- * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+- * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+- * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+- */
+-
+-#include &quot;libpartition.h&quot;
+-#include &lt;stdint.h&gt;
+-
+-/**
+- * Roher Partitionstabelleneintrag
+- */
+-struct raw_entry {
+-    uint8_t active;
+-    uint8_t begin_chs[3];
+-    uint8_t type;
+-    uint8_t end_chs[3];
+-    uint32_t start;
+-    uint32_t size;
+-} PACKED;
+-
+-/**
+- * Uebergebene Partitionstabelle anhand des Sektors fuellen
+- *
+- * @return 1 wenn die Tabelle erfolgreich gefuellt wurde, 0 sonst
+- */
+-int partition_table_fill(struct partition_table* table, void* sector)
+-{
+-    struct raw_entry* entry = (struct raw_entry*) (sector +
+-        PARTITION_TABLE_OFFSET);
+-    uint16_t* signature = sector + PARTITION_TABLE_SIG_OFFSET;
+-    int i;
+-
+-    // Zuerst die Signatur pruefen, denn ohne die muss garnicht weiter gesucht
+-    // werden.
+-    if (*signature != PARTITION_TABLE_SIGNATURE) {
+-        return 0;
+-    }
+-    
+-    // Wenn die Signatur existiert koennen die einzelnen Eintraege ausgelesen
+-    // werden
+-    for (i = 0; i &lt; 4; i++) {
+-        // Wenn 0 als Groesse eingetragen ist, ist der Eintrag unbenutzt
+-        if (entry-&gt;size == 0) {
+-            table-&gt;entries[i].used = 0;
+-        } else {
+-            table-&gt;entries[i].used = 1;
+-
+-            // Fuer erweiterte Partitionen wollen wir generell Typ 0x5, die
+-            // anderen aus Windows und Linux werden deshalb ausgetauscht.
+-            if ((entry-&gt;type == 0x0F) || (entry-&gt;type == 0x85)) {
+-                table-&gt;entries[i].type = PARTITION_TYPE_EXTENDED;
+-            } else {
+-                table-&gt;entries[i].type = entry-&gt;type;
+-            }
+-
+-            table-&gt;entries[i].start = entry-&gt;start;
+-            table-&gt;entries[i].size = entry-&gt;size;
+-        }
+-        entry++;
+-    }
+-    return 1;
+-}
+-
+diff --git a/src/modules/cdi/ata/libpartition.h b/src/modules/cdi/ata/libpartition.h
+deleted file mode 100644
+index e8d2837..0000000
+--- a/src/modules/cdi/ata/libpartition.h
++++ /dev/null
+@@ -1,58 +0,0 @@
+-/*
+- * Copyright (c) 2007 The tyndur Project. All rights reserved.
+- *
+- * This code is derived from software contributed to the tyndur Project
+- * by Antoine Kaufmann.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+- * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+- * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
+- * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+- * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+- * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+- * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+- * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+- * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+- */
+-
+-#ifndef _LIBPARTITION_H_
+-#define _LIBPARTITION_H_
+-
+-#include &lt;stdint.h&gt;
+-
+-#define PACKED __attribute__((packed))
+-#define PARTITION_TABLE_OFFSET 446
+-#define PARTITION_TABLE_SIG_OFFSET 510;
+-#define PARTITION_TABLE_SIGNATURE 0xAA55
+-
+-// Typ fuer eine Erweiterte Partition, deren Startsektor wieder eine
+-// Partitionstabelle beinhaltet.
+-#define PARTITION_TYPE_EXTENDED 0x05
+-
+-struct partition {
+-    uint8_t     used;
+-    uint8_t     type;
+-    uint32_t    start;
+-    uint32_t    size;
+-};
+-
+-struct partition_table {
+-    struct partition entries[4];
+-};
+-
+-// Fuellt die Angegebene Partitionstabelle anhand des uebergebenen Sektors auf
+-int partition_table_fill(struct partition_table* table, void* sector);
+-
+-#endif // ifndef _LIBPARTITION_H_
+-
+diff --git a/src/modules/cdi/lib/libpartition.c b/src/modules/cdi/lib/libpartition.c
+new file mode 100644
+index 0000000..2ecd23c
+--- /dev/null
++++ b/src/modules/cdi/lib/libpartition.c
+@@ -0,0 +1,142 @@
++/*
++ * Copyright (c) 2007 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Antoine Kaufmann.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include &lt;stdint.h&gt;
++#include &lt;stdlib.h&gt;
++
++#include &quot;cdi/lists.h&quot;
++#include &quot;cdi/storage.h&quot;
++#include &quot;libpartition.h&quot;
++
++#define DEBUG(x)
++
++/**
++ * Roher Partitionstabelleneintrag
++ */
++struct raw_entry {
++    uint8_t active;
++    uint8_t begin_chs[3];
++    uint8_t type;
++    uint8_t end_chs[3];
++    uint32_t start;
++    uint32_t size;
++} PACKED;
++
++struct partition_table {
++    struct partition entries[4];
++};
++
++extern int cdi_storage_read(struct cdi_storage_device* device, uint64_t pos,
++    size_t size, void* dest);
++/**
++ * Uebergebene Partitionstabelle anhand des Sektors fuellen
++ *
++ * @return 1 wenn die Tabelle erfolgreich gefuellt wurde, 0 sonst
++ */
++static int partition_table_fill(struct partition_table* table, void* sector)
++{
++    struct raw_entry* entry = (struct raw_entry*) (sector +
++        PARTITION_TABLE_OFFSET);
++    uint16_t* signature = sector + PARTITION_TABLE_SIG_OFFSET;
++    int i;
++
++    // Zuerst die Signatur pruefen, denn ohne die muss garnicht weiter gesucht
++    // werden.
++    if (*signature != PARTITION_TABLE_SIGNATURE) {
++        return 0;
++    }
++
++    // Wenn die Signatur existiert koennen die einzelnen Eintraege ausgelesen
++    // werden
++    for (i = 0; i &lt; 4; i++) {
++        // Wenn 0 als Groesse eingetragen ist, ist der Eintrag unbenutzt
++        if (entry-&gt;size == 0) {
++            table-&gt;entries[i].used = 0;
++        } else {
++            table-&gt;entries[i].used = 1;
++
++            // Fuer erweiterte Partitionen wollen wir generell Typ 0x5, die
++            // anderen aus Windows und Linux werden deshalb ausgetauscht.
++            if ((entry-&gt;type == 0x0F) || (entry-&gt;type == 0x85)) {
++                table-&gt;entries[i].type = PARTITION_TYPE_EXTENDED;
++            } else {
++                table-&gt;entries[i].type = entry-&gt;type;
++            }
++
++            table-&gt;entries[i].start = entry-&gt;start * 512;
++            table-&gt;entries[i].size = entry-&gt;size * 512;
++        }
++        entry++;
++    }
++    return 1;
++}
++
++/**
++ * Partitionstabelle auf einem Massenspeichergeraet verarbeiten
++ *
++ * @param dev Geraet, auf dem nach Partitionen gesucht werden soll
++ * @param partitions Liste, in die gefundene Partitionen eingefuegt werden
++ * sollen (als struct partition)
++ */
++void cdi_tyndur_parse_partitions(struct cdi_storage_device* dev,
++    cdi_list_t partitions)
++{
++    struct partition_table partition_table;
++    uint8_t mbr[512];
++    int i;
++
++    // Die Partitionstabelle liegt im MBR
++    if (cdi_storage_read(dev, 0, 512, mbr) != 0) {
++        DEBUG(&quot;Fehler beim Einlesen der Partitionstabelle&quot;);
++        return;
++    }
++
++    // Partitionstabelle Verarbeiten
++    if (!partition_table_fill(&amp;partition_table, mbr)) {
++        DEBUG(&quot;Fehler beim Verarbeiten der Partitionstabelle&quot;);
++        return;
++    }
++
++    // Ansonsten wird die Tabelle jetzt verarbeitet
++    for (i = 0; i &lt; 4; i++) {
++        if (partition_table.entries[i].used) {
++            // Erweiterter Eintrag =&gt; ueberspringen
++            if (partition_table.entries[i].type == PARTITION_TYPE_EXTENDED) {
++                DEBUG(&quot;TODO Erweiterte Partitionstabelleneintraege\n&quot;);
++                continue;
++            }
++
++            struct partition* part = malloc(sizeof(*part));
++            *part = partition_table.entries[i];
++            part-&gt;dev = dev;
++            part-&gt;number = i;
++
++            cdi_list_push(partitions, part);
++        }
++    }
++}
+diff --git a/src/modules/cdi/lib/libpartition.h b/src/modules/cdi/lib/libpartition.h
+new file mode 100644
+index 0000000..35685b9
+--- /dev/null
++++ b/src/modules/cdi/lib/libpartition.h
+@@ -0,0 +1,64 @@
++/*
++ * Copyright (c) 2007 The tyndur Project. All rights reserved.
++ *
++ * This code is derived from software contributed to the tyndur Project
++ * by Antoine Kaufmann.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
++ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef _LIBPARTITION_H_
++#define _LIBPARTITION_H_
++
++#include &lt;stdint.h&gt;
++
++#define PACKED __attribute__((packed))
++#define PARTITION_TABLE_OFFSET 446
++#define PARTITION_TABLE_SIG_OFFSET 510;
++#define PARTITION_TABLE_SIGNATURE 0xAA55
++
++// Typ fuer eine Erweiterte Partition, deren Startsektor wieder eine
++// Partitionstabelle beinhaltet.
++#define PARTITION_TYPE_EXTENDED 0x05
++
++struct partition {
++    struct cdi_storage_device* dev;
++
++    uint8_t     used;
++    uint8_t     type;
++    uint16_t    number;
++    uint64_t    start;
++    uint64_t    size;
++};
++
++/**
++ * Partitionstabelle auf einem Massenspeichergeraet verarbeiten
++ *
++ * @param dev Geraet, auf dem nach Partitionen gesucht werden soll
++ * @param partitions Liste, in die gefundene Partitionen eingefuegt werden
++ * sollen (als struct partition)
++ */
++void cdi_tyndur_parse_partitions(struct cdi_storage_device* dev,
++    cdi_list_t partitions);
++
++#endif // ifndef _LIBPARTITION_H_
++
+diff --git a/src/modules/cdi/lib/scsi/disk.c b/src/modules/cdi/lib/scsi/disk.c
+index bd9e18f..e0eca2e 100644
+--- a/src/modules/cdi/lib/scsi/disk.c
++++ b/src/modules/cdi/lib/scsi/disk.c
+@@ -29,8 +29,6 @@
+ #include &lt;cdi/scsi.h&gt;
+ #include &lt;cdi/storage.h&gt;
+ 
+-extern int lostio_mst_if_newdev(struct cdi_storage_device* device);
+-
+ #define big_endian_word(x) ((((x) &amp; 0xFF) &lt;&lt; 8) | (((x) &amp; 0xFF00) &gt;&gt; 8))
+ #define big_endian_dword(x) \
+     ((big_endian_word((x) &amp; 0xFFFF) &lt;&lt; 16) | \
+@@ -241,15 +239,17 @@ int cdi_scsi_disk_init(struct cdi_scsi_device* device)
+     frontdev-&gt;dev.driver = (struct cdi_driver*) &amp;cdi_scsi_disk_driver;
+     frontdev-&gt;dev.name = device-&gt;dev.name;
+ 
++    // Groesse des Mediums bestimmen. Falls keins eingelegt ist, brauchen wir
++    // trotzdem zumindest eine Sektorgroesse.
+     cdrom_capacity(device, &amp;num_sectors, &amp;sector_size);
+-    frontdev-&gt;block_size = sector_size;
++    frontdev-&gt;block_size = sector_size ? sector_size : 2048;
+     frontdev-&gt;block_count = num_sectors;
+ 
+     frontdev-&gt;dev.backdev = device;
+     device-&gt;frontdev = frontdev;
+ 
+     // LostIO-Verzeichnisknoten anlegen
+-    lostio_mst_if_newdev(frontdev);
++    cdi_storage_device_init(frontdev);
+ 
+     return 0;
+ }
+diff --git a/src/modules/cdi/lib/storage.c b/src/modules/cdi/lib/storage.c
+index be846cd..4d2e656 100644
+--- a/src/modules/cdi/lib/storage.c
++++ b/src/modules/cdi/lib/storage.c
+@@ -2,11 +2,11 @@
+  * Copyright (c) 2007 Antoine Kaufmann
+  *
+  * This program is free software. It comes without any warranty, to
+- * the extent permitted by applicable law. You can redistribute it 
+- * and/or modify it under the terms of the Do What The Fuck You Want 
++ * the extent permitted by applicable law. You can redistribute it
++ * and/or modify it under the terms of the Do What The Fuck You Want
+  * To Public License, Version 2, as published by Sam Hocevar. See
+  * <A HREF="http://sam.zoy.org/projects/COPYING.WTFPL">http://sam.zoy.org/projects/COPYING.WTFPL</A> for more details.
+- */  
++ */
+ 
+ #include &lt;stdio.h&gt;
+ #include &lt;stdint.h&gt;
+@@ -15,9 +15,10 @@
+ #include &lt;lostio.h&gt;
+ 
+ #include &quot;cdi/storage.h&quot;
++#include &quot;libpartition.h&quot;
+ 
+ static void lostio_mst_if_init(void);
+-int lostio_mst_if_newdev(struct cdi_storage_device* device);
++int lostio_mst_if_newdev(struct partition* part);
+ 
+ static size_t lostio_mst_read_handler(lostio_filehandle_t* fh,
+     void* buf, size_t blocksize, size_t blockcount);
+@@ -29,7 +30,7 @@ static int lostio_mst_seek_handler(lostio_filehandle_t* fh, uint64_t offset,
+ #define CDI_LOSTIO_TYPE_MST 255
+ static typehandle_t lostio_mst_typehandle = {
+     .id = CDI_LOSTIO_TYPE_MST,
+-    
++
+     .pre_open = NULL,
+     .post_open = NULL,
+     .not_found = NULL,
+@@ -75,8 +76,25 @@ void cdi_storage_driver_register(struct cdi_storage_driver* driver)
+  */
+ void cdi_storage_device_init(struct cdi_storage_device* device)
+ {
++    cdi_list_t partitions;
++    struct partition* part;
++
+     // Geraeteknoten fuer LostIO erstellen
+-    lostio_mst_if_newdev(device);
++    part = calloc(1, sizeof(*part));
++    part-&gt;dev       = device;
++    part-&gt;number    = (uint16_t) -1;
++    part-&gt;start     = 0;
++    part-&gt;size      = device-&gt;block_size * device-&gt;block_count;
++
++    lostio_mst_if_newdev(part);
++
++    // Partitionen suchen und Knoten erstellen
++    partitions = cdi_list_create();
++    cdi_tyndur_parse_partitions(device, partitions);
++    while ((part = cdi_list_pop(partitions))) {
++        lostio_mst_if_newdev(part);
++    }
++    cdi_list_destroy(partitions);
+ }
+ 
+ /**
+@@ -97,7 +115,7 @@ int cdi_storage_read(struct cdi_storage_device* device, uint64_t pos,
+     uint64_t block_read_end = (pos + size) / block_size;
+     // Anzahl der Blocks die gelesen werden sollen
+     uint64_t block_read_count = block_read_end - block_read_start;
+-    
++
+     // Wenn nur ganze Bloecke gelesen werden sollen, geht das etwas effizienter
+     if (((pos % block_size) == 0) &amp;&amp; (((pos + size) %  block_size) == 0)) {
+         // Nur ganze Bloecke
+@@ -107,14 +125,14 @@ int cdi_storage_read(struct cdi_storage_device* device, uint64_t pos,
+         // FIXME: Das laesst sich garantiert etwas effizienter loesen
+         block_read_count++;
+         uint8_t buffer[block_read_count * block_size];
+-        
++
+         // In Zwischenspeicher einlesen
+         if (driver-&gt;read_blocks(device, block_read_start, block_read_count,
+             buffer) != 0)
+         {
+             return -1;
+         }
+-        
++
+         // Bereich aus dem Zwischenspeicher kopieren
+         memcpy(dest, buffer + (pos % block_size), size);
+     }
+@@ -133,7 +151,7 @@ int cdi_storage_write(struct cdi_storage_device* device, uint64_t pos,
+ {
+     struct cdi_storage_driver* driver = (struct cdi_storage_driver*) device-&gt;
+         dev.driver;
+-    
++
+     size_t block_size = device-&gt;block_size;
+     uint64_t block_write_start = pos / block_size;
+     uint8_t buffer[block_size];
+@@ -162,20 +180,20 @@ int cdi_storage_write(struct cdi_storage_device* device, uint64_t pos,
+         src += tmp_size;
+         block_write_start++;
+     }
+-    
++
+     // Jetzt wird die Menge der ganzen Blocks auf einmal geschrieben, falls
+     // welche existieren
+     tmp_size = size / block_size;
+     if (tmp_size != 0) {
+         // Buffer abspeichern
+         if (driver-&gt;write_blocks(device, block_write_start, tmp_size, src)
+-            != 0) 
++            != 0)
+         {
+             return -1;
+         }
+         size -= tmp_size * block_size;
+         src += tmp_size * block_size;
+-        block_write_start += block_size;        
++        block_write_start += block_size;
+     }
+ 
+     // Wenn der letzte Block nur teilweise beschrieben wird, geschieht das hier
+@@ -206,27 +224,33 @@ static void lostio_mst_if_init()
+ /**
+  * Erstellt den Dateisystemknoten fuer ein Geraet.
+  */
+-int lostio_mst_if_newdev(struct cdi_storage_device* device)
++int lostio_mst_if_newdev(struct partition* part)
+ {
+     static int has_cdrom = 0;
++    struct cdi_storage_device* device = part-&gt;dev;
+ 
+-    // Slash vor Pfad angaengen
+-    char path[strlen(device-&gt;dev.name) + 2];
+-    strcpy(path + 1, device-&gt;dev.name);
+-    *path = '/';
++    // Slash vor Pfad anhaengen
++    char* path;
++    if (part-&gt;number == (uint16_t) -1) {
++        asprintf(&amp;path, &quot;/%s&quot;, device-&gt;dev.name);
++    } else {
++        asprintf(&amp;path, &quot;/%s_p%d&quot;, device-&gt;dev.name, part-&gt;number);
++    }
+ 
+     if (vfstree_create_node(path, CDI_LOSTIO_TYPE_MST, device-&gt;block_size *
+-        device-&gt;block_count, (void*) device, 0) == FALSE)
++        device-&gt;block_count, (void*) part, 0) == FALSE)
+     {
++        free(path);
+         return -1;
+     }
+ 
+     if (!has_cdrom &amp;&amp; !strncmp(device-&gt;dev.name, &quot;atapi&quot;, strlen(&quot;atapi&quot;))) {
+         has_cdrom = 1;
+         vfstree_create_node(&quot;/cdrom&quot;, CDI_LOSTIO_TYPE_MST, device-&gt;block_size *
+-            device-&gt;block_count, (void*) device, 0);
++            device-&gt;block_count, (void*) part, 0);
+     }
+ 
++    free(path);
+     return 0;
+ }
+ 
+@@ -236,13 +260,13 @@ int lostio_mst_if_newdev(struct cdi_storage_device* device)
+ static size_t lostio_mst_read_handler(lostio_filehandle_t* fh,
+     void* buf, size_t blocksize, size_t blockcount)
+ {
+-    struct cdi_storage_device* device = (struct cdi_storage_device*) fh-&gt;node-&gt;
+-        data;
++    struct partition* part = (struct partition*) fh-&gt;node-&gt;data;
++    struct cdi_storage_device* device = part-&gt;dev;
+     size_t size = blocksize * blockcount;
+ 
+     // Groesse anpassen, wenn ueber das Medium hinaus gelesen werden soll
+-    if (size &gt; (device-&gt;block_count * device-&gt;block_size - fh-&gt;pos)) {
+-        size = device-&gt;block_count * device-&gt;block_size - fh-&gt;pos;
++    if (size &gt; (part-&gt;size - fh-&gt;pos)) {
++        size = part-&gt;size - fh-&gt;pos;
+         if (size == 0) {
+             fh-&gt;flags |= LOSTIO_FLAG_EOF;
+             return 0;
+@@ -250,8 +274,7 @@ static size_t lostio_mst_read_handler(lostio_filehandle_t* fh,
+     }
+ 
+     // In den uebergebenen Buffer einlesen
+-    if (cdi_storage_read(device, fh-&gt;pos, size, buf) != 0) {
+-        printf(&quot;read_error&quot;);
++    if (cdi_storage_read(device, fh-&gt;pos + part-&gt;start, size, buf) != 0) {
+         return 0;
+     }
+ 
+@@ -266,18 +289,18 @@ static size_t lostio_mst_read_handler(lostio_filehandle_t* fh,
+ static size_t lostio_mst_write_handler(lostio_filehandle_t* fh,
+     size_t blocksize, size_t blockcount, void* data)
+ {
+-    struct cdi_storage_device* device = (struct cdi_storage_device*) fh-&gt;node-&gt;
+-        data;
++    struct partition* part = (struct partition*) fh-&gt;node-&gt;data;
++    struct cdi_storage_device* device = part-&gt;dev;
+     size_t size = blocksize * blockcount;
+     size_t result = size;
+ 
+     // Groesse anpassen, wenn ueber das Medium hinaus geschrieben werden soll
+-    if (size &gt; (device-&gt;block_count * device-&gt;block_size - fh-&gt;pos)) {
+-        size = device-&gt;block_count * device-&gt;block_size - fh-&gt;pos;
++    if (size &gt; (part-&gt;size - fh-&gt;pos)) {
++        size = part-&gt;size - fh-&gt;pos;
+     }
+ 
+     // Daten schreiben
+-    if (cdi_storage_write(device, fh-&gt;pos, size, data) != 0) {
++    if (cdi_storage_write(device, fh-&gt;pos + part-&gt;start, size, data) != 0) {
+         result = 0;
+     } else {
+         fh-&gt;pos += size;
+@@ -292,16 +315,15 @@ static size_t lostio_mst_write_handler(lostio_filehandle_t* fh,
+ static int lostio_mst_seek_handler(lostio_filehandle_t* fh, uint64_t offset,
+     int origin)
+ {
+-    struct cdi_storage_device* device = (struct cdi_storage_device*) fh-&gt;node-&gt;
+-        data;
++    struct partition* part = (struct partition*) fh-&gt;node-&gt;data;
+     uint64_t new_pos = fh-&gt;pos;
+-    uint64_t size = device-&gt;block_size * device-&gt;block_count;
++    uint64_t size = part-&gt;size;
+ 
+     switch (origin)  {
+         case SEEK_SET:
+             new_pos = offset;
+             break;
+-        
++
+         case SEEK_CUR:
+             new_pos += offset;
+             break;
+-- 
+1.6.0.2
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="001641.html">[tyndur-devel] [PATCH] SMP: An den richtigen Stellen nach der FPS	suchen
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="001643.html">[tyndur-devel] [PATCH] kernel: Kooperatives Multitasking repariert
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#1642">[ Datum ]</a>
+              <a href="thread.html#1642">[ Thema ]</a>
+              <a href="subject.html#1642">[ Betreff (Subject)]</a>
+              <a href="author.html#1642">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

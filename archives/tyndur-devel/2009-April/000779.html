@@ -1,0 +1,125 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 2/3] cdi/core: Mehrere IRQ-Handler pro Treiber
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%202/3%5D%20cdi/core%3A%20Mehrere%20IRQ-Handler%20pro%20Treiber&In-Reply-To=%3C1240672054-18390-3-git-send-email-toni%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="000797.html">
+   <LINK REL="Next"  HREF="000800.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 2/3] cdi/core: Mehrere IRQ-Handler pro Treiber</H1>
+    <B>Antoine Kaufmann</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%202/3%5D%20cdi/core%3A%20Mehrere%20IRQ-Handler%20pro%20Treiber&In-Reply-To=%3C1240672054-18390-3-git-send-email-toni%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 2/3] cdi/core: Mehrere IRQ-Handler pro Treiber">toni at tyndur.org
+                  </A><BR>
+    <I>Sa Apr 25 17:07:33 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="000797.html">[tyndur-devel] [PATCH 1/3] libc: Interrupthandlern die	Int-Nummer uebergeben
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="000800.html">[tyndur-devel] [PATCH 2/3] cdi/core: Mehrere IRQ-Handler pro	Treiber
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#779">[ Datum ]</a>
+              <a href="thread.html#779">[ Thema ]</a>
+              <a href="subject.html#779">[ Betreff (Subject) ]</a>
+              <a href="author.html#779">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>! cdi/core: Jetzt funktioniert das mit den IRQs auch, wenn man mal auf
+            absurde Idee kommt, mehrere IRQs in einem Treiber benutzen
+            zu wollen. ;-)
+---
+ src/modules/cdi/lib/misc.c |   34 +++++++++++++++++++++++++---------
+ 1 files changed, 25 insertions(+), 9 deletions(-)
+
+diff --git a/src/modules/cdi/lib/misc.c b/src/modules/cdi/lib/misc.c
+index 4a22f78..ae66a9e 100644
+--- a/src/modules/cdi/lib/misc.c
++++ b/src/modules/cdi/lib/misc.c
+@@ -16,16 +16,26 @@
+ #include &quot;cdi.h&quot;
+ #include &quot;cdi/misc.h&quot;
+ 
+-// TODO Bei mehr als einem registrierten IRQ geht das so nicht mehr
+-static void (*driver_irq_handler)(struct cdi_device*) = NULL;
+-static struct cdi_device* driver_irq_device = NULL;
++#define LOST_IRQ_OFFSET 0x20
++#define IRQ_COUNT       0x10
++
++static void (*driver_irq_handler[IRQ_COUNT])(struct cdi_device*) = { NULL };
++static struct cdi_device* driver_irq_device[IRQ_COUNT] = { NULL };
+ 
+ /**
+  * Interner IRQ-Handler, der den IRQ-Handler des Treibers aufruft
+  */
+-static void irq_handler(byte irq)
++static void irq_handler(uint8_t irq)
+ {
+-    driver_irq_handler(driver_irq_device);
++    // Oops, das war wohl kein IRQ, den wollen wir nicht.
++    if ((irq &lt; LOST_IRQ_OFFSET) || (irq &gt; LOST_IRQ_OFFSET + IRQ_COUNT)) {
++        return;
++    }
++
++    irq -= LOST_IRQ_OFFSET;
++    if (driver_irq_handler[irq]) {
++        driver_irq_handler[irq](driver_irq_device[irq]);
++    }
+ }
+ 
+ /**
+@@ -35,13 +45,19 @@ static void irq_handler(byte irq)
+  * @param handler Handlerfunktion
+  * @param device Geraet, das dem Handler als Parameter uebergeben werden soll
+  */
+-void cdi_register_irq(uint8_t irq, void (*handler)(struct cdi_device*), 
++void cdi_register_irq(uint8_t irq, void (*handler)(struct cdi_device*),
+     struct cdi_device* device)
+ {
+-    driver_irq_handler = handler;
+-    driver_irq_device = device;
++    if (irq &gt; IRQ_COUNT) {
++        // FIXME: Eigentlich sollte diese Funktion etwas weniger optimistisch
++        // sein, und einen Rueckgabewert haben.
++        return;
++    }
++
++    driver_irq_handler[irq] = handler;
++    driver_irq_device[irq] = device;
+ 
+-    register_intr_handler(0x20 + irq, irq_handler);
++    register_intr_handler(LOST_IRQ_OFFSET + irq, irq_handler);
+ }
+     
+ /**
+-- 
+1.6.0.6
+
+
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="000797.html">[tyndur-devel] [PATCH 1/3] libc: Interrupthandlern die	Int-Nummer uebergeben
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="000800.html">[tyndur-devel] [PATCH 2/3] cdi/core: Mehrere IRQ-Handler pro	Treiber
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#779">[ Datum ]</a>
+              <a href="thread.html#779">[ Thema ]</a>
+              <a href="subject.html#779">[ Betreff (Subject)]</a>
+              <a href="author.html#779">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

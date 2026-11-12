@@ -1,0 +1,592 @@
+>From 46f6d5f9eef68d4b5984a7359792cf5ab140bb0d Mon Sep 17 00:00:00 2001
+From: Mathias Gottschlag <mathias-go@web.de>
+Date: Tue, 14 Oct 2008 15:55:06 +0200
+Subject: [PATCH] * vterm: Hacks, um Grafikmodus zu ermoeglichen
+
+---
+ src/modules/vterm/lostio.c |  117 +++++++++++++++++++++++++++++++++++++++
+ src/modules/vterm/output.c |  114 +++++++++++++++++++++++++++++++++++---
+ src/modules/vterm/term.c   |  130 +++++++++++++++++++++++++++++++++++++++-----
+ src/modules/vterm/vterm.c  |   15 +++++-
+ src/modules/vterm/vterm.h  |   15 +++++
+ 5 files changed, 366 insertions(+), 25 deletions(-)
+
+diff --git a/src/modules/vterm/lostio.c b/src/modules/vterm/lostio.c
+index 1197207..7e80a82 100644
+--- a/src/modules/vterm/lostio.c
++++ b/src/modules/vterm/lostio.c
+@@ -34,8 +34,14 @@
+  */
+ #include <stdlib.h>
+ #include <syscall.h>
++#include <rpc.h>
+ #include "vterm.h"
+ #include "lostio.h"
++#include <video/commands.h>
++#include <video/video.h>
++
++extern list_t* vterm_list;
++
+ /// Handler fuer Lesen aus in
+ size_t terminal_read(lostio_filehandle_t* handle, void* buf,
+     size_t blocksize, size_t blockcount);
+@@ -47,6 +53,16 @@ size_t terminal_write(lostio_filehandle_t* handle, size_t blocksize,
+ /// Handler fuer close auf in
+ static int lio_in_close(lostio_filehandle_t* fh);
+ 
++/// Handler für Oeffnen von video
++bool videofile_open(char **path, byte attr, pid_t pid, io_resource_t* io_source);
++/// Handler für Schliessen von video
++int videofile_close(lostio_filehandle_t* fh);
++
++
++void rpc_create_gfx_vterm(pid_t pid,
++                          dword correlation_id,
++                          size_t data_size,
++                          void* data);
+ 
+ /**
+  * LostIO-Interface vorbereiten, ueber das die Prozesse mit vterm kommunizieren
+@@ -82,6 +98,20 @@ void init_lostio_interface()
+     typehandle->link        = NULL;
+     typehandle->unlink      = NULL;
+     lostio_register_typehandle(typehandle);
++    
++    // Typehandle fuer Videomodi
++    typehandle = malloc(sizeof(typehandle_t));
++    typehandle->id          = LOSTIO_TYPES_VIDEO;
++    typehandle->not_found   = NULL;
++    typehandle->pre_open    = videofile_open;
++    typehandle->post_open   = NULL;
++    typehandle->read        = NULL;
++    typehandle->write       = NULL;
++    typehandle->seek        = NULL;
++    typehandle->close       = videofile_close;
++    lostio_register_typehandle(typehandle);
++    
++    register_message_handler("GFXVTERM", rpc_create_gfx_vterm);
+ }
+ 
+ /**
+@@ -144,3 +174,90 @@ static int lio_in_close(lostio_filehandle_t* fh)
+ 
+     return 0;
+ }
++
++/**
++ * LostIO-Handler, der einen VScreen öffnet und lockt
++ */
++bool videofile_open(char **path, byte attr, pid_t pid, io_resource_t* io_source)
++{
++    printf("video_open: %s\n", *path);
++    
++    // Passendes Terminal suchen
++    vterminal_t* vterm = 0;
++    int i = 0;
++    while ((vterm = list_get_element_at(vterm_list, i++))) {
++        if (atoi(vterm->name + 5) == atoi((*path) + 6)) {
++            break;
++        }
++    }
++    
++    if (vterm->out_node) {
++        // Schon mit Textausgabe belegt
++        return FALSE;
++    }
++    
++    if (gfxdriver) {
++        // Virtuellen Bildschirm erzeugen
++        int index = atoi(vterm->name + 5);
++        int command[8];
++        command[0] = 0; // Erste Karte
++        command[1] = VIDEO_ADD_VSCREEN;
++        command[2] = index;
++        command[3] = pid;
++        printf("PID (videofile_open): %d\n", pid);
++        if (!rpc_get_dword(gfxdriver,
++                           "VIDEODRV",
++                           sizeof(int) * 4,
++                           (char*)command)) {
++            return FALSE;
++        }
++    }
++    
++    // Zu neuem Terminal wechseln
++    vterm_change(vterm);
++    
++    return TRUE;
++}
++/**
++ * LostIO-Handler, der einen VScreen schließt
++ */
++int videofile_close(lostio_filehandle_t* fh)
++{
++    printf("video_close\n");
++    vterminal_t* vterm = (vterminal_t*) fh->node->data;
++    
++    // Virtuellen Bildschirm schliessen
++    if (gfxdriver) {
++        int index = atoi(vterm->name + 5);
++        int command[8];
++        command[0] = 0; // Erste Karte
++        command[1] = VIDEO_REMOVE_VSCREEN;
++        command[2] = index;
++        rpc_get_dword(gfxdriver,
++                      "VIDEODRV",
++                      sizeof(int) * 2,
++                      (char*)command);
++    }
++    
++    // Terminal wieder loeschen
++    vterm_destroy_video(vterm);
++    return 0;
++}
++
++/**
++ * Liefert ein virtuelles Terminal fuer Grafik zurueck
++ */
++void rpc_create_gfx_vterm(pid_t pid,
++                          dword correlation_id,
++                          size_t data_size,
++                          void* data)
++{
++    if (!gfxdriver) {
++        rpc_send_dword_response(pid, correlation_id, -1);
++        return;
++    }
++    vterminal_t* vterm = vterm_create_video(7);
++    printf("Geoeffnet: %s\n", vterm->name);
++    rpc_send_dword_response(pid, correlation_id, atoi(vterm->name + 5));
++}
++
+diff --git a/src/modules/vterm/output.c b/src/modules/vterm/output.c
+index fc36ef9..d00a7db 100644
+--- a/src/modules/vterm/output.c
++++ b/src/modules/vterm/output.c
+@@ -43,6 +43,8 @@
+ #include "vterm.h"
+ #include <sleep.h>
+ #include <ports.h>
++#include <init.h>
++#include <video/commands.h>
+ 
+ #define PORT_HW_CURSOR 0x3D4
+ 
+@@ -61,6 +63,7 @@ static void buffer_line_clear(vterm_output_t* out, out_buffer_t* buffer,
+ static void output_add_cell(vterm_output_t* out, videomem_cell_t c);
+ static void output_newline(vterm_output_t* out);
+ 
++extern void video_init_vterm(pid_t driver);
+ 
+ /**
+  * Ausgabetreiber allgemein vorbereiten
+@@ -70,9 +73,14 @@ void init_output()
+     video_memory = mem_allocate_physical(SCREEN_WIDTH_MAX * SCREEN_HEIGHT_MAX *
+         sizeof(videomem_cell_t), 0xb8000, 0);
+ 
+-    if (request_ports(PORT_HW_CURSOR, 2) == FALSE) {
+-        puts("[ vterm ] Konnte Port fuer Hardware-Cursor nicht registrieren.");
+-        exit(-1);
++    if (!gfxdriver) {
++        // FIXME: Das hier sollte anders geloest werden
++        if (request_ports(PORT_HW_CURSOR, 2) == FALSE) {
++            puts("[ vterm ] Konnte Port fuer Hardware-Cursor nicht registrieren.");
++            exit(-1);
++        }
++    } else {
++        video_init_vterm(gfxdriver);
+     }
+ }
+ 
+@@ -82,6 +90,40 @@ void init_output()
+  */
+ bool vterm_output_init(vterminal_t* vterm, size_t buffer_lines)
+ {
++    if (gfxdriver) {
++        // Virtuellen Bildschirm erzeugen
++        int index = atoi(vterm->name + 5);
++        int command[8];
++        command[0] = 0; // Erste Karte
++        command[1] = VIDEO_ADD_VSCREEN;
++        command[2] = index;
++        command[3] = get_pid();
++        if (!rpc_get_dword(gfxdriver,
++                           "VIDEODRV",
++                           sizeof(int) * 4,
++                           (char*)command)) {
++            puts("[ vterm ] Konnte virtuellen Bildschirm nicht erzeugen.");
++            return FALSE;
++        }
++        
++        // Aufloesung einstellen
++        command[0] = 0;
++        command[1] = VIDEO_SET_RESOLUTION;
++        command[2] = index;
++        command[3] = 0; // Erster Bildschirm
++        command[4] = 80;
++        command[5] = 25;
++        command[6] = 4;
++        command[7] = 1;
++        int result = rpc_get_dword(gfxdriver,
++                                   "VIDEODRV",
++                                   sizeof(int) * 8,
++                                   (char*)command);
++        if (result) {
++            printf("[ vterm ] Konnte nicht in grafischen Modus wechseln.\n");
++        }
++    }
++    
+     size_t buffer_size;
+     size_t i;
+     videomem_cell_t c;
+@@ -126,6 +168,43 @@ bool vterm_output_init(vterminal_t* vterm, size_t buffer_lines)
+     return TRUE;
+ }
+ 
++bool vterm_output_init_dummy(vterminal_t* vterm)
++{
++    videomem_cell_t c;
++    vterm_output_t* out = &(vterm->output);
++
++    // Struktur initialisieren
++    out->buffer_lines = 0;
++    out->buffer_pos.line = 0;
++    out->buffer_pos.column = 0;
++    
++    out->active = FALSE;
++    
++    out->screen_redraw = FALSE;
++    out->screen_topline = 0;
++    
++    // Im Moment wird standardmaessig der 80x25 Texmode benutzt. Eine
++    // Moeglichkeit um in den 90x50 Modus zu wechseln waere praktisch.
++    out->screen_width = 0;
++    out->screen_height = 0;
++    
++    out->scroll_lock = FALSE;
++    
++    // Standardschriftart: Grau auf schwarz
++    out->current_color.raw = 0;
++    
++    out->vt100_backup_valid = FALSE;
++
++    // Puffer vorbereiten
++    out->buffer = 0;
++
++
++    c.color.raw = 0;
++    c.ascii = ' ';
++
++    return TRUE;
++}
++
+ /**
+  * Wird beim Wechsel zu einem neuen virtuellen Terminal aufgerufen
+  */
+@@ -137,7 +216,22 @@ void vterm_output_change(vterminal_t* old, vterminal_t* new)
+         old->output.active = FALSE;
+     }
+ 
++    // Virtuellen Screen wechseln
++    if (gfxdriver) {
++        int command[3];
++        command[0] = 0;
++        command[1] = VIDEO_SET_ACTIVE_VSCREEN;
++        command[2] = atoi(new->name + 5);
++        if (!rpc_get_dword(gfxdriver,
++                           "VIDEODRV",
++                           sizeof(int) * 3,
++                           (char*)command)) {
++            puts("[ vterm ] Konnte virtuellen Bildschirm nicht wechseln.");
++        }
++    }
++
+     new->output.active = TRUE;
++    if (!new->output.buffer) return;
+     screen_draw(&new->output);
+     screen_cursor_update(&new->output);
+ }
+@@ -267,12 +361,14 @@ static void screen_cursor_update(vterm_output_t* out)
+     if (screen_position(out, out->buffer_pos, &pos) == TRUE) {
+         position = pos.line * out->screen_width + pos.column;
+     }
+-
+-    // Hardware Cursor verschieben
+-    outb(PORT_HW_CURSOR, 15);
+-    outb(PORT_HW_CURSOR + 1, position);
+-    outb(PORT_HW_CURSOR, 14);
+-    outb(PORT_HW_CURSOR + 1, position >> 8);
++    
++    if (!gfxdriver) {
++        // Hardware Cursor verschieben
++        outb(PORT_HW_CURSOR, 15);
++        outb(PORT_HW_CURSOR + 1, position);
++        outb(PORT_HW_CURSOR, 14);
++        outb(PORT_HW_CURSOR + 1, position >> 8);
++    }
+ }
+ 
+ /**
+diff --git a/src/modules/vterm/term.c b/src/modules/vterm/term.c
+index 04d9c0c..e189315 100644
+--- a/src/modules/vterm/term.c
++++ b/src/modules/vterm/term.c
+@@ -49,7 +49,7 @@ char* strnstr(const char* s, const char* find, size_t slen);
+ vterminal_t* current_vterm = NULL;
+ 
+ /// Liste in der alle virtuellen Terminals gespeichert werden
+-static list_t* vterm_list;
++list_t* vterm_list;
+ 
+ /// Virtuelles Terminal erstellen
+ vterminal_t* vterm_create(char shortcut);
+@@ -76,6 +76,7 @@ void init_vterminals(unsigned int count)
+         list_size(vterm_list) - 1));
+ }
+ 
++static int next_vterm_id = 0;
+ /**
+  * Virtuelles Terminal erstellen
+  *
+@@ -90,12 +91,11 @@ vterminal_t* vterm_create(char shortcut)
+     }
+     memset(vterm, 0, sizeof(vterminal_t));
+     
+-    static int next_vterm_id = 0;
+     asprintf(&vterm->name, "vterm%d", next_vterm_id++);
+     
+     // Knoten fuer LostIO-Schnittstelle erstellen
+     size_t name_len = strlen(vterm->name);
+-    char path[name_len + 7];
++    char path[name_len + 9];
+     path[0] = '/';
+     memcpy(path + 1, vterm->name, name_len + 1);
+     
+@@ -129,6 +129,102 @@ vterminal_t* vterm_create(char shortcut)
+ }
+ 
+ /**
++ * Virtuelles Terminal erstellen, für Grafikausgabe
++ *
++ * @return Pointer auf die vterm-Struktur
++ */
++vterminal_t* vterm_create_video(char shortcut)
++{
++    // vterm-Struktur vorbereiten
++    vterminal_t* vterm = malloc(sizeof(vterminal_t));
++    if (vterm == NULL) {
++        return NULL;
++    }
++    memset(vterm, 0, sizeof(vterminal_t));
++    
++    asprintf(&vterm->name, "vterm%d", next_vterm_id++);
++    
++    // Knoten fuer LostIO-Schnittstelle erstellen
++    size_t name_len = strlen(vterm->name);
++    char path[name_len + 9];
++    path[0] = '/';
++    memcpy(path + 1, vterm->name, name_len + 1);
++    
++    // Verzeichnis
++    vfstree_create_node(path, LOSTIO_TYPES_DIRECTORY, 0, NULL,
++        LOSTIO_FLAG_BROWSABLE);
++    // In-Node
++    memcpy(path + name_len + 1, "/in", 4);
++    vfstree_create_node(path, LOSTIO_TYPES_IN, 0, vterm,
++        LOSTIO_FLAG_NOAUTOEOF);
++    vterm->in_node = vfstree_get_node_by_path(path);
++
++    // Kein Out-Node
++    
++    // Video-Node
++    memcpy(path + name_len + 1, "/video", 7);
++    vfstree_create_node(path, LOSTIO_TYPES_VIDEO, 0, vterm, 0);
++    vterm->video_node = vfstree_get_node_by_path(path);
++    
++    // Shortcut zuweisen
++    vterm->shortcut = shortcut;
++    
++    // Standardmaessig nichts ausgeben
++    vterm->input_echo = FALSE;
++
++    // vterm an Liste Anhaengen
++    vterm_list = list_push(vterm_list, vterm);
++    
++    vterm_output_init_dummy(vterm);
++    return vterm;
++}
++
++void vterm_destroy_video(vterminal_t* vterm)
++{
++    if (vterm->output.buffer) return;
++    // Terminal herraussuchen
++    int id = atoi(vterm->name + 5);
++    vterm = 0;
++    int i = 0;
++    while ((vterm = list_get_element_at(vterm_list, i))) {
++        if (atoi(vterm->name + 5) == id) {
++            break;
++        }
++        i++;
++    }
++    if (!vterm) return;
++    
++    if (vterm == current_vterm) {
++        vterminal_t* newterm = 0;
++        // Zu anderem Terminal wechseln
++        int j = 0;
++        while ((newterm = list_get_element_at(vterm_list, j))) {
++            if (newterm != vterm) {
++                break;
++            }
++            j++;
++        }
++        vterm_change(newterm);
++        // TODO: Immer nach vterm0 wechseln?
++    }
++    
++    // Terminal aus Liste loeschen
++    list_remove(vterm_list, i);
++    
++    size_t name_len = strlen(vterm->name);
++    char path[name_len + 2];
++    path[0] = '/';
++    memcpy(path + 1, vterm->name, name_len + 1);
++    if (!vfstree_delete_node(path)) {
++        printf("Kann Terminal-Dateien nicht loeschen.\n");
++    }
++    
++    // Speicher freigeben
++    free(vterm->name);
++    free(vterm);
++}
++
++/**
+  * Virtuelles Terminal aktiviern
+  *
+  * @param vterm Pointer auf die vterm-Struktur
+@@ -223,20 +319,24 @@ bool vterm_process_raw_input(uint8_t keycode, struct modifiers* modifiers)
+                 return TRUE;
+         }
+     } else if (modifiers->alt) {
++        v();
+         switch (keycode) {
+-            case KEYCODE_F1: vterm_switch_to(1); return TRUE;
+-            case KEYCODE_F2: vterm_switch_to(2); return TRUE;
+-            case KEYCODE_F3: vterm_switch_to(3); return TRUE;
+-            case KEYCODE_F4: vterm_switch_to(4); return TRUE;
+-            case KEYCODE_F5: vterm_switch_to(5); return TRUE;
+-            case KEYCODE_F6: vterm_switch_to(6); return TRUE;
+-            case KEYCODE_F7: vterm_switch_to(7); return TRUE;
+-            case KEYCODE_F8: vterm_switch_to(8); return TRUE;
+-            case KEYCODE_F9: vterm_switch_to(9); return TRUE;
+-            case KEYCODE_F10: vterm_switch_to(10); return TRUE;
+-            case KEYCODE_F11: vterm_switch_to(11); return TRUE;
+-            case KEYCODE_F12: vterm_switch_to(12); return TRUE;
++            case KEYCODE_F1: vterm_switch_to(1); break;
++            case KEYCODE_F2: vterm_switch_to(2); break;
++            case KEYCODE_F3: vterm_switch_to(3); break;
++            case KEYCODE_F4: vterm_switch_to(4); break;
++            case KEYCODE_F5: vterm_switch_to(5); break;
++            case KEYCODE_F6: vterm_switch_to(6); break;
++            case KEYCODE_F7: vterm_switch_to(7); break;
++            case KEYCODE_F8: vterm_switch_to(8); break;
++            case KEYCODE_F9: vterm_switch_to(9); break;
++            case KEYCODE_F10: vterm_switch_to(10); break;
++            case KEYCODE_F11: vterm_switch_to(11); break;
++            case KEYCODE_F12: vterm_switch_to(12); break;
++            default: p(); return FALSE;
+         }
++        p();
++        return TRUE;
+     } else if (keycode == KEYCODE_SCROLL_LOCK) {
+         current_vterm->output.scroll_lock = !current_vterm->output.scroll_lock;
+         return TRUE;
+diff --git a/src/modules/vterm/vterm.c b/src/modules/vterm/vterm.c
+index a826c9f..c233ca6 100644
+--- a/src/modules/vterm/vterm.c
++++ b/src/modules/vterm/vterm.c
+@@ -42,18 +42,31 @@
+ #include "sleep.h"
+ #include "init.h"
+ 
++char *gfxdrivername = "";
++pid_t gfxdriver = 0;
+ 
+ /// Hier kommen die Eingaben fuer all die virtuellen Terminals her
+ FILE* input = NULL;
+ 
+ int main(int argc, char* argv[])
+ {
++    // Kommandozeilenargument: Grafiktreiber
++    // TODO: Mehrere Treiber
++    if (argc == 2) {
++        gfxdrivername = argv[1];
++        gfxdriver = init_service_get(gfxdrivername);
++        if (!gfxdriver) {
++            printf("Grafiktreiber nicht gefunden: %s\n", gfxdrivername);
++            return -1;
++        }
++    }
++    
+     // Schnittstelle fuer die anderen Prozesse einrichten
+     init_lostio_interface();
+ 
+     // Virtuelle Terminal initialisieren
+     init_output();
+-    init_vterminals(10);
++    init_vterminals(6);
+ 
+     // Service registrieren
+     init_service_register("vterm");
+diff --git a/src/modules/vterm/vterm.h b/src/modules/vterm/vterm.h
+index 80a1503..1499d5e 100644
+--- a/src/modules/vterm/vterm.h
++++ b/src/modules/vterm/vterm.h
+@@ -39,12 +39,16 @@
+ 
+ #define LOSTIO_TYPES_OUT 255
+ #define LOSTIO_TYPES_IN 254
++#define LOSTIO_TYPES_VIDEO 253
+ 
+ #define SCREEN_WIDTH_MAX 80
+ #define SCREEN_HEIGHT_MAX 25
+ 
+ #define VT100_BUFFER_LEN 16
+ 
++extern char *gfxdrivername;
++extern pid_t gfxdriver;
++
+ /// LostIO-Interface vorbereiten
+ void init_lostio_interface(void);
+ 
+@@ -163,6 +167,9 @@ typedef struct {
+ 
+     /// Anzahl der Zeichen im utf-8 Puffer
+     size_t utf8_buffer_offset;
++    
++    /// LostIO-Node fuer video-Datei
++    vfstree_node_t* video_node;
+ } vterminal_t;
+ 
+ /// Status der Modifiertasten
+@@ -178,8 +185,16 @@ extern vterminal_t* current_vterm;
+ /// Virtuelle terminals einrichten
+ void init_vterminals(unsigned int count);
+ 
++vterminal_t* vterm_create(char shortcut);
++vterminal_t* vterm_create_video(char shortcut);
++void vterm_destroy_video(vterminal_t* vterm);
++
++void vterm_change(vterminal_t* vterm);
++
+ /// Ausgabe fuer ein virtuelles Terminal initialisieren
+ bool vterm_output_init(vterminal_t* vterm, size_t buffer_lines);
++/// Ausgabe fuer ein virtuelles Terminal initialisieren (Dummy fuer Grafikterminals)
++bool vterm_output_init_dummy(vterminal_t* vterm);
+ 
+ /// Wird beim Wechsel zu einem neuen virtuellen Terminal aufgerufen
+ void vterm_output_change(vterminal_t* old, vterminal_t* new);
+-- 
+1.5.4.3
+

@@ -1,0 +1,640 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH] Multiple packets
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%5D%20Multiple%20packets&In-Reply-To=%3C1251572590-31603-1-git-send-email-max%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000023.html">
+   <LINK REL="Next"  HREF="000025.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH] Multiple packets</H1>
+    <B>max at tyndur.org</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%5D%20Multiple%20packets&In-Reply-To=%3C1251572590-31603-1-git-send-email-max%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH] Multiple packets">max at tyndur.org
+       </A><BR>
+    <I>Sat Aug 29 21:03:10 CEST 2009</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000023.html">[cdi-devel] [PATCH] usb: Handle multiple packets in	usb_do_packet
+</A></li>
+        <LI>Next message: <A HREF="000025.html">[cdi-devel] [PATCH] usb: A bit faster
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#24">[ date ]</a>
+              <a href="thread.html#24">[ thread ]</a>
+              <a href="subject.html#24">[ subject ]</a>
+              <a href="author.html#24">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>From: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+
++ OHCD can send more than one packet at once. Now it is a
+  lot faster but unfortunately, you get a lot of STALLs
+  that cannot be recovered.
+* UHCD takes multiple packets but sends them one by one -
+  although that is not very nice.
+
+Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+---
+ usb/include/usb.h |   12 +++-
+ usb/main.c        |   46 +++++-----
+ usb/msd.c         |    9 ++-
+ usb/ohci.c        |  248 +++++++++++++++++++++++++++++++----------------------
+ usb/uhci.c        |   23 +++++-
+ 5 files changed, 210 insertions(+), 128 deletions(-)
+
+diff --git a/usb/include/usb.h b/usb/include/usb.h
+index 5f0f2cc..4b37dc5 100644
+--- a/usb/include/usb.h
++++ b/usb/include/usb.h
+@@ -169,7 +169,7 @@ struct hci {
+       *
+       * @return Gibt den Status an (z. B. USB_NO_ERROR f&#195;&#188;r keinen Fehler)
+       */
+-    int (* do_packet)(struct usb_packet* packet);
++    int (* do_packets)(struct usb_packet* packets, int num_packets);
+ 
+     /**
+       * Erstellt eine neue Pipe
+@@ -299,6 +299,12 @@ struct msclass_data {
+     struct usb_pipe* bulk_out;
+ };
+ 
++enum usb_toggle {
++    TOGGLE_UNSPECIFIC = 0,
++    TOGGLE_0 = 1,
++    TOGGLE_1 = 2
++};
++
+ /** Beschreibt ein USB-Paket */
+ struct usb_packet {
+     /// Die gewuenschte Pipe
+@@ -311,6 +317,10 @@ struct usb_packet {
+     int length;
+     /// Typ der Daten (zur Sicherheit, damit es kein doofes STALL gibt)
+     int type_of_data;
++    /// Fehlertyp (oder USB_NO_ERROR)
++    int condition;
++    /// Bestimmtes Data-Toggle benuten
++    enum usb_toggle use_toggle;
+ };
+ 
+ /// Beschreibt eine Pipe
+diff --git a/usb/main.c b/usb/main.c
+index da767cb..4639369 100644
+--- a/usb/main.c
++++ b/usb/main.c
+@@ -177,6 +177,7 @@ int usb_do_packet(struct usb_packet* packets, int num_packets)
+                 out_packets[cur].data = packets[i].data;
+                 out_packets[cur].length = MIN(packets[i].length, mps);
+                 out_packets[cur].type_of_data = tod;
++                out_packets[cur].condition = USB_NAK;
+ 
+                 packets[i].data += out_packets[cur].length;
+                 packets[i].length -= out_packets[cur].length;
+@@ -185,28 +186,27 @@ int usb_do_packet(struct usb_packet* packets, int num_packets)
+         }
+     }
+ 
+-    // Pakete (FIXME: einzeln) senden
+-    for (i = 0; i &lt; num_out_packets; i++) {
+-        error = USB_NAK;
+-        while (error == USB_NAK) {
+-            error = device-&gt;hci-&gt;do_packet(&amp;out_packets[i]);
+-            if (error == USB_NAK) {
+-                cdi_sleep_ms(5);
++    error = device-&gt;hci-&gt;do_packets(out_packets, num_out_packets);
++    if (error &amp; USB_STALLED) {
++        printf(&quot;[usb] ENDPOINT 0x%02X DES GER&#195;&#132;TS %i STALLED!\n&quot;,
++            pipe-&gt;endpoint-&gt;endpoint_address,
++            device-&gt;id);
++        do_control(device, HOST_TO_DEV | NO_DATA, NULL, 0, STD_REQUEST,
++            REC_ENDPOINT, CLEAR_FEATURE, 0,
++            pipe-&gt;endpoint-&gt;endpoint_address);
++    } else if (error &amp; USB_NAK) {
++        // Nicht angenommene Pakete (FIXME: einzeln) senden
++        for (i = 0; i &lt; num_out_packets; i++) {
++            if (!(out_packets[i].condition &amp; USB_NAK)) {
++                continue;
++            }
++            error = USB_NAK;
++            while (error &amp; USB_NAK) {
++                error = device-&gt;hci-&gt;do_packets(&amp;out_packets[i], 1);
++                if (error &amp; USB_NAK) {
++                    cdi_sleep_ms(5);
++                }
+             }
+-        }
+-        if (error != USB_NO_ERROR) {
+-            i--;
+-        } else {
+-            pipe-&gt;data_toggle ^= 1;
+-        }
+-
+-        if (error == USB_STALLED) {
+-            printf(&quot;[usb] ENDPOINT 0x%02X DES GER&#195;&#132;TS %i STALLED!\n&quot;,
+-                pipe-&gt;endpoint-&gt;endpoint_address,
+-                device-&gt;id);
+-            do_control(device, HOST_TO_DEV | NO_DATA, NULL, 0, STD_REQUEST,
+-                REC_ENDPOINT, CLEAR_FEATURE, 0,
+-                pipe-&gt;endpoint-&gt;endpoint_address);
+         }
+     }
+ 
+@@ -244,6 +244,7 @@ static void* do_control(struct usb_device* device, int direction, void* buffer,
+         .data         = setup,
+         .length       = sizeof(*setup),
+         .type_of_data = USB_TOD_SETUP,
++        .use_toggle   = TOGGLE_UNSPECIFIC
+     };
+ 
+     if (usb_do_packet(&amp;setup_packet, 1)) {
+@@ -262,6 +263,7 @@ static void* do_control(struct usb_device* device, int direction, void* buffer,
+             .type_of_data =
+                 (direction ==
+                  DEV_TO_HOST ? USB_TOD_SETUP_DATA_IN : USB_TOD_SETUP_DATA_OUT),
++            .use_toggle   = TOGGLE_UNSPECIFIC
+         };
+ 
+         rval = usb_do_packet(&amp;data_packet, 1);
+@@ -272,8 +274,8 @@ static void* do_control(struct usb_device* device, int direction, void* buffer,
+             .pipe       = device-&gt;ep0,
+             .data       = NULL,
+             .length     = 0,
++            .use_toggle = TOGGLE_1
+         };
+-        device-&gt;ep0-&gt;data_toggle = 1;
+ 
+         if (no_data || (direction == HOST_TO_DEV)) {
+             ack_packet.type = PACKET_IN;
+diff --git a/usb/msd.c b/usb/msd.c
+index 4191002..34e6e04 100644
+--- a/usb/msd.c
++++ b/usb/msd.c
+@@ -34,7 +34,7 @@
+ //DEBUG definieren, um einige Debugmeldungen anzuzeigen
+ #define DEBUG
+ //FULLDEBUG definieren, um ALLE Debugmeldungen anzuzeigen
+-#define FULLDEBUG
++//#define FULLDEBUG
+ 
+ #if defined FULLDEBUG &amp;&amp; !defined DEBUG
+ #define DEBUG
+@@ -239,6 +239,7 @@ static int write_cmd(struct usb_device* usbdev, void* src)
+         .data         = src,
+         .length       = 0x1F,
+         .type_of_data = USB_TOD_COMMAND,
++        .use_toggle   = TOGGLE_UNSPECIFIC
+     };
+ 
+     return usb_do_packet(&amp;cmd_packet, 1);
+@@ -266,6 +267,7 @@ static int read_status(struct usb_device* usbdev, uint32_t expected_tag)
+         .data         = csw,
+         .length       = 0x0D,
+         .type_of_data = USB_TOD_STATUS,
++        .use_toggle   = TOGGLE_UNSPECIFIC
+     };
+ 
+     error = usb_do_packet(&amp;status_packet, 1);
+@@ -319,6 +321,7 @@ static int msd_get_capacity(struct usb_device* usbdev, uint32_t* block_size,
+         .data         = cap,
+         .length       = sizeof(*cap),
+         .type_of_data = USB_TOD_DATA_IN,
++        .use_toggle   = TOGGLE_UNSPECIFIC
+     };
+ 
+     if (usb_do_packet(&amp;in_packet, 1) != USB_NO_ERROR) {
+@@ -373,7 +376,7 @@ static inline int tsl(volatile int* variable)
+     return rval;
+ }
+ 
+-#define MAX_ACCESS_BLOCKS 32
++#define MAX_ACCESS_BLOCKS 4
+ 
+ static uint32_t msd_read(struct usb_device* usbdev, uint32_t lba,
+     uint16_t sectors, void* buffer,
+@@ -461,6 +464,7 @@ static uint32_t msd_read(struct usb_device* usbdev, uint32_t lba,
+         .data         = buffer,
+         .length       = length,
+         .type_of_data = USB_TOD_DATA_IN,
++        .use_toggle   = TOGGLE_UNSPECIFIC
+     };
+ 
+     error = usb_do_packet(&amp;in_packet, 1);
+@@ -562,6 +566,7 @@ static uint32_t msd_write(struct usb_device* usbdev, uint32_t lba,
+         .data         = buffer,
+         .length       = length,
+         .type_of_data = USB_TOD_DATA_OUT,
++        .use_toggle   = TOGGLE_UNSPECIFIC
+     };
+ 
+     error = usb_do_packet(&amp;out_packet, 1);
+diff --git a/usb/ohci.c b/usb/ohci.c
+index 9e0a2aa..d95f330 100644
+--- a/usb/ohci.c
++++ b/usb/ohci.c
+@@ -53,7 +53,7 @@ static void ohci_kill(struct cdi_driver* cdi_hcd);
+ static void ohci_deinit(struct cdi_device* cdi_hci);
+ void ohci_init(struct cdi_device* cdi_hci);
+ static void ohci_handler(struct cdi_device* dev);
+-static int ohci_do_packet(struct usb_packet* packet);
++static int ohci_do_packets(struct usb_packet* packet, int num_packets);
+ static cdi_list_t get_devices(struct hci* gen_hci);
+ static void activate_device(struct usb_device* device);
+ static void ohci_reset_device(struct usb_device* device);
+@@ -109,7 +109,7 @@ void ohci_init(struct cdi_device* cdi_hci)
+         dprintf(&quot;Speicher nicht gefunden!\n&quot;);
+         return;
+     }
+-    dprintf(&quot;Speicher @ 0x%08x\n&quot;, (uintptr_t) ohci-&gt;memory);
++    dprintf(&quot;Speicher @ 0x%08X\n&quot;, (uintptr_t) ohci-&gt;memory);
+     if ((ohci-&gt;memory-&gt;hc_revision &amp; 0xFF) != 0x10) {
+         dprintf(
+             &quot;Dieses OHCI k&#195;&#182;nnte inkompatibel mit dem Treiber sein (HCI %i.%i, HCD 1.0)\n&quot;,
+@@ -134,7 +134,7 @@ void ohci_init(struct cdi_device* cdi_hci)
+         return;
+     }
+ 
+-    ohci-&gt;transfer_pool = mempool_create(32 * (1024 + sizeof(struct ohci_td)),
++    ohci-&gt;transfer_pool = mempool_create(56 * (1024 + sizeof(struct ohci_td)),
+         1024 + sizeof(struct ohci_td));
+     if (ohci-&gt;transfer_pool == NULL) {
+         dprintf(&quot;Transfer-Speicherpool konnte nicht erzeugt werden!\n&quot;);
+@@ -229,24 +229,33 @@ void ohci_init(struct cdi_device* cdi_hci)
+ 
+     gen_hci-&gt;find_devices = &amp;get_devices;
+     gen_hci-&gt;activate_device = &amp;activate_device;
+-    gen_hci-&gt;do_packet = &amp;ohci_do_packet;
++    gen_hci-&gt;do_packets = &amp;ohci_do_packets;
+     gen_hci-&gt;add_pipe = &amp;ohci_establish_pipe;
+ 
+     enumerate_hci(gen_hci);
+ }
+ 
+-static int ohci_do_packet(struct usb_packet* packet)
++static inline int tsl(volatile int* variable)
++{
++    int rval;
++    rval = *variable;
++    *variable = 1;
++    return rval;
++}
++
++static int ohci_do_packets(struct usb_packet* packets, int num_packets)
+ {
+     struct ohci_ed_desc* edsc;
+     struct ohci_td_desc* tdsc, * otdsc;
+-    int i, cond;
+-    struct ohci* ohci = (struct ohci*) packet-&gt;pipe-&gt;device-&gt;hci;
+-    struct ohci_td* vtd;
+-    uintptr_t ptd;
++    int i, j, cond, toggle, done_packets;
++    struct ohci* ohci = (struct ohci*) packets[0].pipe-&gt;device-&gt;hci;
++    struct ohci_td* vtd[num_packets];
++    uintptr_t ptd[num_packets];
++    static volatile int locked = 0;
+ 
+     for (i = 0; (edsc = cdi_list_get(ohci-&gt;ed_list, i)) != NULL; i++) {
+-        if ((edsc-&gt;function == packet-&gt;pipe-&gt;device-&gt;id) &amp;&amp;
+-            (edsc-&gt;endpoint == packet-&gt;pipe-&gt;endpoint-&gt;endpoint_address))
++        if ((edsc-&gt;function == packets[0].pipe-&gt;device-&gt;id) &amp;&amp;
++            (edsc-&gt;endpoint == packets[0].pipe-&gt;endpoint-&gt;endpoint_address))
+         {
+             break;
+         }
+@@ -254,100 +263,143 @@ static int ohci_do_packet(struct usb_packet* packet)
+     if (edsc == NULL) {
+         return USB_TIMEOUT; //Genau das w&#195;&#188;rde passieren
+     }
+-    if (mempool_get(ohci-&gt;transfer_pool, (void**) &amp;vtd, &amp;ptd) == -1) {
+-        return USB_TRIVIAL_ERROR;
+-    }
+-    if ((packet-&gt;data != NULL) &amp;&amp; (packet-&gt;type != PACKET_IN)) {
+-        memcpy((void*) vtd + sizeof(struct ohci_td), packet-&gt;data,
+-            packet-&gt;length);
+-    }
+-    vtd-&gt;rounding = 1; //Warum nicht
+-    switch (packet-&gt;type) {
+-        case PACKET_SETUP:
+-            vtd-&gt;direction = OHC_TD_DIR_SETUP;
+-            break;
+-        case PACKET_IN:
+-            vtd-&gt;direction = OHC_TD_DIR_IN;
+-            break;
+-        case PACKET_OUT:
+-            vtd-&gt;direction = OHC_TD_DIR_OUT;
+-            break;
+-        default:
+-            mempool_put(ohci-&gt;transfer_pool, vtd);
+-            return USB_TRIVIAL_ERROR; //Hm, passt nicht ganz
+-    }
+-    vtd-&gt;di = 0;
+-    vtd-&gt;toggle = 0x2 | packet-&gt;pipe-&gt;data_toggle;
+-    vtd-&gt;error = 0;
+-    vtd-&gt;condition = 15;
+-    if ((packet-&gt;data == NULL) || !packet-&gt;length) {
+-        vtd-&gt;current_buffer_pointer = 0;
+-        vtd-&gt;buffer_end = 0;
+-    } else {
+-        vtd-&gt;current_buffer_pointer = ptd + sizeof(struct ohci_td);
+-        vtd-&gt;buffer_end = ptd + sizeof(struct ohci_td) + packet-&gt;length - 1;
+-    }
+-    vtd-&gt;next_td = 0;
+-    tdsc = malloc(sizeof(*tdsc));
+-    if (tdsc == NULL) {
+-        mempool_put(ohci-&gt;transfer_pool, vtd);
+-        return USB_TRIVIAL_ERROR;
+-    }
+-    tdsc-&gt;virt = vtd;
+-    tdsc-&gt;phys = ptd;
+-    tdsc-&gt;endpoint = edsc;
+-    if (cdi_list_size(edsc-&gt;transfers)) {
+-        otdsc = cdi_list_get(edsc-&gt;transfers, cdi_list_size(
+-                edsc-&gt;transfers) - 1);
+-        otdsc-&gt;virt-&gt;next_td = ptd;
+-    }
+-    cdi_list_insert(edsc-&gt;transfers, cdi_list_size(edsc-&gt;transfers), tdsc);
+-    if (!edsc-&gt;virt-&gt;td_queue_head) {
+-        edsc-&gt;virt-&gt;td_queue_head = ptd;
++    toggle = packets[0].pipe-&gt;data_toggle;
++    for (i = 0; i &lt; num_packets; i++) {
++        if (mempool_get(ohci-&gt;transfer_pool, (void**) &amp;vtd[i],
++                &amp;ptd[i]) == -1)
++        {
++            return USB_TRIVIAL_ERROR;
++        }
++        if ((packets[i].data != NULL) &amp;&amp; (packets[i].type != PACKET_IN)) {
++            memcpy((void*) vtd[i] + sizeof(struct ohci_td), packets[i].data,
++                packets[i].length);
++        }
++        vtd[i]-&gt;rounding = 1; //Warum nicht
++        switch (packets[i].type) {
++            case PACKET_SETUP:
++                vtd[i]-&gt;direction = OHC_TD_DIR_SETUP;
++                break;
++            case PACKET_IN:
++                vtd[i]-&gt;direction = OHC_TD_DIR_IN;
++                break;
++            case PACKET_OUT:
++                vtd[i]-&gt;direction = OHC_TD_DIR_OUT;
++                break;
++            default: //Hm, passt nicht ganz
++                for (j = 0; j &lt;= i; j++) {
++                    mempool_put(ohci-&gt;transfer_pool, vtd[j]);
++                }
++                return USB_TRIVIAL_ERROR;
++        }
++        vtd[i]-&gt;di = 0;
++        if (packets[i].use_toggle == TOGGLE_0) {
++            toggle = 0;
++        } else if (packets[i].use_toggle == TOGGLE_1) {
++            toggle = 1;
++        }
++        vtd[i]-&gt;toggle = 0x2 | toggle;
++        toggle ^= 1;
++        vtd[i]-&gt;error = 0;
++        vtd[i]-&gt;condition = 15;
++        if ((packets[i].data == NULL) || !packets[i].length) {
++            vtd[i]-&gt;current_buffer_pointer = 0;
++            vtd[i]-&gt;buffer_end = 0;
++        } else {
++            vtd[i]-&gt;current_buffer_pointer = ptd[i] + sizeof(struct ohci_td);
++            vtd[i]-&gt;buffer_end = ptd[i] + sizeof(struct ohci_td) +
++                                 packets[i].length - 1;
++        }
++        vtd[i]-&gt;next_td = 0;
++        tdsc = malloc(sizeof(*tdsc));
++        if (tdsc == NULL) {
++            for (j = 0; j &lt;= i; j++) {
++                mempool_put(ohci-&gt;transfer_pool, vtd[j]);
++            }
++            return USB_TRIVIAL_ERROR;
++        }
++        tdsc-&gt;virt = vtd[i];
++        tdsc-&gt;phys = ptd[i];
++        tdsc-&gt;endpoint = edsc;
++
++        while (tsl(&amp;locked)) {
++#ifndef CDI_STANDALONE
++            __asm__ __volatile__ (&quot;hlt&quot;);
++#endif
++        }
++        if (cdi_list_size(edsc-&gt;transfers)) {
++            otdsc = cdi_list_get(edsc-&gt;transfers, 0);
++            otdsc-&gt;virt-&gt;next_td = ptd[i];
++        }
++        if (!edsc-&gt;virt-&gt;td_queue_head) {
++            edsc-&gt;virt-&gt;td_queue_head = ptd[i];
++        }
++        locked = 0;
++
++        cdi_list_push(edsc-&gt;transfers, tdsc);
+     }
++    packets[0].pipe-&gt;data_toggle = toggle;
+     if (edsc-&gt;type == USB_CONTROL) {
+         ohci-&gt;memory-&gt;hc_command_status |= OHC_CMST_CLF;
+     } else if (edsc-&gt;type == USB_BULK) {
+         ohci-&gt;memory-&gt;hc_command_status |= OHC_CMST_BLF;
+     }
+-    while (vtd-&gt;condition == 15) {
++    done_packets = 0;
++    cond = USB_NO_ERROR;
++    while (done_packets &lt; num_packets) {
+         cdi_sleep_ms(1);
++        for (i = 0; i &lt; num_packets; i++) {
++            if (vtd[i]-&gt;condition != 15) {
++                done_packets++;
++                switch (vtd[i]-&gt;condition) {
++                    case 0x00:
++                        packets[i].condition = USB_NO_ERROR;
++                        break;
++                    case 0x02:
++                        packets[i].condition = USB_BITSTUFF;
++                        break;
++                    case 0x04:
++                        packets[i].condition = USB_STALLED;
++                        for (j = 0; j &lt; num_packets; j++) {
++                            vtd[j]-&gt;condition = 0x04; //Allet, was nicht fertig ist, ist STALLed
++                        }
++                        break;
++                    case 0x05:
++                        packets[i].condition = USB_TIMEOUT;
++                        break;
++                    case 0x08:
++                        packets[i].condition = USB_BABBLE;
++                        break;
++                    case 0x0C:
++                    case 0x0D:
++                        packets[i].condition = USB_BUFFER_ERROR;
++                        break;
++                    default:
++                        packets[i].condition = USB_CRC;
++                        break;
++                }
++                cond |= packets[i].condition;
++                vtd[i]-&gt;condition = 15; //Nicht nochmal &#195;&#188;berpr&#195;&#188;fen
++            }
++        }
+     }
+-    cond = vtd-&gt;condition;
+-    if ((packet-&gt;data != NULL) &amp;&amp; (packet-&gt;type == PACKET_IN)) {
+-        memcpy(packet-&gt;data, (void*) vtd + sizeof(struct ohci_td),
+-            packet-&gt;length);
++    for (i = 0; i &lt; num_packets; i++) {
++        if ((packets[i].data != NULL) &amp;&amp; (packets[i].type == PACKET_IN)) {
++            memcpy(packets[i].data, (void*) vtd[i] + sizeof(struct ohci_td),
++                packets[i].length);
++        }
++        if (vtd[i]-&gt;next_td == 0) {
++            edsc-&gt;virt-&gt;td_queue_head = 0;
++        }
++        mempool_put(ohci-&gt;transfer_pool, vtd[i]);
+     }
+-    if (vtd-&gt;next_td == 0) {
++    if (cond &amp; USB_STALLED) { //Transferliste f&#195;&#188;r diesen Endpoint leeren
+         edsc-&gt;virt-&gt;td_queue_head = 0;
++        while ((tdsc = cdi_list_pop(edsc-&gt;transfers)) != NULL) {
++            free(tdsc);
++        }
++        edsc-&gt;virt-&gt;td_queue_tail = 0; //Weitermachen
+     }
+-    mempool_put(ohci-&gt;transfer_pool, vtd);
+-    switch (cond) {
+-        case 0x00:
+-            return USB_NO_ERROR;
+-        case 0x01:
+-            return USB_CRC;
+-        case 0x02:
+-            return USB_BITSTUFF;
+-        case 0x03: //Datatoggle-Fehler
+-            return USB_CRC;
+-        case 0x04:
+-            return USB_STALLED;
+-        case 0x05:
+-            return USB_TIMEOUT;
+-        case 0x06: //PID-Fehler
+-        case 0x07: //Ebenso
+-            return USB_CRC;
+-        case 0x08:
+-            return USB_BABBLE;
+-        case 0x09: //Data underrun
+-            return USB_CRC;
+-        case 0x0C: //Buffer overrun
+-        case 0x0D: //Buffer underrun
+-            return USB_BUFFER_ERROR;
+-        default: //&#195;&#150;hm...
+-            return USB_CRC;
+-    }
++    return cond;
+ }
+ 
+ static cdi_list_t get_devices(struct hci* gen_hci)
+@@ -440,13 +492,6 @@ static void ohci_establish_pipe(struct usb_pipe* pipe)
+     dsc-&gt;transfers = cdi_list_create();
+     cdi_list_push(ohci-&gt;ed_list, dsc);
+ 
+-    dprintf(
+-        &quot;%s-Endpoint %i (Ger&#195;&#164;t %i) hinzugef&#195;&#188;gt (%s)\n&quot;,
+-        iscontrol ? &quot;Control&quot; : &quot;Bulk&quot;, ved-&gt;endpoint, ved-&gt;function,
+-        (ved-&gt;direction ==
+-         OHC_ED_DIR_TD) ? &quot;IN/OUT/SETUP&quot; : ((ved-&gt;direction ==
+-                                             OHC_ED_DIR_IN) ? &quot;IN&quot; : &quot;OUT&quot;));
+-
+     if (iscontrol) {
+         ohci-&gt;memory-&gt;hc_control_head_ed = ped;
+     } else {
+@@ -485,6 +530,7 @@ static void ohci_handler(struct cdi_device* dev)
+             {
+                 if (tdsc-&gt;phys == phys) { //Das ist der fertige Transfer
+                     cdi_list_remove(edsc-&gt;transfers, j);
++                    free(tdsc);
+                     break;
+                 }
+             }
+diff --git a/usb/uhci.c b/usb/uhci.c
+index 405a879..bad63bb 100644
+--- a/usb/uhci.c
++++ b/usb/uhci.c
+@@ -54,7 +54,7 @@ static struct cdi_driver cdi_driver;
+ static cdi_list_t active_transfers;
+ 
+ static void uhci_handler(struct cdi_device* dev);
+-static int uhci_do_packet(struct usb_packet* packet);
++static int uhci_do_packets(struct usb_packet* packets, int num_packets);
+ static cdi_list_t get_devices(struct hci* gen_hci);
+ static void activate_device(struct usb_device* device);
+ static void uhci_deinit(struct cdi_device* cdi_hci);
+@@ -184,7 +184,7 @@ void uhci_init(struct cdi_device* cdi_hci)
+     dprintf(&quot;  Fertig\n&quot;);
+     gen_hci-&gt;find_devices = &amp;get_devices;
+     gen_hci-&gt;activate_device = &amp;activate_device;
+-    gen_hci-&gt;do_packet = &amp;uhci_do_packet;
++    gen_hci-&gt;do_packets = &amp;uhci_do_packets;
+     gen_hci-&gt;add_pipe = &amp;uhci_establish_pipe;
+ 
+     enumerate_hci(gen_hci);
+@@ -262,7 +262,13 @@ static int uhci_do_packet(struct usb_packet* packet)
+     td.next = 1; //Invalid
+     td.active = 1;
+     td.ioc = 1;
++    if (packet-&gt;use_toggle == TOGGLE_0) {
++        packet-&gt;pipe-&gt;data_toggle = 0;
++    } else if (packet-&gt;use_toggle == TOGGLE_1) {
++        packet-&gt;pipe-&gt;data_toggle = 1;
++    }
+     td.data_toggle = packet-&gt;pipe-&gt;data_toggle;
++    packet-&gt;pipe-&gt;data_toggle ^= 1;
+     td.low_speed = usbdev-&gt;low_speed;
+     td.errors = 1;
+     td.pid = packet-&gt;type;
+@@ -330,6 +336,19 @@ static int uhci_do_packet(struct usb_packet* packet)
+     return addr.error;
+ }
+ 
++static int uhci_do_packets(struct usb_packet* packet, int num_packets)
++{
++    int i, cond = 0;
++
++    //TODO
++    for (i = 0; i &lt; num_packets; i++) {
++        packet[i].condition = uhci_do_packet(&amp;packet[i]);
++        cond |= packet[i].condition;
++    }
++
++    return cond;
++}
++
+ static void uhci_handler(struct cdi_device* cdi_hci)
+ {
+     struct uhci* uhci = (struct uhci*) ((struct cdi_hci*) cdi_hci)-&gt;hci;
+-- 
+1.6.3.3
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000023.html">[cdi-devel] [PATCH] usb: Handle multiple packets in	usb_do_packet
+</A></li>
+	<LI>Next message: <A HREF="000025.html">[cdi-devel] [PATCH] usb: A bit faster
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#24">[ date ]</a>
+              <a href="thread.html#24">[ thread ]</a>
+              <a href="subject.html#24">[ subject ]</a>
+              <a href="author.html#24">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

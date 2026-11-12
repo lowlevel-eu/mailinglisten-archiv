@@ -1,0 +1,428 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH] ac97: CDI.storage driver
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%5D%20ac97%3A%20CDI.storage%20driver&In-Reply-To=%3C1254430332-14696-1-git-send-email-max%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   
+   <LINK REL="Next"  HREF="000029.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH] ac97: CDI.storage driver</H1>
+    <B>max at tyndur.org</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%5D%20ac97%3A%20CDI.storage%20driver&In-Reply-To=%3C1254430332-14696-1-git-send-email-max%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH] ac97: CDI.storage driver">max at tyndur.org
+       </A><BR>
+    <I>Thu Oct  1 22:52:12 CEST 2009</I>
+    <P><UL>
+        
+        <LI>Next message: <A HREF="000029.html">[cdi-devel] [PATCH] ac97: CDI.storage driver
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#28">[ date ]</a>
+              <a href="thread.html#28">[ thread ]</a>
+              <a href="subject.html#28">[ subject ]</a>
+              <a href="author.html#28">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>From: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+
++ ac97 driver appears as CDI.storage driver (path on t&#253;ndur:
+  ac97:/crd0)
+
+Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">max at tyndur.org</A>&gt;
+---
+ ac97/device.h |   65 +++++++++++++
+ ac97/main.c   |  281 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 346 insertions(+), 0 deletions(-)
+ create mode 100644 ac97/device.h
+ create mode 100644 ac97/main.c
+
+diff --git a/ac97/device.h b/ac97/device.h
+new file mode 100644
+index 0000000..382a1b2
+--- /dev/null
++++ b/ac97/device.h
+@@ -0,0 +1,65 @@
++/******************************************************************************
++ * Copyright (c) 2009 Max Reitz                                               *
++ *                                                                            *
++ * Permission is hereby granted,  free of charge,  to any  person obtaining a *
++ * copy of this software and associated documentation files (the &quot;Software&quot;), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use,  copy, modify, merge, publish,  distribute, sublicense, *
++ * and/or sell copies  of the  Software,  and to permit  persons to whom  the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF MERCHANTABILITY, *
++ * FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#ifndef _AC97_DEVICE_H_
++#define _AC97_DEVICE_H_
++
++#define USE_BUFS 16
++#define FRAMES_PER_BUF 0x4000
++
++#define NAM_RESET          0x0000
++#define NAM_MASTER_VOLUME  0x0002
++#define NAM_MONO_VOLUME    0x0006
++#define NAM_PC_BEEP        0x000A
++#define NAM_PCM_VOLUME     0x0018
++#define NAM_EXT_AUDIO_ID   0x0028
++#define NAM_EXT_AUDIO_STC  0x002A
++#define NAM_FRONT_SPLRATE  0x002C
++#define NAM_LR_SPLRATE     0x0032
++#define NABM_POBDBAR       0x0010
++#define NABM_POLVI         0x0015
++#define NABM_POSTATUS      0x0016
++#define NABM_POPICB        0x0018
++#define NABM_POCONTROL     0x001B
++#define NABM_GLB_CTRL_STAT 0x0060
++
++
++struct ac97_bufdesc {
++    uint32_t pbuf;
++    uint16_t samples;
++    uint16_t flags;
++} __attribute__ ((packed));
++
++struct ac97_card {
++    struct cdi_storage_device cdi_strg_dev;
++    struct cdi_pci_device *cdi_pci_dev;
++    int nambar;
++    int nabmbar;
++    int volume;
++    int sample_rate;
++    struct ac97_bufdesc *bufdesc;
++    struct ac97_bufdesc *pbufdesc;
++    void *buffer[USE_BUFS];
++    uintptr_t pbuffer[USE_BUFS];
++} __attribute__ ((packed));
++
++#endif
+diff --git a/ac97/main.c b/ac97/main.c
+new file mode 100644
+index 0000000..18cf764
+--- /dev/null
++++ b/ac97/main.c
+@@ -0,0 +1,281 @@
++/******************************************************************************
++ * Copyright (c) 2009 Max Reitz                                               *
++ *                                                                            *
++ * Permission is hereby granted,  free of charge,  to any  person obtaining a *
++ * copy of this software and associated documentation files (the &quot;Software&quot;), *
++ * to deal in the Software without restriction,  including without limitation *
++ * the rights to use,  copy, modify, merge, publish,  distribute, sublicense, *
++ * and/or sell copies  of the  Software,  and to permit  persons to whom  the *
++ * Software is furnished to do so, subject to the following conditions:       *
++ *                                                                            *
++ * The above copyright notice and this permission notice shall be included in *
++ * all copies or substantial portions of the Software.                        *
++ *                                                                            *
++ * THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR *
++ * IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF MERCHANTABILITY, *
++ * FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  OTHER *
++ * DEALINGS IN THE SOFTWARE.                                                  *
++ ******************************************************************************/
++
++#include &lt;stdint.h&gt;
++#include &lt;stdio.h&gt;
++#include &lt;stdlib.h&gt;
++#include &lt;string.h&gt;
++
++#include &quot;cdi.h&quot;
++#include &quot;cdi/io.h&quot;
++#include &quot;cdi/lists.h&quot;
++#include &quot;cdi/misc.h&quot;
++#include &quot;cdi/pci.h&quot;
++#include &quot;cdi/storage.h&quot;
++
++#include &quot;device.h&quot;
++
++
++static void driver_init(void);
++static void init_dev(struct cdi_device *device);
++static void deinit_dev(struct cdi_device *device);
++static void suicide(struct cdi_driver *drv);
++static int play(struct cdi_storage_device *dev, uint64_t start, uint64_t count,
++    void *buffer);
++static int read_dummy(struct cdi_storage_device *dev, uint64_t start,
++    uint64_t count, void *buffer);
++static void isr(struct cdi_device *device);
++
++static const char *driver_name = &quot;ac97&quot;;
++static struct cdi_storage_driver driver_storage;
++
++
++static int card_counter = 0;
++static volatile int buffer_queue = 0, have_qc_waiting = 0, doing_buffer = 0;
++
++
++#ifdef CDI_STANDALONE
++int main(void)
++#else
++int init_ac97(void)
++#endif
++{
++    cdi_init();
++
++    driver_init();
++    cdi_storage_driver_register((struct cdi_storage_driver *)&amp;driver_storage);
++
++    cdi_run_drivers();
++
++    return 0;
++}
++
++static void driver_init(void)
++{
++    struct cdi_pci_device *dev;
++    int i;
++    struct ac97_card *card;
++    cdi_list_t pci_devices;
++
++    cdi_storage_driver_init(&amp;driver_storage);
++
++    driver_storage.drv.name = driver_name;
++    driver_storage.drv.type = CDI_STORAGE;
++
++    driver_storage.drv.init_device = &amp;init_dev;
++    driver_storage.drv.remove_device = &amp;deinit_dev;
++    driver_storage.drv.destroy = &amp;suicide;
++
++    driver_storage.read_blocks = &amp;read_dummy;
++    driver_storage.write_blocks = &amp;play;
++
++    pci_devices = cdi_list_create();
++    cdi_pci_get_all_devices(pci_devices);
++
++    for (i = 0; (dev = cdi_list_get(pci_devices, i)); i++) {
++        if ((dev-&gt;vendor_id == 0x8086) &amp;&amp; ((dev-&gt;device_id == 0x2415) ||
++            (dev-&gt;device_id == 0x2425) || (dev-&gt;device_id == 0x2445)))
++        {
++            card = malloc(sizeof(*card));
++            card-&gt;cdi_pci_dev = dev;
++            cdi_list_push(driver_storage.drv.devices, card);
++        } else {
++            cdi_pci_device_destroy(dev);
++        }
++    }
++
++    cdi_list_destroy(pci_devices);
++}
++
++static void init_dev(struct cdi_device *device)
++{
++    struct ac97_card *card = (struct ac97_card *)device;
++    cdi_list_t pci_res_list;
++    struct cdi_pci_resource *rsrc;
++    int i;
++
++    card-&gt;cdi_strg_dev.block_size = 4;
++    card-&gt;cdi_strg_dev.block_count = FRAMES_PER_BUF * USE_BUFS;
++    card-&gt;cdi_strg_dev.dev.name = malloc(10);
++    sprintf((char *)card-&gt;cdi_strg_dev.dev.name, &quot;crd%i&quot;, card_counter++);
++
++    cdi_register_irq(card-&gt;cdi_pci_dev-&gt;irq, &amp;isr, device);
++    cdi_pci_alloc_ioports(card-&gt;cdi_pci_dev);
++
++    card-&gt;nambar = 0;
++    card-&gt;nabmbar = 0;
++
++    pci_res_list = card-&gt;cdi_pci_dev-&gt;resources;
++    for (i = 0; (rsrc = cdi_list_get(pci_res_list, i)); i++) {
++        if (rsrc-&gt;type == CDI_PCI_IOPORTS) {
++            //Die Resourcen liegen r&#252;ckw&#228;rts in der Liste!
++            //Wir nehmen nur die ersten zwei.
++            card-&gt;nabmbar = card-&gt;nambar;
++            card-&gt;nambar = rsrc-&gt;start;
++        }
++    }
++
++    cdi_alloc_phys_mem(sizeof(struct ac97_bufdesc) * 32,
++        (void **)&amp;card-&gt;bufdesc, (void **)&amp;card-&gt;pbufdesc);
++    for (i = 0; i &lt; USE_BUFS; i++) {
++        cdi_alloc_phys_mem(FRAMES_PER_BUF * 4, &amp;card-&gt;buffer[i],
++            (void **)&amp;card-&gt;pbuffer[i]);
++    }
++    for (i = 0; i &lt; 32; i++) {
++        card-&gt;bufdesc[i].pbuf = 0;
++        card-&gt;bufdesc[i].samples = 0;
++        card-&gt;bufdesc[i].flags = 0x4000;
++    }
++
++    cdi_outw(card-&gt;nambar + NAM_RESET, 42);
++    cdi_outb(card-&gt;nabmbar + NABM_GLB_CTRL_STAT, 0x02);
++    cdi_sleep_ms(100);
++    card-&gt;volume = 0; //Volle Dr&#246;hnung
++    cdi_outw(card-&gt;nambar + NAM_MASTER_VOLUME,
++        (card-&gt;volume &lt;&lt; 8) | card-&gt;volume);
++    cdi_outw(card-&gt;nambar + NAM_MONO_VOLUME, card-&gt;volume);
++    cdi_outw(card-&gt;nambar + NAM_PC_BEEP, card-&gt;volume);
++    cdi_outw(card-&gt;nambar + NAM_PCM_VOLUME
++        (card-&gt;volume &lt;&lt; 8) | card-&gt;volume);
++    cdi_sleep_ms(10);
++    if (!(cdi_inw(card-&gt;nambar + NAM_EXT_AUDIO_ID) &amp; 1)) {
++        card-&gt;sample_rate = 48000;
++    } else {
++        cdi_outw(card-&gt;nambar + NAM_EXT_AUDIO_STC,
++            cdi_inw(card-&gt;nambar + NAM_EXT_AUDIO_STC) | 1);
++        cdi_sleep_ms(10);
++        cdi_outw(card-&gt;nambar + NAM_FRONT_SPLRATE, 44100);
++        cdi_outw(card-&gt;nambar + NAM_LR_SPLRATE, 44100);
++        cdi_sleep_ms(10);
++        card-&gt;sample_rate = cdi_inw(card-&gt;nambar + NAM_LR_SPLRATE);
++    }
++
++    cdi_storage_device_init((struct cdi_storage_device *)device);
++}
++
++static void deinit_dev(struct cdi_device *device)
++{
++}
++
++static void suicide(struct cdi_driver *drv)
++{
++}
++
++static int read_dummy(struct cdi_storage_device *dev, uint64_t start,
++    uint64_t count, void *buffer)
++{
++    return 0;
++}
++
++static int play(struct cdi_storage_device *dev, uint64_t start, uint64_t count,
++    void *buffer)
++{
++    struct ac97_card *card = (struct ac97_card *)dev;
++    int size = count * 4, i, final = 0;
++    ptrdiff_t off = 0;
++
++    if (!size) {
++        return 0;
++    }
++
++    if (have_qc_waiting &lt; 0) { //Haha
++        have_qc_waiting = 0;
++    }
++    while (have_qc_waiting++ &gt; 1) {
++        have_qc_waiting--;
++        cdi_wait_irq(card-&gt;cdi_pci_dev-&gt;irq, 100);
++    }
++
++    while (buffer_queue &gt; 1) {
++        cdi_reset_wait_irq(card-&gt;cdi_pci_dev-&gt;irq);
++        cdi_wait_irq(card-&gt;cdi_pci_dev-&gt;irq, 100);
++    }
++
++    //Der letzte Buffer... Wir k&#246;nnen den Rest also kopieren
++
++    for (i = 0; (i &lt; USE_BUFS) &amp;&amp; size; i++) {
++        card-&gt;bufdesc[i].pbuf = card-&gt;pbuffer[i];
++        if ((i == USE_BUFS - 1) || (size &lt;= FRAMES_PER_BUF * 4)) {
++            while ((buffer_queue &gt; 1) ||
++                (cdi_inw(card-&gt;nabmbar + NABM_POPICB) &gt; 1764))
++            {
++                //Bis 20 ms vor Ablauf k&#246;nnen wir noch CPU sparen
++                cdi_sleep_ms(1);
++            }
++            while (buffer_queue);
++            if (i) {
++                //Der erste Buffer ist gef&#252;llt, wir k&#246;nnen das Abspielen also
++                //beginnen, bevor wir den letzten f&#252;llen
++                cdi_outl(card-&gt;nabmbar + NABM_POBDBAR,
++                    (uint32_t)card-&gt;pbufdesc);
++                cdi_outb(card-&gt;nabmbar + NABM_POLVI, 15);
++                cdi_outb(card-&gt;nabmbar + NABM_POCONTROL, 0x15);
++                buffer_queue = i + 1;
++                doing_buffer = 0;
++            }
++        }
++        if (size &gt;= FRAMES_PER_BUF * 4) {
++            card-&gt;bufdesc[i].samples = FRAMES_PER_BUF * 2;
++            size -= FRAMES_PER_BUF * 4;
++            memcpy(card-&gt;buffer[i], buffer + off, FRAMES_PER_BUF * 4);
++            off += FRAMES_PER_BUF * 4;
++        } else {
++            card-&gt;bufdesc[i].samples = size &gt;&gt; 1;
++            memcpy(card-&gt;buffer[i], buffer + off, size);
++            size = 0;
++        }
++        card-&gt;bufdesc[i].flags = 0x8000; //IOC
++        if (!size || (i == USE_BUFS - 1)) {
++            card-&gt;bufdesc[i].flags |= 0x4000; //BUP
++            final = i;
++        }
++    }
++
++    if (!final) {
++        cdi_outl(card-&gt;nabmbar + NABM_POBDBAR, (uint32_t)card-&gt;pbufdesc);
++        cdi_outb(card-&gt;nabmbar + NABM_POLVI, 15);
++        cdi_outb(card-&gt;nabmbar + NABM_POCONTROL, 0x15);
++        buffer_queue = 1;
++        doing_buffer = 0;
++    }
++
++    for (; i &lt; 32; i++) {
++        card-&gt;bufdesc[i].samples = 0;
++        card-&gt;bufdesc[i].flags = 0xC000;
++    }
++
++    have_qc_waiting = 0;
++
++    return count;
++}
++
++static void isr(struct cdi_device *device)
++{
++    struct ac97_card *card = (struct ac97_card *)device;
++
++    cdi_outb(card-&gt;nabmbar + NABM_POSTATUS,
++        cdi_inb(card-&gt;nabmbar + NABM_POSTATUS));
++    if (buffer_queue &gt; 0) {
++        card-&gt;bufdesc[doing_buffer++].samples = 0;
++        buffer_queue--;
++    }
++}
+-- 
+1.6.3.3
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	
+	<LI>Next message: <A HREF="000029.html">[cdi-devel] [PATCH] ac97: CDI.storage driver
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#28">[ date ]</a>
+              <a href="thread.html#28">[ thread ]</a>
+              <a href="subject.html#28">[ subject ]</a>
+              <a href="author.html#28">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

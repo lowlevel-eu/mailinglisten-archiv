@@ -1,0 +1,700 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH v2 6/6] libc: LIOv2-Clientunterstützung
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_v2_6/6%3D5D_libc%3D3A_LIOv2-Clientu%3F%3D%0A%09%3D%3Futf-8%3Fq%3Fnterst%3DC3%3DBCtzung%3F%3D&In-Reply-To=%3C1317034095-20245-1-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002293.html">
+   <LINK REL="Next"  HREF="002299.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH v2 6/6] libc: LIOv2-Clientunterstützung</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_v2_6/6%3D5D_libc%3D3A_LIOv2-Clientu%3F%3D%0A%09%3D%3Futf-8%3Fq%3Fnterst%3DC3%3DBCtzung%3F%3D&In-Reply-To=%3C1317034095-20245-1-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH v2 6/6] libc: LIOv2-Clientunterstützung">kevin at tyndur.org
+                  </A><BR>
+    <I>Mo Sep 26 12:48:15 CEST 2011</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002293.html">[tyndur-devel] [PATCH 6/6] libc: LIOv2-Clientunterstützung
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002299.html">[tyndur-devel] [PATCH v2 6/6] libc: LIOv2-Clientunterstützung
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2294">[ Datum ]</a>
+              <a href="thread.html#2294">[ Thema ]</a>
+              <a href="subject.html#2294">[ Betreff (Subject) ]</a>
+              <a href="author.html#2294">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ libc: Die stdio-Funktionen können jetzt sowohl mit LIOv1- als auch
+  LIOv2-Dateien umgehen. Ein gegen diese libc-Version gebautes Programm
+  kann also unter einem LIOv2-fähigen Kernel auf alle Dateien zugreifen.
+  Mit dem aktuellen Kernel bleibt die Erweiterung wirkungslos, auf
+  älteren Kerneln wird das Programm mit einem unbekannten Syscall
+  abstürzen.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/include/syscall_structs.h        |   48 +++++++++++++
+ src/modules/include/dir.h            |    4 +
+ src/modules/include/io_struct.h      |    3 +
+ src/modules/include/lostio.h         |   11 +++-
+ src/modules/lib/lostio/client/file.c |  105 +++++++++++++++++++++++++++-
+ src/modules/lib/lostio/client/seek.c |   19 +++++
+ src/modules/lib/stdlibc/directory.c  |  129 +++++++++++++++++++++++++++++++++-
+ src/modules/lib/stdlibc/file.c       |   36 ++++++++--
+ 8 files changed, 345 insertions(+), 10 deletions(-)
+
+diff --git a/src/include/syscall_structs.h b/src/include/syscall_structs.h
+index c23d39e..6ec63a0 100644
+--- a/src/include/syscall_structs.h
++++ b/src/include/syscall_structs.h
+@@ -83,6 +83,54 @@ typedef int64_t lio_usp_stream_t;
+ typedef int64_t lio_usp_resource_t;
+ 
+ /**
++ * Beschreibt als Bitmaske den Modus, in dem ein Stream arbeiten soll.
++ */
++enum lio_flags {
++    /**
++     * Die Ressource soll beim Öffnen auf Größe 0 gekürzt werden. Nur
++     * gültig, wenn die Datei auch zum Schreiben geöffnet wird.
++     */
++    LIO_TRUNC       =   1,
++
++    /** Die Ressource soll zum Lesen geöffnet werden */
++    LIO_READ        =   2,
++
++    /** Die Ressource soll zum Schreiben geöffnet werden */
++    LIO_WRITE       =   4,
++
++    /**
++     * Die Ressource soll im Writethrough-Modus geöffnet werden, d.h. alle
++     * Änderungen werden sofort persistent gemacht.
++     */
++    /* TODO LIO_WRTHROUGH   =  32, */
++
++    /** Der Cache soll nicht benutzt werden */
++    /* TODO LIO_NOCACHE     =  64, */
++
++    /**
++     * Wenn auf die Ressource geschrieben oder von ihr gelesen werden soll, sie
++     * aber nicht bereit ist, soll die Anfrage blockieren anstatt einen Fehler
++     * zurückzugeben.
++     *
++     * TODO Short Reads/Writes möglich?
++     */
++    /* TODO LIO_BLOCKING    = 128, */
++
++    /**
++     * Der Inhalt der Ressource ist nicht reproduzierbar (z.B. Netzwerk).
++     * Er muss im Cache behalten werden, solange er benutzt wird.
++     */
++    /* TODO LIO_VOLATILE    = 256, */
++
++    /**
++     * Muss zum Öffnen von Symlinks gesetzt sein, darf für andere Ressourcen
++     * nicht gesetzt sein.
++     */
++    LIO_SYMLINK     = 512,
++};
++
++
++/**
+  * Gibt an, realtiv zu welcher Position in der Datei das lio_seek-Offset
+  * zu interpretieren ist.
+  */
+diff --git a/src/modules/include/dir.h b/src/modules/include/dir.h
+index 3056c0d..4fbf63a 100644
+--- a/src/modules/include/dir.h
++++ b/src/modules/include/dir.h
+@@ -31,9 +31,13 @@
+ #include &quot;types.h&quot;
+ #include &quot;stdio.h&quot;
+ #include &quot;io.h&quot;
++#include &lt;dirent.h&gt;
+ 
+ struct dir_handle {
++    bool old;
+     io_resource_t* lio1_handle;
++    lio_resource_t new_res;
++    size_t offset;
+ };
+ 
+ struct dir_handle* directory_open(const char* dirname);
+diff --git a/src/modules/include/io_struct.h b/src/modules/include/io_struct.h
+index 665ab38..e2500a2 100644
+--- a/src/modules/include/io_struct.h
++++ b/src/modules/include/io_struct.h
+@@ -29,6 +29,7 @@
+ #define _IO_STRUCT_H_
+ #include &lt;stdint.h&gt;
+ #include &lt;sys/types.h&gt;
++#include &lt;syscall.h&gt;
+ 
+ #define MAX_FILENAME_LEN 255
+ #define IO_DIRENTRY_FILE 1
+@@ -52,6 +53,8 @@ typedef struct
+     pid_t               pid;
+     io_resource_id_t    resid;
+ 
++    lio_stream_t        lio2_stream;
++    lio_resource_t      lio2_res;
+ } __attribute__ ((packed)) io_resource_t;
+ #endif //ifndef _IO_STRUCT_H_
+ 
+diff --git a/src/modules/include/lostio.h b/src/modules/include/lostio.h
+index f70a7d1..8fc4e4d 100644
+--- a/src/modules/include/lostio.h
++++ b/src/modules/include/lostio.h
+@@ -130,8 +130,17 @@ struct lostio_internal_file {
+     size_t          buffer_pos;
+     uint8_t         buffer_mode;
+     bool            free_buffer;
+-};
+ 
++    /*
++     * Achtung: os_eof ist _nicht_ der EOF-Marker aus der C-Spezifikation, der
++     * erst gesetzt wird, wenn das Programm aus dem Puffer das letzte Byte
++     * einliest, sondern das EOF, auf das beim Einlesen des Puffers gestoßen
++     * wurde!
++     */
++    bool            os_eof;
++    bool            error;
++};
++#define IS_LIO2(h) (h-&gt;lio2_res &gt; 0)
+ 
+ ///LostIO-Schnittstelle initialisieren
+ void lostio_init(void);
+diff --git a/src/modules/lib/lostio/client/file.c b/src/modules/lib/lostio/client/file.c
+index 142de7d..8fe5ebe 100644
+--- a/src/modules/lib/lostio/client/file.c
++++ b/src/modules/lib/lostio/client/file.c
+@@ -32,6 +32,7 @@
+ #include &lt;stdlib.h&gt;
+ #include &lt;rpc.h&gt;
+ #include &lt;syscall.h&gt;
++#include &lt;errno.h&gt;
+ 
+ static void* shm_ptr;
+ static uint32_t shm_id;
+@@ -54,11 +55,87 @@ static void* get_shm(size_t size)
+     return shm_ptr;
+ }
+ 
++static io_resource_t* lio2_open(const char* filename, uint8_t attr)
++{
++    char* full_path;
++    uint8_t lio2_attr = 0;
++    bool m_append = false;
++    bool m_create = false;
++
++    lio_stream_t s;
++    lio_resource_t r;
++    io_resource_t* result = NULL;
++
++    full_path = io_get_absolute_path(filename);
++    if (!full_path) {
++        return NULL;
++    }
++
++    /* Modus auswerten */
++    if (attr &amp; ~(IO_OPEN_MODE_READ | IO_OPEN_MODE_WRITE | IO_OPEN_MODE_CREATE
++        | IO_OPEN_MODE_TRUNC | IO_OPEN_MODE_APPEND))
++    {
++        goto out_err;
++    }
++
++    if (attr &amp; IO_OPEN_MODE_READ)   lio2_attr |= LIO_READ;
++    if (attr &amp; IO_OPEN_MODE_WRITE)  lio2_attr |= LIO_WRITE;
++    if (attr &amp; IO_OPEN_MODE_CREATE) m_create = true;
++    if (attr &amp; IO_OPEN_MODE_TRUNC)  lio2_attr  |= LIO_TRUNC;
++    if (attr &amp; IO_OPEN_MODE_APPEND) m_append = true;
++
++    /* Datei erzeugen, falls nötig */
++    r = lio_resource(full_path, 1);
++    if ((r &lt; 0) &amp;&amp; m_create) {
++        lio_resource_t parent;
++        char* dirname = io_split_dirname(full_path);
++        char* filename = io_split_filename(full_path);
++
++        if ((parent = lio_resource(dirname, 1)) &gt; 0) {
++            r = lio_mkfile(parent, filename);
++        }
++
++        free(dirname);
++        free(filename);
++    }
++
++    if (r &lt; 0) {
++        goto out_err;
++    }
++
++    /* Datei öffnen */
++    s = lio_open(r, lio2_attr);
++    if (s &lt; 0) {
++        goto out_err;
++    }
++
++    if (m_append) {
++        lio_seek(s, 0, LIO_SEEK_END);
++    }
++
++    /* Datenstruktur anlegen */
++    result = malloc(sizeof(*result));
++    *result = (io_resource_t) {
++        .lio2_stream    =   s,
++        .lio2_res       =   r,
++    };
++
++out_err:
++    free(full_path);
++    return result;
++}
++
+ io_resource_t* lio_compat_open(const char* filename, uint8_t attr)
+ {
+-    char* full_path = io_get_absolute_path(filename);
++    char* full_path;
+     io_resource_t* result;
+ 
++    result = lio2_open(filename, attr);
++    if (result) {
++        return result;
++    }
++
++    full_path = io_get_absolute_path(filename);
+     if (!full_path) {
+         return NULL;
+     }
+@@ -88,9 +165,27 @@ out:
+     return result;
+ }
+ 
++static int lio2_fclose(io_resource_t* stream)
++{
++    int result = 0;
++
++    if (stream-&gt;lio2_stream &gt; 0) {
++        result = lio_close(stream-&gt;lio2_stream);
++    }
++    free(stream);
++
++    return result;
++}
++
++
+ int lio_compat_close(io_resource_t* io_res)
+ {
+     uint32_t result;
++
++    if (IS_LIO2(io_res)) {
++        return lio2_fclose(io_res);
++    }
++
+     result = rpc_get_dword(io_res-&gt;pid, &quot;IO_CLOSE&quot;,
+         sizeof(io_resource_id_t), (char*) &amp;(io_res-&gt;id));
+     free(io_res);
+@@ -114,6 +209,10 @@ ssize_t lio_compat_read(void* dest, size_t blocksize, size_t blockcount,
+         .blockcount = blockcount,
+     };
+ 
++    if (IS_LIO2(io_res)) {
++        return lio_read(io_res-&gt;lio2_stream, blocksize * blockcount, dest);
++    }
++
+     // Wenn mehr als 256 Bytes gelesen werden sollen, wird SHM benutzt
+     if ((blocksize * blockcount) &gt; 256) {
+ 
+@@ -170,6 +269,10 @@ ssize_t lio_compat_write(const void* src, size_t blocksize, size_t blockcount,
+     size_t data_size = blockcount * blocksize;
+     size_t request_size = sizeof(io_write_request_t);
+ 
++    if (IS_LIO2(io_res)) {
++        return lio_write(io_res-&gt;lio2_stream, blocksize * blockcount, src);
++    }
++
+     // Bei mehr als einem Kilobyte wird shared memory fuer die Daten benutzt
+     if (data_size &lt; 1024) {
+         request_size += data_size;
+diff --git a/src/modules/lib/lostio/client/seek.c b/src/modules/lib/lostio/client/seek.c
+index 8564486..2ad7a84 100644
+--- a/src/modules/lib/lostio/client/seek.c
++++ b/src/modules/lib/lostio/client/seek.c
+@@ -30,6 +30,20 @@
+ #include &lt;stdio.h&gt;
+ #include &lt;rpc.h&gt;
+ #include &lt;stdint.h&gt;
++#include &lt;stdio.h&gt;
++static bool newlio_flseek(io_resource_t* io_res, uint64_t offset, int origin)
++{
++    int whence;
++
++    switch (origin) {
++        case SEEK_SET: whence = LIO_SEEK_SET; break;
++        case SEEK_CUR: whence = LIO_SEEK_CUR; break;
++        case SEEK_END: whence = LIO_SEEK_END; break;
++        default: return false;
++    }
++
++    return lio_seek(io_res-&gt;lio2_stream, offset, whence) &gt;= 0;
++}
+ 
+ /**
+  * Cursorposition im Dateihandle setzen
+@@ -47,6 +61,11 @@ bool lio_compat_seek(io_resource_t* io_res, uint64_t offset, int origin)
+ {
+     io_seek_request_t seek_request;
+ 
++
++    if (IS_LIO2(io_res)) {
++        return newlio_flseek(io_res, offset, origin);
++    }
++
+     seek_request.id = io_res-&gt;id;
+     seek_request.offset = offset;
+     seek_request.origin = origin;
+diff --git a/src/modules/lib/stdlibc/directory.c b/src/modules/lib/stdlibc/directory.c
+index 216df40..fbfcf3a 100644
+--- a/src/modules/lib/stdlibc/directory.c
++++ b/src/modules/lib/stdlibc/directory.c
+@@ -32,27 +32,69 @@
+ #include &quot;stdlib.h&quot;
+ #include &quot;dir.h&quot;
+ #include &lt;string.h&gt;
++#include &lt;lostio.h&gt;
++
++static struct dir_handle* new_opendir(const char* path)
++{
++    struct dir_handle* handle = NULL;
++    lio_resource_t res;
++    char* abspath = io_get_absolute_path(path);
++
++    res = lio_resource(abspath, 1);
++    if (res &lt; 0) {
++        goto out;
++    }
++
++    /* Prüfen, ob es auch wirklich ein Verzeicnis ist */
++    if (lio_read_dir(res, 0, 0, NULL) != 0) {
++        goto out;
++    }
++
++    handle = malloc(sizeof(*handle));
++    handle-&gt;old = false;
++    handle-&gt;new_res = res;
++    handle-&gt;offset = 0;
++
++out:
++    free(abpath);
++    return handle;
++}
+ 
+ struct dir_handle* directory_open(const char* path)
+ {
+     struct dir_handle* handle;
+     io_resource_t* io_res;
+ 
++    handle = new_opendir(path);
++    if (handle) {
++        return handle;
++    }
++
+     io_res = lio_compat_open(path, IO_OPEN_MODE_READ | IO_OPEN_MODE_DIRECTORY);
+     if (io_res == NULL) {
+         return NULL;
+     }
+ 
+     handle = malloc(sizeof(*handle));
++    handle-&gt;old = true;
+     handle-&gt;lio1_handle = io_res;
+ 
+     return handle;
+ }
+ 
++static int new_closedir(struct dir_handle* handle)
++{
++    free(handle);
++    return 0;
++}
+ int directory_close(struct dir_handle* handle)
+ {
+     int result = 0;
+ 
++    if (!handle-&gt;old) {
++        return new_closedir(handle);
++    }
++
+     if (lio_compat_close(handle-&gt;lio1_handle)) {
+         result = -1;
+     }
+@@ -61,10 +103,35 @@ int directory_close(struct dir_handle* handle)
+     return result;
+ }
+ 
++static io_direntry_t* new_directory_read(struct dir_handle* handle)
++{
++    io_direntry_t* ent = NULL;
++    struct lio_dir_entry lent;
++
++    if (lio_read_dir(handle-&gt;new_res, handle-&gt;offset, 1, &amp;lent) == 1) {
++        ent = calloc(sizeof(*ent), 1);
++        strcpy(ent-&gt;name, lent.name);
++        ent-&gt;type =
++            (((lent.stat.flags &amp; LIO_FLAG_READABLE) |
++                (lent.stat.flags &amp; LIO_FLAG_WRITABLE)) ? IO_DIRENTRY_FILE : 0)|
++            ((lent.stat.flags &amp; LIO_FLAG_BROWSABLE) ? IO_DIRENTRY_DIR : 0) |
++            ((lent.stat.flags &amp; LIO_FLAG_RESOLVABLE) ? IO_DIRENTRY_LINK : 0);
++        ent-&gt;size = lent.stat.size;
++
++        handle-&gt;offset++;
++    }
++
++    return ent;
++}
++
+ io_direntry_t* directory_read(struct dir_handle* io_res)
+ {
+     int ret;
+ 
++    if (!io_res-&gt;old) {
++        return new_directory_read(io_res);
++    }
++
+     if ((io_res == NULL) || (lio_compat_eof(io_res-&gt;lio1_handle) != 0)) {
+         return NULL;
+     }
+@@ -82,10 +149,44 @@ io_direntry_t* directory_read(struct dir_handle* io_res)
+ 
+ int directory_seek(struct dir_handle* handle, long int offset, int origin)
+ {
++    if (IS_LIO2(handle)) {
++        switch (origin) {
++            case SEEK_SET:
++                break;
++            case SEEK_CUR:
++                offset += (handle-&gt;offset * sizeof(io_direntry_t));
++                break;
++            case SEEK_END:
++            default:
++                return -1;
++        }
++        handle-&gt;offset = offset / sizeof(io_direntry_t);
++        return offset;
++    }
++
+     return lio_compat_seek(handle-&gt;lio1_handle, offset, origin);
+ }
+ 
+-bool directory_create(const char* dirname)
++static bool new_directory_create(const char* path)
++{
++    char* abs = io_get_absolute_path(path);
++    char* dir = io_split_dirname(abs);
++    char* file = io_split_filename(abs);
++    bool result = false;
++    lio_resource_t parent;
++
++    if ((parent = lio_resource(dir, 1)) &gt;= 0) {
++        result = (lio_mkdir(parent, file) &gt;= 0);
++    }
++
++    free(dir);
++    free(file);
++    free(abs);
++
++    return result;
++}
++
++static bool old_directory_create(const char* dirname)
+ {
+     io_resource_t* io_res = lio_compat_open(dirname,
+         IO_OPEN_MODE_WRITE | IO_OPEN_MODE_CREATE | IO_OPEN_MODE_TRUNC |
+@@ -99,9 +200,25 @@ bool directory_create(const char* dirname)
+     return true;
+ }
+ 
+-bool is_directory(const char* dirname)
++bool directory_create(const char* dirname)
++{
++    return new_directory_create(dirname) || old_directory_create(dirname);
++}
++
++static bool new_is_directory(const char* path)
+ {
+-    struct dir_handle* dir = directory_open(dirname);
++    lio_resource_t res = lio_resource(path, 1);
++
++    if (res &lt; 0) {
++        return false;
++    }
++
++    return (lio_read_dir(res, 0, 0, NULL) == 0);
++}
++
++static bool old_is_directory(const char* path)
++{
++    struct dir_handle* dir = directory_open(path);
+     if (dir != NULL) {
+         directory_close(dir);
+         return true;
+@@ -109,3 +226,9 @@ bool is_directory(const char* dirname)
+         return false;
+     }
+ }
++
++bool is_directory(const char* dirname)
++{
++    return new_is_directory(dirname) || old_is_directory(dirname);
++}
++
+diff --git a/src/modules/lib/stdlibc/file.c b/src/modules/lib/stdlibc/file.c
+index 759c73c..559920f 100644
+--- a/src/modules/lib/stdlibc/file.c
++++ b/src/modules/lib/stdlibc/file.c
+@@ -35,6 +35,7 @@
+ #include &lt;unistd.h&gt;
+ #include &lt;stdint.h&gt;
+ #include &lt;syscall.h&gt;
++#include &lt;errno.h&gt;
+ 
+ #define IO_BUFFER_MODE_NONE 0
+ #define IO_BUFFER_MODE_FULL 1
+@@ -42,9 +43,11 @@
+ 
+ extern char* io_get_absolute_path(const char* path);
+ 
++#define IS_LIO2_FILE(f) IS_LIO2(f-&gt;res)
++
+ static bool is_valid_res(FILE* io_res)
+ {
+-    return (io_res != NULL) &amp;&amp; (io_res-&gt;res-&gt;pid != 0);
++    return (io_res != NULL) &amp;&amp; (IS_LIO2(io_res-&gt;res) || io_res-&gt;res-&gt;pid != 0);
+ }
+ 
+ /**
+@@ -112,6 +115,9 @@ FILE* fopen (const char* filename, const char* mode)
+     setvbuf(int_res, malloc(BUFSIZ), _IOFBF, BUFSIZ);
+     int_res-&gt;free_buffer = true;
+ 
++    int_res-&gt;error = false;
++    int_res-&gt;os_eof = false;
++
+     return int_res;
+ }
+ 
+@@ -222,8 +228,14 @@ size_t fread(void* dest, size_t blocksize, size_t blockcount, FILE* io_res)
+ 
+     ret = lio_compat_read(dest + read_bytes,
+         (blocksize * blockcount) - read_bytes, 1, io_res-&gt;res);
+-    if (ret &lt; 0) {
++
++    if (ret == -EAGAIN) {
++        return 0;
++    } else if (ret &lt; 0) {
++        io_res-&gt;error = true;
+         return 0;
++    } else if (!ret) {
++        io_res-&gt;os_eof = true;
+     }
+ 
+     return (read_bytes + ret) / blocksize;
+@@ -367,6 +379,7 @@ size_t fwrite(const void* data, size_t blocksize, size_t blockcount,
+         case IO_BUFFER_MODE_NONE:
+             ret = lio_compat_write(data, blocksize, blockcount, io_res-&gt;res);
+             if (ret &lt; 0) {
++                io_res-&gt;error = true;
+                 return 0;
+             } else {
+                 return ret / blocksize;
+@@ -389,6 +402,7 @@ size_t fwrite(const void* data, size_t blocksize, size_t blockcount,
+                 }
+                 ret = lio_compat_write(data, blocksize, blockcount, io_res-&gt;res);
+                 if (ret &lt; 0) {
++                    io_res-&gt;error = true;
+                     return 0;
+                 } else {
+                     return ret / blocksize;
+@@ -409,6 +423,7 @@ size_t fwrite(const void* data, size_t blocksize, size_t blockcount,
+                 }
+                 ret = lio_compat_write(data, blocksize, blockcount, io_res-&gt;res);
+                 if (ret &lt; 0) {
++                    io_res-&gt;error = true;
+                     return 0;
+                 } else {
+                     return ret / blocksize;
+@@ -509,6 +524,11 @@ long ftell(FILE* io_res)
+         return EOF;
+     }
+ 
++    if (IS_LIO2_FILE(io_res)) {
++        int64_t pos = lio_seek(io_res-&gt;res-&gt;lio2_stream, 0, LIO_SEEK_CUR);
++        return (pos &lt; 0 ? -1 : pos);
++    }
++
+     io_tell_request_t tell_request;
+     long result;
+     tell_request.id = io_res-&gt;res-&gt;id;
+@@ -549,6 +569,12 @@ int feof(FILE* io_res)
+         return 0;
+     }
+ 
++    if (IS_LIO2_FILE(io_res)) {
++        // FIXME: EOF ist hier eigentlich doof, aber irgend ein Idiot hat das
++        // mal so implementiert und das wird teilweise so geprüft... ;-)
++        return (io_res-&gt;os_eof ? EOF : 0);
++    }
++
+     //Auch hier könnte mit Daten im Buffer ein falsches Ergebnis rauskommen
+     fflush(io_res);
+ 
+@@ -566,8 +592,7 @@ int feof(FILE* io_res)
+  */
+ int ferror(FILE* io_res)
+ {
+-    //FIXME
+-    return 0;
++    return io_res-&gt;error;
+ }
+ 
+ 
+@@ -578,7 +603,8 @@ int ferror(FILE* io_res)
+  */
+ void clearerr(FILE* io_res)
+ {
+-    // TODO
++    io_res-&gt;error = false;
++    io_res-&gt;os_eof = false;
+ }
+ 
+ 
+-- 
+1.6.0.2
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002293.html">[tyndur-devel] [PATCH 6/6] libc: LIOv2-Clientunterstützung
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002299.html">[tyndur-devel] [PATCH v2 6/6] libc: LIOv2-Clientunterstützung
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2294">[ Datum ]</a>
+              <a href="thread.html#2294">[ Thema ]</a>
+              <a href="subject.html#2294">[ Betreff (Subject)]</a>
+              <a href="author.html#2294">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

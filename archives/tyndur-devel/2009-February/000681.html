@@ -1,0 +1,147 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] kernel2: Initialisierung der physischen	Speicherverwaltung fixen
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20kernel2%3A%20Initialisierung%20der%20physischen%0A%09Speicherverwaltung%20fixen&In-Reply-To=%3C1235515795-22334-1-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="000680.html">
+   <LINK REL="Next"  HREF="000682.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] kernel2: Initialisierung der physischen	Speicherverwaltung fixen</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20kernel2%3A%20Initialisierung%20der%20physischen%0A%09Speicherverwaltung%20fixen&In-Reply-To=%3C1235515795-22334-1-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH] kernel2: Initialisierung der physischen	Speicherverwaltung fixen">kevin at tyndur.org
+                  </A><BR>
+    <I>Di Feb 24 23:49:55 CET 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="000680.html">[tyndur-devel] [PATCH] buildmk: make -j ermoeglichen
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="000682.html">[tyndur-devel] [PATCH] kernel2: Initialisierung der	physischen	Speicherverwaltung fixen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#681">[ Datum ]</a>
+              <a href="thread.html#681">[ Thema ]</a>
+              <a href="subject.html#681">[ Betreff (Subject) ]</a>
+              <a href="author.html#681">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>! kernel2: Solange die Speicherbitmap nicht festgelegt ist, ist es nicht
+  besonders sinnvoll, sie als reserviert zurueckzugeben
+! kernel2: Die Speicherbitmap muss page-aligned sein
+! kernel2: Die Speicherbitmap darf direkt an einen belegten Bereich
+  anschliessen. Da end die naechste freie Adresse bezeichnet, ist
+  Gleichheit zwischen dem Ende des belegten Bereichs und Anfang der
+  Speicherbitmap auch erlaubt.
+---
+ src/kernel2/src/mm/phys.c |   34 ++++++++++++++++++++++++++++------
+ 1 files changed, 28 insertions(+), 6 deletions(-)
+
+diff --git a/src/kernel2/src/mm/phys.c b/src/kernel2/src/mm/phys.c
+index 9a68648..2f91ec8 100644
+--- a/src/kernel2/src/mm/phys.c
++++ b/src/kernel2/src/mm/phys.c
+@@ -348,6 +348,15 @@ struct mem_block {
+ };
+ 
+ /**
++ * Wird benutzt, um nacheinander alle vom BIOS aus freien Speicherbereiche
++ * aufzuzaehlen. Dies bedeutet nicht, dass die zurueckgegebenen
++ * Speicherbereiche frei benutzt werden koennen. Um festzustellen, ob nicht
++ * tyndur Bereiche benoetigt (z.B. fuer Kernel oder Multiboot-Strukturen), muss
++ * zusaetzlich get_reserved_block() benutzt werden.
++ *
++ * @param multiboot_info Pointer auf die Multiboot-Info
++ * @param i Index des freien Speicherbereichs
++ *
+  * @return Beschreibung des freien Speicherblocks. Wenn i größer als die
+  * Anzahl der freien Blocks ist, wird ein Block mit start &gt; end
+  * zurückgegeben.
+@@ -384,17 +393,29 @@ static struct mem_block get_free_block
+ }
+ 
+ /**
++ * Wird benutzt, um nacheinander alle belegten Speicherbereiche aufzuzaehlen.
++ * Dies sind vor allem Kernel, Module und Multiboot-Strukturen. Vom BIOS als
++ * reserviert gekennzeichnete Bereiche sind hierbei nicht enthalten. Um die
++ * vom BIOS aus freien Bereiche zu erhalten, muss get_free_block() benutzt
++ * werdem.
++ *
++ * @param multiboot_info Pointer auf die Multiboot-Info
++ * @param i Index des belegten Speicherbereichs
++ * @param bitmap Wenn TRUE, wird auch der Platz der Speicherbitmap als
++ * reserviert gekennzeichnet. Wenn die Speicherbitmap noch nicht platziert
++ * wurde, muss dieser Parameter FALSE sein.
++ *
+  * @return Beschreibung des reservierten Blocks. Wenn i größer als die
+  * Anzahl der reservierten Blocks ist, wird ein Block mit start &gt; end
+  * zurückgegeben.
+  */
+ static struct mem_block get_reserved_block
+-    (struct multiboot_info* multiboot_info, size_t i)
++    (struct multiboot_info* multiboot_info, size_t i, bool bitmap)
+ {
+     struct mem_block result;
+ 
+     // Die Bitmap ist bereits zugewiesen, wenn diese Funktion aufgerufen wird
+-    if (i-- == 0) {
++    if (bitmap &amp;&amp; (i-- == 0)) {
+         result.start    = pmm_bitmap;
+         result.end      = pmm_bitmap +
+             ((pmm_bitmap_length / 8) * PMM_BITS_PER_ELEMENT);
+@@ -480,12 +501,13 @@ static paddr_t find_bitmap_mem
+             j = 0;
+             do
+             {
+-                reserved = get_reserved_block(multiboot_info, j++);
++                reserved = get_reserved_block(multiboot_info, j++, FALSE);
+                 if (!((reserved.start &gt; bitmap + size)
+-                    || (reserved.end &lt; bitmap)))
++                    || (reserved.end &lt;= bitmap)))
+                 {
+                     j = 0;
+-                    bitmap = reserved.end;
++                    bitmap = (paddr_t)
++                        PAGE_ALIGN_ROUND_UP((uintptr_t) reserved.end);
+                 }
+             }
+             while ((bitmap &lt;= free.end) &amp;&amp; (reserved.start &lt; reserved.end));
+@@ -577,7 +599,7 @@ void pmm_init(struct multiboot_info* multiboot_info)
+     i = 0;
+     do
+     {
+-        struct mem_block block = get_reserved_block(multiboot_info, i++);
++        struct mem_block block = get_reserved_block(multiboot_info, i++, TRUE);
+ 
+         // Wenn der Start nach dem Ende liegt, ist der Block ungültig
+         // und wir sind fertig
+-- 
+1.6.0.2
+
+
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="000680.html">[tyndur-devel] [PATCH] buildmk: make -j ermoeglichen
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="000682.html">[tyndur-devel] [PATCH] kernel2: Initialisierung der	physischen	Speicherverwaltung fixen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#681">[ Datum ]</a>
+              <a href="thread.html#681">[ Thema ]</a>
+              <a href="subject.html#681">[ Betreff (Subject)]</a>
+              <a href="author.html#681">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

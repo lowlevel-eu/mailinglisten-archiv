@@ -1,0 +1,211 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [Lost] [Patch 1/3] kernel2: RPC
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5BLost%5D%20%5BPatch%201/3%5D%20kernel2%3A%20RPC&In-Reply-To=%3C200808021443.27525.toni%40famkaufmann.info%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="000393.html">
+   <LINK REL="Next"  HREF="000397.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[Lost] [Patch 1/3] kernel2: RPC</H1>
+    <B>Antoine Kaufmann</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5BLost%5D%20%5BPatch%201/3%5D%20kernel2%3A%20RPC&In-Reply-To=%3C200808021443.27525.toni%40famkaufmann.info%3E"
+           TITLE="[Lost] [Patch 1/3] kernel2: RPC">toni at famkaufmann.info
+                  </A><BR>
+    <I>Sa Aug  2 14:43:27 CEST 2008</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="000393.html">[Lost] [Patch] kbc - Rewrite
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="000397.html">[Lost] [Patch 1/3] kernel2: RPC
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#394">[ Datum ]</a>
+              <a href="thread.html#394">[ Thema ]</a>
+              <a href="subject.html#394">[ Betreff (Subject) ]</a>
+              <a href="author.html#394">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>Am Donnerstag, 31. Juli 2008 18.24:09 schrieb Kevin Wolf:
+&gt;<i> + kernel2: mmc_automap_user() mappt virtuell zusammenhängenden Speicher aus
+</I>&gt;<i> einem anderen Kontext (z.B. den Stack eines Tasks, der per RPC aufgerufen
+</I>&gt;<i> werden soll)
+</I>&gt;<i> + kernel2: syscall_fastrpc
+</I>&gt;<i> + kernel2: syscall_fastrpc_ret
+</I>&gt;<i>
+</I>&gt;<i> Dieser Patch ist irgendwas zwischen ziemlich und extrem kaputt. Ich würde
+</I>&gt;<i> es trotzdem vorziehen, ihn erstmal so einzuchecken und die Details später
+</I>&gt;<i> zu fixen.
+</I>
+&gt;<i> Index: trunk/src/kernel2/src/syscalls/rpc.c
+</I>&gt;<i> ===================================================================
+</I>&gt;<i> --- trunk.orig/src/kernel2/src/syscalls/rpc.c
+</I>&gt;<i> +++ trunk/src/kernel2/src/syscalls/rpc.c
+</I>&gt;<i> ....
+</I>&gt;<i> +    // Der aufgerufene Task darf wieder laufen
+</I>&gt;<i> +    if (callee-&gt;status == PM_STATUS_WAIT_FOR_RPC) {
+</I>&gt;<i> +        callee-&gt;status = PM_STATUS_READY;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>Muss da das if wirklich hin? Wenn ja, deckt es auch alle Fälle? Irgendwie bin 
+ich da grad etwas unsicher.
+
+&gt;<i> +/**
+</I>&gt;<i> + * Wird nach der Ausführung eines RPC-Handlers aufgerufen.
+</I>&gt;<i> + *
+</I>&gt;<i> + * Nach der Rückkehr vom RPC-Handler wird der neueste Zustand vom
+</I>&gt;<i> RPC-Stack + * gepopt und zur Wiederherstellung des ursprünglichen
+</I>&gt;<i> Prozessorzustands + * benutzt.
+</I>&gt;<i> + *
+</I>&gt;<i> + * Dies betrifft eip, esp, eax und eflags. Die übrigen Register sind vom
+</I>&gt;<i> + * RPC-Handler zu sicher und vor dem Aufruf von SYSCALL_FASTRPC_RET
+</I>s/sicher/sichern/ ;-)
+
+&gt;<i> + * wiederherzustellen. eax ist davon ausgenommen, da es die
+</I>&gt;<i> Funktionsnummer + * des Syscalls enthalten muß.
+</I>&gt;<i> + *
+</I>&gt;<i> + * @param esp Interrupt-Stackframe des vom RPC-Handler zurückkehrenden
+</I>&gt;<i> Tasks + */
+</I>&gt;<i> +void syscall_fastrpc_ret(void)
+</I>&gt;<i> +{
+</I>&gt;<i> +    rpc_t* rpc = list_pop(cpu_get_current()-&gt;thread-&gt;process-&gt;rpcs);
+</I>&gt;<i> +    interrupt_stack_frame_t* callee_isf =
+</I>&gt;<i> +        cpu_get_current()-&gt;thread-&gt;kernel_stack;
+</I>&gt;<i> +
+</I>&gt;<i> +    // Wenn der Task vom RPC-Handler zurückkehrt, obwohl der Handler
+</I>&gt;<i> +    // gar nicht aufgerufen wurde, läuft was schief
+</I>&gt;<i> +    if (rpc == NULL) {
+</I>&gt;<i> +#if 0
+</I>&gt;<i> +        if(debug_test_flag(DEBUG_FLAG_STACK_BACKTRACE)) {
+</I>&gt;<i> +            stack_backtrace_ebp(callee_isf-&gt;ebp, callee_isf-&gt;eip);
+</I>&gt;<i> +        }
+</I>&gt;<i> +#endif
+</I>&gt;<i> +        kprintf(&quot;Unerwartete Rueckkehr vom RPC-Handler\n&quot;);
+</I>Und dann kommt absichtlich ein PF? ;-)
+
+&gt;<i> Index: trunk/src/kernel2/src/arch/i386/mm/virt.c
+</I>&gt;<i> ===================================================================
+</I>&gt;<i> --- trunk.orig/src/kernel2/src/arch/i386/mm/virt.c
+</I>&gt;<i> +++ trunk/src/kernel2/src/arch/i386/mm/virt.c
+</I>&gt;<i> @@ -147,32 +147,35 @@ void vmm_kernel_unmap(vaddr_t start, siz
+</I>&gt;<i>      }
+</I>&gt;<i>  }
+</I>&gt;<i>
+</I>&gt;<i> -#if 0
+</I>&gt;<i>  /**
+</I>&gt;<i>   * Vergr&#65533;ssert den Userspace-Stack eines Tasks um pages Seiten
+</I>s/Tasks/Threads/ oder? ;-)
+
+&gt;<i>   *
+</I>&gt;<i>   * @param task_ptr Pointer zur Task-Struktur
+</I>&gt;<i>   * @param pages Anzahl der zu mappenden Seiten
+</I>&gt;<i>   */
+</I>&gt;<i> -void increase_user_stack_size(struct task * task_ptr, int pages)
+</I>&gt;<i> +void increase_user_stack_size(pm_thread_t* task_ptr, int pages)
+</I>Wäre es soviel arbeit task_ptr anders zu benennen? ;-)
+
+...
+
+&gt;<i> -        map_page((mmc_context_t) task_ptr-&gt;cr3,
+</I>&gt;<i> task_ptr-&gt;user_stack_bottom, phys_alloc_page(), PTE_P | PTE_W | PTE_U); +  
+</I>&gt;<i>      mmc_map(&amp;task_ptr-&gt;process-&gt;context,
+</I>&gt;<i> +            task_ptr-&gt;kernel_stack_bottom,
+</I>&gt;<i> +            pmm_alloc(1), PTE_P | PTE_W | PTE_U, 1);
+</I>&gt;<i>  	}
+</I>&gt;<i>  }
+</I>&gt;<i> -#endif
+</I>Gibts hier nicht ein Makro USERSPACE_DATA oder so?
+
+&gt;<i> Index: trunk/src/kernel2/src/arch/i386/mm/mm_context.c
+</I>&gt;<i> ===================================================================
+</I>&gt;<i> --- trunk.orig/src/kernel2/src/arch/i386/mm/mm_context.c
+</I>&gt;<i> +++ trunk/src/kernel2/src/arch/i386/mm/mm_context.c
+</I>&gt;<i> @@ -509,7 +509,7 @@ static vaddr_t find_contiguous_pages
+</I>&gt;<i>   * Mappt einen Speicherbereich in einen MM-Kontext an eine freie Adresse
+</I>&gt;<i> in * einem vorgegebenen Adressberech.
+</I>&gt;<i>   *
+</I>&gt;<i> - * @param page_directory Kontext, in den gemappt werden soll
+</I>&gt;<i> + * @param context Kontext, in den gemappt werden soll
+</I>&gt;<i>   * @param start Physische Startadresse des zu mappenden Speicherbereichs
+</I>&gt;<i>   * @param count Anzahl der zu mappenden Seiten
+</I>&gt;<i>   * @param lower_limit Niedrigste zul&#65533;ssige virtuelle Adresse
+</I>&gt;<i> @@ -532,3 +532,44 @@ vaddr_t mmc_automap(mmc_context_t* conte
+</I>&gt;<i>          return NULL;
+</I>&gt;<i>      }
+</I>&gt;<i>  }
+</I>&gt;<i> +
+</I>&gt;<i> +/**
+</I>&gt;<i> + * Mappt einen Speicherbereich eines anderen Tasks in einen MM-Kontext an
+</I>&gt;<i> eine + * freie Adresse in einem vorgegebenen Adressberech.
+</I>&gt;<i> + *
+</I>&gt;<i> + * @param target_ctx Kontext, in den gemappt werden soll
+</I>&gt;<i> + * @param source_ctx Kontext, aus dem Speicher gemappt werden soll
+</I>&gt;<i> + * @param start Virtuelle Startadresse des zu mappenden Speicherbereichs
+</I>&gt;<i> + *      bezueglich source_ctx
+</I>&gt;<i> + * @param count Anzahl der zu mappenden Seiten
+</I>&gt;<i> + * @param lower_limit Niedrigste zulaessige virtuelle Adresse
+</I>&gt;<i> + * @param upper_limit Hoechste zulaessige virtuelle Adresse
+</I>&gt;<i> + * @param flags Flags fuer die Pagetable
+</I>&gt;<i> + */
+</I>&gt;<i> +vaddr_t mmc_automap_user(mmc_context_t* target_ctx, mmc_context_t*
+</I>&gt;<i> source_ctx, +    vaddr_t start, size_t count, uintptr_t lower_limit,
+</I>&gt;<i> uintptr_t upper_limit, +    int flags)
+</I>&gt;<i> +{
+</I>&gt;<i> +    size_t i;
+</I>&gt;<i> +    paddr_t paddr;
+</I>&gt;<i> +    vaddr_t vaddr;
+</I>&gt;<i> +    vaddr_t free_page =
+</I>&gt;<i> +        find_contiguous_pages(target_ctx, count, lower_limit,
+</I>&gt;<i> upper_limit); +
+</I>&gt;<i> +    if (free_page == NULL) {
+</I>&gt;<i> +        return NULL;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    // FIXME Hier wird unter Umstaenden ziemlich oft dieselbe Pagetable
+</I>&gt;<i> gemappt +    // und wieder ungemappt (in mmc_resolve)
+</I>&gt;<i> +    for (i = 0; i &lt; count; i++) {
+</I>&gt;<i> +        paddr = mmc_resolve(source_ctx, start + (i * PAGE_SIZE));
+</I>&gt;<i> +        vaddr = free_page + (i * PAGE_SIZE);
+</I>&gt;<i> +        if (!mmc_map(target_ctx, vaddr, paddr, flags, count)) {
+</I>&gt;<i> +            mmc_unmap(target_ctx, free_page, i);
+</I>
+Und phyisch freigeben?
+
+&gt;<i> +            return NULL;
+</I>&gt;<i> +        }
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    return free_page;
+</I>&gt;<i> +}
+</I>
+
+Wenn du das angepasst hast, kannst du direkt einchecken.
+
+
+
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="000393.html">[Lost] [Patch] kbc - Rewrite
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="000397.html">[Lost] [Patch 1/3] kernel2: RPC
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#394">[ Datum ]</a>
+              <a href="thread.html#394">[ Thema ]</a>
+              <a href="subject.html#394">[ Betreff (Subject)]</a>
+              <a href="author.html#394">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

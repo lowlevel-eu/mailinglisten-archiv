@@ -1,0 +1,160 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH v3] kernel2: IRQ-Sharing (Bug 79)
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v3%5D%20kernel2%3A%20IRQ-Sharing%20%28Bug%2079%29&In-Reply-To=%3C1303496873-17572-1-git-send-email-max%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002176.html">
+   <LINK REL="Next"  HREF="002175.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH v3] kernel2: IRQ-Sharing (Bug 79)</H1>
+    <B>Max Reitz</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v3%5D%20kernel2%3A%20IRQ-Sharing%20%28Bug%2079%29&In-Reply-To=%3C1303496873-17572-1-git-send-email-max%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH v3] kernel2: IRQ-Sharing (Bug 79)">max at tyndur.org
+                  </A><BR>
+    <I>Fr Apr 22 20:27:53 CEST 2011</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002176.html">[tyndur-devel] [PATCH v2] kernel2: IRQ-Sharing (Bug 79)
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002175.html">[tyndur-devel] [PATCH] nixer: RPCs zum Teil abgesichert (Bug 77)
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2177">[ Datum ]</a>
+              <a href="thread.html#2177">[ Thema ]</a>
+              <a href="subject.html#2177">[ Betreff (Subject) ]</a>
+              <a href="author.html#2177">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>! Ein IRQ sollte erst dann demaskiert werden, wenn alle RPCs, die ihn
+  behandeln, zurückgekehrt sind.
+
+Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">max at tyndur.org</A>&gt;
+---
+ src/kernel2/include/im.h        |   12 ++++++++++++
+ src/kernel2/src/interrupts/im.c |   24 ++++++++++++++++++++++++
+ src/kernel2/src/syscalls/rpc.c  |    4 +++-
+ 3 files changed, 39 insertions(+), 1 deletions(-)
+
+diff --git a/src/kernel2/include/im.h b/src/kernel2/include/im.h
+index 05f7200..23ccf22 100644
+--- a/src/kernel2/include/im.h
++++ b/src/kernel2/include/im.h
+@@ -54,6 +54,18 @@ void im_disable(void);
+ void im_enable_irq(uint8_t irq);
+ void im_disable_irq(uint8_t irq);
+ 
++/**
++ * Zeigt an, dass ein RPC zu einem Task ausgelöst wurde, der den entsprechenden
++ * IRQ verarbeiten soll.
++ */
++void im_irq_handlers_increment(uint8_t irq);
++/**
++ * Zeigt an, dass solch ein RPC beendet wurde. Ist die Zahl der Tasks, die sich
++ * um diesen IRQ kümmern, auf 0 gesunken, kann der IRQ wieder per im_enable_irq
++ * zugelassen werden.
++ */
++void im_irq_handlers_decrement(uint8_t irq);
++
+ void im_end_of_interrupt(uint8_t interrupt);
+ interrupt_stack_frame_t* im_handler(interrupt_stack_frame_t* isf);
+ interrupt_stack_frame_t* im_prepare_current_thread(void);
+diff --git a/src/kernel2/src/interrupts/im.c b/src/kernel2/src/interrupts/im.c
+index 97862ac..60b57b2 100644
+--- a/src/kernel2/src/interrupts/im.c
++++ b/src/kernel2/src/interrupts/im.c
+@@ -34,6 +34,7 @@
+  */
+ 
+ #include &lt;stdbool.h&gt;
++#include &lt;lock.h&gt;
+ #include &lt;types.h&gt;
+ #include &lt;lost/config.h&gt;
+ 
+@@ -67,6 +68,12 @@ static int intr_num_tasks[IM_NUM_INTERRUPTS];
+ // Interrupt 0 sind, sonst true).
+ static bool any_intr[IM_NUM_INTERRUPTS];
+ 
++// Anzahl von Tasks, die sich gerade um einen bestimmten IRQ kümmern (zu denen
++// also ein fastrpc_irq ausgeführt wurde und noch nicht beendet ist)
++static uint32_t intr_active_tasks[IM_NUM_INTERRUPTS];
++// Ein Lock für dieses Array
++static lock_t intr_active_tasks_lock = LOCK_UNLOCKED;
++
+ void im_send_interrupts(void);
+ bool fastrpc_irq(pm_process_t* callee, size_t metadata_size, void* metadata,
+     size_t data_size, void* data, uint8_t irq);
+@@ -373,3 +380,22 @@ void im_send_interrupts(void)
+         pm_scheduler_try_switch(new_thread);
+     }
+ }
++
++void im_irq_handlers_increment(uint8_t irq)
++{
++    lock(&amp;intr_active_tasks_lock);
++    intr_active_tasks[irq]++;
++    unlock(&amp;intr_active_tasks_lock);
++}
++
++void im_irq_handlers_decrement(uint8_t irq)
++{
++    lock(&amp;intr_active_tasks_lock);
++
++    if (--intr_active_tasks[irq] &lt;= 0) {
++        intr_active_tasks[irq] = 0;
++        im_enable_irq(irq);
++    }
++
++    unlock(&amp;intr_active_tasks_lock);
++}
+diff --git a/src/kernel2/src/syscalls/rpc.c b/src/kernel2/src/syscalls/rpc.c
+index 382c882..1b57ae0 100644
+--- a/src/kernel2/src/syscalls/rpc.c
++++ b/src/kernel2/src/syscalls/rpc.c
+@@ -325,6 +325,8 @@ bool fastrpc_irq(pm_process_t* callee, size_t metadata_size, void* metadata,
+         return false;
+     }
+ 
++    im_irq_handlers_increment(irq);
++
+     rpc_t* rpc = list_get_element_at(callee-&gt;rpcs, 0);
+     rpc-&gt;reenable_irq = irq;
+ 
+@@ -381,7 +383,7 @@ void syscall_fastrpc_ret(void)
+     // Wenn es ein IRQ-verarbeitender RPC war, den Interrupt jetzt
+     // wieder aktivieren
+     if (rpc-&gt;reenable_irq) {
+-        im_enable_irq(rpc-&gt;reenable_irq);
++        im_irq_handlers_decrement(rpc-&gt;reenable_irq);
+     }
+ 
+     free(rpc);
+-- 
+1.7.4.4
+
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002176.html">[tyndur-devel] [PATCH v2] kernel2: IRQ-Sharing (Bug 79)
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002175.html">[tyndur-devel] [PATCH] nixer: RPCs zum Teil abgesichert (Bug 77)
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2177">[ Datum ]</a>
+              <a href="thread.html#2177">[ Thema ]</a>
+              <a href="subject.html#2177">[ Betreff (Subject)]</a>
+              <a href="author.html#2177">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

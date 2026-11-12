@@ -1,0 +1,200 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 4/5] libc: POSIX: Mehr Signale
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%204/5%5D%20libc%3A%20POSIX%3A%20Mehr%20Signale&In-Reply-To=%3C1240424297-4863-5-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="000795.html">
+   <LINK REL="Next"  HREF="000794.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 4/5] libc: POSIX: Mehr Signale</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%204/5%5D%20libc%3A%20POSIX%3A%20Mehr%20Signale&In-Reply-To=%3C1240424297-4863-5-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 4/5] libc: POSIX: Mehr Signale">kevin at tyndur.org
+                  </A><BR>
+    <I>Mi Apr 22 20:18:16 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="000795.html">[tyndur-devel] [PATCH 3/5] libc: netinet/in.h zieht	arpa/inet.h	nach
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="000794.html">[tyndur-devel] [PATCH 4/5] libc: POSIX: Mehr Signale
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#766">[ Datum ]</a>
+              <a href="thread.html#766">[ Thema ]</a>
+              <a href="subject.html#766">[ Betreff (Subject) ]</a>
+              <a href="author.html#766">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ libc: POSIX: Signale blockieren mit sigprocmask()
+! libc: POSIX: raise() setzt errno, wenn es -1 zurueckgibt
+---
+ src/modules/include/signal.h   |   20 +++++++++++++-
+ src/modules/lib/posix/signal.c |   59 ++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 78 insertions(+), 1 deletions(-)
+
+diff --git a/src/modules/include/signal.h b/src/modules/include/signal.h
+index 364cd67..ab67d88 100644
+--- a/src/modules/include/signal.h
++++ b/src/modules/include/signal.h
+@@ -146,6 +146,12 @@ struct sigaction {
+     int             sa_flags;
+ };
+ 
++enum {
++    SIG_BLOCK,
++    SIG_UNBLOCK,
++    SIG_SETMASK,
++};
++
+ 
+ /**
+  * Aendert die auszufuehrende Aktion fuer ein Signal und gibt die alte Aktion
+@@ -158,9 +164,21 @@ struct sigaction {
+  */
+ int sigaction(int sig, const struct sigaction* action, struct sigaction* old);
+ 
+-/// Einen Signal-Hander aendern
++/// Einen Signal-Handler aendern
+ sighandler_t signal(int signum, sighandler_t handler);
+ 
++/**
++ * Verwaltung von blockierten Signalen
++ *
++ * @param mode SIG_BLOCK: Alle Signale aus sigset blockieren
++ * SIG_UNBLOCK: Alle Signale aus sigset wieder aktivieren
++ * SIG_SETMASK: sigset als neue Signal-Maske benutzen
++ *
++ * @return 0 bei Erfolg. -1 und errno = EINVAL, wenn mode einen unerlaubten
++ * Wert hat.
++ */
++int sigprocmask(int mode, const sigset_t* sigset, sigset_t* oldset);
++
+ /// Ein Signal zum aktuellen Prozess senden
+ int raise(int signal);
+ 
+diff --git a/src/modules/lib/posix/signal.c b/src/modules/lib/posix/signal.c
+index 03cfb56..e35064d 100644
+--- a/src/modules/lib/posix/signal.c
++++ b/src/modules/lib/posix/signal.c
+@@ -38,6 +38,7 @@
+ 
+ /// Array mit Pointern auf die Signal-Handler
+ static struct sigaction sigactions[_SIGNO_MAX];
++static sigset_t sigmask;
+ static bool initialized = FALSE;
+ 
+ /**
+@@ -46,7 +47,10 @@ static bool initialized = FALSE;
+ static void init_signals(void)
+ {
+     int i;
++
+     memset(sigactions, 0, sizeof(sigactions));
++    memset(&amp;sigmask, 0, sizeof(sigmask));
++
+     for (i = 0; i &lt; _SIGNO_MAX; i++) {
+         sigactions[i].sa_handler = SIG_DFL;
+     }
+@@ -71,9 +75,16 @@ int raise(int signum)
+     // Wenn das Signal Groesser ist als die Groesste gueltige wird sofort
+     // abgebrochen.
+     if (signum &gt;= _SIGNO_MAX) {
++        errno = EINVAL;
+         return -1;
+     }
+ 
++    // Pruefen, ob das Signal nicht blockiert ist
++    if (sigismember(&amp;sigmask, signum)) {
++        return 0;
++    }
++
++    // Handler aufrufen
+     sighandler_t handler = sigactions[signum].sa_handler;
+     if (handler != NULL) {
+         handler(signum);
+@@ -290,6 +301,54 @@ int sigismember(const sigset_t *sigset, int signum)
+ }
+ 
+ /**
++ * Verwaltung von blockierten Signalen
++ *
++ * @param mode SIG_BLOCK: Alle Signale aus sigset blockieren
++ * SIG_UNBLOCK: Alle Signale aus sigset wieder aktivieren
++ * SIG_SETMASK: sigset als neue Signal-Maske benutzen
++ *
++ * @return 0 bei Erfolg. -1 und errno = EINVAL, wenn mode einen unerlaubten
++ * Wert hat.
++ */
++int sigprocmask(int mode, const sigset_t* sigset, sigset_t* oldset)
++{
++    int i;
++
++    if (oldset != NULL) {
++        memcpy(oldset, &amp;sigmask, sizeof(sigset_t));
++    }
++
++    switch (mode) {
++        case SIG_BLOCK:
++            for (i = 0; i &lt; _SIGNO_MAX; i++) {
++                if (sigismember(sigset, i)) {
++                    sigaddset(&amp;sigmask, i);
++                }
++            }
++            break;
++
++        case SIG_UNBLOCK:
++            for (i = 0; i &lt; _SIGNO_MAX; i++) {
++                if (sigismember(sigset, i)) {
++                    sigdelset(&amp;sigmask, i);
++                }
++            }
++            break;
++
++        case SIG_SETMASK:
++            memcpy(&amp;sigmask, sigset, sizeof(sigset_t));
++            break;
++
++        default:
++            errno = EINVAL;
++            return -1;
++    }
++
++    return 0;
++}
++
++
++/**
+  * Callbackfunktion fuer alarm()
+  */
+ static void do_alarm(void)
+-- 
+1.6.0.2
+
+
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="000795.html">[tyndur-devel] [PATCH 3/5] libc: netinet/in.h zieht	arpa/inet.h	nach
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="000794.html">[tyndur-devel] [PATCH 4/5] libc: POSIX: Mehr Signale
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#766">[ Datum ]</a>
+              <a href="thread.html#766">[ Thema ]</a>
+              <a href="subject.html#766">[ Betreff (Subject)]</a>
+              <a href="author.html#766">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

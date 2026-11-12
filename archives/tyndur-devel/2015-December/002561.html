@@ -1,0 +1,1346 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH v2 18/24] cdi/usb: Implementierung der	CDI-Bibliothek
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%2018/24%5D%20cdi/usb%3A%20Implementierung%20der%0A%09CDI-Bibliothek&In-Reply-To=%3C1449965469-16714-19-git-send-email-max%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002560.html">
+   <LINK REL="Next"  HREF="002562.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH v2 18/24] cdi/usb: Implementierung der	CDI-Bibliothek</H1>
+    <B>Max Reitz</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%2018/24%5D%20cdi/usb%3A%20Implementierung%20der%0A%09CDI-Bibliothek&In-Reply-To=%3C1449965469-16714-19-git-send-email-max%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH v2 18/24] cdi/usb: Implementierung der	CDI-Bibliothek">max at tyndur.org
+                  </A><BR>
+    <I>So Dez 13 01:11:03 CET 2015</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002560.html">[tyndur-devel] [PATCH v2 17/24] cdi/usb: Add headers
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002562.html">[tyndur-devel] [PATCH v2 19/24] usb: Entferne týndur-eigene Treiber
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2561">[ Datum ]</a>
+              <a href="thread.html#2561">[ Thema ]</a>
+              <a href="subject.html#2561">[ Betreff (Subject) ]</a>
+              <a href="author.html#2561">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ Implementierung der CDI-Bibliothek für CDI.usb für týndur
+
+Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">max at tyndur.org</A>&gt;
+---
+ src/modules/cdi/include/cdi-osdep.h |   3 +
+ src/modules/cdi/lib/cdi.c           |  81 +++++++
+ src/modules/cdi/lib/usb.c           | 403 +++++++++++++++++++++++++++++++++++
+ src/modules/cdi/lib/usb_dd.c        | 173 +++++++++++++++
+ src/modules/cdi/lib/usb_hcd.c       | 413 ++++++++++++++++++++++++++++++++++++
+ src/modules/include/usb-ipc.h       | 103 +++++++++
+ 6 files changed, 1176 insertions(+)
+ create mode 100644 src/modules/cdi/lib/usb.c
+ create mode 100644 src/modules/cdi/lib/usb_dd.c
+ create mode 100644 src/modules/cdi/lib/usb_hcd.c
+ create mode 100644 src/modules/include/usb-ipc.h
+
+diff --git a/src/modules/cdi/include/cdi-osdep.h b/src/modules/cdi/include/cdi-osdep.h
+index 3ec20a1..42fa39d 100644
+--- a/src/modules/cdi/include/cdi-osdep.h
++++ b/src/modules/cdi/include/cdi-osdep.h
+@@ -13,6 +13,7 @@
+ 
+ #include &lt;stdio.h&gt;
+ #include &lt;lostio.h&gt;
++#include &lt;sys/types.h&gt;
+ 
+ #define CDI_STANDALONE
+ #define TYNDUR
+@@ -75,6 +76,8 @@ typedef struct
+  * \endjapanese
+  */
+ typedef struct {
++    pid_t pid;
++    int id;
+ } cdi_usb_device_osdep;
+ 
+ /**
+diff --git a/src/modules/cdi/lib/cdi.c b/src/modules/cdi/lib/cdi.c
+index 11b3009..fa8a217 100644
+--- a/src/modules/cdi/lib/cdi.c
++++ b/src/modules/cdi/lib/cdi.c
+@@ -23,11 +23,20 @@
+ #include &quot;cdi/pci.h&quot;
+ #include &quot;cdi/scsi.h&quot;
+ #include &quot;cdi/storage.h&quot;
++#include &quot;cdi/usb.h&quot;
++#include &quot;cdi/usb_hcd.h&quot;
+ 
+ extern void cdi_storage_driver_register(struct cdi_storage_driver* driver);
+ extern void cdi_audio_driver_register(struct cdi_audio_driver* driver);
++extern void cdi_usb_driver_register(struct cdi_usb_driver* driver);
+ extern void cdi_tyndur_net_device_init(struct cdi_device* device);
+ 
++extern void cdi_osdep_handle_usb_device(struct cdi_usb_bus_device_pattern* p);
++
++extern void cdi_osdep_provide_hc(struct cdi_usb_hc* hc);
++
++extern void cdi_osdep_set_up_usb_dd_ipc(struct cdi_driver* drv);
++
+ void cdi_osdep_new_device(struct cdi_driver* drv, struct cdi_device* dev);
+ 
+ static list_t* drivers = NULL;
+@@ -219,6 +228,10 @@ static void cdi_tyndur_run_drivers(void)
+             }
+         }
+ 
++        if (driver-&gt;bus == CDI_USB) {
++            cdi_osdep_set_up_usb_dd_ipc(driver);
++        }
++
+         /* Netzwerk ist schon initialisiert */
+         if (driver-&gt;type != CDI_NETWORK) {
+             init_service_register((char*) driver-&gt;name);
+@@ -270,6 +283,10 @@ void cdi_driver_register(struct cdi_driver* driver)
+             cdi_audio_driver_register((struct cdi_audio_driver*) driver);
+             break;
+ 
++        case CDI_USB:
++            cdi_usb_driver_register((struct cdi_usb_driver*) driver);
++            break;
++
+         default:
+             break;
+     }
+@@ -281,6 +298,66 @@ list_t* cdi_tyndur_get_drivers(void)
+     return drivers;
+ }
+ 
++void cdi_handle_bus_device(struct cdi_driver* drv,
++                           struct cdi_bus_device_pattern* pattern)
++{
++    (void)drv;
++
++    switch ((int)pattern-&gt;bus_type) {
++        case CDI_USB:
++            cdi_osdep_handle_usb_device(
++                CDI_UPCAST(pattern, struct cdi_usb_bus_device_pattern,
++                           pattern));
++            break;
++    }
++}
++
++extern void cdi_osdep_provide_usb_device_to(struct cdi_usb_device* dev,
++                                            pid_t pid);
++
++int cdi_provide_device(struct cdi_bus_data* device)
++{
++    if (device-&gt;bus_type != CDI_USB) {
++        return -1;
++    }
++
++    struct cdi_usb_device* usb_dev = CDI_UPCAST(device, struct cdi_usb_device,
++                                                bus_data);
++    pid_t pid;
++    char name[32];
++
++    sprintf(name, &quot;usb-%04x-%04x&quot;, usb_dev-&gt;vendor_id, usb_dev-&gt;product_id);
++    pid = init_service_get(name);
++    if (pid &gt; 0) {
++        cdi_osdep_provide_usb_device_to(usb_dev, pid);
++        return 0;
++    }
++
++    sprintf(name, &quot;usb-%02x-%02x-%02x&quot;, usb_dev-&gt;class_id, usb_dev-&gt;subclass_id,
++            usb_dev-&gt;protocol_id);
++    pid = init_service_get(name);
++    if (pid &gt; 0) {
++        cdi_osdep_provide_usb_device_to(usb_dev, pid);
++        return 0;
++    }
++
++    sprintf(name, &quot;usb-%02x-%02x-?&quot;, usb_dev-&gt;class_id, usb_dev-&gt;subclass_id);
++    pid = init_service_get(name);
++    if (pid &gt; 0) {
++        cdi_osdep_provide_usb_device_to(usb_dev, pid);
++        return 0;
++    }
++
++    sprintf(name, &quot;usb-%02x-?-?&quot;, usb_dev-&gt;class_id);
++    pid = init_service_get(name);
++    if (pid &gt; 0) {
++        cdi_osdep_provide_usb_device_to(usb_dev, pid);
++        return 0;
++    }
++
++    return -1;
++}
++
+ void cdi_osdep_new_device(struct cdi_driver* drv, struct cdi_device* dev)
+ {
+     if (!dev) {
+@@ -294,6 +371,10 @@ void cdi_osdep_new_device(struct cdi_driver* drv, struct cdi_device* dev)
+         case CDI_SCSI:
+             cdi_scsi_device_init(CDI_UPCAST(dev, struct cdi_scsi_device, dev));
+             break;
++
++        case CDI_USB_HCD:
++            cdi_osdep_provide_hc(CDI_UPCAST(dev, struct cdi_usb_hc, dev));
++            break;
+     }
+ }
+ 
+diff --git a/src/modules/cdi/lib/usb.c b/src/modules/cdi/lib/usb.c
+new file mode 100644
+index 0000000..69da43f
+--- /dev/null
++++ b/src/modules/cdi/lib/usb.c
+@@ -0,0 +1,403 @@
++/*
++ * Copyright (c) 2015 Max Reitz
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it
++ * and/or modify it under the terms of the Do What The Fuck You Want
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * <A HREF="http://sam.zoy.org/projects/COPYING.WTFPL">http://sam.zoy.org/projects/COPYING.WTFPL</A> for more details.
++ */
++
++#include &lt;assert.h&gt;
++#include &lt;collections.h&gt;
++#include &lt;rpc.h&gt;
++#include &lt;services.h&gt;
++#include &lt;stdint.h&gt;
++#include &lt;stdlib.h&gt;
++#include &lt;string.h&gt;
++#include &lt;sys/types.h&gt;
++#include &lt;syscall.h&gt;
++#include &lt;unistd.h&gt;
++#include &lt;usb-ipc.h&gt;
++
++#include &quot;cdi.h&quot;
++#include &quot;cdi/lists.h&quot;
++#include &quot;cdi/misc.h&quot;
++#include &quot;cdi/usb.h&quot;
++#include &quot;cdi/usb_hcd.h&quot;
++
++
++static struct cdi_usb_driver* usb_drv;
++static struct cdi_usb_device** dev_list;
++static size_t dev_list_size;
++
++extern void cdi_osdep_new_device(struct cdi_driver* drv,
++                                 struct cdi_device* dev);
++
++#define RPC(name) \
++    static void name(pid_t src, uint32_t corr_id, size_t length, void* data)
++
++#define rpc_int_resp(val) rpc_send_int_response(src, corr_id, val)
++
++
++struct transmission {
++    cdi_usb_hc_transaction_t ta;
++
++    void* buffer;
++    size_t size;
++
++    cdi_usb_transmission_result_t* result_ptr;
++
++    struct {
++        cdi_usb_transmission_result_t result;
++        char data[];
++    } *shm;
++    uint32_t shmid;
++};
++
++struct ipc_usb_hc {
++    struct cdi_usb_hc cdi;
++    pid_t pid;
++    int id;
++
++    list_t* open_transmissions;
++};
++
++
++RPC(hc_found);
++RPC(get_endpoint_descriptor);
++RPC(control_transfer);
++RPC(bulk_transfer);
++
++
++void cdi_usb_driver_register(struct cdi_usb_driver* drv)
++{
++    assert(!usb_drv);
++    usb_drv = drv;
++
++    // Wait for all USB device drivers
++    servmgr_need(&quot;usb-storage&quot;);
++
++    register_message_handler(USB_IPC_HC_FOUND, hc_found);
++    register_message_handler(USB_IPC_GET_ENDPOINT_DESCRIPTOR,
++                             get_endpoint_descriptor);
++    register_message_handler(USB_IPC_CONTROL_TRANSFER, control_transfer);
++    register_message_handler(USB_IPC_BULK_TRANSFER, bulk_transfer);
++}
++
++
++static void rh_port_down(struct cdi_usb_hub* hub, int index)
++{
++    struct cdi_usb_hc* hc = CDI_UPCAST(hub, struct cdi_usb_hc, rh);
++    struct ipc_usb_hc* ipc_hc = CDI_UPCAST(hc, struct ipc_usb_hc, cdi);
++    struct usb_ipc_hc_port_param par = {
++        .hc = ipc_hc-&gt;id,
++        .index = index
++    };
++
++    rpc_get_int(ipc_hc-&gt;pid, USB_IPC_RH_PORT_DISABLE, sizeof(par),
++                (char*) &amp;par);
++}
++
++
++static void rh_port_up(struct cdi_usb_hub* hub, int index)
++{
++    struct cdi_usb_hc* hc = CDI_UPCAST(hub, struct cdi_usb_hc, rh);
++    struct ipc_usb_hc* ipc_hc = CDI_UPCAST(hc, struct ipc_usb_hc, cdi);
++    struct usb_ipc_hc_port_param par = {
++        .hc = ipc_hc-&gt;id,
++        .index = index
++    };
++
++    rpc_get_int(ipc_hc-&gt;pid, USB_IPC_RH_PORT_RESET_ENABLE, sizeof(par),
++                (char*) &amp;par);
++}
++
++
++static cdi_usb_port_status_t rh_port_status(struct cdi_usb_hub* hub, int index)
++{
++    struct cdi_usb_hc* hc = CDI_UPCAST(hub, struct cdi_usb_hc, rh);
++    struct ipc_usb_hc* ipc_hc = CDI_UPCAST(hc, struct ipc_usb_hc, cdi);
++    struct usb_ipc_hc_port_param par = {
++        .hc = ipc_hc-&gt;id,
++        .index = index
++    };
++
++    return rpc_get_dword(ipc_hc-&gt;pid, USB_IPC_RH_PORT_STATUS, sizeof(par),
++                         (char*) &amp;par);
++}
++
++
++static cdi_usb_hc_transaction_t
++    hc_create_transaction(struct cdi_usb_hc* hc,
++                          const struct cdi_usb_hc_ep_info* target)
++{
++    struct ipc_usb_hc* ipc_hc = CDI_UPCAST(hc, struct ipc_usb_hc, cdi);
++    struct usb_ipc_hc_create_transaction_param par = {
++        .hc = ipc_hc-&gt;id,
++        .target = *target
++    };
++
++    response_t* resp = rpc_get_response(ipc_hc-&gt;pid,
++                                        USB_IPC_HC_CREATE_TRANSACTION,
++                                        sizeof(par), (char*) &amp;par);
++    if (resp-&gt;data_length != sizeof(cdi_usb_hc_transaction_t)) {
++        free(resp-&gt;data);
++        free(resp);
++        return NULL;
++    }
++
++    cdi_usb_hc_transaction_t ta = *(cdi_usb_hc_transaction_t*) resp-&gt;data;
++    free(resp-&gt;data);
++    free(resp);
++
++    return ta;
++}
++
++
++static void hc_enqueue(struct cdi_usb_hc* hc,
++                       const struct cdi_usb_hc_transmission* trans)
++{
++    struct ipc_usb_hc* ipc_hc = CDI_UPCAST(hc, struct ipc_usb_hc, cdi);
++    struct transmission* int_trans = calloc(1, sizeof(*trans));
++
++    int_trans-&gt;ta = trans-&gt;ta;
++    int_trans-&gt;result_ptr = trans-&gt;result;
++
++    int_trans-&gt;shmid = create_shared_memory(trans-&gt;size
++                                            + sizeof(*trans-&gt;result));
++    int_trans-&gt;shm = open_shared_memory(int_trans-&gt;shmid);
++
++    if (trans-&gt;token == CDI_USB_IN) {
++        int_trans-&gt;buffer = trans-&gt;buffer;
++        int_trans-&gt;size   = trans-&gt;size;
++    } else {
++        memcpy(int_trans-&gt;shm-&gt;data, trans-&gt;buffer, trans-&gt;size);
++    }
++
++    list_push(ipc_hc-&gt;open_transmissions, int_trans);
++
++    struct usb_ipc_hc_enqueue_param par = {
++        .hc = ipc_hc-&gt;id,
++        .trans = *trans,
++        .shm = int_trans-&gt;shmid
++    };
++
++    rpc_get_int(ipc_hc-&gt;pid, USB_IPC_HC_ENQUEUE, sizeof(par), (char*) &amp;par);
++}
++
++
++static void hc_start_transaction(struct cdi_usb_hc* hc,
++                                 cdi_usb_hc_transaction_t ta)
++{
++    struct ipc_usb_hc *ipc_hc = CDI_UPCAST(hc, struct ipc_usb_hc, cdi);
++    struct usb_ipc_hc_start_transaction_param par = {
++        .hc = ipc_hc-&gt;id,
++        .ta = ta
++    };
++
++    rpc_get_int(ipc_hc-&gt;pid, USB_IPC_HC_START_TRANSACTION,
++                sizeof(par), (char*) &amp;par);
++}
++
++
++static void hc_wait_transaction(struct cdi_usb_hc* hc,
++                                cdi_usb_hc_transaction_t ta)
++{
++    struct ipc_usb_hc* ipc_hc = CDI_UPCAST(hc, struct ipc_usb_hc, cdi);
++    struct usb_ipc_hc_wait_transaction_param par = {
++        .hc = ipc_hc-&gt;id,
++        .ta = ta
++    };
++
++    rpc_get_int(ipc_hc-&gt;pid, USB_IPC_HC_WAIT_TRANSACTION, sizeof(par),
++                (char*) &amp;par);
++
++    int i = 0;
++    struct transmission* int_trans;
++    while ((int_trans = list_get_element_at(ipc_hc-&gt;open_transmissions, i++))) {
++        if (int_trans-&gt;ta == ta) {
++            list_remove(ipc_hc-&gt;open_transmissions, --i);
++
++            if (int_trans-&gt;result_ptr) {
++                *int_trans-&gt;result_ptr = int_trans-&gt;shm-&gt;result;
++            }
++
++            if (int_trans-&gt;buffer) {
++                memcpy(int_trans-&gt;buffer, int_trans-&gt;shm-&gt;data,
++                       int_trans-&gt;size);
++            }
++
++            close_shared_memory(int_trans-&gt;shmid);
++            free(int_trans);
++        }
++    }
++}
++
++
++static void hc_destroy_transaction(struct cdi_usb_hc* hc,
++                                   cdi_usb_hc_transaction_t ta)
++{
++    struct ipc_usb_hc* ipc_hc = CDI_UPCAST(hc, struct ipc_usb_hc, cdi);
++    struct usb_ipc_hc_wait_transaction_param par = {
++        .hc = ipc_hc-&gt;id,
++        .ta = ta
++    };
++
++    rpc_get_int(ipc_hc-&gt;pid, USB_IPC_HC_DESTROY_TRANSACTION, sizeof(par),
++                (char*) &amp;par);
++
++    int i = 0;
++    struct transmission* int_trans;
++    while ((int_trans = list_get_element_at(ipc_hc-&gt;open_transmissions, i++))) {
++        if (int_trans-&gt;ta == ta) {
++            list_remove(ipc_hc-&gt;open_transmissions, --i);
++            close_shared_memory(int_trans-&gt;shmid);
++            free(int_trans);
++        }
++    }
++}
++
++
++static struct cdi_usb_hcd wrapper_hcd = {
++    .drv = {
++        .name   = &quot;ipc-hci&quot;,
++        .type   = CDI_USB_HCD,
++    },
++
++    .rh_drv = {
++        .port_disable       = rh_port_down,
++        .port_reset_enable  = rh_port_up,
++        .port_status        = rh_port_status,
++    },
++
++    .create_transaction     = hc_create_transaction,
++    .enqueue                = hc_enqueue,
++    .start_transaction      = hc_start_transaction,
++    .wait_transaction       = hc_wait_transaction,
++    .destroy_transaction    = hc_destroy_transaction,
++};
++
++
++RPC(hc_found)
++{
++    struct usb_ipc_hc_found_param* par = data;
++    if (length != sizeof(*par)) {
++        rpc_int_resp(0);
++        return;
++    }
++
++    struct cdi_usb_hcd* hcd = malloc(sizeof(*hcd));
++    *hcd = wrapper_hcd;
++    hcd-&gt;drv.name = strdup(par-&gt;drv_name);
++
++    struct ipc_usb_hc* hc = calloc(1, sizeof(*hc));
++    hc-&gt;pid = src;
++    hc-&gt;id = par-&gt;id;
++    hc-&gt;open_transmissions = list_create();
++    hc-&gt;cdi.dev.driver = &amp;hcd-&gt;drv;
++    hc-&gt;cdi.dev.name = strdup(par-&gt;hc_name);
++    hc-&gt;cdi.rh = par-&gt;rh;
++
++    struct cdi_usb_hc_bus* hcb = calloc(1, sizeof(*hcb));
++    hcb-&gt;bus_data.bus_type = CDI_USB_HCD;
++    hcb-&gt;hc = &amp;hc-&gt;cdi;
++
++    cdi_osdep_new_device(&amp;usb_drv-&gt;drv,
++                         usb_drv-&gt;drv.init_device(&amp;hcb-&gt;bus_data));
++
++    rpc_int_resp(1);
++}
++
++
++RPC(get_endpoint_descriptor)
++{
++    struct usb_ipc_get_endpoint_descriptor_param* par = data;
++    if (length != sizeof(*par)) {
++        rpc_int_resp(0);
++        return;
++    }
++
++    if (par-&gt;dev &lt; 0 || par-&gt;dev &gt;= (int)dev_list_size || !dev_list[par-&gt;dev]) {
++        rpc_int_resp(0);
++        return;
++    }
++
++    struct cdi_usb_device* dev = dev_list[par-&gt;dev];
++    struct cdi_usb_endpoint_descriptor desc;
++
++    usb_drv-&gt;get_endpoint_descriptor(dev, par-&gt;ep, &amp;desc);
++    rpc_send_response(src, corr_id, sizeof(desc), (char*) &amp;desc);
++}
++
++
++RPC(control_transfer)
++{
++    struct usb_ipc_control_transfer_param* par = data;
++    if (length != sizeof(*par)) {
++        rpc_send_dword_response(src, corr_id, CDI_USB_DRIVER_ERROR);
++        return;
++    }
++
++    if (par-&gt;dev &lt; 0 || par-&gt;dev &gt;= (int)dev_list_size || !dev_list[par-&gt;dev]) {
++        rpc_send_dword_response(src, corr_id, CDI_USB_DRIVER_ERROR);
++        return;
++    }
++
++    struct cdi_usb_device* dev = dev_list[par-&gt;dev];
++    void* shm = open_shared_memory(par-&gt;shm);
++
++    cdi_usb_transmission_result_t res;
++    res = usb_drv-&gt;control_transfer(dev, par-&gt;ep, &amp;par-&gt;setup, shm);
++
++    close_shared_memory(par-&gt;shm);
++
++    rpc_send_dword_response(src, corr_id, res);
++}
++
++
++RPC(bulk_transfer)
++{
++    struct usb_ipc_bulk_transfer_param* par = data;
++    if (length != sizeof(*par)) {
++        rpc_send_dword_response(src, corr_id, CDI_USB_DRIVER_ERROR);
++        return;
++    }
++
++    if (par-&gt;dev &lt; 0 || par-&gt;dev &gt;= (int)dev_list_size || !dev_list[par-&gt;dev]) {
++        rpc_send_dword_response(src, corr_id, CDI_USB_DRIVER_ERROR);
++        return;
++    }
++
++    struct cdi_usb_device* dev = dev_list[par-&gt;dev];
++    void* shm = open_shared_memory(par-&gt;shm);
++
++    cdi_usb_transmission_result_t res;
++    res = usb_drv-&gt;bulk_transfer(dev, par-&gt;ep, shm, par-&gt;size);
++
++    close_shared_memory(par-&gt;shm);
++
++    rpc_send_dword_response(src, corr_id, res);
++}
++
++
++void cdi_osdep_provide_usb_device_to(struct cdi_usb_device* usb_dev, pid_t pid);
++
++void cdi_osdep_provide_usb_device_to(struct cdi_usb_device* usb_dev, pid_t pid)
++{
++    int idx;
++    for (idx = 0; idx &lt; (int)dev_list_size &amp;&amp; !dev_list[idx]; idx++);
++
++    if (idx == (int)dev_list_size) {
++        dev_list_size = (dev_list_size + 4) * 3 / 2;
++        dev_list = realloc(dev_list, dev_list_size * sizeof(*dev_list));
++        memset(dev_list + idx, 0, (dev_list_size - idx) * sizeof(*dev_list));
++    }
++
++    dev_list[idx] = usb_dev;
++    dev_list[idx]-&gt;meta.pid = getpid();
++    dev_list[idx]-&gt;meta.id = idx;
++
++    rpc_get_int(pid, USB_IPC_DEVICE_FOUND,
++                sizeof(*dev_list[idx]), (char*) dev_list[idx]);
++}
+diff --git a/src/modules/cdi/lib/usb_dd.c b/src/modules/cdi/lib/usb_dd.c
+new file mode 100644
+index 0000000..e1a379d
+--- /dev/null
++++ b/src/modules/cdi/lib/usb_dd.c
+@@ -0,0 +1,173 @@
++/*
++ * Copyright (c) 2015 Max Reitz
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it
++ * and/or modify it under the terms of the Do What The Fuck You Want
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * <A HREF="http://sam.zoy.org/projects/COPYING.WTFPL">http://sam.zoy.org/projects/COPYING.WTFPL</A> for more details.
++ */
++
++#include &lt;assert.h&gt;
++#include &lt;init.h&gt;
++#include &lt;rpc.h&gt;
++#include &lt;stdlib.h&gt;
++#include &lt;string.h&gt;
++#include &lt;syscall.h&gt;
++#include &lt;unistd.h&gt;
++#include &lt;usb-ipc.h&gt;
++
++#include &quot;cdi.h&quot;
++#include &quot;cdi/misc.h&quot;
++#include &quot;cdi/usb.h&quot;
++
++
++extern void cdi_osdep_new_device(struct cdi_driver* drv,
++                                 struct cdi_device* dev);
++
++static struct cdi_driver* usb_dd;
++
++#define RPC(name) \
++    static void name(pid_t src, uint32_t corr_id, size_t length, void* data)
++
++#define rpc_int_resp(val) rpc_send_int_response(src, corr_id, val)
++
++
++RPC(device_found)
++{
++    struct cdi_usb_device* dev = data;
++    if (length != sizeof(*dev)) {
++        rpc_int_resp(0);
++        return;
++    }
++
++    cdi_osdep_new_device(usb_dd, usb_dd-&gt;init_device(&amp;dev-&gt;bus_data));
++
++    rpc_int_resp(0);
++}
++
++
++void cdi_osdep_set_up_usb_dd_ipc(struct cdi_driver* drv);
++
++void cdi_osdep_set_up_usb_dd_ipc(struct cdi_driver* drv)
++{
++    assert(!usb_dd);
++    usb_dd = drv;
++
++    register_message_handler(USB_IPC_DEVICE_FOUND, device_found);
++}
++
++
++void cdi_osdep_handle_usb_device(struct cdi_usb_bus_device_pattern* p);
++
++void cdi_osdep_handle_usb_device(struct cdi_usb_bus_device_pattern* p)
++{
++    char alias[32];
++
++    if (p-&gt;vendor_id &lt; 0 &amp;&amp; p-&gt;product_id &lt; 0) {
++        assert(p-&gt;class_id &gt;= 0);
++        if (p-&gt;protocol_id &lt; 0) {
++            assert(p-&gt;subclass_id &lt; 0);
++            snprintf(alias, 32, &quot;usb-%02x-?-?&quot;, p-&gt;class_id);
++        } else if (p-&gt;subclass_id &lt; 0) {
++            snprintf(alias, 32, &quot;usb-%02x-%02x-?&quot;, p-&gt;class_id, p-&gt;subclass_id);
++        } else {
++            snprintf(alias, 32, &quot;usb-%02x-%02x-%02x&quot;, p-&gt;class_id,
++                     p-&gt;subclass_id, p-&gt;protocol_id);
++        }
++    } else if (p-&gt;class_id &lt; 0 &amp;&amp; p-&gt;subclass_id &lt; 0 &amp;&amp; p-&gt;protocol_id &lt; 0) {
++        assert(p-&gt;vendor_id &gt;= 0 &amp;&amp; p-&gt;product_id &gt;= 0);
++        snprintf(alias, 32, &quot;usb-%04x-%04x&quot;, p-&gt;vendor_id, p-&gt;product_id);
++    } else {
++        assert(0);
++    }
++
++    init_service_register(alias);
++}
++
++
++void cdi_usb_get_endpoint_descriptor(struct cdi_usb_device* dev, int ep,
++                                     struct cdi_usb_endpoint_descriptor* desc)
++{
++    struct usb_ipc_get_endpoint_descriptor_param par = {
++        .dev   = dev-&gt;meta.id,
++        .ep    = ep
++    };
++
++    response_t* resp = rpc_get_response(dev-&gt;meta.pid,
++                                        USB_IPC_GET_ENDPOINT_DESCRIPTOR,
++                                        sizeof(par), (char*) &amp;par);
++    assert(resp-&gt;data_length == sizeof(*desc));
++
++    memcpy(desc, resp-&gt;data, sizeof(*desc));
++    free(resp-&gt;data);
++    free(resp);
++}
++
++
++cdi_usb_transmission_result_t
++    cdi_usb_control_transfer(struct cdi_usb_device* dev, int ep,
++                             const struct cdi_usb_setup_packet* setup,
++                             void* data)
++{
++    uint32_t shmid = 0;
++    void* shm = NULL;
++
++    if (setup-&gt;w_length) {
++        shmid = create_shared_memory(setup-&gt;w_length);
++        shm = open_shared_memory(shmid);
++        if (setup-&gt;bm_request_type &amp; CDI_USB_CREQ_OUT) {
++            memcpy(shm, data, setup-&gt;w_length);
++        }
++    }
++
++    struct usb_ipc_control_transfer_param par = {
++        .dev   = dev-&gt;meta.id,
++        .ep    = ep,
++        .setup = *setup,
++        .shm   = shmid
++    };
++
++    cdi_usb_transmission_result_t res;
++    res = rpc_get_dword(dev-&gt;meta.pid, USB_IPC_CONTROL_TRANSFER,
++                        sizeof(par), (char*) &amp;par);
++
++    if (setup-&gt;w_length) {
++        if (setup-&gt;bm_request_type &amp; CDI_USB_CREQ_IN) {
++            memcpy(data, shm, setup-&gt;w_length);
++        }
++        close_shared_memory(shmid);
++    }
++
++    return res;
++}
++
++
++cdi_usb_transmission_result_t cdi_usb_bulk_transfer(struct cdi_usb_device* dev,
++                                                    int ep, void* data,
++                                                    size_t size)
++{
++    uint32_t shmid = create_shared_memory(size);
++    void* shm = open_shared_memory(shmid);
++
++    // FIXME (We don't know which direction the transfer is going)
++    memcpy(shm, data, size);
++
++    struct usb_ipc_bulk_transfer_param par = {
++        .dev   = dev-&gt;meta.id,
++        .ep    = ep,
++        .size  = size,
++        .shm   = shmid
++    };
++
++    cdi_usb_transmission_result_t res;
++    res = rpc_get_dword(dev-&gt;meta.pid, USB_IPC_BULK_TRANSFER,
++                        sizeof(par), (char*) &amp;par);
++
++    // FIXME (Same as above)
++    memcpy(data, shm, size);
++
++    close_shared_memory(shmid);
++
++    return res;
++}
+diff --git a/src/modules/cdi/lib/usb_hcd.c b/src/modules/cdi/lib/usb_hcd.c
+new file mode 100644
+index 0000000..b06722c
+--- /dev/null
++++ b/src/modules/cdi/lib/usb_hcd.c
+@@ -0,0 +1,413 @@
++/*
++ * Copyright (c) 2015 Max Reitz
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it
++ * and/or modify it under the terms of the Do What The Fuck You Want
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * <A HREF="http://sam.zoy.org/projects/COPYING.WTFPL">http://sam.zoy.org/projects/COPYING.WTFPL</A> for more details.
++ */
++
++#include &lt;collections.h&gt;
++#include &lt;init.h&gt;
++#include &lt;rpc.h&gt;
++#include &lt;services.h&gt;
++#include &lt;stdlib.h&gt;
++#include &lt;string.h&gt;
++#include &lt;syscall.h&gt;
++#include &lt;unistd.h&gt;
++#include &lt;usb-ipc.h&gt;
++
++#include &quot;cdi/misc.h&quot;
++#include &quot;cdi/usb_hcd.h&quot;
++
++
++extern void cdi_osdep_device_found(void);
++
++
++struct transmission {
++    uint32_t shmid;
++    void* mapping;
++};
++
++struct transaction {
++    cdi_usb_hc_transaction_t ta;
++    list_t* transmissions;
++    bool started;
++};
++
++struct usb_hc {
++    struct cdi_usb_hc* cdi;
++
++    struct transaction** transactions;
++    size_t transactions_size;
++    size_t transactions_first_free;
++};
++
++static struct usb_hc** hc_list;
++static size_t hc_list_size, hc_list_elements;
++
++#define RPC(name) \
++    static void name(pid_t src, uint32_t corr_id, size_t length, void* data)
++
++#define rpc_int_resp(val) rpc_send_int_response(src, corr_id, val)
++
++
++RPC(hc_create_transaction);
++RPC(hc_enqueue);
++RPC(hc_start_transaction);
++RPC(hc_wait_transaction);
++RPC(hc_destroy_transaction);
++
++RPC(rh_port_disable);
++RPC(rh_port_reset_enable);
++RPC(rh_port_status);
++
++
++static void set_up_hc_ipc(void)
++{
++    static bool ipc_set_up;
++
++    if (ipc_set_up) {
++        return;
++    }
++    ipc_set_up = true;
++
++    register_message_handler(USB_IPC_HC_CREATE_TRANSACTION,
++                             hc_create_transaction);
++    register_message_handler(USB_IPC_HC_ENQUEUE, hc_enqueue);
++    register_message_handler(USB_IPC_HC_START_TRANSACTION,
++                             hc_start_transaction);
++    register_message_handler(USB_IPC_HC_WAIT_TRANSACTION, hc_wait_transaction);
++    register_message_handler(USB_IPC_HC_DESTROY_TRANSACTION,
++                             hc_destroy_transaction);
++
++    register_message_handler(USB_IPC_RH_PORT_DISABLE, rh_port_disable);
++    register_message_handler(USB_IPC_RH_PORT_RESET_ENABLE,
++                             rh_port_reset_enable);
++    register_message_handler(USB_IPC_RH_PORT_STATUS, rh_port_status);
++}
++
++
++RPC(hc_create_transaction)
++{
++    struct usb_ipc_hc_create_transaction_param* par = data;
++    if (length != sizeof(*par)) {
++        rpc_int_resp(0);
++        return;
++    }
++
++    if (par-&gt;hc &lt; 0 || par-&gt;hc &gt; (int)hc_list_elements || !hc_list[par-&gt;hc]) {
++        rpc_int_resp(0);
++        return;
++    }
++
++    struct usb_hc* hc = hc_list[par-&gt;hc];
++    struct cdi_usb_hcd* hcd = CDI_UPCAST(hc-&gt;cdi-&gt;dev.driver,
++                                         struct cdi_usb_hcd, drv);
++    struct transaction* ta = malloc(sizeof(*ta));
++
++    *ta = (struct transaction){
++        .ta             = hcd-&gt;create_transaction(hc-&gt;cdi, &amp;par-&gt;target),
++        .transmissions  = list_create()
++    };
++
++    size_t idx;
++    for (idx = hc-&gt;transactions_first_free;
++         idx &lt; hc-&gt;transactions_size &amp;&amp; hc-&gt;transactions[idx]; idx++);
++
++    if (idx &gt;= hc-&gt;transactions_size) {
++        size_t old_ts = hc-&gt;transactions_size;
++        hc-&gt;transactions_size = (hc-&gt;transactions_size + 4) * 2 / 3;
++        hc-&gt;transactions = realloc(hc-&gt;transactions,
++                                   hc-&gt;transactions_size
++                                   * sizeof(*hc-&gt;transactions));
++        memset(hc-&gt;transactions + old_ts, 0,
++               (hc-&gt;transactions_size - old_ts) * sizeof(*hc-&gt;transactions));
++    }
++    hc-&gt;transactions[idx] = ta;
++    hc-&gt;transactions_first_free = idx + 1;
++
++    cdi_usb_hc_transaction_t ipc_ta = (cdi_usb_hc_transaction_t)(uintptr_t)idx;
++    rpc_send_response(src, corr_id, sizeof(ipc_ta), (char*) &amp;ipc_ta);
++}
++
++
++RPC(hc_enqueue)
++{
++    struct usb_ipc_hc_enqueue_param* par = data;
++    if (length != sizeof(*par)) {
++        rpc_int_resp(0);
++        return;
++    }
++
++    if (par-&gt;hc &lt; 0 || par-&gt;hc &gt; (int)hc_list_elements || !hc_list[par-&gt;hc]) {
++        rpc_int_resp(0);
++        return;
++    }
++
++    struct usb_hc* hc = hc_list[par-&gt;hc];
++    struct cdi_usb_hcd* hcd = CDI_UPCAST(hc-&gt;cdi-&gt;dev.driver,
++                                         struct cdi_usb_hcd, drv);
++
++    if ((uintptr_t)par-&gt;trans.ta &gt; hc-&gt;transactions_size ||
++        !hc-&gt;transactions[(uintptr_t)par-&gt;trans.ta])
++    {
++        rpc_int_resp(0);
++        return;
++    }
++
++    struct transaction* ta = hc-&gt;transactions[(uintptr_t)par-&gt;trans.ta];
++
++    if (ta-&gt;started) {
++        rpc_int_resp(0);
++        return;
++    }
++
++    struct transmission* tm = malloc(sizeof(*tm));
++    *tm = (struct transmission) {
++        .shmid      = par-&gt;shm,
++        .mapping    = open_shared_memory(par-&gt;shm)
++    };
++
++    par-&gt;trans.ta = ta-&gt;ta;
++    par-&gt;trans.result = tm-&gt;mapping;
++    par-&gt;trans.buffer = par-&gt;trans.result + 1;
++
++    hcd-&gt;enqueue(hc-&gt;cdi, &amp;par-&gt;trans);
++
++    list_push(ta-&gt;transmissions, tm);
++
++    rpc_int_resp(0);
++}
++
++
++RPC(hc_start_transaction)
++{
++    struct usb_ipc_hc_start_transaction_param* par = data;
++    if (length != sizeof(*par)) {
++        rpc_int_resp(0);
++        return;
++    }
++
++    if (par-&gt;hc &lt; 0 || par-&gt;hc &gt; (int)hc_list_elements || !hc_list[par-&gt;hc]) {
++        rpc_int_resp(0);
++        return;
++    }
++
++    struct usb_hc* hc = hc_list[par-&gt;hc];
++    struct cdi_usb_hcd* hcd = CDI_UPCAST(hc-&gt;cdi-&gt;dev.driver,
++                                         struct cdi_usb_hcd, drv);
++
++    if ((uintptr_t)par-&gt;ta &gt; hc-&gt;transactions_size ||
++        !hc-&gt;transactions[(uintptr_t)par-&gt;ta])
++    {
++        rpc_int_resp(0);
++        return;
++    }
++
++    struct transaction* ta = hc-&gt;transactions[(uintptr_t)par-&gt;ta];
++    ta-&gt;started = true;
++
++    hcd-&gt;start_transaction(hc-&gt;cdi, ta-&gt;ta);
++
++    rpc_int_resp(0);
++}
++
++
++RPC(hc_wait_transaction)
++{
++    struct usb_ipc_hc_wait_transaction_param* par = data;
++    if (length != sizeof(*par)) {
++        rpc_int_resp(0);
++        return;
++    }
++
++    if (par-&gt;hc &lt; 0 || par-&gt;hc &gt; (int)hc_list_elements || !hc_list[par-&gt;hc]) {
++        rpc_int_resp(0);
++        return;
++    }
++
++    struct usb_hc* hc = hc_list[par-&gt;hc];
++    struct cdi_usb_hcd* hcd = CDI_UPCAST(hc-&gt;cdi-&gt;dev.driver,
++                                         struct cdi_usb_hcd, drv);
++
++    if ((uintptr_t)par-&gt;ta &gt; hc-&gt;transactions_size ||
++        !hc-&gt;transactions[(uintptr_t)par-&gt;ta])
++    {
++        rpc_int_resp(0);
++        return;
++    }
++
++    struct transaction* ta = hc-&gt;transactions[(uintptr_t)par-&gt;ta];
++
++    if (!ta-&gt;started) {
++        rpc_int_resp(0);
++        return;
++    }
++
++    hcd-&gt;wait_transaction(hc-&gt;cdi, ta-&gt;ta);
++
++    struct transmission* tm;
++    while ((tm = list_pop(ta-&gt;transmissions))) {
++        close_shared_memory(tm-&gt;shmid);
++        free(tm);
++    }
++
++    rpc_int_resp(0);
++}
++
++
++RPC(hc_destroy_transaction)
++{
++    struct usb_ipc_hc_wait_transaction_param* par = data;
++    if (length != sizeof(*par)) {
++        rpc_int_resp(0);
++        return;
++    }
++
++    if (par-&gt;hc &lt; 0 || par-&gt;hc &gt; (int)hc_list_elements || !hc_list[par-&gt;hc]) {
++        rpc_int_resp(0);
++        return;
++    }
++
++    struct usb_hc* hc = hc_list[par-&gt;hc];
++    struct cdi_usb_hcd* hcd = CDI_UPCAST(hc-&gt;cdi-&gt;dev.driver,
++                                         struct cdi_usb_hcd, drv);
++
++    if ((uintptr_t)par-&gt;ta &gt; hc-&gt;transactions_size ||
++        !hc-&gt;transactions[(uintptr_t)par-&gt;ta])
++    {
++        rpc_int_resp(0);
++        return;
++    }
++
++    struct transaction* ta = hc-&gt;transactions[(uintptr_t)par-&gt;ta];
++
++    hcd-&gt;destroy_transaction(hc-&gt;cdi, ta-&gt;ta);
++
++    hc-&gt;transactions[(uintptr_t)par-&gt;ta] = NULL;
++    if (hc-&gt;transactions_first_free &gt; (uintptr_t)par-&gt;ta) {
++        hc-&gt;transactions_first_free = (uintptr_t)par-&gt;ta;
++    }
++
++    struct transmission* tm;
++    while ((tm = list_pop(ta-&gt;transmissions))) {
++        close_shared_memory(tm-&gt;shmid);
++        free(tm);
++    }
++
++    list_destroy(ta-&gt;transmissions);
++    free(ta);
++
++    rpc_int_resp(0);
++}
++
++
++RPC(rh_port_disable)
++{
++    struct usb_ipc_hc_port_param* par = data;
++    if (length != sizeof(*par)) {
++        rpc_int_resp(0);
++        return;
++    }
++
++    if (par-&gt;hc &lt; 0 || par-&gt;hc &gt; (int)hc_list_elements || !hc_list[par-&gt;hc]) {
++        rpc_int_resp(0);
++        return;
++    }
++
++    struct cdi_usb_hc* hc = hc_list[par-&gt;hc]-&gt;cdi;
++    struct cdi_usb_hcd* hcd = CDI_UPCAST(hc-&gt;dev.driver, struct cdi_usb_hcd,
++                                         drv);
++
++    hcd-&gt;rh_drv.port_disable(&amp;hc-&gt;rh, par-&gt;index);
++
++    rpc_int_resp(0);
++}
++
++
++RPC(rh_port_reset_enable)
++{
++    struct usb_ipc_hc_port_param* par = data;
++    if (length != sizeof(*par)) {
++        rpc_int_resp(0);
++        return;
++    }
++
++    if (par-&gt;hc &lt; 0 || par-&gt;hc &gt; (int)hc_list_elements || !hc_list[par-&gt;hc]) {
++        rpc_int_resp(0);
++        return;
++    }
++
++    struct cdi_usb_hc* hc = hc_list[par-&gt;hc]-&gt;cdi;
++    struct cdi_usb_hcd* hcd = CDI_UPCAST(hc-&gt;dev.driver, struct cdi_usb_hcd,
++                                         drv);
++
++    hcd-&gt;rh_drv.port_reset_enable(&amp;hc-&gt;rh, par-&gt;index);
++
++    rpc_int_resp(0);
++}
++
++
++RPC(rh_port_status)
++{
++    struct usb_ipc_hc_port_param* par = data;
++    if (length != sizeof(*par)) {
++        rpc_send_dword_response(src, corr_id, 0);
++        return;
++    }
++
++    if (par-&gt;hc &lt; 0 || par-&gt;hc &gt; (int)hc_list_elements || !hc_list[par-&gt;hc]) {
++        rpc_send_dword_response(src, corr_id, 0);
++        return;
++    }
++
++    struct cdi_usb_hc* hc = hc_list[par-&gt;hc]-&gt;cdi;
++    struct cdi_usb_hcd* hcd = CDI_UPCAST(hc-&gt;dev.driver, struct cdi_usb_hcd,
++                                         drv);
++
++    rpc_send_dword_response(src, corr_id,
++                            hcd-&gt;rh_drv.port_status(&amp;hc-&gt;rh, par-&gt;index));
++}
++
++
++void cdi_osdep_provide_hc(struct cdi_usb_hc* cdi_hc);
++
++void cdi_osdep_provide_hc(struct cdi_usb_hc* cdi_hc)
++{
++    struct usb_hc* hc = calloc(1, sizeof(*hc));
++    hc-&gt;cdi = cdi_hc;
++
++    set_up_hc_ipc();
++
++    if (hc_list_size == hc_list_elements) {
++        size_t old_hls = hc_list_size;
++        hc_list_size = (hc_list_size + 4) * 2 / 3;
++        hc_list = realloc(hc_list, hc_list_size * sizeof(*hc_list));
++        memset(hc_list + old_hls, 0,
++               (hc_list_size - old_hls) * sizeof(*hc_list));
++    }
++
++    int id = hc_list_elements;
++    hc_list[hc_list_elements++] = hc;
++
++    static pid_t usb_pid;
++    if (!usb_pid) {
++        servmgr_need(&quot;usb&quot;);
++        usb_pid = init_service_get(&quot;usb&quot;);
++    }
++
++    struct usb_ipc_hc_found_param par;
++
++    strncpy(par.drv_name, cdi_hc-&gt;dev.driver-&gt;name, 31);
++    par.drv_name[31] = 0;
++
++    strncpy(par.hc_name, cdi_hc-&gt;dev.name, 31);
++    par.hc_name[31] = 0;
++
++    par.id = id;
++    par.rh = cdi_hc-&gt;rh;
++
++    rpc_get_int(usb_pid, USB_IPC_HC_FOUND, sizeof(par), (char*) &amp;par);
++}
+diff --git a/src/modules/include/usb-ipc.h b/src/modules/include/usb-ipc.h
+new file mode 100644
+index 0000000..ae6ccf0
+--- /dev/null
++++ b/src/modules/include/usb-ipc.h
+@@ -0,0 +1,103 @@
++/*
++ * Copyright (c) 2015 Max Reitz
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it
++ * and/or modify it under the terms of the Do What The Fuck You Want
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * <A HREF="http://sam.zoy.org/projects/COPYING.WTFPL">http://sam.zoy.org/projects/COPYING.WTFPL</A> for more details.
++ */
++
++#ifndef _USB_IPC_H
++#define _USB_IPC_H
++
++#include &lt;stdint.h&gt;
++
++#include &lt;cdi/usb.h&gt;
++#include &lt;cdi/usb_hcd.h&gt;
++
++
++// Provided by HCDs
++#define USB_IPC_HC_CREATE_TRANSACTION   &quot;HCCRTTA&quot;
++#define USB_IPC_HC_ENQUEUE              &quot;HCNQXFR&quot;
++#define USB_IPC_HC_START_TRANSACTION    &quot;HCSTTTA&quot;
++#define USB_IPC_HC_WAIT_TRANSACTION     &quot;HCWAITA&quot;
++#define USB_IPC_HC_DESTROY_TRANSACTION  &quot;HCDTYTA&quot;
++
++#define USB_IPC_RH_PORT_DISABLE         &quot;RHPRTDN&quot;
++#define USB_IPC_RH_PORT_RESET_ENABLE    &quot;RHPRTUP&quot;
++#define USB_IPC_RH_PORT_STATUS          &quot;RHPRTST&quot;
++
++
++struct usb_ipc_hc_create_transaction_param {
++    int hc;
++    struct cdi_usb_hc_ep_info target;
++};
++
++struct usb_ipc_hc_enqueue_param {
++    int hc;
++    // @buffer and @result are ignored; @result is put at the start of the SHM
++    // provided, @buffer has to be placed directly afterwards
++    struct cdi_usb_hc_transmission trans;
++    uint32_t shm;
++};
++
++struct usb_ipc_hc_start_transaction_param {
++    int hc;
++    cdi_usb_hc_transaction_t ta;
++};
++
++struct usb_ipc_hc_wait_transaction_param {
++    int hc;
++    cdi_usb_hc_transaction_t ta;
++};
++
++struct usb_ipc_hc_destroy_transaction_param {
++    int hc;
++    cdi_usb_hc_transaction_t ta;
++};
++
++struct usb_ipc_hc_port_param {
++    int hc, index;
++};
++
++
++// Provided by the bus driver
++#define USB_IPC_HC_FOUND                &quot;HCFOUND&quot;
++
++#define USB_IPC_GET_ENDPOINT_DESCRIPTOR &quot;GEPDESC&quot;
++
++#define USB_IPC_CONTROL_TRANSFER        &quot;CTRLXFR&quot;
++#define USB_IPC_BULK_TRANSFER           &quot;BULKXFR&quot;
++
++
++struct usb_ipc_hc_found_param {
++    char drv_name[32], hc_name[32];
++    int id;
++    struct cdi_usb_hub rh;
++};
++
++struct usb_ipc_get_endpoint_descriptor_param {
++    int dev, ep;
++};
++
++struct usb_ipc_control_transfer_param {
++    int dev, ep;
++    struct cdi_usb_setup_packet setup;
++    uint32_t shm; // @buffer
++};
++
++struct usb_ipc_bulk_transfer_param {
++    int dev, ep;
++    size_t size;
++    uint32_t shm; // @buffer
++};
++
++
++// Provided by device drivers
++#define USB_IPC_DEVICE_FOUND    &quot;USBPLUG&quot;
++
++
++// The parameter for device_found() is a struct cdi_usb_device.
++
++#endif
+-- 
+2.6.3
+
+</PRE>
+
+
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002560.html">[tyndur-devel] [PATCH v2 17/24] cdi/usb: Add headers
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002562.html">[tyndur-devel] [PATCH v2 19/24] usb: Entferne týndur-eigene Treiber
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2561">[ Datum ]</a>
+              <a href="thread.html#2561">[ Thema ]</a>
+              <a href="subject.html#2561">[ Betreff (Subject)]</a>
+              <a href="author.html#2561">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

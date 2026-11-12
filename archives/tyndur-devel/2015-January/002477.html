@@ -1,0 +1,259 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH 1/6] kernel2: Refcounting für lio_stream
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_1/6%3D5D_kernel2%3D3A_Refcounting_f%3F%3D%0A%09%3D%3Futf-8%3Fq%3F%3DC3%3DBCr_lio%3D5Fstream%3F%3D&In-Reply-To=%3C1421098871-25847-2-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002483.html">
+   <LINK REL="Next"  HREF="002484.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH 1/6] kernel2: Refcounting für lio_stream</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%3D%3Futf-8%3Fq%3F%3D5BPATCH_1/6%3D5D_kernel2%3D3A_Refcounting_f%3F%3D%0A%09%3D%3Futf-8%3Fq%3F%3DC3%3DBCr_lio%3D5Fstream%3F%3D&In-Reply-To=%3C1421098871-25847-2-git-send-email-kevin%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH 1/6] kernel2: Refcounting für lio_stream">kevin at tyndur.org
+                  </A><BR>
+    <I>Mo Jan 12 22:41:06 CET 2015</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002483.html">[tyndur-devel] [PATCH 6/6] vterm: Nach LostIOv2 konvertiert
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002484.html">[tyndur-devel] [PATCH] Changed size of hd-images to 2GB
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2477">[ Datum ]</a>
+              <a href="thread.html#2477">[ Thema ]</a>
+              <a href="subject.html#2477">[ Betreff (Subject) ]</a>
+              <a href="author.html#2477">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>+ kernel2: lio_streams haben jetzt einen Refcount, so dass mehrere
+  Userspace-IDs auf denselben Stream verweisen können.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">kevin at tyndur.org</A>&gt;
+---
+ src/kernel2/include/lostio/core.h      |  2 ++
+ src/kernel2/include/lostio/userspace.h |  7 +++++--
+ src/kernel2/src/lostio/userspace.c     | 32 +++++++++++++++++++++++++++-----
+ src/kernel2/src/syscalls/lostio.c      | 22 ++++++++--------------
+ src/kernel2/src/tasks/pm.c             |  8 ++------
+ 5 files changed, 44 insertions(+), 27 deletions(-)
+
+diff --git a/src/kernel2/include/lostio/core.h b/src/kernel2/include/lostio/core.h
+index b1183b4..3e71dc3 100644
+--- a/src/kernel2/include/lostio/core.h
++++ b/src/kernel2/include/lostio/core.h
+@@ -54,6 +54,8 @@ struct lio_stream {
+ 
+     int                     flags;
+     bool                    eof;
++
++    int                     usp_refcount;
+ };
+ 
+ struct lio_usp_stream {
+diff --git a/src/kernel2/include/lostio/userspace.h b/src/kernel2/include/lostio/userspace.h
+index a8a5cdc..cde9778 100644
+--- a/src/kernel2/include/lostio/userspace.h
++++ b/src/kernel2/include/lostio/userspace.h
+@@ -53,8 +53,11 @@ struct lio_usp_stream* lio_usp_add_stream(pm_process_t* proc,
+ struct lio_usp_stream* lio_usp_get_stream(pm_process_t* proc,
+     lio_usp_stream_t id);
+ 
+-/** Gibt die Userspace-ID des Streams wieder frei */
+-void lio_usp_remove_stream(pm_process_t* proc, struct lio_usp_stream* stream);
++/**
++ * Gibt die Userspace-ID des Streams wieder frei und schließt den Stream, wenn
++ * das die letzte Userspace-Referenz war.
++ */
++int lio_usp_unref_stream(pm_process_t* proc, struct lio_usp_stream* stream);
+ 
+ 
+ 
+diff --git a/src/kernel2/src/lostio/userspace.c b/src/kernel2/src/lostio/userspace.c
+index d6376de..76874fc 100644
+--- a/src/kernel2/src/lostio/userspace.c
++++ b/src/kernel2/src/lostio/userspace.c
+@@ -35,7 +35,9 @@
+ 
+ #include &lt;stdlib.h&gt;
+ 
++#include &quot;kernel.h&quot;
+ #include &quot;lostio/core.h&quot;
++#include &quot;lostio/client.h&quot;
+ #include &quot;lostio_int.h&quot;
+ 
+ static tree_t* resource_tree;
+@@ -101,8 +103,10 @@ struct lio_usp_stream* lio_usp_add_stream(pm_process_t* proc,
+ 
+     entry-&gt;stream = stream;
+     entry-&gt;usp_id = new_streamid();
+-
+     tree_insert(proc-&gt;lio_streams, entry);
++
++    stream-&gt;usp_refcount++;
++
+     return entry;
+ }
+ 
+@@ -116,11 +120,29 @@ struct lio_usp_stream* lio_usp_get_stream(pm_process_t* proc,
+     return tree_search(proc-&gt;lio_streams, id);
+ }
+ 
+-/** Gibt die Userspace-ID des Streams wieder frei */
+-void lio_usp_remove_stream(pm_process_t* proc, struct lio_usp_stream* stream)
++/**
++ * Gibt die Userspace-ID des Streams wieder frei und schließt den Stream, wenn
++ * das die letzte Userspace-Referenz war.
++ */
++int lio_usp_unref_stream(pm_process_t* proc, struct lio_usp_stream* us)
+ {
+-    tree_remove(proc-&gt;lio_streams, stream);
+-    free(stream);
++    struct lio_stream* stream = us-&gt;stream;
++    int ret;
++
++    BUG_ON(stream-&gt;usp_refcount &lt;= 0);
++    stream-&gt;usp_refcount--;
++
++    if (stream-&gt;usp_refcount == 0) {
++        ret = lio_close(stream);
++        if (ret &lt; 0) {
++            return ret;
++        }
++    }
++
++    tree_remove(proc-&gt;lio_streams, us);
++    free(us);
++
++    return 0;
+ }
+ 
+ /** Weist einem Verzeichnisbaum eine Userspace-ID zu */
+diff --git a/src/kernel2/src/syscalls/lostio.c b/src/kernel2/src/syscalls/lostio.c
+index 1c978d4..314ca98 100644
+--- a/src/kernel2/src/syscalls/lostio.c
++++ b/src/kernel2/src/syscalls/lostio.c
+@@ -37,6 +37,7 @@
+ #include &lt;stdlib.h&gt;
+ #include &lt;errno.h&gt;
+ 
++#include &quot;kernel.h&quot;
+ #include &quot;kprintf.h&quot;
+ #include &quot;syscall.h&quot;
+ #include &lt;syscall_structs.h&gt;
+@@ -107,8 +108,6 @@ void syscall_lio_open(lio_usp_resource_t* resid, int flags,
+ int syscall_lio_close(lio_usp_stream_t* stream_id)
+ {
+     struct lio_usp_stream* fd;
+-    struct lio_stream* stream;
+-    int ret;
+ 
+     // TODO: is_userspace
+     fd = lio_usp_get_stream(current_process, *stream_id);
+@@ -116,17 +115,7 @@ int syscall_lio_close(lio_usp_stream_t* stream_id)
+         return -EBADF;
+     }
+ 
+-    // lio_close gibt stream im Erfolgsfall frei, wir koennen es also nicht
+-    // erst hinterher aus dem Baum entfernen. Falls close schiefgeht, muessen
+-    // wir es wohl oder uebel wieder eintragen.
+-    stream = fd-&gt;stream;
+-    lio_usp_remove_stream(current_process, fd);
+-    ret = lio_close(stream);
+-    if (ret &lt; 0) {
+-        lio_usp_add_stream(current_process, stream);
+-    }
+-
+-    return ret;
++    return lio_usp_unref_stream(current_process, fd);
+ }
+ 
+ /// Stream an anderen Prozess weitergeben
+@@ -135,6 +124,7 @@ int syscall_lio_pass_fd(lio_usp_stream_t* stream_id, pid_t pid)
+     struct lio_usp_stream* fd;
+     struct lio_stream* stream;
+     pm_process_t* process;
++    int ret;
+ 
+     process = pm_get(pid);
+     if (process == NULL) {
+@@ -148,10 +138,14 @@ int syscall_lio_pass_fd(lio_usp_stream_t* stream_id, pid_t pid)
+     }
+ 
+     stream = fd-&gt;stream;
+-    lio_usp_remove_stream(current_process, fd);
+     fd = lio_usp_add_stream(process, stream);
+     *stream_id = fd-&gt;usp_id;
+ 
++    // Wir haben gerade eine zweite Referenz hinzugefügt, also kann kein
++    // lio_close() aufgerufen, das fehlschlagen könnte.
++    ret = lio_usp_unref_stream(current_process, fd);
++    BUG_ON(ret != 0);
++
+     return 0;
+ }
+ 
+diff --git a/src/kernel2/src/tasks/pm.c b/src/kernel2/src/tasks/pm.c
+index 8219022..bb95923 100644
+--- a/src/kernel2/src/tasks/pm.c
++++ b/src/kernel2/src/tasks/pm.c
+@@ -192,16 +192,12 @@ void pm_prepare_destroy(pm_process_t* process)
+     // Alle Dateien schliessen und freigeben
+     struct lio_usp_stream* fd = NULL;
+     struct lio_usp_stream* next = NULL;
+-    struct lio_stream* s;
+ 
+     fd = tree_next(process-&gt;lio_streams, NULL);
+     while (fd != NULL) {
+         next = tree_next(process-&gt;lio_streams, fd);
+-
+-        s = fd-&gt;stream;
+-        lio_usp_remove_stream(process, fd);
+-        lio_close(s);
+-
++        // TODO Was machen mit Dateien, die sich nicht schließen lassen?
++        (void) lio_usp_unref_stream(process, fd);
+         fd = next;
+     }
+     tree_destroy(process-&gt;lio_streams);
+-- 
+2.1.2
+
+</PRE>
+
+
+
+
+
+
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002483.html">[tyndur-devel] [PATCH 6/6] vterm: Nach LostIOv2 konvertiert
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002484.html">[tyndur-devel] [PATCH] Changed size of hd-images to 2GB
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2477">[ Datum ]</a>
+              <a href="thread.html#2477">[ Thema ]</a>
+              <a href="subject.html#2477">[ Betreff (Subject)]</a>
+              <a href="author.html#2477">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

@@ -1,0 +1,2214 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [Cdi-devel] [PATCH] UHCI, USB, MSC
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5BCdi-devel%5D%20%5BPATCH%5D%20UHCI%2C%20USB%2C%20MSC&In-Reply-To=%3C4A8973D2.3050204%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   
+   <LINK REL="Next"  HREF="000001.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[Cdi-devel] [PATCH] UHCI, USB, MSC</H1>
+    <B>Max Reitz</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5BCdi-devel%5D%20%5BPATCH%5D%20UHCI%2C%20USB%2C%20MSC&In-Reply-To=%3C4A8973D2.3050204%40tyndur.org%3E"
+       TITLE="[Cdi-devel] [PATCH] UHCI, USB, MSC">max at tyndur.org
+       </A><BR>
+    <I>Mon Aug 17 17:14:26 CEST 2009</I>
+    <P><UL>
+        
+        <LI>Next message: <A HREF="000001.html">[cdi-devel] [PATCH] UHCI, USB, MSC
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#0">[ date ]</a>
+              <a href="thread.html#0">[ thread ]</a>
+              <a href="subject.html#0">[ subject ]</a>
+              <a href="author.html#0">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>+ UHCI/USB/MSC (MSDs erscheinen als CDI.storage),
+   der Schreibsupport ist gro&#223;e Gl&#252;ckssache, Treiber
+   nur unter QEMU erfolgreich getestet...
+
+Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">xanclic at googlemail.com</A>&gt;
+---
+  usb/include/msd.h  |  104 +++++++++
+  usb/include/uhci.h |  110 ++++++++++
+  usb/include/usb.h  |  287 +++++++++++++++++++++++++
+  usb/main.c         |  451 +++++++++++++++++++++++++++++++++++++++
+  usb/msd.c          |  599 
+++++++++++++++++++++++++++++++++++++++++++++++++++++
+  usb/uhci.c         |  339 +++++++++++++++++++++++++++++
+  6 files changed, 1890 insertions(+), 0 deletions(-)
+  create mode 100644 usb/include/msd.h
+  create mode 100644 usb/include/uhci.h
+  create mode 100644 usb/include/usb.h
+  create mode 100644 usb/main.c
+  create mode 100644 usb/msd.c
+  create mode 100644 usb/uhci.c
+
+diff --git a/usb/include/msd.h b/usb/include/msd.h
+new file mode 100644
+index 0000000..99c796d
+--- /dev/null
++++ b/usb/include/msd.h
+@@ -0,0 +1,104 @@
++/******************************************************************************
++ * Copyright (c) 2009 Max 
+Reitz                                               *
++ 
+*                                                                            
+*
++ * Permission is hereby granted,  free of charge,  to any  person 
+obtaining a *
++ * copy of this software and associated documentation files (the 
+&quot;Software&quot;), *
++ * to deal in the Software without restriction,  including without 
+limitation *
++ * the rights to use,  copy, modify, merge, publish,  distribute, 
+sublicense, *
++ * and/or sell copies  of the  Software,  and to permit  persons to 
+whom  the *
++ * Software is furnished to do so, subject to the following 
+conditions:       *
++ 
+*                                                                            
+*
++ * The above copyright notice and this permission notice shall be 
+included in *
++ * all copies or substantial portions of the 
+Software.                        *
++ 
+*                                                                            
+*
++ * THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, 
+EXPRESS OR *
++ * IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF 
+MERCHANTABILITY, *
++ * FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT 
+SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR 
+OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  
+ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  
+OTHER *
++ * DEALINGS IN THE 
+SOFTWARE.                                                  *
++ 
+******************************************************************************/
++
++#ifndef _CDI__USB__MSD_H
++#define _CDI__USB__MSD_H
++
++#include &lt;stdint.h&gt;
++
++#include &quot;cdi/storage.h&quot;
++
++#include &quot;usb.h&quot;
++
++
++//&quot;USBC&quot;
++#define CBW_SIGNATURE 0x43425355
++struct command_block_wrapper
++{
++    uint32_t cbw_signature;
++    uint32_t cbw_tag;
++    uint32_t cbw_data_transfer_length;
++    uint8_t cbw_flags;
++    uint8_t cbw_lun;
++    uint8_t cbw_cb_length;
++    uint8_t cbw_cb[16];
++} __attribute__((packed));
++
++//&quot;USBS&quot;
++#define CSW_SIGNATURE 0x53425355
++struct command_status_wrapper
++{
++    uint32_t csw_signature;
++    uint32_t csw_tag;
++    uint32_t csw_data_residue;
++    uint8_t csw_status;
++} __attribute__((packed));
++
++struct msc_sense
++{
++    unsigned error : 7;
++    unsigned valid : 1;
++    uint8_t rsvd0;
++    unsigned sense_key : 4;
++    unsigned rsvd1 : 4;
++    uint32_t information;
++    uint8_t additional_length;
++    uint32_t rsvd2;
++    uint8_t additional_code;
++    uint8_t additional_code_qualifier;
++    uint32_t rsvd;
++} __attribute__((packed));
++
++struct msd_capacity
++{
++    uint32_t last_lba;
++    uint32_t block_length;
++} __attribute__((packed));
++
++struct cdi_msd
++{
++    struct cdi_storage_device cdi_device;
++    struct usb_device *usb_device;
++    uint32_t offset; //F&#252;r Partitionen
++};
++
++struct part_table_entry
++{
++   uint8_t active;
++   uint8_t begin_chs[3];
++   uint8_t type;
++   uint8_t end_chs[3];
++   uint32_t start;
++   uint32_t size;
++} __attribute__((packed));
++
++
++#define MSC_CMD_REZERO   0x01
++#define MSC_CMD_SENSE    0x03
++#define MSC_CMD_CAPACITY 0x25
++#define MSC_CMD_READ10   0x28
++#define MSC_CMD_WRITE10  0x2A
++#define MSC_CMD_SEEK     0x2B
++#define MSC_CMD_READ12   0xA8
++#define MSC_CMD_WRITE12  0xAA
++
++#endif
+diff --git a/usb/include/uhci.h b/usb/include/uhci.h
+new file mode 100644
+index 0000000..0158bd2
+--- /dev/null
++++ b/usb/include/uhci.h
+@@ -0,0 +1,110 @@
++/******************************************************************************
++ * Copyright (c) 2009 Max 
+Reitz                                               *
++ 
+*                                                                            
+*
++ * Permission is hereby granted,  free of charge,  to any  person 
+obtaining a *
++ * copy of this software and associated documentation files (the 
+&quot;Software&quot;), *
++ * to deal in the Software without restriction,  including without 
+limitation *
++ * the rights to use,  copy, modify, merge, publish,  distribute, 
+sublicense, *
++ * and/or sell copies  of the  Software,  and to permit  persons to 
+whom  the *
++ * Software is furnished to do so, subject to the following 
+conditions:       *
++ 
+*                                                                            
+*
++ * The above copyright notice and this permission notice shall be 
+included in *
++ * all copies or substantial portions of the 
+Software.                        *
++ 
+*                                                                            
+*
++ * THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, 
+EXPRESS OR *
++ * IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF 
+MERCHANTABILITY, *
++ * FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT 
+SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR 
+OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  
+ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  
+OTHER *
++ * DEALINGS IN THE 
+SOFTWARE.                                                  *
++ 
+******************************************************************************/
++
++#ifndef _CDI__USB__UHCI_H
++#define _CDI__USB__UHCI_H
++
++#include &lt;stdint.h&gt;
++
++#include &quot;cdi/misc.h&quot;
++#include &quot;cdi/pci.h&quot;
++
++#include &quot;usb.h&quot;
++
++
++#define UHCI_USBCMD    0x00 //w
++#define UHCI_USBSTS    0x02 //w
++#define UHCI_USBINTR   0x04 //w
++#define UHCI_FRNUM     0x06 //w
++#define UHCI_FRBASEADD 0x08 //l
++#define UHCI_SOFMOD    0x0C //b
++#define UHCI_RPORTS    0x10
++#define UHCI_PORTSC1   0x10 //w
++#define UHCI_PORTSC2   0x12 //w
++
++#define MAXP    0x0080
++#define GRESET  0x0004
++#define HCRESET 0x0002
++#define USB_RUN 0x0001
++
++#define RPORT_RESET  0x0200
++#define RPORT_LOSPD  0x0100 //Low speed device attached
++#define RPORT_ENABLE 0x0004
++#define RPORT_CSC    0x0002 //Connect status change
++#define RPORT_DEVICE 0x0001
++
++
++struct uhci
++{
++    struct hci gen_hci;
++    uint16_t pbase;
++    uintptr_t phys_frame_list;
++    uint32_t *frame_list;
++    int root_ports;
++};
++
++struct uhci_qh
++{
++    volatile uint32_t next;
++    volatile uint32_t transfer;
++} __attribute__((packed));
++
++struct uhci_td
++{
++    volatile uint32_t next;
++
++    unsigned trans_len : 11;
++    unsigned rsvd0 : 6;
++    unsigned bitstuff_err : 1;
++    unsigned crc_time_err : 1;
++    unsigned nak : 1;
++    unsigned babble : 1;
++    unsigned buf_err : 1;
++    unsigned stalled_err : 1;
++    unsigned active : 1;
++    unsigned ioc : 1;
++    unsigned isochronous : 1;
++    unsigned low_speed : 1;
++    unsigned errors : 2;
++    unsigned spd : 1;
++    unsigned rsvd1 : 2;
++
++    unsigned pid : 8;
++    unsigned device : 7;
++    unsigned endpoint : 4;
++    unsigned data_toggle : 1;
++    unsigned rsvd2 : 1;
++    unsigned maxlen : 11;
++
++    uint32_t buffer;
++
++    uint32_t user[4];
++} __attribute__((packed));
++
++struct transfer
++{
++    void *virt;
++    uintptr_t phys;
++    volatile int error;
++};
++
++#endif
+diff --git a/usb/include/usb.h b/usb/include/usb.h
+new file mode 100644
+index 0000000..2c435d8
+--- /dev/null
++++ b/usb/include/usb.h
+@@ -0,0 +1,287 @@
++/******************************************************************************
++ * Copyright (c) 2009 Max 
+Reitz                                               *
++ 
+*                                                                            
+*
++ * Permission is hereby granted,  free of charge,  to any  person 
+obtaining a *
++ * copy of this software and associated documentation files (the 
+&quot;Software&quot;), *
++ * to deal in the Software without restriction,  including without 
+limitation *
++ * the rights to use,  copy, modify, merge, publish,  distribute, 
+sublicense, *
++ * and/or sell copies  of the  Software,  and to permit  persons to 
+whom  the *
++ * Software is furnished to do so, subject to the following 
+conditions:       *
++ 
+*                                                                            
+*
++ * The above copyright notice and this permission notice shall be 
+included in *
++ * all copies or substantial portions of the 
+Software.                        *
++ 
+*                                                                            
+*
++ * THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, 
+EXPRESS OR *
++ * IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF 
+MERCHANTABILITY, *
++ * FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT 
+SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR 
+OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  
+ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  
+OTHER *
++ * DEALINGS IN THE 
+SOFTWARE.                                                  *
++ 
+******************************************************************************/
++
++#ifndef _CDI__USB__USB_H
++#define _CDI__USB__USB_H
++
++#include &lt;stdint.h&gt;
++
++#include &quot;cdi/misc.h&quot;
++#include &quot;cdi/pci.h&quot;
++
++
++#define PACKET_SETUP 0x2D
++#define PACKET_IN    0x69
++#define PACKET_OUT   0xE1
++
++#define NO_DATA       0x01
++#define DEV_TO_HOST   0x80
++#define HOST_TO_DEV   0x00
++#define STD_REQUEST   0x00
++#define CLS_REQUEST   0x20
++#define VEN_REQUEST   0x40
++#define REC_DEVICE    0x00
++#define REC_INTERFACE 0x01
++#define REC_ENDPOINT  0x02
++#define REC_OTHER     0x03
++
++#define GET_STATUS         0
++#define CLEAR_FEATURE      1
++#define SET_FEATURE        3
++#define SET_ADDRESS        5
++#define GET_DESCRIPTOR     6
++#define SET_DESCRIPTOR     7
++#define GET_CONFIGURATION  8
++#define SET_CONFIGURATION  9
++#define GET_INTERFACE     10
++#define SET_INTERFACE     11
++#define SYNC_FRAME        12
++
++#define PORT_DEVICE      0x0001
++#define PORT_ENABLED     0x0002
++#define PORT_SUSPENDED   0x0004
++#define PORT_OVERCURRENT 0x0008
++#define PORT_RESET       0x0010
++#define PORT_POWER       0x0100
++#define PORT_LOWSPEED    0x0200
++#define PORT_HIGHSPEED   0x0400
++#define PORT_TEST        0x0800
++#define PORT_INDICATOR   0x1000
++
++#define PORTF_CONNECTION         0
++#define PORTF_ENABLE             1
++#define PORTF_SUSPEND            2
++#define PORTF_OVERCURRENT        3
++#define PORTF_RESET              4
++#define PORTF_POWER              8
++#define PORTF_LOWSPEED           9
++#define PORTF_HIGHSPEED          10
++#define PORTF_C_CONNECTION       16
++#define PORTF_C_ENABLE           17
++#define PORTF_C_SUSPEND          18
++#define PORTF_C_OVERCURRENT      19
++#define PORTF_C_RESET            20
++#define PORTF_TEST               21
++#define PORTF_INDICATOR          22
++
++#define DESC_DEVICE                    1
++#define DESC_CONFIGURATION             2
++#define DESC_STRING                    3
++#define DESC_INTERFACE                 4
++#define DESC_ENDPOINT                  5
++#define DESC_DEVICE_QUALIFIER          6
++#define DESC_OTHER_SPEED_CONFIGURATION 7
++#define DESC_INTERFACE_POWER           8
++
++#define USB_NO_ERROR      0x00
++#define USB_STALLED       0x01
++#define USB_BUFFER_ERROR  0x02
++#define USB_BABBLE        0x04
++#define USB_NAK           0x08
++#define USB_CRC           0x10
++#define USB_TIMEOUT       0x20
++#define USB_BITSTUFF      0x40
++#define USB_TRIVIAL_ERROR 0x80
++
++#define USB_TOD_SETUP          0x0001
++#define USB_TOD_SETUP_DATA_IN  0x0002
++#define USB_TOD_SETUP_DATA_OUT 0x0004
++#define USB_TOD_SETUP_ACK_IN   0x0008
++#define USB_TOD_SETUP_ACK_OUT  0x0010
++#define USB_TOD_COMMAND        0x0020
++#define USB_TOD_DATA_IN        0x0040
++#define USB_TOD_DATA_OUT       0x0080
++#define USB_TOD_STATUS         0x0100
++
++#define USB_TODS_SETUP          0
++#define USB_TODS_SETUP_DATA_IN  1
++#define USB_TODS_SETUP_DATA_OUT 2
++#define USB_TODS_SETUP_ACK_IN   3
++#define USB_TODS_SETUP_ACK_OUT  4
++#define USB_TODS_COMMAND        5
++#define USB_TODS_DATA_IN        6
++#define USB_TODS_DATA_OUT       7
++#define USB_TODS_STATUS         8
++
++
++typedef enum
++{
++    HCI_UHCI,
++    HCI_OHCI,
++    HCI_EHCI
++} hci_type_t;
++
++struct cdi_hci
++{
++    struct cdi_device cdi_device;
++    struct hci *hci;
++};
++
++struct usb_device;
++
++struct hci
++{
++    struct cdi_pci_device *pcidev;
++    hci_type_t type;
++    cdi_list_t (*find_devices)(struct hci *);
++    void (*activate_device)(struct hci *, struct usb_device *);
++    int (*do_packet)(struct hci *, int frame, int type, int device, int 
+endpoint, int low_speed, uintptr_t phys_data, int length, int datatoggle);
++    int (*get_frame)(struct hci *);
++};
++
++struct setup_packet
++{
++    uint8_t request_type;
++    uint8_t request;
++    uint16_t value;
++    uint16_t index;
++    uint16_t length;
++} __attribute__((packed));
++
++struct device_desc
++{
++    uint8_t length;
++    uint8_t descriptor_type;
++    uint16_t bcdUSB;
++    uint8_t class_id;
++    uint8_t subclass_id;
++    uint8_t protocol_id;
++    uint8_t max_packet_size0;
++    uint16_t vendor_id;
++    uint16_t device_id;
++    uint16_t bcdDevice;
++    uint8_t iManufacturer;
++    uint8_t iProduct;
++    uint8_t iSerialNumber;
++    uint8_t num_configurations;
++} __attribute__((packed));
++
++struct config_desc
++{
++    uint8_t length;
++    uint8_t descriptor_type;
++    uint16_t total_length;
++    uint8_t num_interfaces;
++    uint8_t config_value;
++    uint8_t iConfiguration;
++    uint8_t attributes;
++    uint8_t max_power;
++} __attribute__((packed));
++
++struct interface_desc
++{
++    uint8_t length;
++    uint8_t descriptor_type;
++    uint8_t interface_number;
++    uint8_t alternate_setting;
++    uint8_t num_endpoints;
++    uint8_t interface_class;
++    uint8_t interface_subclass;
++    uint8_t interface_protocol;
++    uint8_t iInterface;
++} __attribute__((packed));
++
++struct endpoint_desc
++{
++    uint8_t length;
++    uint8_t descriptor_type;
++    uint8_t endpoint_address;
++    uint8_t attributes;
++    uint16_t max_packet_size;
++    uint8_t interval;
++} __attribute__((packed));
++
++struct hub_desc
++{
++    uint8_t length;
++    uint8_t descriptor_type;
++    uint8_t nbr_ports;
++    uint16_t hub_characteristics;
++    uint8_t pwron2pwrgood;
++    uint8_t hub_contr_current;
++} __attribute__((packed));
++
++typedef enum
++{
++    USBDC_COMPOSITE = 0x00,
++    USBDC_AUDIO = 0x01,
++    USBDC_COMM_CDC = 0x02,
++    USBDC_HID = 0x03,
++    USBDC_PID = 0x05,
++    USBDC_IMAGE = 0x06,
++    USBDC_PRINTER = 0x07,
++    USBDC_MSC = 0x08,
++    USBDC_HUB = 0x09,
++    USBDC_CDC_DATA = 0x0A,
++    USBDC_CHIP = 0x0B,
++    USBDC_SECURITY = 0x0D,
++    USBDC_VIDEO = 0x0E,
++    USBDC_HEALTH = 0x0F,
++    USBDC_DIAGNOSIS = 0xDC,
++    USBDC_WIRELESS = 0xE0,
++    USBDC_MISC = 0xEF,
++    USBDC_SOFT_SPEC = 0xFE,
++    USBDC_VENDOR_SPEC = 0xFF
++} usb_class_t;
++
++struct class_data
++{
++    usb_class_t type;
++};
++
++struct usb_device
++{
++    struct hci *hci;
++    int id;
++    int port;
++    int low_speed;
++    struct device_desc *device;
++    struct config_desc *config;
++    struct interface_desc *interface;
++    struct class_data *classd;
++    int stalled;
++    int locked;
++    int expects;
++};
++
++struct msclass_data
++{
++    struct class_data gen_class;
++    struct endpoint_desc *bulk_ep_in;
++    struct endpoint_desc *bulk_ep_out;
++};
++
++
++#include &quot;uhci.h&quot;
++
++
++#define HCI_STRUCT_SIZE sizeof(struct uhci)
++
++
++int do_packet(struct usb_device *device, int type, int endpoint, 
+uintptr_t phys_data, int length, int datatoggle, int type_of_data);
++void enumerate_hci(struct hci *);
++struct cdi_driver *init_uhcd(void);
++void init_msc_driver(void);
++void register_msd(struct usb_device *usbdev);
++void uhci_init(struct cdi_device *cdi_hci);
++
++#endif
+diff --git a/usb/main.c b/usb/main.c
+new file mode 100644
+index 0000000..c06f15d
+--- /dev/null
++++ b/usb/main.c
+@@ -0,0 +1,451 @@
++/******************************************************************************
++ * Copyright (c) 2009 Max 
+Reitz                                               *
++ 
+*                                                                            
+*
++ * Permission is hereby granted,  free of charge,  to any  person 
+obtaining a *
++ * copy of this software and associated documentation files (the 
+&quot;Software&quot;), *
++ * to deal in the Software without restriction,  including without 
+limitation *
++ * the rights to use,  copy, modify, merge, publish,  distribute, 
+sublicense, *
++ * and/or sell copies  of the  Software,  and to permit  persons to 
+whom  the *
++ * Software is furnished to do so, subject to the following 
+conditions:       *
++ 
+*                                                                            
+*
++ * The above copyright notice and this permission notice shall be 
+included in *
++ * all copies or substantial portions of the 
+Software.                        *
++ 
+*                                                                            
+*
++ * THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, 
+EXPRESS OR *
++ * IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF 
+MERCHANTABILITY, *
++ * FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT 
+SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR 
+OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  
+ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  
+OTHER *
++ * DEALINGS IN THE 
+SOFTWARE.                                                  *
++ 
+******************************************************************************/
++
++#include &lt;stdio.h&gt;
++#include &lt;stdlib.h&gt;
++#include &lt;string.h&gt;
++
++#include &quot;cdi/io.h&quot;
++#include &quot;cdi/misc.h&quot;
++#include &quot;cdi/pci.h&quot;
++
++#include &quot;usb.h&quot;
++
++#define DEBUG
++
++#ifdef DEBUG
++#include &lt;stdarg.h&gt;
++#define dprintf(fmt, args...) printf(&quot;[usb] &quot; fmt, ##args)
++#define _dprintf(fmt, args...) printf(fmt, ##args)
++#else
++static int dprintf(const char *fmt, ...)
++{
++    return 0;
++}
++#define _dprintf(fmt, args...) dprintf(fmt, ##args)
++#endif
++
++static struct usb_device *devices[128];
++static cdi_list_t ehci, ohci, uhci;
++static void (*ccdriver_take_device[0x100])(struct usb_device *);
++static int usb_dev_ids = 1;
++
++static void usb_init(void);
++static void enumerate_hub(struct usb_device *usbdev);
++
++#ifdef CDI_STANDALONE
++int main(void)
++#else
++int init_usb(void)
++#endif
++{
++    cdi_init();
++
++    memset(devices, 0, 128 * sizeof(struct usb_device *));
++
++    usb_init();
++
++    cdi_run_drivers();
++
++    return 0;
++}
++
++static const int next_data_type[9] = {
++    USB_TOD_SETUP_DATA_IN | USB_TOD_SETUP_DATA_OUT | USB_TOD_SETUP_ACK_IN,
++    USB_TOD_SETUP_ACK_OUT,
++    USB_TOD_SETUP_ACK_IN,
++    USB_TOD_SETUP | USB_TOD_COMMAND,
++    USB_TOD_SETUP | USB_TOD_COMMAND,
++    USB_TOD_DATA_IN | USB_TOD_DATA_OUT | USB_TOD_STATUS,
++    USB_TOD_STATUS,
++    USB_TOD_STATUS,
++    USB_TOD_SETUP | USB_TOD_COMMAND
++};
++
++/*static const char *tod_name[9] = {
++    &quot;SETUP&quot;,
++    &quot;SETUP DS IN&quot;,
++    &quot;SETUP DS OUT&quot;,
++    &quot;SETUP ACK IN&quot;,
++    &quot;SETUP ACK OUT&quot;,
++    &quot;COMMAND&quot;,
++    &quot;DATA IN&quot;,
++    &quot;DATA OUT&quot;,
++    &quot;STATUS&quot;
++};*/
++
++/**
++* Verarbeitet ein USB-Paket.
++*
++* @param device Das USB-Ger&#228;t
++* @param type Der Typ des Pakets (PACKET_IN, PACKET_OUT, PACKET_SETUP)
++* @param endpoint Der gew&#252;nschte Endpoint (0 bis 15)
++* @param phys_data Die physische Adresse des zu verwendenden Datenpuffers
++* @param length Die L&#228;nge des Puffers
++* @param datatoggle Gibt an, ob DATA0 (0) oder DATA1 (1) verwendet 
+werden soll
++* @param type_of_data Typ der Daten (zur Sicherheit, damit es kein 
+doofes STALL gibt)
++*/
++
++int do_packet(struct usb_device *device, int type, int endpoint, 
+uintptr_t phys_data, int length, int datatoggle, int type_of_data)
++{
++    int error;
++    int tod_short;
++
++    if (!(device-&gt;expects &amp; type_of_data)) {
++        dprintf(&quot;Expected 0x%04X, got 0x%04X...?\n&quot;, device-&gt;expects, 
+type_of_data);
++        for (;;);
++    }
++    type_of_data &gt;&gt;= 1;
++    for (tod_short = 0; type_of_data; tod_short++) {
++        type_of_data &gt;&gt;= 1;
++    }
++    //dprintf(&quot;TOD: %s\n&quot;, tod_name[tod_short]);
++    device-&gt;expects = next_data_type[tod_short];
++    endpoint &amp;= 0x07;
++    type &amp;= 0xFF;
++    if (device-&gt;stalled) //TODO: Irgendwie entstallen, evtl.? oO
++    {
++        dprintf(&quot;Zugriff auf stalled-Ger&#228;t verweigert.\n&quot;);
++        return USB_STALLED;
++    }
++    error = device-&gt;hci-&gt;do_packet(device-&gt;hci,
++                                   (device-&gt;hci-&gt;get_frame(device-&gt;hci) 
++ 3) &amp; 0x3FF,
++                                   type, device-&gt;id, endpoint,
++                                   device-&gt;low_speed, phys_data, length,
++                                   datatoggle);
++    if (error == USB_STALLED)
++    {
++        printf(&quot;[usb] ENDPOINT %i DES GER&#196;TS %i STALLED!\n&quot;, endpoint, 
+device-&gt;id);
++        device-&gt;stalled = 1;
++    }
++    return error;
++}
++
++static void *do_control(struct usb_device *device, int direction, void 
+*buffer, int length, int rtype, int recipient, int request, int value, 
+int index)
++{
++    void *rbuf;
++    int rval, no_data;
++    struct setup_packet *setup;
++    uintptr_t pbuf, psetup;
++
++    no_data = direction &amp; NO_DATA;
++    if (!no_data &amp;&amp; (cdi_alloc_phys_mem(length, &amp;rbuf, (void **)&amp;pbuf) 
+== -1)) {
++        return NULL;
++    }
++    if (cdi_alloc_phys_mem(sizeof(struct setup_packet),
++                           (void **)&amp;setup, (void **)&amp;psetup) == -1) {
++        return NULL;
++    }
++    direction &amp;= 0x80;
++    if ((direction == HOST_TO_DEV) &amp;&amp; length &amp;&amp; (buffer != NULL)) {
++        memcpy(rbuf, buffer, length);
++    }
++    setup-&gt;request_type = direction | (rtype &amp; 0x60) | (recipient &amp; 0x1F);
++    setup-&gt;request = request;
++    setup-&gt;value = value;
++    setup-&gt;index = index;
++    setup-&gt;length = length;
++    if (do_packet(device, PACKET_SETUP, 0, psetup, sizeof(struct 
+setup_packet),
++                  0, USB_TOD_SETUP) != USB_NO_ERROR) {
++        return NULL;
++    }
++    cdi_sleep_ms(20);
++    if (no_data)
++    {
++        rval = USB_NO_ERROR;
++        rbuf = (void *)0xFFFFFFFF; //Kein Fehler, aber auch keine Daten
++    }
++    else
++    {
++        if (direction == DEV_TO_HOST) {
++            rval = do_packet(device, PACKET_IN, 0, pbuf, length, 1,
++                             USB_TOD_SETUP_DATA_IN);
++        } else {
++            rval = do_packet(device, PACKET_OUT, 0, pbuf, length, 1,
++                             USB_TOD_SETUP_DATA_OUT);
++        }
++    }
++    if (rval == USB_NO_ERROR)
++    {
++        cdi_sleep_ms(20);
++        if (no_data || (direction == HOST_TO_DEV)) {
++            rval = do_packet(device, PACKET_IN, 0, 0, 0, 1, 
+USB_TOD_SETUP_ACK_IN);
++        } else {
++            rval = do_packet(device, PACKET_OUT, 0, 0, 0, 1, 
+USB_TOD_SETUP_ACK_OUT);
++        }
++    }
++    return (rval == USB_NO_ERROR) ? rbuf : NULL;
++}
++
++static void usb_init(void)
++{
++    struct cdi_pci_device *dev;
++    struct hci *hci;
++    struct cdi_hci *cdi_hci;
++    struct cdi_driver *uhcd;
++    char *dev_name;
++    int i;
++
++    init_msc_driver();
++
++    memset(ccdriver_take_device, 0, sizeof(void (*)(struct usb_device 
+*)) * 0x100);
++    ccdriver_take_device[8] = &amp;register_msd;
++    ccdriver_take_device[9] = &amp;enumerate_hub;
++
++    ehci = cdi_list_create();
++    ohci = cdi_list_create();
++    uhci = cdi_list_create();
++
++    cdi_list_t pci_devices = cdi_list_create();
++    cdi_pci_get_all_devices(pci_devices);
++    for (i = 0; (dev = cdi_list_get(pci_devices, i)) != NULL; i++)
++    {
++        if ((dev-&gt;class_id != 0x0C) || (dev-&gt;subclass_id != 0x03)) {
++            cdi_pci_device_destroy(dev);
++        } else {
++            switch (dev-&gt;interface_id)
++            {
++                case 0x00:
++                    hci = malloc(HCI_STRUCT_SIZE);
++                    hci-&gt;pcidev = dev;
++                    hci-&gt;type = HCI_UHCI;
++                    cdi_list_push(uhci, hci);
++                    break;
++                case 0x10:
++                    hci = malloc(HCI_STRUCT_SIZE);
++                    hci-&gt;pcidev = dev;
++                    hci-&gt;type = HCI_OHCI;
++                    cdi_list_push(ohci, hci);
++                    break;
++                case 0x20:
++                    hci = malloc(HCI_STRUCT_SIZE);
++                    hci-&gt;pcidev = dev;
++                    hci-&gt;type = HCI_EHCI;
++                    cdi_list_push(ehci, hci);
++            }
++        }
++    }
++
++    cdi_list_destroy(pci_devices);
++
++    dprintf(&quot;%i EHCIs, %i OHCIs und %i UHCIs gefunden.\n&quot;, 
+cdi_list_size(ehci),
++                                                           
+cdi_list_size(ohci),
++                                                           
+cdi_list_size(uhci));
++
++    uhcd = init_uhcd();
++
++    for (i = 0; (hci = cdi_list_pop(uhci)) != NULL; i++)
++    {
++        cdi_hci = malloc(sizeof(struct cdi_hci));
++        cdi_hci-&gt;cdi_device.type = CDI_UNKNOWN;
++        dev_name = malloc(10);
++        sprintf(dev_name, &quot;uhci%i&quot;, i);
++        cdi_hci-&gt;cdi_device.name = dev_name;
++        hci-&gt;find_devices = NULL;
++        cdi_hci-&gt;hci = hci;
++        //cdi_list_push(uhcd-&gt;devices, cdi_hci);
++        //^ Das ist zwar sehr sch&#246;n, geht so aber leider nicht
++        dprintf(&quot;%s registriert.\n&quot;, dev_name);
++        cdi_hci-&gt;cdi_device.driver = uhcd;
++        uhci_init(&amp;cdi_hci-&gt;cdi_device);
++    }
++
++    cdi_list_destroy(ehci);
++    cdi_list_destroy(ohci);
++    cdi_list_destroy(uhci);
++}
++
++static void enum_device(struct usb_device *usbdev)
++{
++    struct device_desc *dev_desc;
++    struct config_desc *conf_desc;
++    struct interface_desc *if_desc, *best_if;
++    char *name;
++    void *position;
++    int i, id;
++
++    usbdev-&gt;stalled = 0;
++    usbdev-&gt;locked = 0;
++    usbdev-&gt;expects = USB_TOD_SETUP | USB_TOD_COMMAND;
++    dev_desc = do_control(usbdev, DEV_TO_HOST, NULL, sizeof(*dev_desc),
++                          STD_REQUEST, REC_DEVICE, GET_DESCRIPTOR,
++                          DESC_DEVICE &lt;&lt; 8, 0);
++    if (dev_desc == NULL) {
++        return;
++    }
++    usbdev-&gt;device = dev_desc;
++    dprintf(&quot;0x%04X:0x%04X (%i) -&gt; &quot;, dev_desc-&gt;vendor_id, 
+dev_desc-&gt;device_id,
++                                      dev_desc-&gt;class_id);
++    do_control(usbdev, HOST_TO_DEV | NO_DATA, NULL, 0, STD_REQUEST, 
+REC_DEVICE,
++               SET_ADDRESS, (id = usb_dev_ids++), 0);
++    usbdev-&gt;id = id;
++    _dprintf(&quot;%i\n&quot;, id);
++    if (dev_desc-&gt;iManufacturer)
++    {
++        name = do_control(usbdev, DEV_TO_HOST, NULL, 64, STD_REQUEST,
++                          REC_DEVICE, GET_DESCRIPTOR,
++                          (DESC_STRING &lt;&lt; 8) | dev_desc-&gt;iManufacturer, 0);
++        if (name == NULL) {
++            return;
++        }
++        dprintf(&quot; -&gt; Hersteller: &quot;);
++        for (i = 2; i &lt; name[0]; i += 2) {
++            _dprintf(&quot;%c&quot;, name[i]);
++        }
++        _dprintf(&quot;\n&quot;);
++    }
++    if (dev_desc-&gt;iProduct)
++    {
++        name = do_control(usbdev, DEV_TO_HOST, NULL, 64, STD_REQUEST,
++                          REC_DEVICE, GET_DESCRIPTOR,
++                          (DESC_STRING &lt;&lt; 8) | dev_desc-&gt;iProduct, 0);
++        if (name == NULL) {
++            return;
++        }
++        dprintf(&quot; -&gt; Produkt: &quot;);
++        for (i = 2; i &lt; name[0]; i += 2) {
++            _dprintf(&quot;%c&quot;, name[i]);
++        }
++        _dprintf(&quot;\n&quot;);
++    }
++    devices[id] = usbdev;
++  //TODO: Man kann doch nicht immer den ersten nehmen...
++    conf_desc = do_control(usbdev, DEV_TO_HOST, NULL,
++                           sizeof(struct config_desc), STD_REQUEST, 
+REC_DEVICE,
++                           GET_DESCRIPTOR, DESC_CONFIGURATION &lt;&lt; 8, 0);
++    if (conf_desc == NULL) {
++        return;
++    }
++    conf_desc = do_control(usbdev, DEV_TO_HOST, NULL, 
+conf_desc-&gt;total_length,
++                           STD_REQUEST, REC_DEVICE, GET_DESCRIPTOR,
++                           DESC_CONFIGURATION &lt;&lt; 8, 0);
++    if (conf_desc == NULL) {
++        return;
++    }
++    usbdev-&gt;config = conf_desc;
++    do_control(usbdev, HOST_TO_DEV, NULL, 0, STD_REQUEST, REC_DEVICE,
++               SET_CONFIGURATION, conf_desc-&gt;config_value, 0);
++    if (conf_desc-&gt;iConfiguration)
++    {
++        name = do_control(usbdev, DEV_TO_HOST, NULL, 64, STD_REQUEST,
++                          REC_DEVICE, GET_DESCRIPTOR,
++                          (DESC_STRING &lt;&lt; 8) | 
+conf_desc-&gt;iConfiguration, 0);
++        if (name == NULL) {
++            return;
++        }
++        dprintf(&quot;Verwende Konfiguration &quot;);
++        for (i = 2; i &lt; name[0]; i += 2) {
++            _dprintf(&quot;%c&quot;, name[i]);
++        }
++        _dprintf(&quot;.\n&quot;);
++    }
++    position = conf_desc;
++    position += sizeof(struct config_desc);
++    best_if = position; //Standard-IF
++    for (i = 0; i &lt; conf_desc-&gt;num_interfaces; i++)
++    {
++        if_desc = position;
++        if (if_desc-&gt;interface_class == 8) //TODO: Mehr Klassencodes 
+nat&#252;rlich!
++        {
++            best_if = if_desc;
++            break;
++        }
++        position += sizeof(struct interface_desc) + 
+if_desc-&gt;num_endpoints * sizeof(struct endpoint_desc);
++    }
++    do_control(usbdev, HOST_TO_DEV, NULL, 0, STD_REQUEST, REC_DEVICE,
++               SET_INTERFACE, best_if-&gt;interface_number, 0);
++    usbdev-&gt;interface = best_if;
++    if (best_if-&gt;iInterface)
++    {
++        name = do_control(usbdev, DEV_TO_HOST, NULL, 64, STD_REQUEST,
++                          REC_DEVICE, GET_DESCRIPTOR,
++                          (DESC_STRING &lt;&lt; 8) | best_if-&gt;iInterface, 0);
++        if (name == NULL) {
++            return;
++        }
++        dprintf(&quot;Verwende Interface &quot;);
++        for (i = 2; i &lt; name[0]; i += 2) {
++            _dprintf(&quot;%c&quot;, name[i]);
++        }
++        _dprintf(&quot;.\n&quot;);
++    }
++    dprintf(&quot;Konfiguration: %i:%i (%i)\n&quot;, conf_desc-&gt;config_value,
++                                           best_if-&gt;interface_number,
++                                           best_if-&gt;interface_class);
++    if (ccdriver_take_device[best_if-&gt;interface_class] != NULL) {
++        ccdriver_take_device[best_if-&gt;interface_class](usbdev);
++    }
++}
++
++static void enumerate_hub(struct usb_device *usbdev)
++{
++    struct hub_desc *hub_desc;
++    struct usb_device *down;
++    uint16_t *port_status;
++    int i;
++
++    //Mehr als 8 Ports sollte es nicht geben, die Gr&#246;&#223;e des Deskriptors 
+wird
++    //daher wohl nicht gr&#246;&#223;er als sizeof()+16 werden
++    hub_desc = do_control(usbdev, DEV_TO_HOST, NULL, sizeof(*hub_desc) 
++ 16,
++                          CLS_REQUEST, REC_DEVICE, GET_DESCRIPTOR,
++                          DESC_DEVICE &lt;&lt; 8, 0);
++    for (i = 0; i &lt; hub_desc-&gt;nbr_ports; i++)
++    {
++        port_status = do_control(usbdev, DEV_TO_HOST, NULL, 4, CLS_REQUEST,
++                                 REC_OTHER, GET_STATUS, 0, i+1);
++        if (!(port_status[0] &amp; PORT_DEVICE)) {
++            continue;
++        }
++        //Strom an
++        do_control(usbdev, HOST_TO_DEV, NULL, 0, CLS_REQUEST, REC_OTHER,
++                   SET_FEATURE, PORTF_POWER, i+1);
++        cdi_sleep_ms(hub_desc-&gt;pwron2pwrgood * 2);
++        //Resetten
++        do_control(usbdev, HOST_TO_DEV, NULL, 0, CLS_REQUEST, REC_OTHER,
++                   SET_FEATURE, PORTF_RESET, i+1);
++        //Reset sollte jetzt eigtl. schon beendet sein
++        //(do_control wartet ja 50 ms)
++        down = malloc(sizeof(struct usb_device));
++        down-&gt;hci = usbdev-&gt;hci;
++        down-&gt;id = 0;
++        down-&gt;port = i;
++        down-&gt;low_speed = (port_status[0] &amp; PORT_LOWSPEED) &amp;&amp; 1;
++        enum_device(down);
++    }
++}
++
++void enumerate_hci(struct hci *hci)
++{
++    struct usb_device *usbdev;
++    cdi_list_t usb_devices;
++
++    if (hci-&gt;find_devices != NULL)
++    {
++        usb_devices = hci-&gt;find_devices(hci);
++        while ((usbdev = cdi_list_pop(usb_devices)) != NULL)
++        {
++            hci-&gt;activate_device(hci, usbdev);
++            cdi_sleep_ms(50);
++            enum_device(usbdev);
++        }
++    }
++}
+diff --git a/usb/msd.c b/usb/msd.c
+new file mode 100644
+index 0000000..11fbd6a
+--- /dev/null
++++ b/usb/msd.c
+@@ -0,0 +1,599 @@
++/******************************************************************************
++ * Copyright (c) 2009 Max 
+Reitz                                               *
++ 
+*                                                                            
+*
++ * Permission is hereby granted,  free of charge,  to any  person 
+obtaining a *
++ * copy of this software and associated documentation files (the 
+&quot;Software&quot;), *
++ * to deal in the Software without restriction,  including without 
+limitation *
++ * the rights to use,  copy, modify, merge, publish,  distribute, 
+sublicense, *
++ * and/or sell copies  of the  Software,  and to permit  persons to 
+whom  the *
++ * Software is furnished to do so, subject to the following 
+conditions:       *
++ 
+*                                                                            
+*
++ * The above copyright notice and this permission notice shall be 
+included in *
++ * all copies or substantial portions of the 
+Software.                        *
++ 
+*                                                                            
+*
++ * THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, 
+EXPRESS OR *
++ * IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF 
+MERCHANTABILITY, *
++ * FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT 
+SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR 
+OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  
+ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  
+OTHER *
++ * DEALINGS IN THE 
+SOFTWARE.                                                  *
++ 
+******************************************************************************/
++
++#include &lt;stdint.h&gt;
++#include &lt;stdio.h&gt;
++#include &lt;stdlib.h&gt;
++#include &lt;string.h&gt;
++
++#include &quot;cdi/misc.h&quot;
++#include &quot;cdi/storage.h&quot;
++
++#include &quot;msd.h&quot;
++#include &quot;usb.h&quot;
++
++//DEBUG definieren, um einige Debugmeldungen anzuzeigen
++#define DEBUG
++//FULLDEBUG definieren, um ALLE Debugmeldungen anzuzeigen
++#define FULLDEBUG
++
++#if defined FULLDEBUG &amp;&amp; !defined DEBUG
++#define DEBUG
++#endif
++
++#ifdef DEBUG
++#define dprintf(fmt, args...) printf(&quot;[usb-msc] &quot; fmt, ##args)
++#define _dprintf(fmt, args...) printf(fmt, ##args)
++#else
++static int dprintf(const char *fmt, ...)
++{
++    return 0;
++}
++#define _dprintf(fmt, args...) dprintf(fmt, ##args)
++#endif
++
++#ifdef FULLDEBUG
++#define fdprintf(fmt, args...) printf(&quot;[usb-msc] &quot; fmt, ##args)
++#else
++static int fdprintf(const char *fmt, ...)
++{
++    return 0;
++}
++#endif
++
++static uint32_t cbw_tag = 1;
++
++static const char *driver_name = &quot;usb-msc&quot;;
++
++static struct cdi_storage_driver cdi_driver;
++
++static void deinit_msd(struct cdi_device *cdi_msd);
++static void get_partitions(struct cdi_storage_device *cdistrg);
++static void init_msd(struct cdi_device *cdi_msd);
++static void kill_driver(struct cdi_driver *cdi_msc_driver);
++static int msd_cdi_read(struct cdi_storage_device *strgdev, uint64_t 
+start, uint64_t count, void *buffer);
++static int msd_cdi_write(struct cdi_storage_device *strgdev, uint64_t 
+start, uint64_t count, void *buffer);
++static int msd_get_capacity(struct usb_device *usbdev, uint32_t 
+*block_size, uint32_t *block_count);
++
++//TODO: CDI-Funktion w&#228;re hier sicher n&#252;tzlich...
++#define CPU_IS_LITTLE_ENDIAN
++
++#define change_endianess_32(_) 
+((((_)&amp;0xFF000000)&gt;&gt;24)|(((_)&amp;0xFF0000)&gt;&gt;8)|(((_)&amp;0xFF00)&lt;&lt;8)|(((_)&amp;0xFF)&lt;&lt;24))
++#ifdef CPU_IS_LITTLE_ENDIAN
++#define CPU2BE(_) change_endianess_32(_)
++#define CPU2LE(_) (_)
++#define BE2CPU(_) change_endianess_32(_)
++#define LE2CPU(_) (_)
++#else
++#define CPU2BE(_) (_)
++#define CPU2LE(_) change_endianess_32(_)
++#define BE2CPU(_) (_)
++#define LE2CPU(_) change_endianess_32(_)
++#endif
++
++//Das muss definiert werden, um vor einem Befehl zu warten, bis das MSD 
+fertig
++//ist. Theoretisch ist das &#228;u&#223;erst sinnvoll, praktisch h&#228;ngt sich der 
+Treiber
++//bisweilen auf - das sollte allerdings mit dem Timeout gegessen sein
++/**
++#define WAIT_FOR_MSD_READY
++*/
++
++//TODO: Storage bietet eine SCSI-Klasse. Die k&#246;nnte man durchaus 
+benutzen. xD
++
++void init_msc_driver()
++{
++    struct cdi_driver *stddrv = (struct cdi_driver *)&amp;cdi_driver;
++    stddrv-&gt;type = CDI_STORAGE;
++    stddrv-&gt;name = driver_name;
++    stddrv-&gt;init_device = &amp;init_msd;
++    stddrv-&gt;remove_device = &amp;deinit_msd;
++    stddrv-&gt;destroy = &amp;kill_driver;
++    cdi_driver.read_blocks = &amp;msd_cdi_read;
++    cdi_driver.write_blocks = &amp;msd_cdi_write;
++    cdi_storage_driver_init(&amp;cdi_driver);
++    cdi_storage_driver_register(&amp;cdi_driver);
++}
++
++void register_msd(struct usb_device *usbdev)
++{
++    struct cdi_storage_device *strgdev;
++    struct cdi_msd *cdimsd;
++    struct msclass_data *msc;
++    struct endpoint_desc *ep_desc;
++    void *address;
++    int i;
++    uint32_t bs, bc;
++    uint64_t size;
++    static int msdnum = 0;
++
++    if (usbdev-&gt;interface-&gt;interface_protocol != 0x50)
++    {
++       dprintf(&quot;Es werden nur bulk-only-Interfaces unterst&#252;tzt.\n&quot;);
++       return;
++    }
++    cdimsd = malloc(sizeof(struct cdi_msd));
++    if (cdimsd == NULL) {
++        return;
++    }
++    cdimsd-&gt;usb_device = usbdev;
++    cdimsd-&gt;offset = 0;
++    strgdev = (struct cdi_storage_device *)cdimsd;
++    strgdev-&gt;dev.type = CDI_STORAGE;
++    strgdev-&gt;dev.name = malloc(10);
++    if (strgdev-&gt;dev.name == NULL)
++    {
++        free(strgdev);
++        return;
++    }
++    sprintf((char *)strgdev-&gt;dev.name, &quot;msd%i&quot;, msdnum++);
++    msc = malloc(sizeof(struct msclass_data));
++    if (msc == NULL)
++    {
++        free((void *)strgdev-&gt;dev.name);
++        free(strgdev);
++        return;
++    }
++    usbdev-&gt;classd = (struct class_data *)msc;
++    msc-&gt;bulk_ep_in = NULL;
++    msc-&gt;bulk_ep_out = NULL;
++    address = (void *)usbdev-&gt;interface + sizeof(struct interface_desc);
++    for (i = 0; i &lt; usbdev-&gt;interface-&gt;num_endpoints; i++)
++    {
++        ep_desc = address;
++        if ((ep_desc-&gt;endpoint_address &amp; 0x80) &amp;&amp;
++            (ep_desc-&gt;attributes      == 0x02) &amp;&amp;
++            (msc-&gt;bulk_ep_in          == NULL)) { //BULK-IN
++            msc-&gt;bulk_ep_in = ep_desc;
++        } else if (!(ep_desc-&gt;endpoint_address &amp; 0x80) &amp;&amp;
++                    (ep_desc-&gt;attributes      == 0x02) &amp;&amp;
++                    (msc-&gt;bulk_ep_out         == NULL)) { //BULK-OUT
++            msc-&gt;bulk_ep_out = ep_desc;
++        }
++        address += sizeof(struct endpoint_desc);
++    }
++    if ((msc-&gt;bulk_ep_in == NULL) || (msc-&gt;bulk_ep_out == NULL))
++    {
++        dprintf(&quot;Nicht gen&#252;gend Endpoints gefunden.\n&quot;);
++        return;
++    }
++    if (!msd_get_capacity(usbdev, &amp;bs, &amp;bc))
++    {
++        strgdev-&gt;block_size = 0;
++        strgdev-&gt;block_count = 0;
++        dprintf(&quot;Konnte Gr&#246;&#223;e f&#252;r %s nicht ermitteln.\n&quot;, 
+strgdev-&gt;dev.name);
++    }
++    else
++    {
++        strgdev-&gt;block_size = bs;
++        strgdev-&gt;block_count = bc;
++        size = bs;
++        size *= bc;
++        dprintf(&quot;%s: %i * %i B (ca. %i MB).\n&quot;, strgdev-&gt;dev.name, bc, 
+bs, size &gt;&gt; 20);
++    }
++    cdi_storage_device_init(strgdev);
++    cdi_list_push(cdi_driver.drv.devices, strgdev);
++    get_partitions(strgdev);
++}
++
++static void init_msd(struct cdi_device *cdi_dev)
++{
++    //Hier wird nichts gemacht, da die Partitionen schon in register_msd()
++    //erkannt werden M&#220;SSEN. Somit l&#228;uft die ganze Initialisierung dort ab.
++}
++
++static void kill_driver(struct cdi_driver *cdi_msc_driver)
++{
++    //TODO: Man k&#246;nnte doch noch irgendwie die Ger&#228;te entfernen
++}
++
++static void deinit_msd(struct cdi_device *cdi_msd)
++{
++    //TODO: Und gerade hier...
++}
++
++static int msd_get_capacity(struct usb_device *usbdev, uint32_t 
+*block_size, uint32_t *block_count)
++{
++    struct msclass_data *msc;
++    struct command_block_wrapper *cbw;
++    struct command_status_wrapper *csw;
++    struct msd_capacity *cap;
++    uintptr_t pcbw, pcsw, pcap;
++    uint32_t expected_tag;
++
++    if ((usbdev == NULL) || (block_size == NULL) || (block_count == 
+NULL)) {
++        return 0;
++    }
++    if (cdi_alloc_phys_mem(sizeof(struct command_block_wrapper),
++                           (void **)&amp;cbw, (void **)&amp;pcbw) == -1) {
++        return 0;
++    }
++    if (cdi_alloc_phys_mem(sizeof(struct command_status_wrapper),
++                           (void **)&amp;csw, (void **)&amp;pcsw) == -1) {
++        return 0;
++    }
++    if (cdi_alloc_phys_mem(sizeof(struct msd_capacity),
++                           (void **)&amp;cap, (void **)&amp;pcap) == -1) {
++        return 0;
++    }
++    msc = (struct msclass_data *)usbdev-&gt;classd;
++    memset(cbw, 0, 0x1F);
++    cbw-&gt;cbw_signature = CBW_SIGNATURE;
++    cbw-&gt;cbw_tag = (expected_tag = cbw_tag++);
++    cbw-&gt;cbw_data_transfer_length = sizeof(struct msd_capacity);
++    cbw-&gt;cbw_flags = 0x80; //IN
++    cbw-&gt;cbw_lun = 0; //Was wei&#223; ich, wie viele LUNs datt Dingens hat?
++    cbw-&gt;cbw_cb_length = 12;
++    cbw-&gt;cbw_cb[0] = MSC_CMD_CAPACITY;
++    cbw-&gt;cbw_cb[1] = 0; //LUN: 0
++    if (do_packet(usbdev, PACKET_OUT, 
+msc-&gt;bulk_ep_out-&gt;endpoint_address, pcbw,
++                  0x1F, 0, USB_TOD_COMMAND) != USB_NO_ERROR) {
++        return 0;
++    }
++    cdi_sleep_ms(20);
++    if (do_packet(usbdev, PACKET_IN, msc-&gt;bulk_ep_in-&gt;endpoint_address, 
+pcap,
++                  sizeof(struct msd_capacity), 0, USB_TOD_DATA_IN)
++           != USB_NO_ERROR) {
++        return 0;
++    }
++    cdi_sleep_ms(5);
++    if (do_packet(usbdev, PACKET_IN, msc-&gt;bulk_ep_in-&gt;endpoint_address, 
+pcsw,
++                  0x0D, 0, USB_TOD_STATUS) != USB_NO_ERROR) {
++        return 0;
++    }
++    cdi_sleep_ms(5);
++    if ((csw-&gt;csw_signature != CSW_SIGNATURE) ||
++         (csw-&gt;csw_tag      !=  expected_tag) ||
++          csw-&gt;csw_status) {
++        return 0;
++    }
++    *block_size = BE2CPU(cap-&gt;block_length);
++    *block_count = BE2CPU(cap-&gt;last_lba) + 1;
++    return 1;
++}
++
++#ifdef WAIT_FOR_MSD_READY
++static int msd_ready(struct usb_device *usbdev)
++{
++   struct msclass_data *msc;
++   struct command_block_wrapper *cbw;
++   struct command_status_wrapper *csw;
++   uintptr_t pcbw, pcsw;
++   uint32_t expected_tag;
++
++   if (cdi_alloc_phys_mem(sizeof(struct command_block_wrapper),
++                          (void **)&amp;cbw, (void **)&amp;pcbw) == -1) {
++      return 0;
++   }
++   if (cdi_alloc_phys_mem(sizeof(struct command_status_wrapper),
++                          (void **)&amp;csw, (void **)&amp;pcsw) == -1) {
++      return 0;
++   }
++   msc = (struct msclass_data *)usbdev-&gt;classd;
++   memset(cbw, 0, 0x1F);
++   cbw-&gt;cbw_signature = CBW_SIGNATURE;
++   cbw-&gt;cbw_tag = (expected_tag = cbw_tag++);
++   cbw-&gt;cbw_data_transfer_length = 0;
++   cbw-&gt;cbw_flags = 0x80; //IN
++   cbw-&gt;cbw_lun = 0; //Was wei&#223; ich, wie viele LUNs datt Dingens hat?
++   cbw-&gt;cbw_cb_length = 12; //Alles null, also &quot;Test unit ready&quot;
++   if (do_packet(usbdev, PACKET_OUT, 
+msc-&gt;bulk_ep_out-&gt;endpoint_address, pcbw,
++                 0x1F, 0, USB_TOD_COMMAND) != USB_NO_ERROR) {
++       return 0;
++   }
++   cdi_sleep_ms(7);
++   if (do_packet(usbdev, PACKET_IN, msc-&gt;bulk_ep_in-&gt;endpoint_address, 
+pcsw,
++                 0x0D, 0, USB_TOD_STATUS) != USB_NO_ERROR) {
++       return 0;
++   }
++   cdi_sleep_ms(4);
++   if ((csw-&gt;csw_signature != CSW_SIGNATURE) ||
++       (csw-&gt;csw_tag       !=  expected_tag) ||
++        csw-&gt;csw_status) {
++      return 0;
++   }
++   return 1;
++}
++#endif
++
++static inline int tsl(volatile int *variable)
++{
++    int rval;
++    rval = *variable;
++    *variable = 1;
++    return rval;
++}
++
++static uint32_t msd_read(struct usb_device *usbdev, uint32_t lba, 
+uint16_t sectors, uintptr_t phys_buffer, size_t length);
++
++static int msd_cdi_read(struct cdi_storage_device *strgdev, uint64_t 
+start, uint64_t count, void *buffer)
++{
++    void *vb;
++    uintptr_t pb;
++    int bs = strgdev-&gt;block_size, error;
++#ifdef WAIT_FOR_MSD_READY
++    int j;
++#endif
++    uint32_t i;
++    struct usb_device *usbdev = ((struct cdi_msd *)strgdev)-&gt;usb_device;
++
++    fdprintf(&quot;read(%i, %i)\n&quot;, (int)start, (int)count);
++    start += ((struct cdi_msd *)strgdev)-&gt;offset;
++    if (cdi_alloc_phys_mem(bs, &amp;vb, (void **)&amp;pb) == -1)
++    {
++        dprintf(&quot;Blockspeicher konnte nicht allociert werden.\n&quot;);
++        return -1;
++    }
++    if (!count)
++    {
++        dprintf(&quot;Leere Leseanfrage.\n&quot;);
++        return 0;
++    }
++    while (tsl(&amp;usbdev-&gt;locked))
++    {
++#ifndef CDI_STANDALONE
++        __asm__ __volatile__ (&quot;hlt&quot;);
++#endif
++    }
++    for (i = 0; i &lt; count; i++)
++    {
++#ifdef WAIT_FOR_MSD_READY
++        for (j = 0; !msd_ready(usbdev) &amp;&amp; (j &lt; 10); j++) {
++            cdi_sleep_ms(20);
++        }
++#endif
++        error = msd_read(usbdev, start + i, 1, pb, bs);
++        if (error != USB_NO_ERROR)
++        {
++            dprintf(&quot;Lesefehler 0x%X bei Block %i.\n&quot;, error, i);
++            usbdev-&gt;locked = 0;
++            return -1;
++        }
++        memcpy(buffer + i*bs, vb, bs);
++    }
++    usbdev-&gt;locked = 0;
++    return 0;
++}
++
++static uint32_t msd_read(struct usb_device *usbdev, uint32_t lba, 
+uint16_t sectors, uintptr_t phys_buffer, size_t length)
++{
++    struct msclass_data *msc;
++    struct command_block_wrapper *cbw;
++    struct command_status_wrapper *csw;
++    uintptr_t pcbw, pcsw;
++    uint32_t expected_tag;
++    int error;
++
++    if (cdi_alloc_phys_mem(sizeof(struct command_block_wrapper),
++                           (void **)&amp;cbw, (void **)&amp;pcbw) == -1) {
++        return USB_TRIVIAL_ERROR;
++    }
++    if (cdi_alloc_phys_mem(sizeof(struct command_status_wrapper),
++                           (void **)&amp;csw, (void **)&amp;pcsw) == -1) {
++        return USB_TRIVIAL_ERROR;
++    }
++    if (!phys_buffer || !length) {
++        return USB_TRIVIAL_ERROR;
++    }
++    msc = (struct msclass_data *)usbdev-&gt;classd;
++    memset(cbw, 0, 0x1F);
++    cbw-&gt;cbw_signature = CBW_SIGNATURE;
++    cbw-&gt;cbw_tag = (expected_tag = cbw_tag++);
++    cbw-&gt;cbw_data_transfer_length = length;
++    cbw-&gt;cbw_flags = 0x80; //IN
++    cbw-&gt;cbw_lun = 0; //Was wei&#223; ich, wie viele LUNs datt Dingens hat?
++    cbw-&gt;cbw_cb_length = 12;
++    cbw-&gt;cbw_cb[0] = MSC_CMD_READ10;
++    cbw-&gt;cbw_cb[1] = 0; //LUN: 0
++    cbw-&gt;cbw_cb[2] = (lba &amp; 0xFF000000) &gt;&gt; 24;
++    cbw-&gt;cbw_cb[3] = (lba &amp; 0x00FF0000) &gt;&gt; 16;
++    cbw-&gt;cbw_cb[4] = (lba &amp; 0x0000FF00) &gt;&gt; 8;
++    cbw-&gt;cbw_cb[5] =  lba &amp; 0x000000FF;
++    cbw-&gt;cbw_cb[7] = (sectors &amp; 0x0000FF00) &gt;&gt; 8;
++    cbw-&gt;cbw_cb[8] =  sectors &amp; 0x000000FF;
++    error = do_packet(usbdev, PACKET_OUT, 
+msc-&gt;bulk_ep_out-&gt;endpoint_address,
++                      pcbw, 0x1F, 0, USB_TOD_COMMAND);
++    if (error != USB_NO_ERROR) {
++        return error;
++    }
++    cdi_sleep_ms(20);
++    error = do_packet(usbdev, PACKET_IN, msc-&gt;bulk_ep_in-&gt;endpoint_address,
++                      phys_buffer, length, 0, USB_TOD_DATA_IN);
++    if (error != USB_NO_ERROR) {
++        return error;
++    }
++    cdi_sleep_ms(5);
++    error = do_packet(usbdev, PACKET_IN, msc-&gt;bulk_ep_in-&gt;endpoint_address,
++                      pcsw, 0x0D, 0, USB_TOD_STATUS);
++    if (error != USB_NO_ERROR) {
++        return error;
++    }
++    cdi_sleep_ms(4);
++    if ((csw-&gt;csw_signature != CSW_SIGNATURE) ||
++        (csw-&gt;csw_tag       !=  expected_tag) ||
++         csw-&gt;csw_status)
++    {
++        dprintf(&quot;0x%08X 0x%08X==0x%08X 0x%02X\n&quot;, csw-&gt;csw_signature,
++                                                  csw-&gt;csw_tag,
++                                                  expected_tag,
++                                                  csw-&gt;csw_status);
++        return USB_CRC; //Watt wei&#223; denn ich...
++    }
++    return USB_NO_ERROR;
++}
++
++static uint32_t msd_write(struct usb_device *usbdev, uint32_t lba, 
+uint16_t sectors, uintptr_t phys_buffer, size_t length);
++
++static int msd_cdi_write(struct cdi_storage_device *strgdev, uint64_t 
+start, uint64_t count, void *buffer)
++{
++    void *vb;
++    uintptr_t pb;
++    int bs = strgdev-&gt;block_size, error;
++#ifdef WAIT_FOR_MSD_READY
++    int j;
++#endif
++    uint32_t i;
++    struct usb_device *usbdev = ((struct cdi_msd *)strgdev)-&gt;usb_device;
++
++    fdprintf(&quot;write(%i, %i)\n&quot;, (int)start, (int)count);
++    start += ((struct cdi_msd *)strgdev)-&gt;offset;
++    if (cdi_alloc_phys_mem(bs, &amp;vb, (void **)&amp;pb) == -1)
++    {
++        dprintf(&quot;Blockspeicher zum Schreiben konnte nicht allociert 
+werden.\n&quot;);
++        return -1;
++    }
++    while (tsl(&amp;usbdev-&gt;locked))
++    {
++#ifndef CDI_STANDALONE
++        __asm__ __volatile__ (&quot;hlt&quot;);
++#endif
++    }
++    for (i = 0; i &lt; count; i++)
++    {
++        memcpy(vb, buffer + i*bs, bs);
++#ifdef WAIT_FOR_MSD_READY
++        for (j = 0; !msd_ready(usbdev) &amp;&amp; (j &lt; 10); j++) {
++            cdi_sleep_ms(20);
++        }
++#endif
++        error = msd_write(usbdev, start + i, 1, pb, bs);
++        if (error != USB_NO_ERROR)
++        {
++            dprintf(&quot;Schreibfehler 0x%X bei Block %i.\n&quot;, error, i);
++            usbdev-&gt;locked = 0;
++            return -1;
++        }
++    }
++    usbdev-&gt;locked = 0;
++    return 0;
++}
++
++static uint32_t msd_write(struct usb_device *usbdev, uint32_t lba, 
+uint16_t sectors, uintptr_t phys_buffer, size_t length)
++{
++    struct msclass_data *msc;
++    struct command_block_wrapper *cbw;
++    struct command_status_wrapper *csw;
++    uintptr_t pcbw, pcsw;
++    uint32_t expected_tag;
++    int error;
++
++    if (cdi_alloc_phys_mem(sizeof(struct command_block_wrapper),
++                           (void **)&amp;cbw, (void **)&amp;pcbw) == -1) {
++        return USB_TRIVIAL_ERROR;
++    }
++    if (cdi_alloc_phys_mem(sizeof(struct command_status_wrapper),
++                           (void **)&amp;csw, (void **)&amp;pcsw) == -1) {
++        return USB_TRIVIAL_ERROR;
++    }
++    if (!phys_buffer || !length) {
++        return USB_TRIVIAL_ERROR;
++    }
++    msc = (struct msclass_data *)usbdev-&gt;classd;
++    memset(cbw, 0, 0x1F);
++    cbw-&gt;cbw_signature = CBW_SIGNATURE;
++    cbw-&gt;cbw_tag = (expected_tag = cbw_tag++);
++    cbw-&gt;cbw_data_transfer_length = length;
++    cbw-&gt;cbw_flags = 0x00; //OUT
++    cbw-&gt;cbw_lun = 0; //Was wei&#223; ich, wie viele LUNs datt Dingens hat?
++    cbw-&gt;cbw_cb_length = 12;
++    cbw-&gt;cbw_cb[0] = MSC_CMD_WRITE10;
++    cbw-&gt;cbw_cb[1] = 0; //LUN: 0
++    cbw-&gt;cbw_cb[2] = (lba &amp; 0xFF000000) &gt;&gt; 24;
++    cbw-&gt;cbw_cb[3] = (lba &amp; 0x00FF0000) &gt;&gt; 16;
++    cbw-&gt;cbw_cb[4] = (lba &amp; 0x0000FF00) &gt;&gt; 8;
++    cbw-&gt;cbw_cb[5] =  lba &amp; 0x000000FF;
++    cbw-&gt;cbw_cb[7] = (sectors &amp; 0x0000FF00) &gt;&gt; 8;
++    cbw-&gt;cbw_cb[8] =  sectors &amp; 0x000000FF;
++    error = do_packet(usbdev, PACKET_OUT, 
+msc-&gt;bulk_ep_out-&gt;endpoint_address,
++                      pcbw, 0x1F, 0, USB_TOD_COMMAND);
++    if (error != USB_NO_ERROR) {
++        return error;
++    }
++    cdi_sleep_ms(20);
++    error = do_packet(usbdev, PACKET_OUT, 
+msc-&gt;bulk_ep_out-&gt;endpoint_address,
++                      phys_buffer, length, 0, USB_TOD_DATA_OUT);
++    if (error != USB_NO_ERROR) {
++        return error;
++    }
++    cdi_sleep_ms(5);
++    error = do_packet(usbdev, PACKET_IN, msc-&gt;bulk_ep_in-&gt;endpoint_address,
++                      pcsw, 0x0D, 0, USB_TOD_STATUS);
++    if (error != USB_NO_ERROR) {
++        return error;
++    }
++    cdi_sleep_ms(4);
++    if ((csw-&gt;csw_signature != CSW_SIGNATURE) ||
++        (csw-&gt;csw_tag       !=  expected_tag) ||
++         csw-&gt;csw_status)
++    {
++        dprintf(&quot;0x%08X 0x%08X==0x%08X 0x%02X\n&quot;, csw-&gt;csw_signature,
++                                                  csw-&gt;csw_tag,
++                                                  expected_tag,
++                                                  csw-&gt;csw_status);
++        return USB_CRC;
++    }
++    return USB_NO_ERROR;
++}
++
++static void get_partitions(struct cdi_storage_device *cdistrg)
++{
++    void *mbr;
++    struct part_table_entry *partition;
++    struct cdi_msd *cdimsd, *base_cdimsd = (struct cdi_msd *)cdistrg;
++    int i, j = 0;
++
++    mbr = malloc(512);
++    if (msd_cdi_read(cdistrg, 0, 1, mbr) != USB_NO_ERROR) {
++        dprintf(&quot;MBR konnte nicht eingelesen werden.\n&quot;);
++        return;
++    }
++    if (((uint16_t *)mbr)[255] != 0xAA55) {
++        return;
++    }
++    partition = mbr + 0x1BE;
++    dprintf(&quot;Partitionen auf %s:&quot;, cdistrg-&gt;dev.name);
++    for (i = 0; i &lt; 4; i++)
++    {
++        if (partition[i].type &amp;&amp; partition[i].size &amp;&amp; 
+(partition[i].start + partition[i].size &lt; cdistrg-&gt;block_count))
++        {
++            cdimsd = malloc(sizeof(struct cdi_msd));
++            if (cdimsd == NULL) {
++                break;
++            }
++            cdimsd-&gt;offset = partition[i].start;
++            cdimsd-&gt;usb_device = base_cdimsd-&gt;usb_device;
++            cdimsd-&gt;cdi_device.dev.type = CDI_STORAGE;
++            cdimsd-&gt;cdi_device.dev.name = malloc(14);
++            if (cdimsd-&gt;cdi_device.dev.name == NULL)
++            {
++                free(cdimsd);
++                break;
++            }
++            sprintf((char *)cdimsd-&gt;cdi_device.dev.name, &quot;%sp%i&quot;, 
+cdistrg-&gt;dev.name, j++);
++            cdimsd-&gt;cdi_device.block_size = 
+base_cdimsd-&gt;cdi_device.block_size;
++            cdimsd-&gt;cdi_device.block_count = partition[i].size;
++            _dprintf(&quot; %s&quot;, cdimsd-&gt;cdi_device.dev.name);
++            cdi_storage_device_init((struct cdi_storage_device *)cdimsd);
++            cdi_list_push(cdi_driver.drv.devices, cdimsd);
++        }
++    }
++    _dprintf(&quot;\n&quot;);
++}
+diff --git a/usb/uhci.c b/usb/uhci.c
+new file mode 100644
+index 0000000..c09075c
+--- /dev/null
++++ b/usb/uhci.c
+@@ -0,0 +1,339 @@
++/******************************************************************************
++ * Copyright (c) 2009 Max 
+Reitz                                               *
++ 
+*                                                                            
+*
++ * Permission is hereby granted,  free of charge,  to any  person 
+obtaining a *
++ * copy of this software and associated documentation files (the 
+&quot;Software&quot;), *
++ * to deal in the Software without restriction,  including without 
+limitation *
++ * the rights to use,  copy, modify, merge, publish,  distribute, 
+sublicense, *
++ * and/or sell copies  of the  Software,  and to permit  persons to 
+whom  the *
++ * Software is furnished to do so, subject to the following 
+conditions:       *
++ 
+*                                                                            
+*
++ * The above copyright notice and this permission notice shall be 
+included in *
++ * all copies or substantial portions of the 
+Software.                        *
++ 
+*                                                                            
+*
++ * THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, 
+EXPRESS OR *
++ * IMPLIED, INCLUDING  BUT NOT  LIMITED TO THE WARRANTIES OF 
+MERCHANTABILITY, *
++ * FITNESS FOR A PARTICULAR  PURPOSE AND  NONINFRINGEMENT.  IN NO EVENT 
+SHALL *
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR 
+OTHER *
++ * LIABILITY,  WHETHER IN AN ACTION OF CONTRACT,  TORT OR OTHERWISE,  
+ARISING *
++ * FROM,  OUT OF  OR IN CONNECTION  WITH THE  SOFTWARE  OR THE  USE OR  
+OTHER *
++ * DEALINGS IN THE 
+SOFTWARE.                                                  *
++ 
+******************************************************************************/
++
++#include &lt;stdlib.h&gt;
++#include &lt;string.h&gt;
++
++#include &quot;cdi/io.h&quot;
++#include &quot;cdi/lists.h&quot;
++#include &quot;cdi/misc.h&quot;
++#include &quot;cdi/pci.h&quot;
++
++#include &quot;uhci.h&quot;
++#include &quot;usb.h&quot;
++
++#define DEBUG
++
++#ifdef DEBUG
++#include &lt;stdio.h&gt;
++#include &lt;stdarg.h&gt;
++#define dprintf(fmt, args...) printf(&quot;[uhci] &quot; fmt, ##args)
++#define _dprintf(fmt, args...) printf(fmt, ##args)
++#else
++static int dprintf(const char *fmt, ...)
++{
++    return 0;
++}
++#define _dprintf(fmt, args...) dprintf(fmt, ##args)
++#endif
++
++static const char *driver_name = &quot;uhci&quot;;
++
++static struct cdi_driver cdi_driver;
++static cdi_list_t active_transfers;
++
++static void uhci_handler(struct cdi_device *dev);
++static int enqueue_request(struct hci *gen_hci, int frame, int type, 
+int device, int endpoint, int low_speed, uintptr_t phys_data, int 
+length, int datatoggle);
++static cdi_list_t get_devices(struct hci *gen_hci);
++static void activate_device(struct hci *gen_hci, struct usb_device 
+*device);
++static int get_current_frame(struct hci *gen_hci);
++static void uhci_deinit(struct cdi_device *cdi_hci);
++static void uhci_kill(struct cdi_driver *cdi_hcd);
++
++
++struct cdi_driver *init_uhcd()
++{
++    active_transfers = cdi_list_create();
++    cdi_driver.type = CDI_UNKNOWN;
++    cdi_driver.name = driver_name;
++    cdi_driver.init_device = &amp;uhci_init;
++    cdi_driver.remove_device = &amp;uhci_deinit;
++    cdi_driver.destroy = &amp;uhci_kill;
++    cdi_driver_init(&amp;cdi_driver);
++    cdi_driver_register(&amp;cdi_driver);
++    return &amp;cdi_driver;
++}
++
++static void uhci_kill(struct cdi_driver *cdi_hcd)
++{
++  //TODO: Da geht doch noch was
++}
++
++static void uhci_deinit(struct cdi_device *cdi_hci)
++{
++    cdi_outw(((struct uhci *)((struct cdi_hci *)cdi_hci)-&gt;hci)-&gt;pbase + 
+UHCI_USBCMD,
++             MAXP); //HC anhalten
++  //TODO: Hier doch auch
++}
++
++void uhci_init(struct cdi_device *cdi_hci)
++{
++    struct hci *gen_hci = ((struct cdi_hci *)cdi_hci)-&gt;hci;
++    struct uhci *uhci = (struct uhci *)gen_hci;
++    struct cdi_pci_resource *res;
++    int i, size = 0x14;
++
++    //cdi_pci_alloc_ioports(gen_hci-&gt;pcidev);
++    uhci-&gt;pbase = 0;
++    for (i = 0; (res = cdi_list_get(gen_hci-&gt;pcidev-&gt;resources, i)) != 
+NULL;
++         i++)
++    {
++        if (res-&gt;type == CDI_PCI_IOPORTS)
++        {
++            size = res-&gt;length ? res-&gt;length : 0x14;
++            if (cdi_ioports_alloc(res-&gt;start, size) == -1)
++            {
++                dprintf(&quot;I/O-Ports konnten nicht reserviert werden.\n&quot;);
++                return;
++            }
++            uhci-&gt;pbase = res-&gt;start;
++            break;
++        }
++    }
++    if (!uhci-&gt;pbase)
++    {
++        dprintf(&quot;I/O-Basis nicht gefunden!\n&quot;);
++        return;
++    }
++    if (cdi_alloc_phys_mem(4096, (void **)&amp;uhci-&gt;frame_list,
++                                 (void **)&amp;uhci-&gt;phys_frame_list) == -1)
++    {
++        dprintf(&quot;Frame List konnte nicht allociert werden!\n&quot;);
++        return;
++    }
++    cdi_register_irq(gen_hci-&gt;pcidev-&gt;irq, &amp;uhci_handler, cdi_hci);
++    uhci-&gt;root_ports = (size - 0x10) &gt;&gt; 1;
++    if (uhci-&gt;root_ports &gt; 7) { //Laut Linuxkernel ist das so &quot;weird&quot;, 
+dass da was nicht stimmen kann...
++        uhci-&gt;root_ports = 2;
++    }
++    dprintf(&quot;UHC mit I/O 0x%04X (%i Ports) und IRQ %i\n&quot;, uhci-&gt;pbase, 
+uhci-&gt;root_ports, gen_hci-&gt;pcidev-&gt;irq);
++    for (i = 0; i &lt; 1024; i++) {
++        uhci-&gt;frame_list[i] = 1; //Invalid
++    }
++    dprintf(&quot;Resetten...\n&quot;);
++    //HC zur&#252;cksetzen
++    cdi_outw(uhci-&gt;pbase + UHCI_USBCMD, MAXP | HCRESET);
++    for (i = 0; (cdi_inw(uhci-&gt;pbase + UHCI_USBCMD) &amp; HCRESET) &amp;&amp; (i &lt; 
+50); i++) {
++        cdi_sleep_ms(10);
++    }
++    //Reset auf dem USB treiben
++    cdi_outw(uhci-&gt;pbase + UHCI_USBCMD, MAXP | GRESET);
++    for (i = 0; (cdi_inw(uhci-&gt;pbase + UHCI_USBCMD) &amp; GRESET) &amp;&amp; (i &lt; 
+50); i++) {
++        cdi_sleep_ms(10);
++    }
++    //Alle Interrupts senden
++    cdi_outw(uhci-&gt;pbase + UHCI_USBINTR, 0xF);
++    //Framelistadresse eintragen
++    cdi_outl(uhci-&gt;pbase + UHCI_FRBASEADD, uhci-&gt;phys_frame_list);
++    cdi_outw(uhci-&gt;pbase + UHCI_FRNUM, 0); //Frame zur&#252;cksetzen
++    //Ports abschalten, damit selektiv eingeschaltet werden kann 
+(Enumeration)
++    for (i = 0; i &lt; uhci-&gt;root_ports; i++) {
++        cdi_outw(uhci-&gt;pbase + UHCI_RPORTS + i*2, RPORT_CSC);
++    }
++    dprintf(&quot;  Fertig\n&quot;);
++    gen_hci-&gt;find_devices = &amp;get_devices;
++    gen_hci-&gt;activate_device = &amp;activate_device;
++    gen_hci-&gt;do_packet = &amp;enqueue_request;
++    gen_hci-&gt;get_frame = &amp;get_current_frame;
++
++    enumerate_hci(gen_hci);
++}
++
++static cdi_list_t get_devices(struct hci *gen_hci)
++{
++    struct uhci *uhci = (struct uhci *)gen_hci;
++    struct usb_device *dev;
++    cdi_list_t dlist = cdi_list_create();
++    int i;
++
++    dprintf(&quot;Ger&#228;te finden: &quot;);
++    cdi_outw(uhci-&gt;pbase + UHCI_USBCMD, USB_RUN);
++    for (i = 0; i &lt; uhci-&gt;root_ports; i++)
++    {
++        if (!(cdi_inw(uhci-&gt;pbase + UHCI_RPORTS + 2*i) &amp; RPORT_DEVICE))
++        {
++            _dprintf(&quot;-&quot;);
++            continue;
++        }
++        _dprintf(&quot;!&quot;);
++        dev = malloc(sizeof(struct usb_device));
++        dev-&gt;hci = gen_hci;
++        dev-&gt;id = 0;
++        dev-&gt;port = i;
++        dev-&gt;low_speed =
++                (cdi_inw(uhci-&gt;pbase + UHCI_RPORTS + 2*i) &amp; 
+RPORT_LOSPD) &amp;&amp; 1;
++        cdi_list_push(dlist, dev);
++    }
++    _dprintf(&quot;\n&quot;);
++    return dlist;
++}
++
++static void activate_device(struct hci *gen_hci, struct usb_device *device)
++{
++    struct uhci *uhci = (struct uhci *)gen_hci;
++
++    dprintf(&quot;Ger&#228;t an Port %i wird aktiviert.\n&quot;, device-&gt;port);
++    cdi_outw(uhci-&gt;pbase + UHCI_RPORTS + 2 * device-&gt;port,
++             RPORT_RESET | RPORT_ENABLE | RPORT_CSC);
++    cdi_sleep_ms(20);
++}
++
++static int get_current_frame(struct hci *gen_hci)
++{
++    return cdi_inw(((struct uhci *)gen_hci)-&gt;pbase + UHCI_FRNUM);
++}
++
++static inline int tsl(volatile int *variable)
++{
++    int rval;
++    rval = *variable;
++    *variable = 1;
++    return rval;
++}
++static volatile int locked = 0;
++
++static int enqueue_request(struct hci *gen_hci, int frame, int type, 
+int device, int endpoint, int low_speed, uintptr_t phys_data, int 
+length, int datatoggle)
++{
++    struct uhci *uhci = (struct uhci *)gen_hci;
++    struct uhci_td *td;
++    struct uhci_qh *qh;
++    uintptr_t ptd, pqh;
++    struct transfer *addr;
++
++    if (cdi_alloc_phys_mem(sizeof(struct uhci_td),
++                           (void **)&amp;td, (void **)&amp;ptd) == -1) {
++        return USB_TRIVIAL_ERROR;
++    }
++    if (cdi_alloc_phys_mem(sizeof(struct uhci_qh),
++                           (void **)&amp;qh, (void **)&amp;pqh) == -1) {
++        return USB_TRIVIAL_ERROR;
++    }
++    while (tsl(&amp;locked))
++    {
++#ifndef CDI_STANDALONE
++        __asm__ __volatile__ (&quot;hlt&quot;);
++#endif
++    }
++    qh-&gt;next = 1; //Invalid
++    qh-&gt;transfer = ptd;
++    memset(td, 0, sizeof(struct uhci_td));
++    td-&gt;next = 1; //Invalid
++    td-&gt;active = 1;
++    td-&gt;ioc = 1;
++    td-&gt;data_toggle = datatoggle;
++    td-&gt;low_speed = low_speed;
++    td-&gt;errors = 1;
++    td-&gt;pid = type;
++    td-&gt;device = device;
++    td-&gt;endpoint = endpoint;
++    td-&gt;maxlen = length ? length-1 : 0x7FF;
++    td-&gt;buffer = phys_data;
++    addr = malloc(sizeof(struct transfer));
++    addr-&gt;virt = td;
++    addr-&gt;phys = ptd;
++    addr-&gt;error = 0xFFFF;
++    cdi_list_push(active_transfers, addr);
++    uhci-&gt;frame_list[frame] = pqh | 2;
++#ifdef CDI_STANDALONE
++    /*int cframe = get_current_frame(gen_hci), nframe;
++    nframe = (cframe &gt; frame) ? frame + 1024 : frame; //&#220;berl&#228;ufe 
+korrigieren
++    //Ann&#228;hern, wann er wohl fertig ist
++    cdi_sleep_ms(nframe + 30 - get_current_frame(gen_hci));*/
++#else
++    while (!(qh-&gt;transfer &amp; 1)) {
++        __asm__ __volatile__ (&quot;hlt&quot;);
++    }
++#endif
++    while (addr-&gt;error == 0xFFFF)
++    {
++#ifndef CDI_STANDALONE
++        __asm__ __volatile__ (&quot;hlt&quot;);
++#endif
++    }
++    uhci-&gt;frame_list[frame] = 1;
++    locked = 0;
++    return addr-&gt;error;
++}
++
++static void uhci_handler(struct cdi_device *cdi_hci)
++{
++    struct uhci *uhci = (struct uhci *)((struct cdi_hci *)cdi_hci)-&gt;hci;
++    int status = cdi_inw(uhci-&gt;pbase + UHCI_USBSTS), i;
++    struct transfer *addr;
++    struct uhci_td *td;
++
++    if (!status) { //Also, von hier kommt der IRQ nicht.
++        return;
++    }
++    if (status &amp; ~0x0001) {
++        dprintf(&quot;Unerwarteter IRQ 0x%04X von %s\n&quot;, status, cdi_hci-&gt;name);
++    }
++    if (status &amp; 0x10)
++    {
++        printf(&quot;[uhci] SCHWERWIEGENDER FEHLER - HC WIRD ANGEHALTEN\n&quot;);
++        cdi_outw(uhci-&gt;pbase + UHCI_USBCMD, MAXP | HCRESET); //FU!
++    }
++    else
++    {
++        for (i = 0; (addr = cdi_list_get(active_transfers, i)) != NULL; 
+i++)
++        {
++            td = addr-&gt;virt;
++            if (td-&gt;active) {
++                continue;
++            }
++            addr-&gt;error = USB_NO_ERROR;
++            cdi_list_remove(active_transfers, i--);
++            if (td-&gt;stalled_err)
++            {
++                dprintf(&quot;ENDPOINT STALLED\n&quot;);
++                addr-&gt;error |= USB_STALLED;
++            }
++            if (td-&gt;buf_err)
++            {
++                dprintf(&quot;Puffer&#252;berlauf oder Underrun\n&quot;);
++                addr-&gt;error |= USB_BUFFER_ERROR;
++            }
++            if (td-&gt;babble)
++            {
++                dprintf(&quot;Puh, da war ein Ger&#228;t wohl sehr gespr&#228;chig: 
+Babble.\n&quot;);
++                addr-&gt;error |= USB_BABBLE;
++            }
++            if (td-&gt;nak)
++            {
++                dprintf(&quot;NAK empfangen\n&quot;);
++                addr-&gt;error |= USB_NAK;
++            }
++            if (td-&gt;crc_time_err)
++            {
++                dprintf(&quot;CRC-Fehler oder Timeout\n&quot;);
++                addr-&gt;error |= USB_CRC | USB_TIMEOUT;
++            }
++            if (td-&gt;bitstuff_err)
++            {
++                dprintf(&quot;Bitstufffehler\n&quot;);
++                addr-&gt;error |= USB_BITSTUFF;
++            }
++            //TODO: free(td) - dazu w&#228;re eine CDI-Funktion n&#252;tzlich
++        }
++    }
++    cdi_outw(uhci-&gt;pbase + UHCI_USBSTS, status);
++}
+-- 
+1.6.0.2
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	
+	<LI>Next message: <A HREF="000001.html">[cdi-devel] [PATCH] UHCI, USB, MSC
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#0">[ date ]</a>
+              <a href="thread.html#0">[ thread ]</a>
+              <a href="subject.html#0">[ subject ]</a>
+              <a href="author.html#0">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

@@ -1,0 +1,789 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH v2 13/24] cdi/scsi: Neu geschrieben
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%2013/24%5D%20cdi/scsi%3A%20Neu%20geschrieben&In-Reply-To=%3C20151220175410.GC2886%40silvanus%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <style type="text/css">
+       pre {
+           white-space: pre-wrap;       /* css-2.1, curent FF, Opera, Safari */
+           }
+   </style>
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="002556.html">
+   <LINK REL="Next"  HREF="002557.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH v2 13/24] cdi/scsi: Neu geschrieben</H1>
+    <B>Kevin Wolf</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%20v2%2013/24%5D%20cdi/scsi%3A%20Neu%20geschrieben&In-Reply-To=%3C20151220175410.GC2886%40silvanus%3E"
+           TITLE="[tyndur-devel] [PATCH v2 13/24] cdi/scsi: Neu geschrieben">kevin at tyndur.org
+                  </A><BR>
+    <I>So Dez 20 18:54:12 CET 2015</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="002556.html">[tyndur-devel] [PATCH v2 13/24] cdi/scsi: Neu geschrieben
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="002557.html">[tyndur-devel] [PATCH v2 14/24] lock.h: locked_decrement()
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#2572">[ Datum ]</a>
+              <a href="thread.html#2572">[ Thema ]</a>
+              <a href="subject.html#2572">[ Betreff (Subject) ]</a>
+              <a href="author.html#2572">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>On Sun, Dec 13, 2015 at 01:10:58AM +0100, Max Reitz wrote:
+&gt;<i> * Die týndur-Implementierung von cdi/scsi war im Prinzip nur zur
+</I>&gt;<i>   Benutzung mit dem CDI-ATAPI-Treiber geeignet. Dieser Patch macht die
+</I>&gt;<i>   Implementierung allgemeiner und auch für andere (zukünftige)
+</I>&gt;<i>   SCSI-CDI-Treiber einsatzfähig.
+</I>&gt;<i> 
+</I>&gt;<i> Signed-off-by: Max Reitz &lt;<A HREF="http://list.tyndur.org/mailman/listinfo/tyndur-devel">max at tyndur.org</A>&gt;
+</I>&gt;<i> ---
+</I>&gt;<i>  src/modules/cdi/lib/cdi.c       |  26 ++-
+</I>&gt;<i>  src/modules/cdi/lib/scsi/disk.c | 506 ++++++++++++++++++++++++++++++----------
+</I>&gt;<i>  2 files changed, 404 insertions(+), 128 deletions(-)
+</I>&gt;<i> 
+</I>&gt;<i> diff --git a/src/modules/cdi/lib/cdi.c b/src/modules/cdi/lib/cdi.c
+</I>&gt;<i> index 5d519b4..11b3009 100644
+</I>&gt;<i> --- a/src/modules/cdi/lib/cdi.c
+</I>&gt;<i> +++ b/src/modules/cdi/lib/cdi.c
+</I>&gt;<i> @@ -19,13 +19,17 @@
+</I>&gt;<i>  #include &quot;cdi.h&quot;
+</I>&gt;<i>  #include &quot;cdi/audio.h&quot;
+</I>&gt;<i>  #include &quot;cdi/fs.h&quot;
+</I>&gt;<i> +#include &quot;cdi/misc.h&quot;
+</I>&gt;<i>  #include &quot;cdi/pci.h&quot;
+</I>&gt;<i> +#include &quot;cdi/scsi.h&quot;
+</I>&gt;<i>  #include &quot;cdi/storage.h&quot;
+</I>&gt;<i>  
+</I>&gt;<i>  extern void cdi_storage_driver_register(struct cdi_storage_driver* driver);
+</I>&gt;<i>  extern void cdi_audio_driver_register(struct cdi_audio_driver* driver);
+</I>&gt;<i>  extern void cdi_tyndur_net_device_init(struct cdi_device* device);
+</I>&gt;<i>  
+</I>&gt;<i> +void cdi_osdep_new_device(struct cdi_driver* drv, struct cdi_device* dev);
+</I>&gt;<i> +
+</I>&gt;<i>  static list_t* drivers = NULL;
+</I>&gt;<i>  
+</I>&gt;<i>  static void cdi_tyndur_run_drivers(void);
+</I>&gt;<i> @@ -149,6 +153,7 @@ static void cdi_tyndur_init_pci_devices(void)
+</I>&gt;<i>          }
+</I>&gt;<i>  
+</I>&gt;<i>          if (device != NULL) {
+</I>&gt;<i> +            cdi_osdep_new_device(driver, device);
+</I>&gt;<i>              cdi_list_push(driver-&gt;devices, device);
+</I>
+Hier wird das Gerät immer noch in die Liste des Treibers gesteckt...
+
+&gt;<i>              printf(&quot;cdi: %x.%x.%x: Benutze Treiber %s\n&quot;,
+</I>&gt;<i>                  pci-&gt;bus, pci-&gt;dev, pci-&gt;function, driver-&gt;name);
+</I>&gt;<i> @@ -214,9 +219,8 @@ static void cdi_tyndur_run_drivers(void)
+</I>&gt;<i>              }
+</I>&gt;<i>          }
+</I>&gt;<i>  
+</I>&gt;<i> -        /* Netzwerk ist schon initialisiert und SCSI hat kein RPC-Interface,
+</I>&gt;<i> -         * sondern muss mit scsidisk gelinkt werden. */
+</I>&gt;<i> -        if (driver-&gt;type != CDI_NETWORK &amp;&amp; driver-&gt;type != CDI_SCSI) {
+</I>&gt;<i> +        /* Netzwerk ist schon initialisiert */
+</I>&gt;<i> +        if (driver-&gt;type != CDI_NETWORK) {
+</I>&gt;<i>              init_service_register((char*) driver-&gt;name);
+</I>&gt;<i>          }
+</I>
+Commit a4514ab beschreibt diesen Hunk mit &quot;Diese Änderung beseitigt den
+nutzlosen atapi-Service.&quot; Mit dieser Serie ist der Service wieder da
+(mit leerem Verzeichnisbaum), und zwar interessanterweise gleich zweimal:
+
+[  INIT  ] service_register 'ata' = 3
+[  INIT  ] service_register 'atapi' = 3
+[  INIT  ] service_register 'atapi' = 3
+
+Dafür ist jetzt der nutzlose scsidisk-Service weg, auch was wert. ;-)
+
+&gt;<i>      }
+</I>&gt;<i> @@ -277,6 +281,22 @@ list_t* cdi_tyndur_get_drivers(void)
+</I>&gt;<i>      return drivers;
+</I>&gt;<i>  }
+</I>&gt;<i>  
+</I>&gt;<i> +void cdi_osdep_new_device(struct cdi_driver* drv, struct cdi_device* dev)
+</I>&gt;<i> +{
+</I>&gt;<i> +    if (!dev) {
+</I>&gt;<i> +        return;
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    dev-&gt;driver = drv;
+</I>&gt;<i> +    cdi_list_push(drv-&gt;devices, dev);
+</I>
+...aber hier ist das schon einmal passiert. Ich vermute,
+cdi_tyndur_init_pci_devices() sollte das dann bleiben lassen.
+
+&gt;<i> +    switch ((int)drv-&gt;type) {
+</I>&gt;<i> +        case CDI_SCSI:
+</I>&gt;<i> +            cdi_scsi_device_init(CDI_UPCAST(dev, struct cdi_scsi_device, dev));
+</I>&gt;<i> +            break;
+</I>&gt;<i> +    }
+</I>&gt;<i> +}
+</I>&gt;<i> +
+</I>&gt;<i>  /**
+</I>&gt;<i>   * Wenn main nicht von einem Treiber ueberschrieben wird, ist hier der
+</I>&gt;<i>   * Einsprungspunkt. Die Standardfunktion ruft nur cdi_init() auf. Treiber, die
+</I>&gt;<i> diff --git a/src/modules/cdi/lib/scsi/disk.c b/src/modules/cdi/lib/scsi/disk.c
+</I>&gt;<i> index 49f408e..2f2b7bd 100644
+</I>&gt;<i> --- a/src/modules/cdi/lib/scsi/disk.c
+</I>&gt;<i> +++ b/src/modules/cdi/lib/scsi/disk.c
+</I>&gt;<i> @@ -1,6 +1,7 @@
+</I>&gt;<i>  /*
+</I>&gt;<i>   * Copyright (C) 2008 Mathias Gottschlag
+</I>&gt;<i>   * Copyright (C) 2009 Kevin Wolf
+</I>&gt;<i> + * Copyright (C) 2015 Max Reitz
+</I>&gt;<i>   *
+</I>&gt;<i>   * Permission is hereby granted, free of charge, to any person obtaining a copy
+</I>&gt;<i>   * of this software and associated documentation files (the &quot;Software&quot;), to
+</I>&gt;<i> @@ -26,14 +27,10 @@
+</I>&gt;<i>  #include &lt;stdlib.h&gt;
+</I>&gt;<i>  
+</I>&gt;<i>  #include &lt;cdi/lists.h&gt;
+</I>&gt;<i> +#include &lt;cdi/misc.h&gt;
+</I>&gt;<i>  #include &lt;cdi/scsi.h&gt;
+</I>&gt;<i>  #include &lt;cdi/storage.h&gt;
+</I>&gt;<i>  
+</I>&gt;<i> -#define big_endian_word(x) ((((x) &amp; 0xFF) &lt;&lt; 8) | (((x) &amp; 0xFF00) &gt;&gt; 8))
+</I>&gt;<i> -#define big_endian_dword(x) \
+</I>&gt;<i> -    ((big_endian_word((x) &amp; 0xFFFF) &lt;&lt; 16) | \
+</I>&gt;<i> -    (big_endian_word((x) &gt;&gt; 16)))
+</I>&gt;<i> -
+</I>&gt;<i>  static int cdi_scsi_disk_read(struct cdi_storage_device* device,
+</I>&gt;<i>      uint64_t start, uint64_t count, void* buffer);
+</I>&gt;<i>  
+</I>&gt;<i> @@ -44,84 +41,272 @@ struct cdi_storage_driver cdi_scsi_disk_driver = {
+</I>&gt;<i>      .drv = {
+</I>&gt;<i>          .name       = &quot;scsidisk&quot;,
+</I>&gt;<i>          .type       = CDI_STORAGE,
+</I>&gt;<i> +        .bus        = CDI_SCSI,
+</I>&gt;<i>      },
+</I>&gt;<i>      .read_blocks    = cdi_scsi_disk_read,
+</I>&gt;<i>      .write_blocks   = cdi_scsi_disk_write,
+</I>&gt;<i>  };
+</I>&gt;<i>  
+</I>&gt;<i> -// TODO: This is kind of incomplete... -.-
+</I>&gt;<i> -// FIXME Das ist alles sehr CD-ROM-spezifisch hartkodiert...
+</I>&gt;<i>  
+</I>&gt;<i> -union cdrom_command
+</I>&gt;<i> +typedef struct scsi_storage_device {
+</I>&gt;<i> +    struct cdi_storage_device dev;
+</I>&gt;<i> +    struct cdi_scsi_device* backend;
+</I>&gt;<i> +    int lun;
+</I>&gt;<i> +} scsi_storage_device_t;
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +#define SCSI_REQUEST_SENSE      0x03
+</I>&gt;<i> +#define SCSI_INQUIRY            0x12
+</I>&gt;<i> +#define SCSI_START_STOP_UNIT    0x1b
+</I>&gt;<i> +#define SCSI_READ_CAPACITY      0x25
+</I>&gt;<i> +#define SCSI_READ10             0x28
+</I>&gt;<i> +#define SCSI_WRITE10            0x2a
+</I>&gt;<i> +#define SCSI_READ16             0x88
+</I>&gt;<i> +#define SCSI_WRITE16            0x8a
+</I>&gt;<i> +
+</I>&gt;<i> +struct scsi_cmd {
+</I>&gt;<i> +    uint8_t operation;
+</I>&gt;<i> +} __attribute__((packed));
+</I>&gt;<i> +
+</I>&gt;<i> +struct scsi_cmd_request_sense {
+</I>&gt;<i> +    struct scsi_cmd cmd;
+</I>&gt;<i> +    uint8_t rsvd1;
+</I>&gt;<i> +    uint16_t rsvd2;
+</I>&gt;<i> +    uint8_t alloc_len;
+</I>&gt;<i> +    uint8_t control;
+</I>&gt;<i> +} __attribute__((packed));
+</I>&gt;<i> +
+</I>&gt;<i> +struct scsi_cmd_inquiry {
+</I>&gt;<i> +    struct scsi_cmd cmd;
+</I>&gt;<i> +    uint8_t rsvd;
+</I>&gt;<i> +    uint8_t page;
+</I>&gt;<i> +    uint16_t alloc_len;
+</I>&gt;<i> +    uint8_t control;
+</I>&gt;<i> +} __attribute__((packed));
+</I>&gt;<i> +
+</I>&gt;<i> +struct scsi_cmd_start_stop_unit {
+</I>&gt;<i> +    struct scsi_cmd cmd;
+</I>&gt;<i> +    uint8_t immed;
+</I>&gt;<i> +    uint8_t rsvd;
+</I>&gt;<i> +    uint8_t power_condition_modifier;
+</I>&gt;<i> +    uint8_t flags_power_condition;
+</I>&gt;<i> +    uint8_t control;
+</I>&gt;<i> +} __attribute__((packed));
+</I>&gt;<i> +
+</I>&gt;<i> +struct scsi_cmd_read_capacity {
+</I>&gt;<i> +    struct scsi_cmd cmd;
+</I>&gt;<i> +    uint8_t rsvd1;
+</I>&gt;<i> +    uint32_t lba;
+</I>&gt;<i> +    uint32_t rsvd2;
+</I>&gt;<i> +} __attribute__((packed));
+</I>&gt;<i> +
+</I>&gt;<i> +struct scsi_cmd_read10 {
+</I>&gt;<i> +    struct scsi_cmd cmd;
+</I>&gt;<i> +    uint8_t rsvd1;
+</I>&gt;<i> +    uint32_t lba;
+</I>&gt;<i> +    uint8_t rsvd2;
+</I>&gt;<i> +    uint16_t length;
+</I>&gt;<i> +    uint8_t control;
+</I>&gt;<i> +} __attribute__((packed));
+</I>&gt;<i> +
+</I>&gt;<i> +struct scsi_cmd_write10 {
+</I>&gt;<i> +    struct scsi_cmd cmd;
+</I>&gt;<i> +    uint8_t rsvd1;
+</I>&gt;<i> +    uint32_t lba;
+</I>&gt;<i> +    uint8_t rsvd2;
+</I>&gt;<i> +    uint16_t length;
+</I>&gt;<i> +    uint8_t control;
+</I>&gt;<i> +} __attribute__((packed));
+</I>&gt;<i> +
+</I>&gt;<i> +struct scsi_cmd_read16 {
+</I>&gt;<i> +    struct scsi_cmd cmd;
+</I>&gt;<i> +    uint8_t flags;
+</I>&gt;<i> +    uint64_t lba;
+</I>&gt;<i> +    uint32_t length;
+</I>&gt;<i> +    uint8_t group;
+</I>&gt;<i> +    uint8_t control;
+</I>&gt;<i> +} __attribute__((packed));
+</I>&gt;<i> +
+</I>&gt;<i> +struct scsi_cmd_write16 {
+</I>&gt;<i> +    struct scsi_cmd cmd;
+</I>&gt;<i> +    uint8_t flags;
+</I>&gt;<i> +    uint64_t lba;
+</I>&gt;<i> +    uint32_t length;
+</I>&gt;<i> +    uint8_t group;
+</I>&gt;<i> +    uint8_t control;
+</I>&gt;<i> +} __attribute__((packed));
+</I>&gt;<i> +
+</I>&gt;<i> +struct scsi_sense {
+</I>&gt;<i> +    uint8_t resp_code;
+</I>&gt;<i> +    uint8_t segment;
+</I>&gt;<i> +    uint8_t flags;
+</I>&gt;<i> +    uint32_t information;
+</I>&gt;<i> +    uint8_t add_sense_length;
+</I>&gt;<i> +    uint32_t cmd_spec_info;
+</I>&gt;<i> +    uint8_t add_sense_code;
+</I>&gt;<i> +    uint8_t add_sense_code_qual;
+</I>&gt;<i> +    uint8_t field_replacable_unit_code;
+</I>&gt;<i> +    uint8_t sense_key_spec1;
+</I>&gt;<i> +    uint8_t sense_key_spec2;
+</I>&gt;<i> +    uint8_t sense_key_spec3;
+</I>&gt;<i> +} __attribute__((packed));
+</I>
+Diese Struct sieht unbenutzt aus.
+
+&gt;<i> +struct scsi_inq_answer {
+</I>&gt;<i> +    uint8_t dev_type;
+</I>&gt;<i> +    uint8_t type_mod;
+</I>&gt;<i> +    uint8_t version;
+</I>&gt;<i> +    uint8_t resp_data_format;
+</I>&gt;<i> +    uint8_t add_length;
+</I>&gt;<i> +    uint8_t flags1, flags2, flags3;
+</I>&gt;<i> +    char vendor[8];
+</I>&gt;<i> +    char product[16];
+</I>&gt;<i> +    uint32_t revision;
+</I>&gt;<i> +    char serial[8];
+</I>&gt;<i> +    uint8_t vendor_unique[12];
+</I>&gt;<i> +    uint8_t clocking;
+</I>&gt;<i> +    uint8_t rsvd1;
+</I>&gt;<i> +    uint16_t version_desc[8];
+</I>&gt;<i> +    uint8_t rsvd2[22];
+</I>&gt;<i> +} __attribute__((packed));
+</I>&gt;<i> +
+</I>&gt;<i> +
+</I>&gt;<i> +static int scsi_read10(scsi_storage_device_t* dev, uint32_t sector,
+</I>&gt;<i> +                       uint16_t nb_sectors, char* buffer)
+</I>&gt;<i>  {
+</I>&gt;<i> -    struct
+</I>&gt;<i> -    {
+</I>&gt;<i> -        uint8_t opcode;
+</I>&gt;<i> -        uint8_t reserved0;
+</I>&gt;<i> -        uint32_t address;
+</I>&gt;<i> -        uint8_t reserved1;
+</I>&gt;<i> -        uint16_t length;
+</I>&gt;<i> -        uint8_t reserved2;
+</I>&gt;<i> -    } __attribute__ ((packed)) dfl;
+</I>&gt;<i> -    struct
+</I>&gt;<i> -    {
+</I>&gt;<i> -        uint8_t opcode;
+</I>&gt;<i> -        uint8_t reserved0;
+</I>&gt;<i> -        uint32_t address;
+</I>&gt;<i> -        uint32_t length;
+</I>&gt;<i> -        uint16_t reserved1;
+</I>&gt;<i> -    } __attribute__ ((packed)) ext;
+</I>&gt;<i> -};
+</I>&gt;<i> -
+</I>&gt;<i> -static int cdrom_read_partial(
+</I>&gt;<i> -    struct cdi_scsi_device *device, uint32_t sector, uint64_t nb_sectors,
+</I>&gt;<i> -     char *buffer)
+</I>&gt;<i> -{
+</I>&gt;<i> -    struct cdi_scsi_packet packet;
+</I>&gt;<i> -    struct cdi_scsi_driver* drv = (struct cdi_scsi_driver*) device-&gt;dev.driver;
+</I>&gt;<i> -    union cdrom_command* cmd = (union cdrom_command*) &amp;packet.command;
+</I>&gt;<i> +    struct cdi_scsi_driver* drv = CDI_UPCAST(dev-&gt;backend-&gt;dev.driver,
+</I>&gt;<i> +                                             struct cdi_scsi_driver, drv);
+</I>&gt;<i> +    struct scsi_cmd_read10 r10 = {
+</I>&gt;<i> +        .cmd = {
+</I>&gt;<i> +            .operation = SCSI_READ10
+</I>&gt;<i> +        },
+</I>&gt;<i> +        .lba    = cdi_cpu_to_be32(sector),
+</I>&gt;<i> +        .length = cdi_cpu_to_be16(nb_sectors)
+</I>
+Mach doch gleich ein Komma auch hinter das letzte initialisierte Feld,
+dann muss der nächste Patch, der ein neues Feld setzt, keine Zeile
+anfassen, die ihn gar nicht interessiert. (Gilt für alle
+Initialisierungen im ganzen Patch.)
+
+&gt;<i> +    };
+</I>&gt;<i> +    struct cdi_scsi_packet pkt = {
+</I>&gt;<i> +        .lun        = dev-&gt;lun,
+</I>&gt;<i> +        .buffer     = buffer,
+</I>&gt;<i> +        .bufsize    = (size_t)nb_sectors * dev-&gt;dev.block_size,
+</I>&gt;<i> +        .direction  = CDI_SCSI_READ,
+</I>&gt;<i> +        .cmdsize    = sizeof(r10)
+</I>&gt;<i> +    };
+</I>&gt;<i> +    memcpy(pkt.command, &amp;r10, sizeof(r10));
+</I>&gt;<i> +
+</I>&gt;<i> +    if (drv-&gt;request(dev-&gt;backend, &amp;pkt)) {
+</I>&gt;<i> +        return -1;
+</I>&gt;<i> +    }
+</I>&gt;<i>  
+</I>&gt;<i> -    nb_sectors = (uint32_t) nb_sectors;
+</I>&gt;<i> +    return 0;
+</I>&gt;<i> +}
+</I>&gt;<i>  
+</I>&gt;<i> -    memset(&amp;packet, 0, sizeof(packet));
+</I>&gt;<i> -    packet.direction = CDI_SCSI_READ;
+</I>&gt;<i> -    packet.buffer = buffer;
+</I>&gt;<i> -    packet.bufsize = 2048 * nb_sectors;
+</I>&gt;<i> -    packet.cmdsize = 12;
+</I>&gt;<i> +static int scsi_write10(scsi_storage_device_t* dev, uint32_t sector,
+</I>&gt;<i> +                        uint16_t nb_sectors, char* buffer)
+</I>&gt;<i> +{
+</I>&gt;<i> +    struct cdi_scsi_driver* drv = CDI_UPCAST(dev-&gt;backend-&gt;dev.driver,
+</I>&gt;<i> +                                             struct cdi_scsi_driver, drv);
+</I>&gt;<i> +    struct scsi_cmd_write10 w10 = {
+</I>&gt;<i> +        .cmd = {
+</I>&gt;<i> +            .operation = SCSI_WRITE10
+</I>&gt;<i> +        },
+</I>&gt;<i> +        .lba    = cdi_cpu_to_be32(sector),
+</I>&gt;<i> +        .length = cdi_cpu_to_be16(nb_sectors)
+</I>&gt;<i> +    };
+</I>&gt;<i> +    struct cdi_scsi_packet pkt = {
+</I>&gt;<i> +        .lun        = dev-&gt;lun,
+</I>&gt;<i> +        .buffer     = buffer,
+</I>&gt;<i> +        .bufsize    = (size_t)nb_sectors * dev-&gt;dev.block_size,
+</I>&gt;<i> +        .direction  = CDI_SCSI_WRITE,
+</I>&gt;<i> +        .cmdsize    = sizeof(w10)
+</I>&gt;<i> +    };
+</I>&gt;<i> +    memcpy(pkt.command, &amp;w10, sizeof(w10));
+</I>&gt;<i> +
+</I>&gt;<i> +    if (drv-&gt;request(dev-&gt;backend, &amp;pkt)) {
+</I>&gt;<i> +        return -1;
+</I>&gt;<i> +    }
+</I>&gt;<i>  
+</I>&gt;<i> -    cmd-&gt;ext.opcode = 0xA8;
+</I>&gt;<i> -    cmd-&gt;ext.address = big_endian_dword(sector);
+</I>&gt;<i> -    cmd-&gt;ext.length = big_endian_dword(nb_sectors);
+</I>&gt;<i> +    return 0;
+</I>&gt;<i> +}
+</I>&gt;<i>  
+</I>&gt;<i> -    if (drv-&gt;request(device, &amp;packet)) {
+</I>&gt;<i> +static int scsi_read16(scsi_storage_device_t* dev, uint64_t sector,
+</I>&gt;<i> +                       uint32_t nb_sectors, char* buffer)
+</I>&gt;<i> +{
+</I>&gt;<i> +    struct cdi_scsi_driver* drv = CDI_UPCAST(dev-&gt;backend-&gt;dev.driver,
+</I>&gt;<i> +                                             struct cdi_scsi_driver, drv);
+</I>&gt;<i> +    struct scsi_cmd_read16 r16 = {
+</I>&gt;<i> +        .cmd = {
+</I>&gt;<i> +            .operation = SCSI_READ16
+</I>&gt;<i> +        },
+</I>&gt;<i> +        .lba    = cdi_cpu_to_be64(sector),
+</I>&gt;<i> +        .length = cdi_cpu_to_be32(nb_sectors)
+</I>&gt;<i> +    };
+</I>&gt;<i> +    struct cdi_scsi_packet pkt = {
+</I>&gt;<i> +        .lun        = dev-&gt;lun,
+</I>&gt;<i> +        .buffer     = buffer,
+</I>&gt;<i> +        .bufsize    = (size_t)nb_sectors * dev-&gt;dev.block_size,
+</I>&gt;<i> +        .direction  = CDI_SCSI_READ,
+</I>&gt;<i> +        .cmdsize    = sizeof(r16)
+</I>&gt;<i> +    };
+</I>&gt;<i> +    memcpy(pkt.command, &amp;r16, sizeof(r16));
+</I>&gt;<i> +
+</I>&gt;<i> +    if (drv-&gt;request(dev-&gt;backend, &amp;pkt)) {
+</I>&gt;<i>          return -1;
+</I>&gt;<i>      }
+</I>&gt;<i>  
+</I>&gt;<i> -    return nb_sectors;
+</I>&gt;<i> +    return 0;
+</I>&gt;<i>  }
+</I>&gt;<i>  
+</I>&gt;<i> -static int cdrom_capacity(struct cdi_scsi_device *device,
+</I>&gt;<i> -    uint32_t* num_sectors, uint32_t* sector_size)
+</I>&gt;<i> +static int scsi_write16(scsi_storage_device_t* dev, uint64_t sector,
+</I>&gt;<i> +                        uint32_t nb_sectors, char* buffer)
+</I>&gt;<i>  {
+</I>&gt;<i> -    uint32_t buffer[32];
+</I>&gt;<i> -    struct cdi_scsi_packet packet;
+</I>&gt;<i> -    struct cdi_scsi_driver* drv = (struct cdi_scsi_driver*) device-&gt;dev.driver;
+</I>&gt;<i> -    union cdrom_command* cmd = (union cdrom_command*) &amp;packet.command;
+</I>&gt;<i> -
+</I>&gt;<i> -    memset(&amp;packet, 0, sizeof(packet));
+</I>&gt;<i> -    packet.direction = CDI_SCSI_READ;
+</I>&gt;<i> -    packet.buffer = buffer;
+</I>&gt;<i> -    packet.bufsize = sizeof(buffer);
+</I>&gt;<i> -    packet.cmdsize = 12;
+</I>&gt;<i> +    struct cdi_scsi_driver* drv = CDI_UPCAST(dev-&gt;backend-&gt;dev.driver,
+</I>&gt;<i> +                                             struct cdi_scsi_driver, drv);
+</I>&gt;<i> +    struct scsi_cmd_write16 w16 = {
+</I>&gt;<i> +        .cmd = {
+</I>&gt;<i> +            .operation = SCSI_WRITE16
+</I>&gt;<i> +        },
+</I>&gt;<i> +        .lba    = cdi_cpu_to_be64(sector),
+</I>&gt;<i> +        .length = cdi_cpu_to_be32(nb_sectors)
+</I>&gt;<i> +    };
+</I>&gt;<i> +    struct cdi_scsi_packet pkt = {
+</I>&gt;<i> +        .lun        = dev-&gt;lun,
+</I>&gt;<i> +        .buffer     = buffer,
+</I>&gt;<i> +        .bufsize    = (size_t)nb_sectors * dev-&gt;dev.block_size,
+</I>&gt;<i> +        .direction  = CDI_SCSI_WRITE,
+</I>&gt;<i> +        .cmdsize    = sizeof(w16)
+</I>&gt;<i> +    };
+</I>&gt;<i> +    memcpy(pkt.command, &amp;w16, sizeof(w16));
+</I>&gt;<i> +
+</I>&gt;<i> +    if (drv-&gt;request(dev-&gt;backend, &amp;pkt)) {
+</I>&gt;<i> +        return -1;
+</I>&gt;<i> +    }
+</I>&gt;<i>  
+</I>&gt;<i> -    cmd-&gt;ext.opcode = 0x25;
+</I>&gt;<i> +    return 0;
+</I>&gt;<i> +}
+</I>&gt;<i>  
+</I>&gt;<i> -    if (drv-&gt;request(device, &amp;packet)) {
+</I>&gt;<i> +static int scsi_get_capacity(scsi_storage_device_t* dev)
+</I>&gt;<i> +{
+</I>&gt;<i> +    struct cdi_scsi_driver* drv = CDI_UPCAST(dev-&gt;backend-&gt;dev.driver,
+</I>&gt;<i> +                                             struct cdi_scsi_driver, drv);
+</I>&gt;<i> +    uint32_t capacity[2] = { 0 };
+</I>&gt;<i> +    struct scsi_cmd_read_capacity read_cap = {
+</I>&gt;<i> +        .cmd = {
+</I>&gt;<i> +            .operation = SCSI_READ_CAPACITY
+</I>&gt;<i> +        }
+</I>&gt;<i> +    };
+</I>&gt;<i> +    struct cdi_scsi_packet pkt = {
+</I>&gt;<i> +        .lun        = dev-&gt;lun,
+</I>&gt;<i> +        .buffer     = capacity,
+</I>&gt;<i> +        .bufsize    = sizeof(capacity),
+</I>&gt;<i> +        .direction  = CDI_SCSI_READ,
+</I>&gt;<i> +        .cmdsize    = sizeof(read_cap)
+</I>&gt;<i> +    };
+</I>&gt;<i> +    memcpy(pkt.command, &amp;read_cap, sizeof(read_cap));
+</I>&gt;<i> +
+</I>&gt;<i> +    if (drv-&gt;request(dev-&gt;backend, &amp;pkt)) {
+</I>&gt;<i>          return -1;
+</I>&gt;<i>      }
+</I>&gt;<i>  
+</I>&gt;<i> -    *num_sectors = big_endian_dword(buffer[0]);
+</I>&gt;<i> -    *sector_size = big_endian_dword(buffer[1]);
+</I>&gt;<i> +    dev-&gt;dev.block_count = (uint64_t)cdi_be32_to_cpu(capacity[0]) + 1;
+</I>&gt;<i> +    dev-&gt;dev.block_size  = cdi_be32_to_cpu(capacity[1]);
+</I>&gt;<i>  
+</I>&gt;<i>      return 0;
+</I>&gt;<i>  }
+</I>&gt;<i> @@ -160,27 +345,28 @@ static void cdrom_sense(FsSCSIDevice *device, uint32_t index)
+</I>&gt;<i>  }
+</I>&gt;<i>  #endif
+</I>&gt;<i>  
+</I>&gt;<i> -int cdrom_init(struct cdi_scsi_device* device)
+</I>&gt;<i> +static int scsi_init(scsi_storage_device_t* dev)
+</I>&gt;<i>  {
+</I>&gt;<i> -    // Send inquiry command
+</I>&gt;<i> -    struct cdi_scsi_driver* drv = (struct cdi_scsi_driver*) device-&gt;dev.driver;
+</I>&gt;<i> -    struct cdi_scsi_packet packet;
+</I>&gt;<i> -    uint32_t status;
+</I>&gt;<i> -    unsigned char inqdata[96];
+</I>&gt;<i> -
+</I>&gt;<i> -    memset(&amp;packet, 0, sizeof(packet));
+</I>&gt;<i> -    memset(inqdata, 0xF0, sizeof(inqdata));
+</I>&gt;<i> -
+</I>&gt;<i> -    packet.direction = CDI_SCSI_READ;
+</I>&gt;<i> -    packet.buffer = inqdata;
+</I>&gt;<i> -    packet.bufsize = 96;
+</I>&gt;<i> -    packet.cmdsize = 12;
+</I>&gt;<i> -
+</I>&gt;<i> -    ((union cdrom_command*)packet.command)-&gt;dfl.opcode = 0x12;
+</I>&gt;<i> -    packet.command[4] = 96;
+</I>&gt;<i> -    status = drv-&gt;request(device, &amp;packet);
+</I>&gt;<i> -    if (status)
+</I>&gt;<i> -    {
+</I>&gt;<i> +    struct cdi_scsi_driver* drv = CDI_UPCAST(dev-&gt;backend-&gt;dev.driver,
+</I>&gt;<i> +                                             struct cdi_scsi_driver, drv);
+</I>&gt;<i> +    struct scsi_inq_answer inqdata;
+</I>&gt;<i> +
+</I>&gt;<i> +    struct scsi_cmd_inquiry inq = {
+</I>&gt;<i> +        .cmd = {
+</I>&gt;<i> +            .operation = SCSI_INQUIRY,
+</I>&gt;<i> +        },
+</I>&gt;<i> +        .alloc_len = cdi_cpu_to_be16(sizeof(inqdata))
+</I>&gt;<i> +    };
+</I>&gt;<i> +    struct cdi_scsi_packet inq_pkt = {
+</I>&gt;<i> +        .lun        = dev-&gt;lun,
+</I>&gt;<i> +        .buffer     = &amp;inqdata,
+</I>&gt;<i> +        .bufsize    = sizeof(inqdata),
+</I>&gt;<i> +        .direction  = CDI_SCSI_READ,
+</I>&gt;<i> +        .cmdsize    = sizeof(inq)
+</I>&gt;<i> +    };
+</I>&gt;<i> +    memcpy(inq_pkt.command, &amp;inq, sizeof(inq));
+</I>&gt;<i> +
+</I>&gt;<i> +    if (drv-&gt;request(dev-&gt;backend, &amp;inq_pkt)) {
+</I>&gt;<i>          return -1;
+</I>&gt;<i>      }
+</I>&gt;<i>  
+</I>&gt;<i> @@ -189,56 +375,109 @@ int cdrom_init(struct cdi_scsi_device* device)
+</I>&gt;<i>          return KE_ERROR_UNKNOWN;
+</I>&gt;<i>  #endif
+</I>&gt;<i>  
+</I>&gt;<i> -    // Start drive
+</I>&gt;<i> -    packet.direction = CDI_SCSI_NODATA;
+</I>&gt;<i> -    ((union cdrom_command*)packet.command)-&gt;dfl.opcode = 0x1B;
+</I>&gt;<i> -    packet.buffer = 0;
+</I>&gt;<i> -    packet.bufsize = 0;
+</I>&gt;<i> -    packet.command[4] = 0;
+</I>&gt;<i> -    packet.command[4] = 3;
+</I>&gt;<i> -    packet.cmdsize = 12;
+</I>&gt;<i> -
+</I>&gt;<i> -    status = drv-&gt;request(device, &amp;packet);
+</I>&gt;<i> -    if (status)
+</I>&gt;<i> -    {
+</I>&gt;<i> -        printf(&quot;cdrom %d: Start failed, %x\n&quot;, index, status);
+</I>&gt;<i> -        return -1;
+</I>&gt;<i> +    struct scsi_cmd_start_stop_unit ssu = {
+</I>&gt;<i> +        .cmd = {
+</I>&gt;<i> +            .operation = SCSI_START_STOP_UNIT,
+</I>&gt;<i> +        },
+</I>&gt;<i> +        .flags_power_condition = 0x3 // LOEJ+START
+</I>&gt;<i> +    };
+</I>&gt;<i> +    struct cdi_scsi_packet ssu_pkt = {
+</I>&gt;<i> +        .lun        = dev-&gt;lun,
+</I>&gt;<i> +        .direction  = CDI_SCSI_NODATA,
+</I>&gt;<i> +        .cmdsize    = sizeof(ssu)
+</I>&gt;<i> +    };
+</I>&gt;<i> +    memcpy(ssu_pkt.command, &amp;ssu, sizeof(ssu));
+</I>&gt;<i> +
+</I>&gt;<i> +    if ((inqdata.dev_type &amp; 0x1f) == 0x05) { // CD/DVD
+</I>&gt;<i> +        if (drv-&gt;request(dev-&gt;backend, &amp;ssu_pkt)) {
+</I>&gt;<i> +            printf(&quot;cdrom: Start failed\n&quot;);
+</I>&gt;<i> +            return -1;
+</I>&gt;<i> +        }
+</I>&gt;<i> +        dev-&gt;dev.block_size = 2048;
+</I>&gt;<i> +    } else {
+</I>&gt;<i> +        dev-&gt;dev.block_size = 512;
+</I>&gt;<i>      }
+</I>&gt;<i>  
+</I>&gt;<i>      return 0;
+</I>&gt;<i>  }
+</I>&gt;<i>  
+</I>&gt;<i> -static int cdi_scsi_disk_read(struct cdi_storage_device* device,
+</I>&gt;<i> -    uint64_t start, uint64_t count, void* buffer)
+</I>&gt;<i> +static int cdi_scsi_disk_read(struct cdi_storage_device* dev, uint64_t start,
+</I>&gt;<i> +                              uint64_t count, void* buffer)
+</I>&gt;<i>  {
+</I>&gt;<i> -    struct cdi_scsi_device* dev = device-&gt;dev.backdev;
+</I>&gt;<i> +    scsi_storage_device_t* scsi_dev = CDI_UPCAST(dev, scsi_storage_device_t,
+</I>&gt;<i> +                                                 dev);
+</I>&gt;<i> +    bool read16 = (start &gt;&gt; 32) || ((start + count) &gt;&gt; 32);
+</I>&gt;<i>  
+</I>&gt;<i>      while (count &gt; 0) {
+</I>&gt;<i>          int ret;
+</I>&gt;<i> +        uint32_t it_count;
+</I>&gt;<i> +
+</I>&gt;<i> +        if (read16) {
+</I>&gt;<i> +            it_count = count &gt; 0xffffffffu ? 0xffffffffu : count;
+</I>&gt;<i> +        } else {
+</I>&gt;<i> +            it_count = count &gt; 0xffff ? 0xffff : count;
+</I>&gt;<i> +        }
+</I>&gt;<i>  
+</I>&gt;<i> -        ret = cdrom_read_partial(dev, start, count, buffer);
+</I>&gt;<i> -        if (ret &lt;= 0) {
+</I>&gt;<i> +        if (read16) {
+</I>&gt;<i> +            ret = scsi_read16(scsi_dev, start, it_count, buffer);
+</I>&gt;<i> +        } else {
+</I>&gt;<i> +            ret = scsi_read10(scsi_dev, start, it_count, buffer);
+</I>&gt;<i> +        }
+</I>
+Die zwei if-Blöcke könnte man eigentlich auch in einen zusammenpacken.
+
+&gt;<i> +        if (ret &lt; 0) {
+</I>&gt;<i>              return -1;
+</I>&gt;<i>          }
+</I>&gt;<i> -        start += ret;
+</I>&gt;<i> -        buffer += ret;
+</I>&gt;<i> -        count -= ret;
+</I>&gt;<i> +
+</I>&gt;<i> +        start += it_count;
+</I>&gt;<i> +        count -= it_count;
+</I>&gt;<i> +
+</I>&gt;<i> +        buffer = (void*) ((uintptr_t)buffer + it_count * dev-&gt;block_size);
+</I>&gt;<i>      }
+</I>&gt;<i>  
+</I>&gt;<i>      return 0;
+</I>&gt;<i>  }
+</I>&gt;<i>  
+</I>&gt;<i> -static int cdi_scsi_disk_write(struct cdi_storage_device* device,
+</I>&gt;<i> -    uint64_t start, uint64_t count, void* buffer)
+</I>&gt;<i> +static int cdi_scsi_disk_write(struct cdi_storage_device* dev, uint64_t start,
+</I>&gt;<i> +                               uint64_t count, void* buffer)
+</I>&gt;<i>  {
+</I>&gt;<i> -    return -1;
+</I>&gt;<i> +    scsi_storage_device_t* scsi_dev = CDI_UPCAST(dev, scsi_storage_device_t,
+</I>&gt;<i> +                                                 dev);
+</I>&gt;<i> +    bool write16 = (start &gt;&gt; 32) || ((start + count) &gt;&gt; 32);
+</I>&gt;<i> +
+</I>&gt;<i> +    while (count &gt; 0) {
+</I>&gt;<i> +        int ret;
+</I>&gt;<i> +        uint32_t it_count;
+</I>&gt;<i> +
+</I>&gt;<i> +        if (write16) {
+</I>&gt;<i> +            it_count = count &gt; 0xffffffffu ? 0xffffffffu : count;
+</I>&gt;<i> +        } else {
+</I>&gt;<i> +            it_count = count &gt; 0xffff ? 0xffff : count;
+</I>&gt;<i> +        }
+</I>&gt;<i> +
+</I>&gt;<i> +        if (write16) {
+</I>&gt;<i> +            ret = scsi_write16(scsi_dev, start, it_count, buffer);
+</I>&gt;<i> +        } else {
+</I>&gt;<i> +            ret = scsi_write10(scsi_dev, start, it_count, buffer);
+</I>&gt;<i> +        }
+</I>&gt;<i> +        if (ret &lt; 0) {
+</I>&gt;<i> +            return -1;
+</I>&gt;<i> +        }
+</I>&gt;<i> +
+</I>&gt;<i> +        start += it_count;
+</I>&gt;<i> +        count -= it_count;
+</I>&gt;<i> +
+</I>&gt;<i> +        buffer = (void*) ((uintptr_t)buffer + it_count * dev-&gt;block_size);
+</I>&gt;<i> +    }
+</I>&gt;<i> +
+</I>&gt;<i> +    return 0;
+</I>&gt;<i>  }
+</I>
+Und bis auf scsi_read10/16 durch scsi_write10/16 zu ersetzen scheint das
+das gleiche zu sein wie oben. Mit je einem Funktionspointer für die
+beiden Varianten müsste man das doch in eine einzige Instanz eindampfen
+können.
+
+&gt;<i> -static void driver_init(void)
+</I>&gt;<i> +static void driver_init(struct cdi_driver* drv)
+</I>&gt;<i>  {
+</I>&gt;<i>      static int initialised = 0;
+</I>&gt;<i>  
+</I>&gt;<i>      if (!initialised) {
+</I>&gt;<i> +        cdi_scsi_disk_driver.drv.name = strdup(drv-&gt;name);
+</I>&gt;<i> +
+</I>&gt;<i>          cdi_driver_register(&amp;cdi_scsi_disk_driver.drv);
+</I>&gt;<i>          cdi_storage_driver_init(&amp;cdi_scsi_disk_driver);
+</I>&gt;<i>      }
+</I>
+Aha, hier kommt der zweite atapi-Service her. Das ist also einfach nur
+der umbenannte scsidisk. :-)
+
+&gt;<i> @@ -246,30 +485,47 @@ static void driver_init(void)
+</I>&gt;<i>  
+</I>&gt;<i>  int cdi_scsi_disk_init(struct cdi_scsi_device* device)
+</I>&gt;<i>  {
+</I>&gt;<i> -    struct cdi_storage_device* frontdev;
+</I>&gt;<i> -    uint32_t num_sectors = 0, sector_size = 0;
+</I>&gt;<i> +    int luns = device-&gt;lun_count ?: 1;
+</I>&gt;<i>  
+</I>&gt;<i> -    driver_init();
+</I>&gt;<i> +    driver_init(device-&gt;dev.driver);
+</I>&gt;<i>  
+</I>&gt;<i> -    if (cdrom_init(device)) {
+</I>&gt;<i> -        return -1;
+</I>&gt;<i> -    }
+</I>&gt;<i> +    for (int lun = 0; lun &lt; luns; lun++) {
+</I>&gt;<i> +        scsi_storage_device_t* dev = calloc(1, sizeof(*dev));
+</I>&gt;<i> +        bool inquiry_failed;
+</I>&gt;<i> +
+</I>&gt;<i> +        dev-&gt;backend = device;
+</I>&gt;<i> +        dev-&gt;lun = lun;
+</I>&gt;<i> +
+</I>&gt;<i> +        inquiry_failed = scsi_init(dev) &lt; 0;
+</I>&gt;<i>  
+</I>&gt;<i> -    frontdev = calloc(1, sizeof(*frontdev));
+</I>&gt;<i> -    frontdev-&gt;dev.driver = (struct cdi_driver*) &amp;cdi_scsi_disk_driver;
+</I>&gt;<i> -    frontdev-&gt;dev.name = device-&gt;dev.name;
+</I>&gt;<i> +        if (scsi_get_capacity(dev) &lt; 0) {
+</I>&gt;<i> +            if (inquiry_failed) {
+</I>&gt;<i> +                /* We're fine as long as either INQUIRY or READ_CAPACITY work -
+</I>&gt;<i> +                 * but if both fail, there's not a lot we can do. */
+</I>&gt;<i> +                fprintf(stderr,
+</I>&gt;<i> +                        &quot;[scsi] Failed to initialize LUN %i of device %s\n&quot;,
+</I>&gt;<i> +                        lun, device-&gt;dev.name);
+</I>&gt;<i>  
+</I>&gt;<i> -    // Groesse des Mediums bestimmen. Falls keins eingelegt ist, brauchen wir
+</I>&gt;<i> -    // trotzdem zumindest eine Sektorgroesse.
+</I>&gt;<i> -    cdrom_capacity(device, &amp;num_sectors, &amp;sector_size);
+</I>&gt;<i> -    frontdev-&gt;block_size = sector_size ? sector_size : 2048;
+</I>&gt;<i> -    frontdev-&gt;block_count = num_sectors;
+</I>&gt;<i> +                free(dev);
+</I>&gt;<i> +                continue;
+</I>&gt;<i> +            }
+</I>&gt;<i>  
+</I>&gt;<i> -    frontdev-&gt;dev.backdev = device;
+</I>&gt;<i> -    device-&gt;frontdev = frontdev;
+</I>&gt;<i> +            /* Apparently this is common for CD-ROM devices; at least the old
+</I>&gt;<i> +             * SCSI implementation didn't care about it. A default block_size
+</I>&gt;<i> +             * has been set by scsi_init(). */
+</I>&gt;<i> +            dev-&gt;dev.block_count = 0xffffffffu;
+</I>
+Ich weiß nicht, ob es an diesem Default liegt, aber ata:/atapi10 hat bei
+mir mit leerem Laufwerk jetzt eine Dateigröße von -2048. Das finde ich
+eher nicht so geschickt.
+
+&gt;<i> +        }
+</I>&gt;<i> +
+</I>&gt;<i> +        dev-&gt;dev.dev.driver = (struct cdi_driver*) &amp;cdi_scsi_disk_driver;
+</I>&gt;<i> +        if (luns &gt; 1) {
+</I>&gt;<i> +            asprintf((char**) &amp;dev-&gt;dev.dev.name, &quot;%s_l%i&quot;,
+</I>&gt;<i> +                     device-&gt;dev.name, lun);
+</I>&gt;<i> +        } else {
+</I>&gt;<i> +            dev-&gt;dev.dev.name = strdup(device-&gt;dev.name);
+</I>&gt;<i> +        }
+</I>&gt;<i>  
+</I>&gt;<i> -    // LostIO-Verzeichnisknoten anlegen
+</I>&gt;<i> -    cdi_storage_device_init(frontdev);
+</I>&gt;<i> +        cdi_storage_device_init(&amp;dev-&gt;dev);
+</I>&gt;<i> +    }
+</I>&gt;<i>  
+</I>&gt;<i>      return 0;
+</I>&gt;<i>  }
+</I>
+Kevin
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="002556.html">[tyndur-devel] [PATCH v2 13/24] cdi/scsi: Neu geschrieben
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="002557.html">[tyndur-devel] [PATCH v2 14/24] lock.h: locked_decrement()
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#2572">[ Datum ]</a>
+              <a href="thread.html#2572">[ Thema ]</a>
+              <a href="subject.html#2572">[ Betreff (Subject)]</a>
+              <a href="author.html#2572">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

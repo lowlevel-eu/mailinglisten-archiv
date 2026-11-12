@@ -1,0 +1,198 @@
+diff --git a/trunk/src/modules/pas/lpt/lpt.pas b/trunk/src/modules/pas/lpt/lpt.pas
+index 7f0c6c9..72c9928 100644
+--- a/trunk/src/modules/pas/lpt/lpt.pas
++++ b/trunk/src/modules/pas/lpt/lpt.pas
+@@ -9,6 +9,8 @@ begin
+     WriteLn('  scan: Lädt die Paketlisten von den Servern');
+     WriteLn('  list: Zeigt alle installierten Pakete an');
+     WriteLn('  get:  Installiert das angegebene Paket');
++    WriteLn('  install: Installiert das angegebene Paket aus lokaler Datei');
++    WriteLn('           Achtung, Datei als letzten Parameter angeben!');
+ end;
+ 
+ procedure Scan;
+@@ -192,6 +194,14 @@ begin
+     end;
+ end;
+ 
++procedure Install(pkgfile: String; pkgname: String; reinstall: boolean);
++var
++    repo: TRepository;
++begin
++    AddRepository(pkgname, pkgfile, singlefile);
++    Get(pkgname, reinstall);
++end;
++
+ procedure List;
+ var
+     srec: SearchRec;
+@@ -296,6 +306,20 @@ begin
+             WriteLn('Falsche Parameterzahl');
+             PrintUsage;
+         end;
++    end else if system.ParamStr(1) = 'install' then begin
++        if system.ParamCount = 3 then begin
++            Install(system.ParamStr(3), system.ParamStr(2), false);
++        end else begin
++            WriteLn('Falsche Parameterzahl');
++            PrintUsage;
++        end;
++    end else if system.ParamStr(1) = 'reinstall' then begin
++        if system.ParamCount = 3 then begin
++            Install(system.ParamStr(3), system.ParamStr(2), true);
++        end else begin
++            WriteLn('Falsche Parameterzahl');
++            PrintUsage;
++        end;
+     end else if system.ParamStr(1) = 'cfg-addbin' then begin
+         if system.ParamCount = 3 then begin
+             CfgAddbin(system.ParamStr(2), system.ParamStr(3));
+diff --git a/trunk/src/modules/pas/lpt/repositories.pas b/trunk/src/modules/pas/lpt/repositories.pas
+index aa08149..658429e 100644
+--- a/trunk/src/modules/pas/lpt/repositories.pas
++++ b/trunk/src/modules/pas/lpt/repositories.pas
+@@ -2,7 +2,7 @@ unit repositories;
+ {$MODE ObjFPC}
+ 
+ interface
+-uses crt, sysutils, classes, helpers, repository_base, repository_http;
++uses crt, sysutils, classes, helpers, repository_base, repository_http, repository_single;
+ 
+ procedure ReadPkgsrc(filename: String);
+ procedure AddRepository(name, url: String; repostype: Trepostype);
+@@ -20,6 +20,8 @@ var
+ begin
+     if repostype = http then begin
+         repo := THTTPRepository.create(repos);
++    end else if repostype = singlefile then begin
++        repo := TSFRepository.create(repos);
+     end else begin
+         raise EInvalidRepository.create('Repository unbekannten Types!');
+     end;
+diff --git a/trunk/src/modules/pas/lpt/repository_base.pas b/trunk/src/modules/pas/lpt/repository_base.pas
+index eb999f7..c9b16a5 100644
+--- a/trunk/src/modules/pas/lpt/repository_base.pas
++++ b/trunk/src/modules/pas/lpt/repository_base.pas
+@@ -9,7 +9,7 @@ type
+     EPackageList = class(Exception) end;
+     EInvalidRepository = class(Exception) end;
+ 
+-    Trepostype = ( none, http );
++    Trepostype = ( none, http, singlefile );
+ 
+     TRepository = class(TCollectionItem)
+         public
+diff --git a/trunk/src/modules/pas/lpt/repository_single.pas b/trunk/src/modules/pas/lpt/repository_single.pas
+new file mode 100644
+index 0000000..1a62681
+--- /dev/null
++++ b/trunk/src/modules/pas/lpt/repository_single.pas
+@@ -0,0 +1,108 @@
++unit repository_single;
++{$MODE ObjFPC}
++
++interface
++uses sysutils, classes, tar, packages, helpers, repository_base;
++
++type
++    TSFRepository = class(TRepository)
++        public
++            function repostype: Trepostype; virtual;
++            constructor create(parent : TCollection);
++            function Download(version: TPackageVersion): TTarArchive; override;
++            procedure PrepareLists; override;
++            procedure FetchLists(pkgset: TPackageSet); override;
++    end;
++
++implementation
++
++constructor TSFRepository.create(parent : TCollection);
++begin
++    inherited;
++end;
++
++function TSFRepository.repostype: Trepostype;
++begin
++    exit(singlefile);
++end;
++
++function TSFRepository.Download(version: TPackageVersion): TTarArchive;
++var
++    tar: TTarArchive;
++begin
++    (* Einzelpakete enthalten nur sich selbst. Nur als Tar öffnen reicht. *)
++    tar := TTarArchive.create(self.url);
++    exit(tar);
++end;
++
++procedure TSFRepository.PrepareLists;
++begin
++    (* Einzelpakete haben keine Listen. *)
++    exit;
++end;
++
++procedure TSFRepository.FetchLists(pkgset: TPackageSet);
++var
++    package: TTarArchive;
++    line: String;
++    i: integer;
++    size: integer;
++
++    package_file_string: String;
++    pkg_name, pkg_version, pkg_section, pkg_arch: String;
++
++    pkg: TPackage;
++    section: TPackageSection;
++    version: TPackageVersion;
++begin
++    package := TTarArchive.create(self.url);
++    while package.hasNext do begin
++        line := package.nextFilename;
++        size := package.nextSize;
++        i := Pos('packageinfo', line);
++        if i > 0 then begin
++            (* Metadaten laden *)
++            package_file_string :=  package.ExtractString();
++
++            (* Newline-getrennte Infos auslesen. *)
++            (* In Reihenfolge: Name, Version, Sektion, Architektur *)
++            i := Pos(#10, package_file_string);
++            pkg_name := Copy(package_file_string, 1, i - 1);
++            package_file_string :=
++                Copy(package_file_string, i + 1, Length(package_file_string));
++
++            i := Pos(#10, package_file_string);
++            pkg_version := Copy(package_file_string, 1, i - 1);
++            package_file_string :=
++                Copy(package_file_string, i + 1, Length(package_file_string));
++
++            i := Pos(#10, package_file_string);
++            pkg_section := Copy(package_file_string, 1, i - 1);
++            package_file_string :=
++                Copy(package_file_string, i + 1, Length(package_file_string));
++
++            i := Pos(#10, package_file_string);
++            pkg_arch := Copy(package_file_string, 1, i - 1);
++            package_file_string :=
++                Copy(package_file_string, i + 1, Length(package_file_string));
++
++            (* Prüfen ob Metadaten zu Paket passen *)
++            if (line = 'packages/'+pkg_name+'/'+pkg_version+'/packageinfo-'+pkg_section) then begin
++                pkg := pkgset.add(pkg_name);
++                pkg.desc := 'Keine (lokale Datei)';
++                section := pkg.add(pkg_section);
++                version := section.add(pkg_version);
++                version.pkg := pkg;
++                version.section := section;
++                version.repository := self.name;
++                break;
++            end;
++        end else begin
++            package.skipFile();
++        end;
++    end;
++    package.destroy();
++end;
++
++begin
++end.

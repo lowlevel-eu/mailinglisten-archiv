@@ -1,0 +1,329 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [cdi-devel] [PATCH v2] mem.h: Handling memory areas
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made" HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%20v2%5D%20mem.h%3A%20Handling%20memory%20areas&In-Reply-To=%3C1265472340-31626-1-git-send-email-kevin%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=us-ascii">
+   <LINK REL="Previous"  HREF="000165.html">
+   <LINK REL="Next"  HREF="000167.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[cdi-devel] [PATCH v2] mem.h: Handling memory areas</H1>
+    <B>Kevin Wolf</B> 
+    <A HREF="mailto:cdi-devel%40tyndur.org?Subject=Re%3A%20%5Bcdi-devel%5D%20%5BPATCH%20v2%5D%20mem.h%3A%20Handling%20memory%20areas&In-Reply-To=%3C1265472340-31626-1-git-send-email-kevin%40tyndur.org%3E"
+       TITLE="[cdi-devel] [PATCH v2] mem.h: Handling memory areas">kevin at tyndur.org
+       </A><BR>
+    <I>Sat Feb  6 17:05:40 CET 2010</I>
+    <P><UL>
+        <LI>Previous message: <A HREF="000165.html">[cdi-devel] CDI status
+</A></li>
+        <LI>Next message: <A HREF="000167.html">[cdi-devel] [PATCH v2] mem.h: Handling memory areas
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#166">[ date ]</a>
+              <a href="thread.html#166">[ thread ]</a>
+              <a href="subject.html#166">[ subject ]</a>
+              <a href="author.html#166">[ author ]</a>
+         </LI>
+       </UL>
+    <HR>  
+<!--beginarticle-->
+<PRE>This adds a new CDI header cdi/mem.h. It unifies memory allocations
+(and memory areas passed from external sources) for different types
+of DMA, allows the OS layer to back it by shared memory (makes sense
+in a microkernel approach) and probably some more nice things.
+
+What cdi_mem_alloc/free are good for is obvious, I hope.
+
+To explain the use of the other functions, consider the following.
+Let's take a disk driver as an example. Instead of buffer/size its
+write function will directly get a memory area from the OS. The OS might
+already have allocated the memory physically contiguous, but it doesn't
+need to do so. The driver calls cdi_mem_require_flags which copies the
+data into a suited buffer - but if the OS already did the right thing,
+it's a no-op.
+
+cdi_mem_copy is for the other way round. Now the disk driver wants to
+read something from its disk. It gets a memory area from the OS and uses
+cdi_mem_require_flags to get something usable for DMA, which may or may
+not involve a copy. When the disk has transferred all the data, the
+driver uses cdi_mem_copy to make sure that the read data ends up in the
+buffer it was passed - and again, if the buffer had already the right
+flags this will be a no-op.
+
+Signed-off-by: Kevin Wolf &lt;<A HREF="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">kevin at tyndur.org</A>&gt;
+---
+
+v2:
+- Added s/g lists
+- Added alignment field in flags
+- Removed requirement to work only on complete pages
+
+ include/cdi/mem.h |  229 +++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 files changed, 229 insertions(+), 0 deletions(-)
+ create mode 100644 include/cdi/mem.h
+
+diff --git a/include/cdi/mem.h b/include/cdi/mem.h
+new file mode 100644
+index 0000000..0061a72
+--- /dev/null
++++ b/include/cdi/mem.h
+@@ -0,0 +1,229 @@
++/*
++ * Copyright (c) 2010 Kevin Wolf
++ *
++ * This program is free software. It comes without any warranty, to
++ * the extent permitted by applicable law. You can redistribute it
++ * and/or modify it under the terms of the Do What The Fuck You Want
++ * To Public License, Version 2, as published by Sam Hocevar. See
++ * <A HREF="http://sam.zoy.org/projects/COPYING.WTFPL">http://sam.zoy.org/projects/COPYING.WTFPL</A> for more details.
++ */
++
++#ifndef _CDI_MEM_H_
++#define _CDI_MEM_H_
++
++#include &lt;stdint.h&gt;
++#include &quot;cdi.h&quot;
++
++#ifdef __cplusplus
++extern &quot;C&quot; {
++#endif
++
++/**
++ * \german
++ * Beschreibt Anforderungen an einen Speicherbereich
++ * \endgerman
++ * \english
++ * Describes requirements for a memory area
++ * \endenglish
++ */
++typedef enum {
++    /**
++     * \german
++     * Maske fuer ein Bitfeld, das das benoetige physische Alignment beschreibt
++     * (das geforderte Alignment ist 2^x Bytes)
++     * \endgerman
++     * \english
++     * Mask for a bit field which describes the required physical alignment
++     * (the required alignment is 2^x bytes)
++     * \endenglish
++     */
++    CDI_MEM_ALIGN_MASK      = 0x1f,
++
++    /**
++     * \german
++     * Physische Adresse muss nicht gueltig sein
++     * \endgerman
++     * \english
++     * Physical address isn't required to be valid
++     * \endenglish
++     */
++    CDI_MEM_VIRT_ONLY       = 0x20,
++
++    /**
++     * \german
++     * Physisch zusammenh&#195;&#164;ngenden Speicher anfordern
++     * \endgerman
++     * \english
++     * Request physically contiguous memory
++     * \endenglish
++     */
++    CDI_MEM_PHYS_CONTIGUOUS = 0x40,
++
++    /**
++     * \german
++     * Physischen Speicher &lt; 16 MB anfordern
++     * \endgerman
++     * \english
++     * Request physical memory &lt; 16 MB
++     * \endenglish
++     */
++    CDI_MEM_DMA_16M         = 0x80,
++
++    /**
++     * \german
++     * Physischen Speicher &lt; 4 GB anfordern
++     * \endgerman
++     * \english
++     * Request physical memory &lt; 4 GB
++     * \endenglish
++     */
++    CDI_MEM_DMA_4G          = 0x100,
++
++    /**
++     * \german
++     * Speicher muss nicht initialisiert werden (verhindert Kopie bei
++     * cdi_mem_require_flags)
++     * \endgerman
++     * \english
++     * Memory doesn't need to be initialised (avoids copy in
++     * cdi_mem_require_flags)
++     * \endenglish
++     */
++    CDI_MEM_NOINIT          = 0x200,
++} cdi_mem_flags_t;
++
++/**
++ * \german
++ * Beschreibt einen physischen Speicherberich (Eintrag einer
++ * Scatter/Gather-Liste)
++ * \endgerman
++ * \english
++ * Describes an area of physical memory (an entry for a scatter/gather list)
++ * \endenglish
++ */
++struct cdi_mem_sg_item {
++    uintptr_t   start;
++    size_t      size;
++};
++
++/**
++ * \german
++ * Scatter/Gather-Liste, die die physischen Adressen zu einem bestimmten
++ * virtuellen Speicherbereich enth&#195;&#164;lt.
++ * \endgerman
++ * \english
++ * Scatter/Gather list which contains the physical addresses for a given area
++ * of virtual memory.
++ * \endenglish
++ */
++struct cdi_mem_sg_list {
++    size_t                  num;
++    struct cdi_mem_sg_item* items;
++};
++
++/**
++ * \german
++ * Beschreibt einen virtuellen Speicherbereich, je nach Flags mit einer
++ * Scatter/Gather-Liste der zugeh&#195;&#182;rigen phyischen Adressen.
++ * \endgerman
++ * \english
++ * Describes an area of virtual memory, depending on the allocation flags with
++ * a scatter/gather list of its physical addresses.
++ * \endenglish
++ */
++struct cdi_mem_area {
++    size_t                  size;
++    void*                   vaddr;
++    struct cdi_mem_sg_list  paddr;
++
++    cdi_mem_osdep           osdep;
++};
++
++/**
++ * \german
++ * Reserviert einen Speicherbereich.
++ *
++ * @param size Gr&#195;&#182;&#195;&#159;e des Speicherbereichs in Bytes
++ * @param flags Flags, die zus&#195;&#164;tzliche Anforderungen beschreiben
++ * \endgerman
++ * \english
++ * Allocates a memory area.
++ *
++ * @param size Size of the memory area in bytes
++ * @param flags Flags that describe additional requirements
++ * \endenglish
++ */
++struct cdi_mem_area* cdi_mem_alloc(size_t size, cdi_mem_flags_t flags);
++
++/**
++ * \german
++ * Gibt einen durch cdi_mem_alloc reservierten Speicherbereich frei
++ * \endgerman
++ * \english
++ * Frees a memory area that was previously allocated by cdi_mem_alloc
++ * \endenglish
++ */
++void cdi_mem_free(struct cdi_memory_area* p);
++
++/**
++ * \german
++ * Gibt einen Speicherbereich zur&#195;&#188;ck, der dieselben Daten wie @a p beschreibt,
++ * aber mindestens die gegebenen Flags gesetzt hat.
++ *
++ * Diese Funktion kann denselben virtuellen und physischen Speicherbereich wie
++ * @p benutzen oder sogar @p selbst zur&#195;&#188;ckzugeben, solange der gemeinsam
++ * benutzte Speicher erst dann freigegeben wird, wenn sowohl @a p als auch der
++ * R&#195;&#188;ckgabewert durch cdi_mem_free freigegeben worden sind.
++ *
++ * Ansonsten wird ein neuer Speicherbereich reserviert und (au&#195;&#159;er wenn das
++ * Flag CDI_MEM_NOINIT gesetzt ist) die Daten werden aus @a p in den neu
++ * reservierten Speicher kopiert.
++ * \endgerman
++ * \english
++ * Returns a memory area that describes the same data as @a p does, but for
++ * which at least the given flags are set.
++ *
++ * This function may use the same virtual and physical memory areas as used in
++ * @a p, or it may even return @a p itself. In this case it must ensure that
++ * the commonly used memory is only freed when both @a p and the return value
++ * of this function have been freed by cdi_mem_free.
++ *
++ * Otherwise, a new memory area is allocated and data is copied from @a p into
++ * the newly allocated memory (unless CDI_MEM_NOINIT is set).
++ * \endenglish
++ */
++struct cdi_mem_area* cdi_mem_require_flags(struct cdi_mem_area* p,
++    cdi_mem_flags_t flags);
++
++/**
++ * \german
++ * Kopiert die Daten von @a src nach @a dest. Beide Speicherbereiche m&#195;&#188;ssen
++ * gleich gro&#195;&#159; sein.
++ *
++ * Das bedeutet nicht unbedingt eine physische Kopie: Wenn beide
++ * Speicherbereiche auf denselben physischen Speicher zeigen, macht diese
++ * Funktion nichts. Sie kann auch andere Methoden verwenden, um den Speicher
++ * effektiv zu kopieren, z.B. durch geeignetes Ummappen von Pages.
++ *
++ * @return 0 bei Erfolg, -1 sonst
++ * \endgerman
++ * \english
++ * Copies data from @a src to @a dest. Both memory areas must be of the same
++ * size.
++ *
++ * This does not necessarily involve a physical copy: If both memory areas
++ * point to the same physical memory, this function does nothing. It can also
++ * use other methods to achieve the same visible effect, e.g. by remapping
++ * pages.
++ *
++ * @return 0 on success, -1 otherwise
++ * \endenglish
++ */
++int cdi_mem_copy(struct cdi_mem_area* dest, struct cdi_mem_area* src);
++
++#ifdef __cplusplus
++}; // extern &quot;C&quot;
++#endif
++
++#endif
++
+-- 
+1.6.0.2
+
+</PRE>
+
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Previous message: <A HREF="000165.html">[cdi-devel] CDI status
+</A></li>
+	<LI>Next message: <A HREF="000167.html">[cdi-devel] [PATCH v2] mem.h: Handling memory areas
+</A></li>
+         <LI> <B>Messages sorted by:</B> 
+              <a href="date.html#166">[ date ]</a>
+              <a href="thread.html#166">[ thread ]</a>
+              <a href="subject.html#166">[ subject ]</a>
+              <a href="author.html#166">[ author ]</a>
+         </LI>
+       </UL>
+
+<hr>
+<a href="http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel">More information about the cdi-devel
+mailing list</a><br>
+</body></html>

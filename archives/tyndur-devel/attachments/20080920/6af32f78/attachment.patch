@@ -1,0 +1,57 @@
+Index: trunk/src/kernel2/src/interrupts/im.c
+===================================================================
+--- trunk.orig/src/kernel2/src/interrupts/im.c
++++ trunk/src/kernel2/src/interrupts/im.c
+@@ -53,6 +53,7 @@ uint64_t timer_ticks = 0;
+ static pm_process_t* intr_handling_task[IM_NUM_INTERRUPTS];
+ static uint32_t intr_to_send[IM_NUM_INTERRUPTS];
+ 
++void im_send_interrupts(void);
+ bool fastrpc_irq(pm_process_t* callee, size_t metadata_size, void* metadata,
+     size_t data_size, void* data, uint8_t irq);
+ 
+@@ -132,6 +133,8 @@ interrupt_stack_frame_t* im_handler(inte
+         }
+     }
+ 
++    im_send_interrupts();
++
+     thread = cpu_get_current()->thread;
+     if (thread != old_thread) {
+         cpu_get_current()->tss.ss0 = 2 << 3;
+Index: trunk/src/kernel2/src/syscalls/rpc.c
+===================================================================
+--- trunk.orig/src/kernel2/src/syscalls/rpc.c
++++ trunk/src/kernel2/src/syscalls/rpc.c
+@@ -300,19 +300,24 @@ int syscall_fastrpc(pid_t callee_pid, si
+ bool fastrpc_irq(pm_process_t* callee, size_t metadata_size, void* metadata,
+     size_t data_size, void* data, uint8_t irq)
+ {
++    int ret;
++
+     if (callee->blocked_by_pid && (callee->status != PM_STATUS_WAIT_FOR_RPC)) {
+         return FALSE;
+     }
+ 
+-    if (syscall_fastrpc(callee->pid, metadata_size, metadata, data_size, data))
+-    {
+-        rpc_t* rpc = list_get_element_at(
+-            cpu_get_current()->thread->process->rpcs, 0);
+-        rpc->reenable_irq = irq;
+-        return TRUE;
+-    } else {
++    ret = syscall_fastrpc(
++        callee->pid, metadata_size, metadata, data_size, data);
++
++    if (ret < 0) {
+         return FALSE;
+     }
++
++    rpc_t* rpc = list_get_element_at(
++        cpu_get_current()->thread->process->rpcs, 0);
++    rpc->reenable_irq = irq;
++
++    return TRUE;
+ }
+ 
+ /**

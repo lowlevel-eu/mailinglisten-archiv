@@ -1,0 +1,287 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2//EN">
+<HTML>
+ <HEAD>
+   <TITLE> [tyndur-devel] [PATCH] libc: readline() multibyte-kompatibel machen
+   </TITLE>
+   <LINK REL="Index" HREF="index.html" >
+   <LINK REL="made"  HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20libc%3A%20readline%28%29%20multibyte-kompatibel%20machen&In-Reply-To=%3C1240673286-20223-1-git-send-email-toni%40tyndur.org%3E">
+   <META NAME="robots" CONTENT="index,nofollow">
+   <META http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+   <LINK REL="Previous"  HREF="000803.html">
+   <LINK REL="Next"  HREF="000814.html">
+ </HEAD>
+ <BODY BGCOLOR="#ffffff">
+   <H1>[tyndur-devel] [PATCH] libc: readline() multibyte-kompatibel machen</H1>
+    <B>Antoine Kaufmann</B> 
+    <A
+    HREF="mailto:tyndur-devel%40tyndur.org?Subject=Re%3A%20%5Btyndur-devel%5D%20%5BPATCH%5D%20libc%3A%20readline%28%29%20multibyte-kompatibel%20machen&In-Reply-To=%3C1240673286-20223-1-git-send-email-toni%40tyndur.org%3E"
+           TITLE="[tyndur-devel] [PATCH] libc: readline() multibyte-kompatibel machen">toni at tyndur.org
+                  </A><BR>
+    <I>Sa Apr 25 17:28:06 CEST 2009</I>
+    <P><UL>
+        <LI>Vorherige Nachricht: <A HREF="000803.html">[tyndur-devel] [PATCH] servmgr: Fix fuer uninitialisierte	Variable
+</A></li>
+        <LI>Nächste Nachricht: <A HREF="000814.html">[tyndur-devel] [PATCH] libc: readline() multibyte-kompatibel	machen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B> 
+              <a href="date.html#792">[ Datum ]</a>
+              <a href="thread.html#792">[ Thema ]</a>
+              <a href="subject.html#792">[ Betreff (Subject) ]</a>
+              <a href="author.html#792">[ Autor ]</a>
+         </LI>
+       </UL>
+    <HR>
+<!--beginarticle-->
+<PRE>* libc: readline() kommt jetzt auch mit Zeichen klar, die mehr als ein
+        Byte in Anspruch nehmen (z.B. UTF-8).
+---
+ src/modules/lib/readline.c |  111 +++++++++++++++++++++++++++++++------------
+ 1 files changed, 80 insertions(+), 31 deletions(-)
+
+diff --git a/src/modules/lib/readline.c b/src/modules/lib/readline.c
+index 5c7fab0..97242d5 100644
+--- a/src/modules/lib/readline.c
++++ b/src/modules/lib/readline.c
+@@ -31,6 +31,7 @@
+ #include &lt;stdio.h&gt;
+ #include &lt;stdint.h&gt;
+ #include &lt;collections.h&gt;
++#include &lt;wchar.h&gt;
+ 
+ #include &lt;readline/readline.h&gt;
+ 
+@@ -53,13 +54,13 @@ char* rl_line_buffer;
+  * @return Das eingelesene Zeichen oder NULL, wenn das Ende der Eingabedatei
+  * erreicht ist.
+  */
+-static char keyboard_read_char(void)
++static wint_t keyboard_read_char(void)
+ {
+-    char c = 0;
+-    
+-    while (!fread(&amp;c, 1, 1, stdin)) {
++    wint_t c = 0;
++
++    while ((c = fgetwc(stdin)) == WEOF) {
+         if (feof(stdin)) {
+-            return 0;
++            return WEOF;
+         }
+     }
+ 
+@@ -69,42 +70,94 @@ static char keyboard_read_char(void)
+ /**
+  * Loescht ein Zeichen aus dem Puffer
+  */
+-static void delchar(char* buffer, int pos)
++static void delchar(char* buffer, int pos, int* size)
+ {
+     int i;
+     size_t len = strlen(buffer);
++    int clen;
+ 
+     if (len &lt; pos) {
+         return;
+     }
+ 
+-    for (i = pos; i &lt; BUFFER_SIZE - 1; i++) {
+-        buffer[i] = buffer[i + 1];
++    clen = mblen(buffer + pos, len - pos + 1);
++    for (i = pos; i &lt; BUFFER_SIZE - clen; i++) {
++        buffer[i] = buffer[i + clen];
+         if (buffer[i] == '\0') {
+             break;
+         }
+     }
+ 
+-    buffer[BUFFER_SIZE - 1] = '\0';
++    buffer[BUFFER_SIZE - clen] = '\0';
++    *size -= clen;
+ }
+ 
+ /**
+  * Fuegt ein Zeichen in den Buffer ein
+  */
+-static void inschar(char* buffer, int pos, char c)
++static void inschar(char* buffer, int* pos, int* size, wint_t c)
+ {
+     int i;
+     size_t len = strlen(buffer);
++    char mbbuf[MB_CUR_MAX];
++    int clen;
++
+ 
+-    if ((len &lt; pos) || (len + 1 &gt;= BUFFER_SIZE)) {
++    clen = wctomb(mbbuf, c);
++    if ((len &lt; *pos) || (len + clen &gt;= BUFFER_SIZE) || (clen == -1)) {
+         return;
+     }
+ 
+-    for (i = len + 1; i &gt; pos; i--) {
+-        buffer[i] = buffer[i - 1];
++    for (i = len + clen; i &gt; *pos; i--) {
++        buffer[i] = buffer[i - clen];
++    }
++
++    memcpy(buffer + *pos, mbbuf, clen);
++
++    *pos += clen;
++    *size += clen;
++}
++
++/**
++ * Veraendert die Pufferposition; positiv =&gt; rechts, negativ =&gt; links
++ */
++static void move_cursor(char* buffer, int* pos, int size, int offset)
++{
++    int clen;
++
++    if (offset &gt;  0) {
++        // Rechts
++        if ((clen = mblen(buffer + *pos, size - *pos + 1)) &gt; 0) {
++            *pos += clen;
++        }
++    } else {
++        // Links, bis wir ein ganzes Zeichen haben
++        while (--(*pos) &amp;&amp; (mblen(buffer + *pos, size - *pos + 1) == -1)) { }
++    }
++}
++
++/**
++ * Zaehlt die Anzahl der angezeigten Zeichen im Puffer
++ *
++ * @param start Position von der angefangen werden soll zu zaehlen
++ * @param size  Anzahl Zeichen im Puffer
++ */
++static int count_visible_chars(char* buffer, int start, int size)
++{
++    int clen;
++    int count = 0;
++
++    while ((start &lt; size)) {
++        if ((clen = mblen(buffer + start, size - start + 1)) == -1) {
++            // Unvollstaendiges MB-Zeichen wird uebersprungen
++            start++;
++        } else {
++            count++;
++            start += clen;
++        }
+     }
+ 
+-    buffer[pos] = c;
++    return count;
+ }
+ 
+ /**
+@@ -253,10 +306,10 @@ char* readline(const char* prompt)
+     pos = size = 0;
+     while (!enter)
+     {
+-        char c = keyboard_read_char();
++        wint_t c = keyboard_read_char();
+ 
+         switch (c) {
+-
++            case WEOF:
+             case '\0':
+                 c = keyboard_read_char();
+                 enter = TRUE;
+@@ -283,7 +336,7 @@ char* readline(const char* prompt)
+                         if (pos &gt; 0) {
+                             printf(&quot;\033[1D&quot;);
+                             fflush(stdout);
+-                            pos--;
++                            move_cursor(buffer, &amp;pos, size, -1);
+                         }
+                         break;
+ 
+@@ -292,7 +345,7 @@ char* readline(const char* prompt)
+                         if (pos &lt; size) {
+                             printf(&quot;\033[1C&quot;);
+                             fflush(stdout);
+-                            pos++;
++                            move_cursor(buffer, &amp;pos, size, 1);
+                         }
+                         break;
+ 
+@@ -338,8 +391,7 @@ char* readline(const char* prompt)
+                         }
+ 
+                         if (pos &lt; size) {
+-                            delchar(buffer, pos);
+-                            size--;
++                            delchar(buffer, pos, &amp;size);
+                             printf(&quot;\033[K\033[s%s\033[u&quot;, &amp;buffer[pos]);
+                             fflush(stdout);
+                         }
+@@ -349,17 +401,16 @@ char* readline(const char* prompt)
+ 
+                     // Pos1
+                     case 'H':
+-                        printf(&quot;\033[%dD&quot;, pos);
++                        printf(&quot;\033[%dD&quot;, count_visible_chars(buffer, 0, pos));
+                         pos = 0;
+                         fflush(stdout);
+                         break;
+ 
+                     // Ende
+                     case 'F':
+-                        printf(&quot;\033[%dC&quot;, strlen(buffer) - pos);
++                        printf(&quot;\033[%dC&quot;,
++                            count_visible_chars(buffer, pos, size));
+                         pos = strlen(buffer);
+-                        delchar(buffer, pos);
+-                        printf(&quot;\033[K\033[s%s\033[u&quot;, &amp;buffer[pos]);
+                         fflush(stdout);
+                         break;
+ 
+@@ -377,9 +428,8 @@ seq_nomatch:
+ 
+             case '\b':
+                 if (pos &gt; 0) {
+-                    pos--;
+-                    size--;
+-                    delchar(buffer, pos);
++                    move_cursor(buffer, &amp;pos, size, -1);
++                    delchar(buffer, pos, &amp;size);
+                     printf(&quot;\033[1D\033[K\033[s%s\033[u&quot;, &amp;buffer[pos]);
+                     fflush(stdout);
+                 }
+@@ -414,10 +464,9 @@ seq_nomatch:
+ 
+             default:
+                 if (pos &lt; BUFFER_SIZE - 1) {
+-                    inschar(buffer, pos, c);
+-                    printf(&quot;\033[K\033[s%s\033[u\033[1C&quot;, &amp;buffer[pos]);
+-                    pos++;
+-                    size++;
++                    int old_pos = pos;
++                    inschar(buffer, &amp;pos, &amp;size, c);
++                    printf(&quot;\033[K\033[s%s\033[u\033[1C&quot;, &amp;buffer[old_pos]);
+                     fflush(stdout);
+                 }
+                 break;
+-- 
+1.6.0.6
+
+
+</PRE>
+
+<!--endarticle-->
+    <HR>
+    <P><UL>
+        <!--threads-->
+	<LI>Vorherige Nachricht: <A HREF="000803.html">[tyndur-devel] [PATCH] servmgr: Fix fuer uninitialisierte	Variable
+</A></li>
+	<LI>Nächste Nachricht: <A HREF="000814.html">[tyndur-devel] [PATCH] libc: readline() multibyte-kompatibel	machen
+</A></li>
+         <LI> <B>Nachrichten sortiert nach:</B>
+              <a href="date.html#792">[ Datum ]</a>
+              <a href="thread.html#792">[ Thema ]</a>
+              <a href="subject.html#792">[ Betreff (Subject)]</a>
+              <a href="author.html#792">[ Autor ]</a>
+         </LI>
+       </UL>
+<hr>
+<a href="http://list.tyndur.org/mailman/listinfo/tyndur-devel">Mehr Informationen &uuml;ber die Mailingliste tyndur-devel</a><br>
+</body></html>

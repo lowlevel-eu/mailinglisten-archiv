@@ -1,0 +1,662 @@
+From matthew at theiselins.net  Wed Nov 11 08:44:31 2009
+From: matthew at theiselins.net (Matthew Iselin)
+Date: Wed, 11 Nov 2009 17:44:31 +1000
+Subject: [cdi-devel] [PATCH] Update pcnet to use cdi_wait_irq
+Message-ID: <1257925471-10196-1-git-send-email-matthew@theiselins.net>
+
+Hi,
+
+This patch changes the pcnet driver to use the cdi_wait_irq function instead
+of implementing its own solution.
+
+Cheers,
+Matt
+
+Signed-off-by: Matthew Iselin <matthew at theiselins.net>
+---
+ pcnet/pcnet.c |    4 +++-
+ 1 files changed, 3 insertions(+), 1 deletions(-)
+
+diff --git a/pcnet/pcnet.c b/pcnet/pcnet.c
+index 800b795..27d364c 100644
+--- a/pcnet/pcnet.c
++++ b/pcnet/pcnet.c
+@@ -306,7 +306,9 @@ void pcnet_dev_init(struct pcnet_device *netcard, int promiscuous)
+     pcnet_write_csr(netcard, CSR_STATUS, STATUS_INIT | STATUS_INTERRUPT_ENABLE);
+     
+     // Wait until initialization completed, NOTE: see pcnet_handle_interrupt()
+-    while (netcard->init_wait_for_irq != 0);
++    int irq = cdi_wait_irq(netcard->pci->irq, 1000);
++    if(irq < 0 || netcard->init_wait_for_irq == 1)
++        printf("pcnet: waiting for IRQ failed: %d\n", irq);
+     
+     // CSR4 Enable transmit auto-padding and receive automatic padding removal
+     // TODO DMAPLUS? 
+-- 
+1.6.4.2
+
+
+From matthew at theiselins.net  Wed Nov 11 09:01:33 2009
+From: matthew at theiselins.net (Matthew Iselin)
+Date: Wed, 11 Nov 2009 18:01:33 +1000
+Subject: [cdi-devel] [PATCH] Fix warnings in e1000, pcnet, sis900
+Message-ID: <1257926493-10564-1-git-send-email-matthew@theiselins.net>
+
+Hi,
+
+This patch merely fixes warnings in the e1000, pcnet, and sis900 drivers.
+
+Cheers,
+Matt
+
+Signed-off-by: Matthew Iselin <matthew at theiselins.net>
+---
+ e1000/device.c   |    7 ++++---
+ e1000/e1000_io.h |    4 ++--
+ pcnet/pcnet.c    |    9 +++++----
+ sis900/device.c  |    1 +
+ 4 files changed, 12 insertions(+), 9 deletions(-)
+
+diff --git a/e1000/device.c b/e1000/device.c
+index dd37510..e0f3768 100644
+--- a/e1000/device.c
++++ b/e1000/device.c
+@@ -30,6 +30,7 @@
+ #include <stdio.h>
+ #include <stddef.h>
+ #include <string.h>
++#include <stdlib.h>
+ 
+ #include "cdi.h"
+ #include "cdi/misc.h"
+@@ -209,7 +210,7 @@ void e1000_send_packet(struct cdi_net_device* device, void* data, size_t size)
+ 
+     // Head auslesen
+     head = reg_inl(netcard, REG_TXDESC_HEAD);
+-    if (netcard->tx_cur_buffer == head) {
++    if (netcard->tx_cur_buffer == (int) head) {
+         printf("e1000: Kein Platz in der Sendewarteschlange!\n");
+         return;
+     }
+@@ -246,7 +247,7 @@ static void e1000_handle_interrupt(struct cdi_device* device)
+ 
+         uint32_t head = reg_inl(netcard, REG_RXDESC_HEAD);
+ 
+-        while (netcard->rx_cur_buffer != head) {
++        while (netcard->rx_cur_buffer != (int) head) {
+ 
+             size_t size = netcard->rx_desc[netcard->rx_cur_buffer].length;
+             uint8_t status = netcard->rx_desc[netcard->rx_cur_buffer].status;
+@@ -284,7 +285,7 @@ static void e1000_handle_interrupt(struct cdi_device* device)
+             netcard->rx_cur_buffer %= RX_BUFFER_NUM;
+         }
+ 
+-        if (netcard->rx_cur_buffer == head) {
++        if (netcard->rx_cur_buffer == (int) head) {
+             reg_outl(netcard, REG_RXDESC_TAIL,
+                 (head + RX_BUFFER_NUM - 1) % RX_BUFFER_NUM);
+         } else {
+diff --git a/e1000/e1000_io.h b/e1000/e1000_io.h
+index 2ae9fdc..68937a9 100644
+--- a/e1000/e1000_io.h
++++ b/e1000/e1000_io.h
+@@ -51,7 +51,7 @@ static inline void reg_outw
+ static inline void reg_outl
+     (struct e1000_device* netcard, uint16_t reg, uint32_t value)
+ {
+-    volatile uint32_t* mmio = netcard->mem_base + reg;
++    volatile uint32_t* mmio = (uint32_t*) (((char*)netcard->mem_base) + reg);
+     *mmio = value;
+ }
+ 
+@@ -70,7 +70,7 @@ static inline uint16_t reg_inw(struct e1000_device* netcard, uint16_t reg)
+ 
+ static inline uint32_t reg_inl(struct e1000_device* netcard, uint16_t reg)
+ {
+-    volatile uint32_t* mmio = netcard->mem_base + reg;
++    volatile uint32_t* mmio = (uint32_t*) (((char*)netcard->mem_base) + reg);
+     return *mmio;
+ }
+ 
+diff --git a/pcnet/pcnet.c b/pcnet/pcnet.c
+index 27d364c..dc671e7 100644
+--- a/pcnet/pcnet.c
++++ b/pcnet/pcnet.c
+@@ -31,6 +31,7 @@
+ 
+ #include <stdio.h>
+ #include <string.h>
++#include <stdlib.h>
+ 
+ static void pcnet_handle_interrupt(struct cdi_device* device);
+ static void pcnet_reset(struct pcnet_device *netcard);
+@@ -238,9 +239,9 @@ void pcnet_dev_init(struct pcnet_device *netcard, int promiscuous)
+         printf("pcnet: descriptor region at 0x%p virtual and 0x%p physical\n", virt_desc_region, phys_desc_region);
+     #endif
+     netcard->receive_descriptor = virt_desc_region;
+-    netcard->transmit_descriptor = virt_desc_region + 2 * 1024;
++    netcard->transmit_descriptor = (struct transmit_descriptor*) (((char*)virt_desc_region) + 2 * 1024);
+     netcard->phys_receive_descriptor = phys_desc_region;
+-    netcard->phys_transmit_descriptor = phys_desc_region + 2 * 1024;
++    netcard->phys_transmit_descriptor = (void*) (((char*)phys_desc_region) + 2 * 1024);
+ 
+     // Fill the initialization block
+     // NOTE: Transmit and receive buffer contain 8 entries
+@@ -274,7 +275,7 @@ void pcnet_dev_init(struct pcnet_device *netcard, int promiscuous)
+             return;
+         }
+         netcard->receive_buffer[2 * i] = virt_buffer;
+-        netcard->receive_buffer[2 * i + 1] = virt_buffer + 2048;
++        netcard->receive_buffer[2 * i + 1] = ((char*)virt_buffer) + 2048;
+         netcard->receive_descriptor[2 * i].address = (uint32_t) phys_buffer;
+         netcard->receive_descriptor[2 * i].flags = DESCRIPTOR_OWN | 0xF7FF;
+         netcard->receive_descriptor[2 * i].flags2 = 0;
+@@ -290,7 +291,7 @@ void pcnet_dev_init(struct pcnet_device *netcard, int promiscuous)
+             return;
+         }
+         netcard->transmit_buffer[2 * i] = virt_buffer;
+-        netcard->transmit_buffer[2 * i + 1] = virt_buffer + 2048;
++        netcard->transmit_buffer[2 * i + 1] = ((char*)virt_buffer) + 2048;
+         netcard->transmit_descriptor[2 * i].address = (uint32_t) phys_buffer;
+         netcard->transmit_descriptor[2 * i + 1].address = (uint32_t) phys_buffer + 2048;
+     }
+diff --git a/sis900/device.c b/sis900/device.c
+index ab0479a..0c95055 100644
+--- a/sis900/device.c
++++ b/sis900/device.c
+@@ -30,6 +30,7 @@
+ #include <stdio.h>
+ #include <stddef.h>
+ #include <string.h>
++#include <stdlib.h>
+ 
+ #include "cdi.h"
+ #include "cdi/misc.h"
+-- 
+1.6.4.msysgit.0
+
+
+From matthew at theiselins.net  Thu Nov 12 16:41:50 2009
+From: matthew at theiselins.net (Matthew Iselin)
+Date: Fri, 13 Nov 2009 01:41:50 +1000
+Subject: [cdi-devel] [PATCH v2] Fix warnings in e1000, sis900, pcnet
+Message-ID: <1258040510-5592-1-git-send-email-matthew@theiselins.net>
+
+Hi,
+
+This is version 2 of the warning fix patch, which implements a better solution
+for the e1000 driver's signed/unsigned comparison warning.
+
+Cheers,
+Matt
+
+Signed-off-by: Matthew Iselin <matthew at theiselins.net>
+---
+ e1000/device.c   |    1 +
+ e1000/device.h   |    2 +-
+ e1000/e1000_io.h |    4 ++--
+ pcnet/pcnet.c    |    9 +++++----
+ sis900/device.c  |    1 +
+ 5 files changed, 10 insertions(+), 7 deletions(-)
+
+diff --git a/e1000/device.c b/e1000/device.c
+index dd37510..4e5a62e 100644
+--- a/e1000/device.c
++++ b/e1000/device.c
+@@ -30,6 +30,7 @@
+ #include <stdio.h>
+ #include <stddef.h>
+ #include <string.h>
++#include <stdlib.h>
+ 
+ #include "cdi.h"
+ #include "cdi/misc.h"
+diff --git a/e1000/device.h b/e1000/device.h
+index 0327132..899a06d 100644
+--- a/e1000/device.h
++++ b/e1000/device.h
+@@ -153,7 +153,7 @@ struct e1000_device {
+ 
+     struct e1000_rx_descriptor  rx_desc[RX_BUFFER_NUM];
+     uint8_t                     rx_buffer[RX_BUFFER_NUM * RX_BUFFER_SIZE];
+-    int                         rx_cur_buffer;
++    uint32_t                    rx_cur_buffer;
+ 
+     void*                       mem_base;
+     uint8_t                     revision;
+diff --git a/e1000/e1000_io.h b/e1000/e1000_io.h
+index 2ae9fdc..68937a9 100644
+--- a/e1000/e1000_io.h
++++ b/e1000/e1000_io.h
+@@ -51,7 +51,7 @@ static inline void reg_outw
+ static inline void reg_outl
+     (struct e1000_device* netcard, uint16_t reg, uint32_t value)
+ {
+-    volatile uint32_t* mmio = netcard->mem_base + reg;
++    volatile uint32_t* mmio = (uint32_t*) (((char*)netcard->mem_base) + reg);
+     *mmio = value;
+ }
+ 
+@@ -70,7 +70,7 @@ static inline uint16_t reg_inw(struct e1000_device* netcard, uint16_t reg)
+ 
+ static inline uint32_t reg_inl(struct e1000_device* netcard, uint16_t reg)
+ {
+-    volatile uint32_t* mmio = netcard->mem_base + reg;
++    volatile uint32_t* mmio = (uint32_t*) (((char*)netcard->mem_base) + reg);
+     return *mmio;
+ }
+ 
+diff --git a/pcnet/pcnet.c b/pcnet/pcnet.c
+index 27d364c..dc671e7 100644
+--- a/pcnet/pcnet.c
++++ b/pcnet/pcnet.c
+@@ -31,6 +31,7 @@
+ 
+ #include <stdio.h>
+ #include <string.h>
++#include <stdlib.h>
+ 
+ static void pcnet_handle_interrupt(struct cdi_device* device);
+ static void pcnet_reset(struct pcnet_device *netcard);
+@@ -238,9 +239,9 @@ void pcnet_dev_init(struct pcnet_device *netcard, int promiscuous)
+         printf("pcnet: descriptor region at 0x%p virtual and 0x%p physical\n", virt_desc_region, phys_desc_region);
+     #endif
+     netcard->receive_descriptor = virt_desc_region;
+-    netcard->transmit_descriptor = virt_desc_region + 2 * 1024;
++    netcard->transmit_descriptor = (struct transmit_descriptor*) (((char*)virt_desc_region) + 2 * 1024);
+     netcard->phys_receive_descriptor = phys_desc_region;
+-    netcard->phys_transmit_descriptor = phys_desc_region + 2 * 1024;
++    netcard->phys_transmit_descriptor = (void*) (((char*)phys_desc_region) + 2 * 1024);
+ 
+     // Fill the initialization block
+     // NOTE: Transmit and receive buffer contain 8 entries
+@@ -274,7 +275,7 @@ void pcnet_dev_init(struct pcnet_device *netcard, int promiscuous)
+             return;
+         }
+         netcard->receive_buffer[2 * i] = virt_buffer;
+-        netcard->receive_buffer[2 * i + 1] = virt_buffer + 2048;
++        netcard->receive_buffer[2 * i + 1] = ((char*)virt_buffer) + 2048;
+         netcard->receive_descriptor[2 * i].address = (uint32_t) phys_buffer;
+         netcard->receive_descriptor[2 * i].flags = DESCRIPTOR_OWN | 0xF7FF;
+         netcard->receive_descriptor[2 * i].flags2 = 0;
+@@ -290,7 +291,7 @@ void pcnet_dev_init(struct pcnet_device *netcard, int promiscuous)
+             return;
+         }
+         netcard->transmit_buffer[2 * i] = virt_buffer;
+-        netcard->transmit_buffer[2 * i + 1] = virt_buffer + 2048;
++        netcard->transmit_buffer[2 * i + 1] = ((char*)virt_buffer) + 2048;
+         netcard->transmit_descriptor[2 * i].address = (uint32_t) phys_buffer;
+         netcard->transmit_descriptor[2 * i + 1].address = (uint32_t) phys_buffer + 2048;
+     }
+diff --git a/sis900/device.c b/sis900/device.c
+index ab0479a..0c95055 100644
+--- a/sis900/device.c
++++ b/sis900/device.c
+@@ -30,6 +30,7 @@
+ #include <stdio.h>
+ #include <stddef.h>
+ #include <string.h>
++#include <stdlib.h>
+ 
+ #include "cdi.h"
+ #include "cdi/misc.h"
+-- 
+1.6.4.msysgit.0
+
+
+From kevin at tyndur.org  Thu Nov 12 21:33:02 2009
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Thu, 12 Nov 2009 21:33:02 +0100
+Subject: [cdi-devel] [PATCH v2] Fix warnings in e1000, sis900, pcnet
+In-Reply-To: <1258040510-5592-1-git-send-email-matthew@theiselins.net>
+References: <1258040510-5592-1-git-send-email-matthew@theiselins.net>
+Message-ID: <20091112203301.GA15410@silvanus>
+
+On Fri, Nov 13, 2009 at 01:41:50AM +1000, Matthew Iselin wrote:
+> Hi,
+> 
+> This is version 2 of the warning fix patch, which implements a better solution
+> for the e1000 driver's signed/unsigned comparison warning.
+> 
+> Cheers,
+> Matt
+
+Thanks, applied both patches to both CDI and tyndur.
+
+From matthew at theiselins.net  Sun Nov 22 14:05:09 2009
+From: matthew at theiselins.net (Matthew Iselin)
+Date: Sun, 22 Nov 2009 23:05:09 +1000
+Subject: [cdi-devel] Proposed Sound Infrastructure
+Message-ID: <f88ae150911220505t4510e46atef68bbf1c11d884c@mail.gmail.com>
+
+Hi,
+
+Recently there was discussion on this list about a sound device
+interface, which serves the purpose of interfacing with sound hardware
+directly (ie, sending streams to the device without mixing). Before I
+continue, I would like to make clear that I approve of this interface.
+The problems pointed out with it may well be solved in this proposed
+infrastructure.
+
+I would like to propose a multi-tier infrastructure for sound provided by CDI:
+
+Applications <------> CDI Mixer <------> Sound devices (CDI)
+
+- The "CDI Mixer" is a generic mixer which is provided with CDI and
+can sit between hardware and applications/kernel code.
+- Sound devices would use the same interface proposed recently on this list.
+- Applications would access the mixer by some OS-defined protocol.
+
+Having a mixer built into CDI would make CDI even more attractive as
+it can be (theoretically) dropped in to an existing OS and provide
+clean sound support.
+
+I do believe that this needs further discussion, and as such I am
+merely proposing the infrastructure at this stage. Things to still
+consider include linking the mixer to sound hardware (in a generic,
+OS-independent manner), how to implement the mixer generically, and
+the CDI interface for a mixer device. We may also want to consider
+sound hardware with hardware mixing support; how will these be
+handled, how will they impact this infrastructure?
+
+I'm open to thoughts and ideas, this is merely a proposal, and a draft
+at that! :)
+
+Cheers,
+Matt
+
+From max at tyndur.org  Sun Nov 22 18:48:33 2009
+From: max at tyndur.org (max at tyndur.org)
+Date: Sun, 22 Nov 2009 18:48:33 +0100
+Subject: [cdi-devel] [PATCH] Oncoming CDI drivers' numbers
+Message-ID: <1258912113-18978-1-git-send-email-max@tyndur.org>
+
+From: Max Reitz <max at tyndur.org>
+
++ Numbers for CDI_VIDEO, CDI_AUDIO, CDI_AUDIO_MIXER, CDI_USB_HCD and
+  CDI_USB; these drivers are expected to be the next CDI drivers,
+  hence they must be ordered.
+---
+ include/cdi.h |    5 +++++
+ 1 files changed, 5 insertions(+), 0 deletions(-)
+
+diff --git a/include/cdi.h b/include/cdi.h
+index d803751..06e1904 100644
+--- a/include/cdi.h
++++ b/include/cdi.h
+@@ -25,6 +25,11 @@ typedef enum {
+     CDI_NETWORK         = 1,
+     CDI_STORAGE         = 2,
+     CDI_SCSI            = 3,
++    CDI_VIDEO           = 4,
++    CDI_AUDIO           = 5,
++    CDI_AUDIO_MIXER     = 6,
++    CDI_USB_HCD         = 7,
++    CDI_USB             = 8,
+ } cdi_device_type_t;
+ 
+ struct cdi_driver;
+-- 
+1.6.4.2
+
+
+From max at tyndur.org  Sun Nov 22 21:16:30 2009
+From: max at tyndur.org (Max Reitz)
+Date: Sun, 22 Nov 2009 21:16:30 +0100
+Subject: [cdi-devel] [PATCH] Oncoming CDI drivers' numbers
+In-Reply-To: <1258912113-18978-1-git-send-email-max@tyndur.org>
+References: <1258912113-18978-1-git-send-email-max@tyndur.org>
+Message-ID: <4B099C1E.6040403@tyndur.org>
+
+max at tyndur.org schrieb:
+> From: Max Reitz <max at tyndur.org>
+> 
+> + Numbers for CDI_VIDEO, CDI_AUDIO, CDI_AUDIO_MIXER, CDI_USB_HCD and
+>   CDI_USB; these drivers are expected to be the next CDI drivers,
+>   hence they must be ordered.
+
+Signed-off-by: Max Reitz <max at tyndur.org>
+
+From kevin at tyndur.org  Sun Nov 22 21:41:26 2009
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Sun, 22 Nov 2009 21:41:26 +0100
+Subject: [cdi-devel] Proposed Sound Infrastructure
+In-Reply-To: <f88ae150911220505t4510e46atef68bbf1c11d884c@mail.gmail.com>
+References: <f88ae150911220505t4510e46atef68bbf1c11d884c@mail.gmail.com>
+Message-ID: <20091122204121.GA335@silvanus>
+
+On Sun, Nov 22, 2009 at 11:05:09PM +1000, Matthew Iselin wrote:
+> Hi,
+> 
+> Recently there was discussion on this list about a sound device
+> interface, which serves the purpose of interfacing with sound hardware
+> directly (ie, sending streams to the device without mixing). Before I
+> continue, I would like to make clear that I approve of this interface.
+> The problems pointed out with it may well be solved in this proposed
+> infrastructure.
+> 
+> I would like to propose a multi-tier infrastructure for sound provided by CDI:
+> 
+> Applications <------> CDI Mixer <------> Sound devices (CDI)
+> 
+> - The "CDI Mixer" is a generic mixer which is provided with CDI and
+> can sit between hardware and applications/kernel code.
+> - Sound devices would use the same interface proposed recently on this list.
+> - Applications would access the mixer by some OS-defined protocol.
+
+Right, so nobody else seems to volunteer with commenting on your mail. We
+discussed the proposal of a generic mixer and came to the conclusion
+that it's a good thing (surprise). However, during the discussion a few
+points came up that I'd like to summarize here so they will be
+considered when we actually start with the detailed design.
+
+* We need to support at least two different kinds of OSes. This make a
+  difference foremost for the interface between mixer and hardware
+  driver. The monolithic case is easy, as usual. In other OSes, each
+  hardware driver might sit in its own process and the mixer in another
+  one. We need to support a model where the communication uses some RPC
+  model (and for tyndur I'd prefer to use shared memory for the data)
+
+  So both of the arrows above would end up as OS specific code.
+
+* We need to support hardware mixers. Drivers tell the mixer how many
+  streams they can do in hardware and the CDI mixer sends the number as
+  an additional parameter. Don't know how it looks in detail, but
+  something like this.
+
+I thought it would be more than these two points, but better than nothing.
+
+> I do believe that this needs further discussion, and as such I am
+> merely proposing the infrastructure at this stage. Things to still
+> consider include linking the mixer to sound hardware (in a generic,
+> OS-independent manner),
+
+The mixer will need a method to enumerate all sound devices. I think
+this would be part of the OS specific driver/mixer interface. The mixer
+would probably expose this list to the applications so they could
+select the output device they want to use.
+
+Do you agree with our thoughts so far?
+
+Kevin
+
+From matthew at theiselins.net  Mon Nov 23 03:10:47 2009
+From: matthew at theiselins.net (Matthew Iselin)
+Date: Mon, 23 Nov 2009 12:10:47 +1000
+Subject: [cdi-devel] Proposed Sound Infrastructure
+In-Reply-To: <20091122204121.GA335@silvanus>
+References: <f88ae150911220505t4510e46atef68bbf1c11d884c@mail.gmail.com>
+	<20091122204121.GA335@silvanus>
+Message-ID: <f88ae150911221810l5e8b0c91le7db7e5a8467675f@mail.gmail.com>
+
+Hi,
+
+> * We need to support at least two different kinds of OSes. This make a
+> ?difference foremost for the interface between mixer and hardware
+> ?driver. The monolithic case is easy, as usual. In other OSes, each
+> ?hardware driver might sit in its own process and the mixer in another
+> ?one. We need to support a model where the communication uses some RPC
+> ?model (and for tyndur I'd prefer to use shared memory for the data)
+>
+> ?So both of the arrows above would end up as OS specific code.
+
+I agree.
+
+> * We need to support hardware mixers. Drivers tell the mixer how many
+> ?streams they can do in hardware and the CDI mixer sends the number as
+> ?an additional parameter. Don't know how it looks in detail, but
+> ?something like this.
+
+That's true. I think if we have a "software mixer" CDI device which
+automatically determines if the sound device it's mixing for support
+hardware mixing (and therefore sends it down to the hardware mixer),
+it'd work well. That would require a couple of extra functions in the
+sound device interface, mainly to determine if hardware mixing support
+is available (and whatever other support functions would be needed for
+hardware mixing).
+
+>> I do believe that this needs further discussion, and as such I am
+>> merely proposing the infrastructure at this stage. Things to still
+>> consider include linking the mixer to sound hardware (in a generic,
+>> OS-independent manner),
+>
+> The mixer will need a method to enumerate all sound devices. I think
+> this would be part of the OS specific driver/mixer interface. The mixer
+> would probably expose this list to the applications so they could
+> select the output device they want to use.
+
+Right, and I think a method to access other devices from CDI drivers
+would be rather handy at times as well. This should be another CDI
+"system call", in my opinion. How that call looks is probably
+something to be discussed - it needs to be generic for driver code but
+at the same time able to cater to many different ways for an OS to
+handle devices. Any ideas?
+
+> Do you agree with our thoughts so far?
+
+At this stage I do.
+
+Cheers,
+Matt
+
+From kevin at tyndur.org  Mon Nov 23 19:18:01 2009
+From: kevin at tyndur.org (Kevin Wolf)
+Date: Mon, 23 Nov 2009 19:18:01 +0100
+Subject: [cdi-devel] Proposed Sound Infrastructure
+In-Reply-To: <f88ae150911221810l5e8b0c91le7db7e5a8467675f@mail.gmail.com>
+References: <f88ae150911220505t4510e46atef68bbf1c11d884c@mail.gmail.com>
+	<20091122204121.GA335@silvanus>
+	<f88ae150911221810l5e8b0c91le7db7e5a8467675f@mail.gmail.com>
+Message-ID: <20091123181800.GA1162@silvanus>
+
+On Mon, Nov 23, 2009 at 12:10:47PM +1000, Matthew Iselin wrote:
+> Right, and I think a method to access other devices from CDI drivers
+> would be rather handy at times as well. This should be another CDI
+> "system call", in my opinion. How that call looks is probably
+> something to be discussed - it needs to be generic for driver code but
+> at the same time able to cater to many different ways for an OS to
+> handle devices. Any ideas?
+
+We found that getting this IDC (Inter Driver Communication) part right
+is the most important thing for now, so I'm ignoring the whole audio
+stuff for now.
+
+I have tried to write down some header file fragments that would make up
+a suitable framework, both for monolithic kernels and microkernel
+systems. Basically the only new thing is the abstraction of memory areas
+that allows a (microkernel) OS to use shared memory for the actual sound
+data, so that the user application can create the buffer and it doesn't
+need to be copied anywhere. Other OSes might decide not to implement
+this but rather do a copy. Monolithic kernels will probably just pass
+pointers around.
+
+I'm attaching a first attempt of the header. Comments are appreciated.
+
+Kevin
+-------------- next part --------------
+A non-text attachment was scrubbed...
+Name: ipc.c
+Type: text/x-c++src
+Size: 1597 bytes
+Desc: not available
+URL: <http://list.tyndur.org/pipermail/cdi-devel/attachments/20091123/690ca70e/attachment.c>
+
+From matthew at theiselins.net  Fri Nov 27 12:54:07 2009
+From: matthew at theiselins.net (Matthew Iselin)
+Date: Fri, 27 Nov 2009 21:54:07 +1000
+Subject: [cdi-devel] Proposed Sound Infrastructure
+In-Reply-To: <20091123181800.GA1162@silvanus>
+References: <f88ae150911220505t4510e46atef68bbf1c11d884c@mail.gmail.com>
+	<20091122204121.GA335@silvanus>
+	<f88ae150911221810l5e8b0c91le7db7e5a8467675f@mail.gmail.com>
+	<20091123181800.GA1162@silvanus>
+Message-ID: <f88ae150911270354w6e4d420aobdd8a5b0cea65dac@mail.gmail.com>
+
+Hi,
+
+I like the looks of the initial interface: it is generic and yet also
+highly effective at its role.
+
+Just a couple of caveats I'd like to point out...
+
+> struct cdi_memory_area {
+> ...
+>     /* OS specific part */
+>     int shm_id;
+
+Is it possible to do perhaps make "cdi_memory_area" a generic struct,
+and have an OS-specific struct defined in "cdi-osdep.h"? Something
+like...
+
+struct cdi_memory_area {
+    /* Common part */
+    size_t size;
+    void* vaddr;
+    uintptr_t paddr;
+
+    /* OS specific part */
+    struct cdi_memory_area_os_specific osdata;
+};
+
+struct cdi_memory_area_os_specific {
+    int shm_id;
+};
+
+Just an idea... Apart from that, I like the looks of this interface.
+
+Thanks,
+Matt
+
+On Tue, Nov 24, 2009 at 4:18 AM, Kevin Wolf <kevin at tyndur.org> wrote:
+> On Mon, Nov 23, 2009 at 12:10:47PM +1000, Matthew Iselin wrote:
+>> Right, and I think a method to access other devices from CDI drivers
+>> would be rather handy at times as well. This should be another CDI
+>> "system call", in my opinion. How that call looks is probably
+>> something to be discussed - it needs to be generic for driver code but
+>> at the same time able to cater to many different ways for an OS to
+>> handle devices. Any ideas?
+>
+> We found that getting this IDC (Inter Driver Communication) part right
+> is the most important thing for now, so I'm ignoring the whole audio
+> stuff for now.
+>
+> I have tried to write down some header file fragments that would make up
+> a suitable framework, both for monolithic kernels and microkernel
+> systems. Basically the only new thing is the abstraction of memory areas
+> that allows a (microkernel) OS to use shared memory for the actual sound
+> data, so that the user application can create the buffer and it doesn't
+> need to be copied anywhere. Other OSes might decide not to implement
+> this but rather do a copy. Monolithic kernels will probably just pass
+> pointers around.
+>
+> I'm attaching a first attempt of the header. Comments are appreciated.
+>
+> Kevin
+>
+> _______________________________________________
+> cdi-devel mailing list
+> cdi-devel at tyndur.org
+> http://list.tyndur.org/cgi-bin/mailman/listinfo/cdi-devel
+>
+>
+
